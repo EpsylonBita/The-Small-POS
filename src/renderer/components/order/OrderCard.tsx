@@ -1,7 +1,8 @@
 import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Split } from 'lucide-react';
+import { ShieldCheck, Split } from 'lucide-react';
+import { resolvePlatformPaymentPresentation } from '../../../../../shared/platforms/payment-presentation';
 import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
 import TableOrderIcon from '../icons/TableOrderIcon';
@@ -362,6 +363,13 @@ export const OrderCard = memo<OrderCardProps>(({
   const orderStatusForPayment = String(order.status ?? '').trim().toLowerCase();
   const paymentSettled =
     paymentStatusNormalized === 'paid' || paymentStatusNormalized === 'completed';
+  const platformPaymentPresentation = paymentSettled
+    ? resolvePlatformPaymentPresentation(order)
+    : null;
+  const platformPaymentLabel = t('orderCard.platformPayment', { defaultValue: 'PLATFORM PAYMENT' });
+  const platformPaymentA11y = t('orderCard.platformPaymentA11y', {
+    defaultValue: 'Payment settled by platform; the store does not collect',
+  });
   const showPaymentPending =
     !paymentSettled &&
     paymentStatusNormalized !== 'refunded' &&
@@ -638,8 +646,26 @@ export const OrderCard = memo<OrderCardProps>(({
           </span>
           <div className="flex items-center gap-2">
             <OrderTypeIcon orderType={orderTypeNormalized} />
-            {!showPaymentPending && <PaymentMethodIcon method={paymentMethodPresentation} />}
+            {!showPaymentPending && (platformPaymentPresentation ? (
+              <ShieldCheck
+                width={20}
+                height={20}
+                className="text-cyan-500"
+                strokeWidth={2}
+                role="img"
+                aria-label={platformPaymentA11y}
+              />
+            ) : <PaymentMethodIcon method={paymentMethodPresentation} />)}
           </div>
+          {platformPaymentPresentation && (
+            <span
+              data-testid="order-card-platform-payment"
+              aria-label={platformPaymentA11y}
+              className={`text-[10px] sm:text-xs font-semibold whitespace-nowrap rounded px-1.5 py-0.5 border border-cyan-500/40 bg-cyan-500/10 ${resolvedTheme === 'light' ? 'text-cyan-700' : 'text-cyan-400'}`}
+            >
+              {platformPaymentLabel}
+            </span>
+          )}
           {showPaymentPending ? (
             <span
               data-testid="order-card-payment-pending"

@@ -6,6 +6,7 @@ export interface EditablePaymentRouteRow {
   id: string;
   method: EditablePaymentMethod;
   amount: number;
+  currency?: string | null;
   transactionRef?: string | null;
 }
 
@@ -44,6 +45,7 @@ interface PaymentEditRowLike {
   method?: unknown;
   status?: unknown;
   amount?: unknown;
+  currency?: unknown;
   transactionRef?: unknown;
   refundedAmount?: unknown;
   refunded_amount?: unknown;
@@ -127,6 +129,7 @@ function routeLedgerPaymentEdit(
         id,
         method,
         amount: Number(row.amount ?? 0),
+        currency: textOrNull(row.currency),
         transactionRef:
           typeof row.transactionRef === 'string' ? row.transactionRef : null,
       } satisfies EditablePaymentRouteRow,

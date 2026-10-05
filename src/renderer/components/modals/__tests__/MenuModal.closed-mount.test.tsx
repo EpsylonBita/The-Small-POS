@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Render-instrumentation probe for the shared modal shell. The mock preserves
 // the REAL LiquidGlassModal behavior while recording each render's isOpen.
@@ -52,7 +52,7 @@ vi.mock('../../../contexts/i18n-context', () => {
 // that fabricates fresh objects per render re-arms them on every commit.
 vi.mock('../../../contexts/shift-context', () => {
   const shiftValue = {
-    staff: { branchId: 'branch-1' },
+    staff: { branchId: 'branch-1', organizationId: 'org-1', terminalId: 'terminal-1' },
     activeShift: null,
     isShiftActive: false,
     refreshActiveShift: vi.fn(async () => undefined),
@@ -114,7 +114,7 @@ vi.mock('../../../services/MenuService', () => ({
 
 vi.mock('../../../services/terminal-credentials', () => ({
   getCachedTerminalCredentials: vi.fn(() => null),
-  refreshTerminalCredentialCache: vi.fn(async () => null),
+  refreshTerminalCredentialCache: vi.fn(async () => ({ branchId: 'branch-1', organizationId: 'org-1', terminalId: 'terminal-1' })),
 }));
 
 vi.mock('../../../utils/api-helpers', () => ({
@@ -131,8 +131,25 @@ vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
 // that: `bridge.loyalty` sits in an effect dependency array, so a mock that
 // fabricates a fresh bridge per call re-arms that effect on every render and
 // loops the component. Partial mock; the rest of src/lib stays real.
+const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0, resumeError: null as string | null, inspection: { success: true, outcome: 'not_found', canCollect: false } as any }));
+beforeEach(() => { draftStorage.draft = null; draftStorage.generation = 0; draftStorage.resumeError = null; draftStorage.inspection = { success: true, outcome: 'not_found', canCollect: false }; });
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
+    invoke: vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_inspect') return draftStorage.inspection;
+      if (command === 'checkout_draft_resume_declined') {
+        if (draftStorage.resumeError) throw new Error(draftStorage.resumeError);
+        if (input.expectedGeneration !== draftStorage.generation || input.clientRequestId !== draftStorage.draft.checkoutRequestId) throw new Error('CHECKOUT_DRAFT_VERSION_CHANGED');
+        const { submission: _submission, ...editable } = draftStorage.draft;
+        draftStorage.draft = { ...editable, phase: 'editing', checkoutRequestId: 'renewed-request',
+          context: { ...editable.context, checkoutRequestId: 'renewed-request' } };
+        draftStorage.generation++;
+        draftStorage.inspection = { success: true, outcome: 'not_found', canCollect: false };
+      }
+      if (command === 'checkout_draft_put') { draftStorage.draft = input.draft; draftStorage.generation++; }
+      if (command === 'checkout_draft_delete') { draftStorage.draft = null; draftStorage.generation++; }
+      return { success: true, scope: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' }, generation: draftStorage.generation, draft: draftStorage.draft };
+    }),
     settings: { get: vi.fn(async () => null) },
     orders: { getById: vi.fn(async () => null) },
     customers: {},
@@ -163,9 +180,9 @@ vi.mock('../../menu/MenuItemGrid', () => ({
   ),
 }));
 vi.mock('../../menu/MenuCart', () => ({
-  MenuCart: ({ cartItems, onRemoveItem, onEditItem, onCheckout }: any) => (
+  MenuCart: ({ cartItems, onRemoveItem, onEditItem, onCheckout, isSaving }: any) => (
     <div data-testid="menu-cart">
-      <button onClick={onCheckout}>Checkout</button>
+      <button onClick={onCheckout} disabled={isSaving}>Checkout</button>
       {cartItems.map((item: any) => (
         <div key={item.id}>
           <span>{item.name} × {item.quantity} = {item.totalPrice} [{item.categoryName || ''}]</span>
@@ -343,10 +360,11 @@ describe('MenuModal pickup customer checkout', () => {
   it.each(['Pay cash', 'Split payment'])('persists an anonymous pickup with %s', async (payment) => {
     const complete = vi.fn(async () => true);
     render(<MenuModal {...baseProps} isOpen selectedCustomer={null} onOrderComplete={complete} />);
+    await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
     editCustomer(' Alice ', ' 2101234567 ', ' Call on arrival ');
     const chip = screen.getByRole('button', { name: /Alice.*2101234567/ });
-    expect(chip).toHaveClass('text-green-800', 'bg-green-100');
+    expect(chip).toHaveClass('order-context-chip', 'order-context-chip--light');
     fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
     fireEvent.click(screen.getByRole('button', { name: 'Checkout' }));
     fireEvent.click(await screen.findByRole('button', { name: payment, hidden: true }));
@@ -363,6 +381,7 @@ describe('MenuModal pickup customer checkout', () => {
     const customer = Object.freeze({ id: 'customer-1', name: 'Alice', full_name: 'Alice', phone: '111', phone_number: '111', notes: 'Old note' });
     const complete = vi.fn(async () => true);
     const view = render(<MenuModal {...baseProps} isOpen selectedCustomer={customer} onOrderComplete={complete} />);
+    await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: /Alice.*111/ }));
     editCustomer('', '', '');
     view.rerender(<MenuModal {...baseProps} isOpen selectedCustomer={{ ...customer }} onOrderComplete={complete} />);
@@ -379,8 +398,9 @@ describe('MenuModal pickup customer checkout', () => {
     expect(customer).toMatchObject({ name: 'Alice', phone: '111', notes: 'Old note' });
   });
 
-  it('keeps pickup details after cancelling payment, then clears them for the next order', async () => {
+  it('keeps pickup details after cancelling payment and reopening the saved cart', async () => {
     const view = render(<MenuModal {...baseProps} isOpen selectedCustomer={null} />);
+    await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
     editCustomer('Alice', '111', 'Call first');
     fireEvent.click(screen.getByRole('button', { name: 'Add espresso' }));
@@ -390,11 +410,12 @@ describe('MenuModal pickup customer checkout', () => {
     expect(screen.getByPlaceholderText('Notes')).toHaveValue('Call first');
     view.rerender(<MenuModal {...baseProps} isOpen={false} selectedCustomer={null} />);
     view.rerender(<MenuModal {...baseProps} isOpen selectedCustomer={null} />);
+    await act(async () => {});
     expect(screen.queryByPlaceholderText('Name')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
-    expect(screen.getByPlaceholderText('Name')).toHaveValue('');
-    expect(screen.getByPlaceholderText('Phone')).toHaveValue('');
-    expect(screen.getByPlaceholderText('Notes')).toHaveValue('');
+    fireEvent.click(await screen.findByRole('button', { name: /Alice.*111/ }));
+    expect(screen.getByPlaceholderText('Name')).toHaveValue('Alice');
+    expect(screen.getByPlaceholderText('Phone')).toHaveValue('111');
+    expect(screen.getByPlaceholderText('Notes')).toHaveValue('Call first');
   });
 
   it('resets for customer identity and edit-order changes without clobbering ongoing typing', () => {
@@ -418,6 +439,135 @@ describe('MenuModal pickup customer checkout', () => {
   it('uses the dark-theme foreground for a phone-only pickup chip', () => {
     themeState.resolvedTheme = 'dark';
     render(<MenuModal {...baseProps} isOpen selectedCustomer={{ phone: '111' }} />);
-    expect(screen.getByRole('button', { name: '111' })).toHaveClass('text-green-300', 'bg-green-500/20');
+    expect(screen.getByRole('button', { name: '111' })).toHaveClass('order-context-chip', 'order-context-chip--dark');
+  });
+});
+
+
+describe('MenuModal durable checkout recovery', () => {
+  afterEach(cleanup);
+  it('persists the exact frozen request before parent checkout and clears only its accepted cart', async () => {
+    const complete = vi.fn(async (payload: any) => {
+      expect(draftStorage.draft.phase).toBe('checkout_pending');
+      expect(draftStorage.draft.checkoutRequestId).toBe(payload.clientRequestId);
+      expect(draftStorage.draft.submission.items).toEqual(payload.items);
+      return true;
+    });
+    render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByText('Add espresso')); fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Pay cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(draftStorage.draft).toBeNull());
+  });
+  it('retains failed or ambiguous checkout across reopening and blocks another collection', async () => {
+    const complete = vi.fn(async () => false);
+    const props = { ...baseProps, isOpen: true, onOrderComplete: complete };
+    const view = render(<MenuModal {...props} />); await act(async () => {});
+    fireEvent.click(screen.getByText('Add espresso')); fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Pay cash')); await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await screen.findByText('The original checkout is retained. Confirm its result before starting another payment.');
+    const retainedId = draftStorage.draft.checkoutRequestId;
+    view.rerender(<MenuModal {...props} isOpen={false} />); view.rerender(<MenuModal {...props} />);
+    await screen.findByText('The original checkout is retained. Confirm its result before starting another payment.');
+    fireEvent.click(screen.getByText('Checkout')); expect(complete).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText('Check original checkout'));
+    await act(async () => {});
+    expect(draftStorage.draft.checkoutRequestId).toBe(retainedId);
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1][0]).toEqual(complete.mock.calls[0][0]);
+  });
+  it('hydrates the actual saved form/cart after parent context restoration without an empty overwrite', async () => {
+    draftStorage.draft = { schemaVersion: 1, draftId: 'restored-cart', checkoutRequestId: 'original-request', phase: 'editing',
+      cartItems: [{ id: 'coffee', name: 'Espresso', quantity: 3, totalPrice: 9, customizations: [] }],
+      context: { orderType: 'pickup', editMode: false, selectedCustomer: null, selectedAddress: null, tableNumber: '' },
+      state: { pickupCustomerDraft: { name: 'Alex', phone: '123', notes: 'original note' }, manualDiscountValue: 2, manualDiscountMode: 'amount' } };
+    const restore = vi.fn(); render(<MenuModal {...baseProps} isOpen onDraftRestore={restore} />);
+    await screen.findByText('Espresso × 3 = 9 []');
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ checkoutRequestId: 'original-request', orderType: 'pickup' }));
+    fireEvent.click(screen.getByRole('button', { name: /Alex.*123/ }));
+    expect(screen.getByPlaceholderText('Notes')).toHaveValue('original note');
+    expect(draftStorage.draft.cartItems).toHaveLength(1);
+    expect(draftStorage.draft.checkoutRequestId).toBe('original-request');
+  });
+});
+
+
+describe('MenuModal explicit immutable replay after crash before dispatch', () => {
+  afterEach(cleanup);
+  const editor = () => ({ schemaVersion: 1, draftId: 'frozen-edit', checkoutRequestId: 'edit-event', phase: 'checkout_pending',
+    cartItems: [{ id: 'line', name: 'Coffee', quantity: 1, totalPrice: 4 }],
+    context: { orderType: 'pickup', editMode: true, editOrderId: 'original-order', editExpectedVersion: 7 }, state: {},
+    submission: { action: 'edit', orderId: 'original-order', client_event_id: 'edit-event', expected_version: 7, total: 4, items: [{ id: 'line', name: 'Coffee', quantity: 1, totalPrice: 4 }] } });
+  it('replays a frozen edit with the exact original event/version and clears only after native acceptance', async () => {
+    draftStorage.draft = editor();
+    const complete = vi.fn(async (input: any) => {
+      expect(input).toMatchObject({ orderId: 'original-order', client_event_id: 'edit-event', expected_version: 7 });
+    });
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1)); await waitFor(() => expect(draftStorage.draft).toBeNull());
+  });
+  it('fresh authorization can retry the same frozen edit after an uncertain denial without rebasing', async () => {
+    draftStorage.draft = editor();
+    draftStorage.inspection = { success: true, outcome: 'uncertain', canCollect: false, recovery: { recoveryState: 'auth_required' } };
+    const complete = vi.fn().mockRejectedValueOnce(new Error('AUTHORIZATION_REQUIRED')).mockResolvedValue(undefined);
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(draftStorage.draft.checkoutRequestId).toBe('edit-event');
+    fireEvent.click(screen.getByText('Check original checkout'));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(2));
+    expect(complete.mock.calls[1][0]).toEqual(complete.mock.calls[0][0]);
+    expect(complete.mock.calls[1][0]).toMatchObject({ client_event_id: 'edit-event', expected_version: 7, orderId: 'original-order' });
+    await waitFor(() => expect(draftStorage.draft).toBeNull());
+  });
+  it('absence of a card reservation never permits new collection or erases the frozen cart', async () => {
+    draftStorage.draft = { ...editor(), draftId: 'frozen-card', checkoutRequestId: 'card-request',
+      context: { orderType: 'pickup', editMode: false }, submission: { clientRequestId: 'card-request', paymentData: { method: 'card', amount: 4 }, items: [] } };
+    const complete = vi.fn(async () => true); render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.checkoutRequestId).toBe('card-request');
+  });
+  it('explicit stored decline restores the original cart and parent identity without starting payment', async () => {
+    draftStorage.draft = { ...editor(), draftId: 'declined-card', checkoutRequestId: 'card-request',
+      context: { orderType: 'pickup', editMode: false }, submission: { clientRequestId: 'card-request', paymentData: { method: 'card', amount: 4 } } };
+    draftStorage.inspection = { success: true, outcome: 'declined', canCollect: false };
+    const complete = vi.fn(async () => true); const restore = vi.fn();
+    render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} onDraftRestore={restore} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(draftStorage.draft.checkoutRequestId).toBe('renewed-request'));
+    await waitFor(() => expect(restore).toHaveBeenLastCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request' })));
+    expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.cartItems).toEqual(editor().cartItems);
+    expect(draftStorage.draft.phase).toBe('editing'); expect(draftStorage.draft.submission).toBeUndefined();
+    await waitFor(() => expect(screen.getByText('Checkout')).not.toBeDisabled());
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Pay cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: 'renewed-request' })));
+  });
+  it('native mixed evidence appearing after inspection cannot release or replace the frozen cart', async () => {
+    draftStorage.draft = { ...editor(), checkoutRequestId: 'card-request', context: { orderType: 'pickup', editMode: false },
+      submission: { clientRequestId: 'card-request', paymentData: { method: 'card' } } };
+    draftStorage.inspection = { success: true, outcome: 'declined', canCollect: false };
+    draftStorage.resumeError = 'CHECKOUT_DRAFT_DECLINE_NOT_PROVEN';
+    const complete = vi.fn(async () => true); render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(draftStorage.draft.checkoutRequestId).toBe('card-request'); expect(draftStorage.draft.phase).toBe('checkout_pending');
+    fireEvent.click(screen.getByText('Checkout')); expect(screen.queryByText('Pay cash')).toBeNull();
+    expect(complete).not.toHaveBeenCalled();
+  });
+  it.each(['not_sent', 'not_charged'])('explicit native %s proof renews the cart without payment dispatch', async outcome => {
+    draftStorage.draft = { ...editor(), checkoutRequestId: 'card-request', context: { orderType: 'pickup', editMode: false },
+      submission: { clientRequestId: 'card-request', paymentData: { method: 'card' } } };
+    draftStorage.inspection = { success: true, outcome, canCollect: false };
+    const complete = vi.fn(async () => true); const restore = vi.fn();
+    render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} onDraftRestore={restore} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(draftStorage.draft.checkoutRequestId).toBe('renewed-request'));
+    await waitFor(() => expect(screen.getByText('Checkout')).not.toBeDisabled());
+    expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.cartItems).toEqual(editor().cartItems);
+    expect(restore).toHaveBeenLastCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request' }));
   });
 });

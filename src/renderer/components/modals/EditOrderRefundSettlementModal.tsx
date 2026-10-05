@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 import React, { useEffect, useMemo, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
@@ -46,6 +47,9 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
   const { t } = useTranslation();
   const [drafts, setDrafts] = useState<Record<string, RefundDraft>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const paymentUnits = new Set((preview?.completedPayments ?? []).map(payment => payment.currency || null));
+  const originalCurrency = paymentUnits.size === 1 ? [...paymentUnits][0] : null;
+  const originalMoney = (amount: number) => formatCurrency(amount, originalCurrency);
 
   const totalRequired = useMemo(() => round2(Math.max(0, (preview?.paidTotal || 0) - (preview?.nextTotal || 0))), [preview]);
   const totalReduced = (preview?.nextTotal || 0) < (preview?.originalTotal || 0) - 0.01;
@@ -204,14 +208,14 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
         <div className="liquid-glass-modal-border flex flex-wrap items-center justify-between gap-3 border-t pt-4">
           <div className="text-sm liquid-glass-modal-text-muted">
             {t('modals.refund.requiredAmount', { defaultValue: 'Required refund' })}:{' '}
-            <span className="font-semibold text-orange-800 dark:text-orange-300">&euro;{totalRequired.toFixed(2)}</span>
+            <span className="font-semibold text-orange-800 dark:text-orange-300">{originalMoney(totalRequired)}</span>
             {' • '}
             {t('splitPayment.assigned', { defaultValue: 'Assigned' })}:{' '}
-            <span className="font-semibold liquid-glass-modal-text">&euro;{allocatedTotal.toFixed(2)}</span>
+            <span className="font-semibold liquid-glass-modal-text">{originalMoney(allocatedTotal)}</span>
             {' • '}
             {t('splitPayment.remaining', { defaultValue: 'Remaining' })}:{' '}
             <span className={`font-semibold ${Math.abs(remainingAmount) <= 0.01 ? 'text-emerald-800 dark:text-emerald-300' : 'text-amber-800 dark:text-amber-300'}`}>
-              &euro;{remainingAmount.toFixed(2)}
+              {originalMoney(remainingAmount)}
             </span>
           </div>
           <button
@@ -252,15 +256,15 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                 </p>
                 <p className="text-xs text-amber-800 dark:text-amber-100/70">
                   {t('modals.refund.originalVsNext', {
-                    defaultValue: 'Order total changed from €{{from}} to €{{to}}',
-                    from: preview.originalTotal.toFixed(2),
-                    to: preview.nextTotal.toFixed(2),
+                    defaultValue: 'Order total changed from {{from}} to {{to}}',
+                    from: originalMoney(preview.originalTotal),
+                    to: originalMoney(preview.nextTotal),
                   })}
                 </p>
                 <p className="text-xs text-amber-800 dark:text-amber-100/70">
                   {t('modals.refund.netPaidAfterRefunds', {
-                    defaultValue: 'Paid after previous refunds: €{{amount}}',
-                    amount: preview.paidTotal.toFixed(2),
+                    defaultValue: 'Paid after previous refunds: {{amount}}',
+                    amount: originalMoney(preview.paidTotal),
                   })}
                 </p>
               </div>
@@ -302,7 +306,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         {payment.method || 'Payment'}
                       </div>
                       <div className="text-xs liquid-glass-modal-text-muted">
-                        {t('modals.refund.remaining', { defaultValue: 'Remaining' })}: &euro;{Number(payment.remainingRefundable || 0).toFixed(2)}
+                        {t('modals.refund.remaining', { defaultValue: 'Remaining' })}: {formatCurrency(Number(payment.remainingRefundable || 0), payment.currency ?? null)}
                       </div>
                     </div>
                     <button
@@ -320,7 +324,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         {t('modals.refund.amount', { defaultValue: 'Amount' })}
                       </span>
                       <div className="relative">
-                        <span className="liquid-glass-modal-text-muted absolute left-3 top-1/2 -translate-y-1/2 text-sm">&euro;</span>
+                        <span className="liquid-glass-modal-text-muted absolute left-3 top-1/2 -translate-y-1/2 text-sm">{payment.currency ?? '—'}</span>
                         <input
                           type="number"
                           step="0.01"
@@ -328,7 +332,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                           max={payment.remainingRefundable || 0}
                           value={draft.amount}
                           onChange={(event) => setDraft(payment.id, (current) => ({ ...current, amount: event.target.value }))}
-                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-7 pr-3 text-sm focus:border-orange-400/50 focus:outline-none"
+                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3 text-sm focus:border-orange-400/50 focus:outline-none"
                           placeholder="0.00"
                         />
                       </div>

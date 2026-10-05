@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "cafeLan": {
+      "title": "Lidhja lokale e kamarierëve",
+      "internetRequired": "Terminali kryesor kërkon Internet për të regjistruar porositë, pagesat dhe ndryshimet e tavolinave. Nëse lidhja dështon, veprimi fillestar mbetet në pritje.",
+      "desktopMainOnly": "Ky kompjuter merr kërkesa si terminal kryesor. Importoni kodin në një terminal kamarieri Android.",
+      "port": "Porta",
+      "listening": "Në pritje të kamarierëve",
+      "stopped": "Dëgjimi u ndal",
+      "connected": "Terminali kryesor u lidh",
+      "pending": "Lidhja në pritje; veprimet ruhen",
+      "refresh": "Rifresko",
+      "start": "Fillo dëgjimin",
+      "stop": "Ndalo dëgjimin",
+      "child": "Terminali i kamarierit",
+      "selectChild": "Zgjidhni kamarierin",
+      "noChildren": "Nuk ka terminale kamarieri të lidhura në dispozicion.",
+      "host": "Adresa LAN e terminalit kryesor",
+      "generate": "Gjenero ose rinovo kodin",
+      "revoke": "Revoko çiftimin",
+      "codeHelp": "Ndajeni këtë kod vetëm me kamarierin e zgjedhur. Fshihet pas pesë minutash.",
+      "code": "Kodi i çiftimit",
+      "copy": "Kopjo kodin",
+      "hide": "Fshih kodin",
+      "failed": "Lidhja nuk u krye. Kontrolloni Internetin, konfigurimin e terminalit dhe adresën LAN, pastaj riprovoni.",
+      "rotationHelp": "Gjenerimi ose revokimi i kodit zëvendëson çiftimin dhe fshin përgjigjet e koduara në pritje. Kamarieri duhet të importojë kodin e ri; veprimet fillestare mbeten në pritje. Vazhdoni?",
+      "unavailable": "Shërbimi LAN nuk është gati në këtë pajisje.",
+      "import": "Importo kodin e çiftimit",
+      "test": "Testo lidhjen kryesore"
+    }
+  }
+}

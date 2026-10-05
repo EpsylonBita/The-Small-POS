@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getBridge, offEvent, onEvent } from '../../lib'
+import { setStoreCurrencyFromSettings } from '../utils/store-currency'
 import type { TerminalSettings } from '../../lib/ipc-adapter'
 
 // Terminal settings are typically returned as a flat map like "category.key" -> value
@@ -9,7 +10,7 @@ import type { TerminalSettings } from '../../lib/ipc-adapter'
 // `Record<string, any>` shadow type that bypasses the typed interface.
 export type { TerminalSettings }
 
-export function useTerminalSettings() {
+export function useTerminalSettings(publishCurrency = false) {
   const bridge = useMemo(() => getBridge(), [])
   const [settings, setSettings] = useState<TerminalSettings>({})
   const [loading, setLoading] = useState<boolean>(true)
@@ -35,6 +36,7 @@ export function useTerminalSettings() {
         setError(null)
         const s = await bridge.terminalConfig.getSettings()
         if (!isCurrent()) return
+        if (publishCurrency) setStoreCurrencyFromSettings(s || {})
         setSettings(s || {})
         setLoaded(true)
         if ((!s || Object.keys(s).length === 0) && attempt < 5) {
@@ -73,8 +75,9 @@ export function useTerminalSettings() {
       loadGeneration.current += 1
       if (retryTimer !== undefined) clearTimeout(retryTimer)
       offEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
+      if (publishCurrency) setStoreCurrencyFromSettings({})
     }
-  }, [bridge])
+  }, [bridge, publishCurrency])
 
   const refresh = useCallback(async () => {
     const generation = ++loadGeneration.current
@@ -85,6 +88,7 @@ export function useTerminalSettings() {
       if ((res as any)?.success !== false) {
         latestSettings = await bridge.terminalConfig.getSettings()
         if (generation === loadGeneration.current) {
+          if (publishCurrency) setStoreCurrencyFromSettings(latestSettings || {})
           setSettings(latestSettings || {})
           setLoaded(true)
         }
@@ -102,7 +106,7 @@ export function useTerminalSettings() {
     } finally {
       if (generation === loadGeneration.current) setLoading(false)
     }
-  }, [bridge])
+  }, [bridge, publishCurrency])
 
   // Read the local settings again (no network): the "Try again" of a checkout
   // paused because the money settings could not be read.
@@ -111,6 +115,7 @@ export function useTerminalSettings() {
     try {
       const latest = await bridge.terminalConfig.getSettings()
       if (generation === loadGeneration.current) {
+        if (publishCurrency) setStoreCurrencyFromSettings(latest || {})
         setSettings(latest || {})
         setLoaded(true)
         setError(null)
@@ -124,7 +129,7 @@ export function useTerminalSettings() {
     } finally {
       if (generation === loadGeneration.current) setLoading(false)
     }
-  }, [bridge])
+  }, [bridge, publishCurrency])
 
   const getSetting = useCallback(
     <T = any>(category: string, key: string, defaultValue?: T): T | undefined => {

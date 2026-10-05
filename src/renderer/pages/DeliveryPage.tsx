@@ -1,3 +1,4 @@
+import { formatCurrency } from '../utils/format';
 /**
  * DeliveryPage - Delivery order management for Desktop POS
  *
@@ -396,7 +397,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
               <span>{delivery.orderItems?.length || 0} items</span>
             </div>
             <span>•</span>
-            <span className="font-medium">€{delivery.orderTotal.toFixed(2)}</span>
+            <span className="font-medium">{formatCurrency(delivery.orderTotal)}</span>
             {delivery.paymentStatus === 'paid' && (
               <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-200' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
                 PAID

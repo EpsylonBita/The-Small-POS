@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import {
   TrendingUp,
-  Euro,
+  Banknote,
   ShoppingCart,
   CheckCircle,
   Download,
@@ -251,7 +251,7 @@ const ReportsPage: React.FC = () => {
             delay={0.1}
           />
           <MetricCard
-            icon={Euro}
+            icon={Banknote}
             title={t('reports.sales.totalSales')}
             value={formatMoney(todayStats?.totalSales ?? 0)}
             subtitle={t('reports.trends.revenueChange')}

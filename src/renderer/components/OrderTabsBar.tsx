@@ -22,8 +22,6 @@ interface OrderTabsBarProps {
     rooms?: number;
     services?: number;
   };
-  /** Whether to show the Delivered tab (requires Delivery module) */
-  showDeliveredTab?: boolean;
   /** Whether to show the Tables tab (requires Tables module) */
   showTablesTab?: boolean;
   /** Whether to show the Rooms hub tab (requires Rooms module) */
@@ -69,7 +67,6 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
     activeTab,
     onTabChange,
     orderCounts,
-    showDeliveredTab = true,
     showTablesTab = false,
     showRoomsTab = false,
     showServicesTab = false,
@@ -87,15 +84,13 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
         },
       ];
 
-      // Add Delivered tab only if Delivery module is acquired
-      if (showDeliveredTab) {
-        allTabs.push({
-          id: 'delivered',
-          label: t('dashboard.tabs.delivered', 'Delivered'),
-          count: orderCounts.delivered,
-          color: 'orange',
-        });
-      }
+      // Completion history covers every order type, regardless of acquired modules.
+      allTabs.push({
+        id: 'delivered',
+        label: t('dashboard.tabs.delivered', 'Delivered'),
+        count: orderCounts.delivered,
+        color: 'orange',
+      });
 
       // Add Tables tab only if Tables module is acquired
       if (showTablesTab) {
@@ -136,7 +131,7 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
       });
 
       return allTabs;
-    }, [orderCounts, showDeliveredTab, showTablesTab, showRoomsTab, showServicesTab, t]);
+    }, [orderCounts, showTablesTab, showRoomsTab, showServicesTab, t]);
 
     const handleTabChange = useCallback(
       (tabId: string) => {

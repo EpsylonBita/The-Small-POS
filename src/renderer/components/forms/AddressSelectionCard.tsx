@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Edit, Trash2, MapPin, CheckCircle, AlertTriangle, Clock } from 'lucide-react';
@@ -236,7 +237,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
               <div className={`text-sm font-semibold mt-1 ${
                 resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
               }`}>
-                €{validationResult.zone.deliveryFee.toFixed(2)}
+                {formatCurrency(validationResult.zone.deliveryFee)}
               </div>
             </div>
             <div>
@@ -263,7 +264,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
                 <div className={`text-sm font-semibold mt-1 ${
                   resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                 }`}>
-                  €{validationResult.zone.minimumOrderAmount.toFixed(2)}
+                  {formatCurrency(validationResult.zone.minimumOrderAmount)}
                 </div>
               </div>
             )}

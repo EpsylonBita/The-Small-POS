@@ -4076,8 +4076,8 @@
     "editSettlementDelta": {
       "collectTitle": "Zusätzliche Zahlung",
       "refundTitle": "Erstattung",
-      "collectBody": "Zusätzlich €{{amount}} einziehen — Methode wählen.",
-      "refundBody": "€{{amount}} an den Kunden zurückgeben — Methode wählen.",
+      "collectBody": "Zusätzlich {{amount}} einziehen — Methode wählen.",
+      "refundBody": "{{amount}} an den Kunden zurückgeben — Methode wählen.",
       "collectAmountLabel": "Zusatzbetrag",
       "refundAmountLabel": "Erstattungsbetrag",
       "payWithCash": "Mit Bargeld zahlen",
@@ -4392,8 +4392,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Preise nach Bestellart",
-      "pickupPrice": "Abholpreis (€)",
-      "deliveryPrice": "Lieferpreis (€)",
+      "pickupPrice": "Abholpreis",
+      "deliveryPrice": "Lieferpreis",
       "pricingHelp": "Legen Sie unterschiedliche Preise für Abholung und Lieferung fest.",
       "savePricing": "Preise speichern",
       "title": "Preis festlegen"
@@ -4415,7 +4415,7 @@
       "unavailable": "Nicht verfügbar",
       "noStaffSelected": "Bitte wählen Sie einen Mitarbeiter",
       "shiftStarted": "Schicht erfolgreich gestartet",
-      "drawerContinuityWarning": "Kassenlade stimmt nicht: zuletzt mit {{previous}} € geschlossen, aber mit {{opening}} € geöffnet. Bitte vor dem Fortfahren nachzählen.",
+      "drawerContinuityWarning": "Kassenlade stimmt nicht: zuletzt mit {{previous}} geschlossen, aber mit {{opening}} geöffnet. Bitte vor dem Fortfahren nachzählen.",
       "shiftEnded": "Schicht erfolgreich beendet",
       "failedToLoad": "Personalliste konnte nicht geladen werden. Bitte versuchen Sie es erneut.",
       "shiftSummary": "Schichtzusammenfassung",
@@ -4590,7 +4590,7 @@
       "ordersCountValue": "{{count}} Bestellungen",
       "paymentHistory": "Zahlungsverlauf",
       "paymentHistoryToday": "Heutige Zahlungen",
-      "todayTotal": "Heute gesamt: €{{amount}}",
+      "todayTotal": "Heute gesamt: {{amount}}",
       "paymentRecorded": "Zahlung erfolgreich erfasst",
       "paymentFailed": "Zahlung konnte nicht erfasst werden",
       "selectStaffPlaceholder": "-- Mitarbeiter auswählen --",
@@ -4723,7 +4723,7 @@
       "driverStartingCashHelper": "Optional: Geben Sie Bargeld ein, das der Fahrer vor Beginn der Lieferungen vom aktiven Kassierer bekommen hat.",
       "serverStartingCashTitle": "Startgeld für Service eingeben",
       "serverStartingCashHelper": "Optional: Geben Sie Bargeld ein, das die Servicekraft vor Beginn des Tischservice vom aktiven Kassierer bekommen hat.",
-      "skipCash": "Überspringen (€0)",
+      "skipCash": "Überspringen (0)",
       "startShift": "Schicht starten",
       "noCashierWarning": "Kein aktiver Kassierer verfügbar. Sie können nur mit 0 € fortfahren.",
       "activeSince": "Aktiv seit {{time}}",
@@ -4763,8 +4763,11 @@
         "expectedCash": "Erwartetes Bargeld",
         "countedLabel": "Von {{name}} erhaltenes Bargeld",
         "closing": "Wird geschlossen…",
-        "confirm": "Schicht schließen & Bargeld annehmen"
-      }
+        "confirm": "Schicht schließen & Bargeld annehmen",
+        "pending": "Die Übergabe ist auf dieser Kasse gespeichert und wartet auf Bestätigung. Sie wird automatisch wiederholt; erfassen Sie das Bargeld nicht erneut.",
+        "retry": "Gespeicherte Übergabe wiederholen"
+      },
+      "currencySettlementRequired": "Rechnen Sie die Mitarbeiterschichten in ihrer ursprünglichen Währung ab und schließen Sie sie vor dieser Kassenschicht."
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -5692,8 +5695,8 @@
       "editSettlementReducedRequired": "Diese Änderung verringert eine bezahlte Bestellung und erfordert eine erfasste Erstattung",
       "editSettlementTitle": "Erstattung der Änderung",
       "enterAmountFirst": "Geben Sie einen Erstattungsbetrag ein, um zu wählen, wie diese Zahlung erstattet wurde.",
-      "netPaidAfterRefunds": "Bezahlt nach früheren Erstattungen: €{{amount}}",
-      "originalVsNext": "Bestellsumme geändert von €{{from}} auf €{{to}}",
+      "netPaidAfterRefunds": "Bezahlt nach früheren Erstattungen: {{amount}}",
+      "originalVsNext": "Bestellsumme geändert von {{from}} auf {{to}}",
       "requiredAmount": "Erforderliche Erstattung",
       "selectAllocation": "Ordnen Sie die Erstattung mindestens einer Zahlung zu",
       "useRemaining": "Rest verwenden"
@@ -6134,7 +6137,9 @@
     "loadingAddress": "Adresse wird geladen...",
     "customer": "Kunde",
     "paymentPending": "AUSSTEHEND",
-    "paymentPendingA11y": "Zahlung ausstehend"
+    "paymentPendingA11y": "Zahlung ausstehend",
+    "platformPayment": "PLATTFORMZAHLUNG",
+    "platformPaymentA11y": "Zahlung durch die Plattform abgerechnet; das Geschäft kassiert nicht"
   },
   "incomingOrderAlert": {
     "title": "Neue {{platform}}-Bestellung",
@@ -6244,6 +6249,8 @@
     "tableNumber": "Tisch {{number}}",
     "capacity": "Kapazität",
     "seats": "{{count}} Plätze",
+    "seats_one": "{{count}} Platz",
+    "seats_other": "{{count}} Plätze",
     "section": "Bereich",
     "floor": "Etage",
     "status": {
@@ -7678,7 +7685,7 @@
     "title": "Treueprogramm",
     "programInactive": "Treueprogramm inaktiv",
     "programInactiveDesc": "Das Treueprogramm ist derzeit deaktiviert. Aktivieren Sie es im Admin-Dashboard.",
-    "pointsPerEuro": "Punkt pro 1 €",
+    "pointsPerEuro": "Punkt pro {{amount}}",
     "perPoint": "pro Punkt",
     "members": "Mitglieder",
     "totalPoints": "Gesamtpunkte",
@@ -9588,7 +9595,11 @@
     },
     "errors": {
       "moduleRequired": "Gästefakturierung ist für dieses Terminal nicht aktiviert.",
-      "actionFailed": "Gästekonto konnte nicht aktualisiert werden."
+      "actionFailed": "Gästekonto konnte nicht aktualisiert werden.",
+      "currencyUnavailable": "Die ursprüngliche Währung des Gästekontos ist nicht verfügbar. Prüfe das Konto, bevor du Geld buchst.",
+      "currencyMismatch": "Dieses Gästekonto verwendet eine andere Währung als die Filiale. Neue Belastungen sind nicht möglich.",
+      "shiftCurrency": "Die Kassenschicht hat eine andere oder unbekannte Währung. Schließen Sie diese Schicht und öffnen Sie eine neue, bevor Sie neue Bestellungen oder Zahlungen annehmen.",
+      "storeCurrency": "Die Filialwährung fehlt oder wurde geändert. Aktualisieren Sie die Terminaleinstellungen vor neuen Bestellungen oder Zahlungen."
     },
     "error": {
       "title": "Gästekonten konnten nicht geladen werden"
@@ -9597,7 +9608,8 @@
       "amount": "Geben Sie einen Betrag größer als null ein.",
       "quantity": "Die Menge muss größer als null sein.",
       "description": "Beschreibung ist erforderlich."
-    }
+    },
+    "roomChargePending": "Bestellung gespeichert. Die Zimmerbelastung wartet auf die Serverbestätigung. Nicht erneut kassieren."
   },
   "filters": {
     "all": "Alle"
@@ -9832,7 +9844,7 @@
       "revenue": "Umsatz",
       "status": "Kiosk-Status",
       "title": "Kiosk-Verwaltung",
-      "todayOrders": "Heutige Bestellungen",
+      "todayOrders": "Bestellungen des Geschäftstags",
       "toggleError": "Kiosk-Status konnte nicht aktualisiert werden"
     },
     "launchPurchase": {
@@ -9902,5 +9914,12 @@
     "unsavedReturnedAction": "Geld an den Kunden zurückgegeben",
     "unsavedSaving": "Wird gespeichert...",
     "unsavedResolving": "Wird erfasst..."
+  },
+  "cashierGate": {
+    "title": "Kassierer-Schicht erforderlich",
+    "body": "Der normale POS-Betrieb ist gesperrt. Ein Kassierer oder Manager muss sich an dieser Kasse anmelden, um den Geschäftstag zu öffnen.",
+    "waiterBody": "Die Hauptkasse ist geschlossen. Ein Kassierer oder Manager muss sich an der zugeordneten Hauptkasse anmelden. Danach können Sie Ihre eigene Schicht beginnen und fortfahren.",
+    "checking": "Kassierer-Schicht wird geprüft…",
+    "recheck": "Erneut prüfen"
   }
 }

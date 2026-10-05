@@ -12,6 +12,7 @@ import PrinterSettingsModal from './PrinterSettingsModal';
 import CashRegisterSection, { type CashRegisterSetupIntent } from '../peripherals/CashRegisterSection';
 import CallerIdSection from '../peripherals/CallerIdSection';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
+import { CafeLanSettings } from '../settings/CafeLanSettings';
 import { WaiterDevicesSection } from '../settings/WaiterDevicesSection';
 import { PlatformsSection } from '../settings/PlatformsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -927,6 +928,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   return (
     <>
     <LiquidGlassModal
+      recoveryAccess
       isOpen={isOpen}
       onClose={handleClose}
       closeMode="request"
@@ -1333,6 +1335,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </div>
         </div>
         )}
+
+        {activeSettingsSection === 'connection' && <CafeLanSettings isMain={isMainTerminal} />}
 
         {/* PIN Settings */}
         {activeSettingsSection === 'security' && (

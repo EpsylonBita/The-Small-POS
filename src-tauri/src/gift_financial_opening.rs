@@ -1406,9 +1406,9 @@ fn adopt_local_mirror(
             check_in_time, report_date, period_start_at,
             opening_cash_amount, opening_cash_amount_cents,
             status, calculation_version, transferred_to_cashier_shift_id,
-            sync_status, created_at, updated_at, is_day_start
+            sync_status, created_at, updated_at, is_day_start, currency
         ) VALUES (?1, ?2, ?3, ?4, ?5, 'cashier', ?6, ?7, ?8, ?9, ?10, 'active', ?11, NULL,
-                  'synced', ?12, ?12, ?13)",
+                  'synced', ?12, ?12, ?13, ?14)",
         params![
             intent.shift_id,
             intent.staff_id,
@@ -1423,6 +1423,7 @@ fn adopt_local_mirror(
             intent.calculation_version,
             now,
             intent.is_day_start,
+            intent.currency,
         ],
     )
     .map_err(|error| {
@@ -1432,8 +1433,8 @@ fn adopt_local_mirror(
     conn.execute(
         "INSERT INTO cash_drawer_sessions (
             id, staff_shift_id, cashier_id, branch_id, terminal_id,
-            opening_amount, opening_amount_cents, opened_at, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            opening_amount, opening_amount_cents, opened_at, created_at, updated_at, currency
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
         params![
             intent.drawer_id,
             intent.shift_id,
@@ -1444,6 +1445,7 @@ fn adopt_local_mirror(
             intent.opening_cents,
             intent.checked_in_at,
             now,
+            intent.currency,
         ],
     )
     .map_err(|error| {

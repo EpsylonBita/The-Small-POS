@@ -7,7 +7,7 @@ import { extractPrivilegedActionError } from '../utils/privileged-actions'
 
 interface PrivilegedActionRequest<T> {
   scope: PrivilegedActionScope
-  action: () => Promise<T>
+  action: (pin?: string) => Promise<T>
   title?: string
   subtitle?: string
 }
@@ -99,7 +99,9 @@ export function usePrivilegedActionConfirmation() {
     }
 
     try {
-      const result = await pendingAction.action()
+      // Only the current callback receives the PIN. It is never retained in
+      // pending state, storage, logs, or an offline operation payload.
+      const result = await pendingAction.action(pin)
       pendingAction.resolve(result)
     } catch (error) {
       pendingAction.reject(error)

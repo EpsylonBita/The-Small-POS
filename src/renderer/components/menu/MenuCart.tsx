@@ -1,3 +1,4 @@
+import { getStoreCurrency } from '../../utils/store-currency';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift, CheckSquare, Square, Percent, RotateCcw, Award, MapPin } from 'lucide-react';
@@ -1873,7 +1874,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     autoFocus
                   />
                   <span className="text-base font-semibold liquid-glass-modal-text">
-                    {lineDiscountModeDraft === 'percentage' ? '%' : '€'}
+                    {lineDiscountModeDraft === 'percentage' ? '%' : (getStoreCurrency() ?? '—')}
                   </span>
                 </div>
                 {isLineDiscountDraftOverMax && (
@@ -2204,7 +2205,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
                   />
                   <span className="text-base font-semibold liquid-glass-modal-text">
-                    {discountModeDraft === 'percentage' ? '%' : '€'}
+                    {discountModeDraft === 'percentage' ? '%' : (getStoreCurrency() ?? '—')}
                   </span>
                 </div>
                 {isDraftOverMax && (

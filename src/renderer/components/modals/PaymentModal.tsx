@@ -1,3 +1,5 @@
+import { getStoreCurrency } from '../../utils/store-currency';
+import { canChargeFolio } from '../../utils/folio-currency';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { CreditCard, Banknote, Coins, AlertTriangle, Split, BedDouble, HandCoins, Gift } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -31,6 +33,7 @@ import {
 } from './TipModal';
 
 export interface RoomChargeContext {
+  currency?: string | null;
   roomId: string;
   roomNumber?: string | null;
   guestName?: string | null;
@@ -69,6 +72,7 @@ export interface PaymentCompletionData {
   existingOrderId?: string;
   existingOrderNumber?: string;
   roomChargeFallback?: boolean;
+  roomChargeApplied?: boolean;
   /**
    * Existing-order cash/card only: the ordinary collection claim this confirm
    * made. Pass it on unchanged; never claim again, copy, log or persist it.
@@ -281,6 +285,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const canUseRoomCharge =
     !roomChargeFallback &&
     Boolean(roomChargeContext?.roomId && roomChargeContext?.activeFolioId) &&
+    canChargeFolio(roomChargeContext?.currency, getStoreCurrency()) &&
     hasModule(MODULE_IDS.ROOMS) &&
     hasModule(MODULE_IDS.ORDERS) &&
     hasModule('guest_billing');
@@ -493,6 +498,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   // Simple payment handler - just method, no amount input needed
   const handleSimplePayment = async (method: Exclude<PaymentMethodSelection, 'twint'>) => {
     if (pendingTwintReceipts.length) return;
+    if (method === 'room_charge' && !canChargeFolio(roomChargeContext?.currency, getStoreCurrency())) return;
     // A receipt reentry never collects money.
     if (giftReceiptRecovery) return;
     // Existing-order cash/card: claim the order before any state change or
@@ -518,7 +524,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
       const txId = `${method.toUpperCase().replace('_', '-')}-${Date.now()}`;
 
-      const paymentPayload = {
+      const paymentPayload: PaymentCompletionData = {
         method,
         amount: payableTotal,
         transactionId: txId,
@@ -529,6 +535,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         tipRecipientRole: tipSelection?.recipientRole,
         ...(method === 'room_charge' && roomChargeContext
           ? {
+              currency: roomChargeContext.currency ?? undefined,
               roomId: roomChargeContext.roomId,
               room_id: roomChargeContext.roomId,
               roomCharge: roomChargeContext,
@@ -584,6 +591,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         return;
       }
 
+      if (method === 'room_charge' && paymentPayload.roomChargeApplied !== true) {
+        toast(t('guestBilling.roomChargePending'));
+        return;
+      }
       try {
         ActivityTracker.trackPaymentCompleted(payableTotal, method, txId, undefined);
       } catch { }
@@ -932,6 +943,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     <img src={twintLogo} alt="" className="h-20 max-w-full mb-3 rounded-lg" />
                     <span className={paymentMethodLabelBaseClass}>TWINT</span>
                   </button>
+                )}
+                {roomChargeContext && !canChargeFolio(roomChargeContext.currency, getStoreCurrency()) && (
+                  <p role="alert" className="col-span-full text-sm text-amber-600">{t(roomChargeContext.currency ? 'guestBilling.errors.currencyMismatch' : 'guestBilling.errors.currencyUnavailable')}</p>
                 )}
                 {canUseRoomCharge && roomChargeContext && (
                   <button

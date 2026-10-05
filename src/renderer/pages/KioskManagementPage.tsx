@@ -1,3 +1,4 @@
+import { getStoreCurrency } from '../utils/store-currency';
 /**
  * @fileoverview Kiosk Management Page for POS System
  *
@@ -330,7 +331,7 @@ const KioskManagementPage: React.FC = () => {
           isDark={isDark}
         />
         <StatCard
-          icon={<span className="text-lg font-bold">€</span>}
+          icon={<span className="text-lg font-bold">{getStoreCurrency() ?? '—'}</span>}
           label={t('modules.kiosk.revenue', { defaultValue: 'Revenue' })}
           value={formatCurrency(stats.totalRevenue)}
           color="green"

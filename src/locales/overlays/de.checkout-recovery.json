@@ -1,0 +1,30 @@
+{
+  "modals": {
+    "menu": {
+      "draftReadFailed": "Der gespeicherte Warenkorb konnte nicht gelesen werden. Der Abschluss ist angehalten; der bisherige Warenkorb bleibt erhalten.",
+      "draftSaveFailed": "Der Warenkorb konnte nicht gespeichert werden. Der Abschluss wartet auf eine erfolgreiche dauerhafte Speicherung.",
+      "draftDiscardFailed": "Der gespeicherte Warenkorb konnte nicht verworfen werden. Er bleibt erhalten.",
+      "draftNeedsReconciliation": "Der ursprüngliche Abschluss muss noch abgeglichen werden. Keine neue Zahlung wurde gestartet. Nutzen Sie die Zahlungswiederherstellung oder fragen Sie die Leitung.",
+      "draftRecoveryUnavailable": "Der ursprüngliche Abschluss konnte nicht bestätigt werden. Der gespeicherte Warenkorb bleibt geschützt.",
+      "draftPending": "Der ursprüngliche Abschluss bleibt erhalten. Bestätigen Sie das Ergebnis, bevor Sie eine weitere Zahlung starten.",
+      "draftLoading": "Gespeicherten Warenkorb laden…",
+      "draftRecover": "Ursprünglichen Abschluss prüfen",
+      "draftRecovered": "Die ursprüngliche Bestellung wurde wiederhergestellt.",
+      "draftExistingTable": "Dieser Tisch hat bereits eine offene Rechnung. Öffnen Sie diese, um Artikel hinzuzufügen.",
+      "draftDeclinedResumed": "Die Zahlung wurde abgelehnt. Ihr Warenkorb wurde wiederhergestellt; es wurde keine neue Zahlung gestartet.",
+      "draftNotSentResumed": "Es wurde keine Zahlung gesendet. Ihr Warenkorb wurde wiederhergestellt; es wurde keine neue Zahlung gestartet.",
+      "draftNotChargedResumed": "Die ursprünglichen Zahlungsversuche haben den Kunden nicht belastet. Ihr Warenkorb wurde wiederhergestellt; es wurde keine neue Zahlung gestartet."
+    }
+  },
+  "checkoutRecovery": {
+    "title": "Tischvorgänge warten auf Wiederherstellung",
+    "guidance": "Ursprüngliche Anfragen bleiben gespeichert. Internet und aktuelle Berechtigungen sind erforderlich. Wiederholen Sie keine unklare Zahlung.",
+    "unavailable": "Der Wiederherstellungsstatus konnte nicht gelesen werden. Ausstehende Vorgänge bleiben erhalten.",
+    "pending": "Warten auf Verbindung",
+    "processing": "Ursprünglichen Vorgang wiederherstellen",
+    "approval_required": "Die Stornierung benötigt eine neue Mitarbeiter- oder Leitungsfreigabe. Öffnen Sie die ursprüngliche Rechnung.",
+    "auth_required": "Melden Sie sich mit einer berechtigten Mitarbeitersitzung an.",
+    "conflict": "Ein anderes Terminal hat diese Rechnung geändert. Prüfen Sie den aktuellen Stand vor dem Fortfahren.",
+    "refresh": "Status aktualisieren"
+  }
+}

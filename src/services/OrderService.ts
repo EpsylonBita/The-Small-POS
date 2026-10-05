@@ -1,3 +1,6 @@
+import i18n from '../lib/i18n';
+import { getStoreCurrency } from '../renderer/utils/store-currency';
+import { freezeRoomChargeCurrency, recordedFolioCurrency } from '../renderer/utils/folio-currency';
 // OrderService for POS system - API integration with admin dashboard
 import { Order, OrderStatus } from '../shared/types/orders';
 import { mapStatusForSupabase, mapStatusForPOS } from '../shared/types/order-status';
@@ -43,6 +46,14 @@ const normalizeDriverFields = <T extends Record<string, unknown>>(order: T): T =
     ...(driverId ? { driverId, driver_id: driverId } : {}),
     ...(driverName ? { driverName, driver_name: driverName } : {}),
   };
+};
+
+const currencyAdmissionError = (error: unknown): Error | null => {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
+  const code = message?.match(/(?:STORE|SHIFT|ORDER|FOLIO|OPERATING)_CURRENCY_(?:UNAVAILABLE|MISMATCH|BRANCH_MISMATCH)|FOLIO_ROOM_MISMATCH/)?.[0];
+  if (!code) return null;
+  const key = code.startsWith('SHIFT_') ? 'shiftCurrency' : 'storeCurrency';
+  return Object.assign(new Error(`${i18n.t(`guestBilling.errors.${key}`)} (${code})`), { code, retryable: false, currencyAdmission: true });
 };
 
 export class OrderService {
@@ -888,6 +899,20 @@ export class OrderService {
         normalizeText(orderDataAny.roomId) ||
         null;
 
+      const roomChargeCurrency = (normalizedInitialPaymentMethod ?? orderDataAny.payment_method ?? orderDataAny.paymentMethod) === 'room_charge'
+        ? freezeRoomChargeCurrency({
+          metadata: orderDataAny.ghost_metadata ?? orderDataAny.ghostMetadata,
+          currency: initialPayment?.currency ?? orderDataAny.currency,
+          // Native deduplicates a retained checkout before applying NEW-order
+          // currency admission. Preserve its original proposed unit for that
+          // lookup; a fresh mismatch still fails at the native boundary.
+          storeCurrency: this.getBridge()
+            ? recordedFolioCurrency(initialPayment?.currency ?? orderDataAny.currency) ?? getStoreCurrency()
+            : getStoreCurrency(),
+          roomId: normalizedRoomId,
+        }) : null;
+
+      const frozenOrderCurrency = roomChargeCurrency?.currency ?? orderDataAny.currency ?? normalizedInitialPayment?.currency ?? getStoreCurrency();
       const normalized: any = {
         // Include customerId for backend address fallback resolution
         customerId: persistedCustomerId,
@@ -918,7 +943,8 @@ export class OrderService {
         skipAutoPrint: orderDataAny.skipAutoPrint ?? orderDataAny.skip_auto_print ?? false,
         skip_auto_print: orderDataAny.skip_auto_print ?? orderDataAny.skipAutoPrint ?? false,
         ghost_source: (orderData as any).ghost_source ?? (orderData as any).ghostSource ?? null,
-        ghost_metadata:
+        currency: frozenOrderCurrency,
+        ghost_metadata: roomChargeCurrency?.metadata ??
           (orderData as any).ghost_metadata ?? (orderData as any).ghostMetadata ?? null,
         status: orderData.status,
         orderType: (orderData.orderType ?? orderData.order_type) as any,
@@ -936,8 +962,8 @@ export class OrderService {
         roomId: normalizedRoomId,
         room_id: normalizedRoomId,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
-        initialPayment: normalizedInitialPayment,
-        initial_payment: normalizedInitialPayment,
+        initialPayment: roomChargeCurrency ? undefined : normalizedInitialPayment,
+        initial_payment: roomChargeCurrency ? undefined : normalizedInitialPayment,
         staffShiftId: (orderData as any).staffShiftId ?? (orderData as any).staff_shift_id ?? null,
         staffId: (orderData as any).staffId ?? (orderData as any).staff_id ?? null,
       };
@@ -953,7 +979,7 @@ export class OrderService {
             ? await bridge.orders.createWithInitialPayment(normalized as any)
             : await bridge.orders.create(normalized as any);
           const ipcPayload = resp?.data ?? resp;
-          const roomCharge = ipcPayload?.roomCharge || resp?.roomCharge || resp?.data?.roomCharge;
+          const roomCharge = ipcPayload?.roomCharge || resp?.roomCharge || resp?.data?.roomCharge || (roomChargeCurrency ? { pending: true } : undefined);
           const orderId =
             ipcPayload?.orderId ||
             resp?.orderId ||
@@ -992,7 +1018,12 @@ export class OrderService {
           }
           // Bridge returned a non-success response
           const ipcError = resp?.error || 'Bridge create returned unexpected response';
-          if (resp?.errorCode === 'FISCAL_CHECKOUT_NOT_APPROVED') {
+          const currencyError = ['PAYMENT_NOT_SAVED', 'CHECKOUT_IN_PROGRESS', 'FISCAL_CHECKOUT_NOT_APPROVED'].includes(resp?.errorCode)
+            ? null : currencyAdmissionError(ipcError);
+          if (currencyError) {
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = currencyError;
+          } else if (resp?.errorCode === 'FISCAL_CHECKOUT_NOT_APPROVED') {
             bridgeCreateHardFailure = true;
             bridgeCreateError = Object.assign(
               ErrorFactory.system(
@@ -1045,7 +1076,11 @@ export class OrderService {
             debugLogger.warn('Bridge create returned error; will try Admin API', ipcError, 'OrderService');
           }
         } catch (ipcErr) {
-          if (!this.allowAdminApiFallback()) {
+          const currencyError = currencyAdmissionError(ipcErr);
+          if (currencyError) {
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = currencyError;
+          } else if (!this.allowAdminApiFallback()) {
             const errMsg = (ipcErr as any)?.message || String(ipcErr);
             debugLogger.error('Native bridge order create failed', ipcErr, 'OrderService');
             bridgeCreateError = ErrorFactory.system(errMsg);
@@ -1058,14 +1093,11 @@ export class OrderService {
       // A charged checkout held for "Save payment again" is final here: no
       // Admin API payload is built and nothing below may turn it into a retry
       // record or a second create.
-      if (
-        bridgeCreateHardFailure &&
-        ((bridgeCreateError as any)?.paymentNotSaved === true ||
-          (bridgeCreateError as any)?.checkoutInProgress === true)
-      ) {
+      if (bridgeCreateHardFailure && bridgeCreateError) {
         throw bridgeCreateError;
       }
 
+      if (!frozenOrderCurrency) throw new Error('STORE_CURRENCY_UNAVAILABLE');
       // 2) Fallback to Admin API
       // Transform orderData to match Admin API schema
       const latestCreds = await refreshTerminalCredentialCache();
@@ -1082,7 +1114,7 @@ export class OrderService {
         orderDataAny.ghost === true;
       const normalizedGhostSource =
         orderDataAny.ghost_source ?? orderDataAny.ghostSource ?? null;
-      const normalizedGhostMetadata =
+      const normalizedGhostMetadata = roomChargeCurrency?.metadata ??
         orderDataAny.ghost_metadata ?? orderDataAny.ghostMetadata ?? null;
 
       // Map payment_status: 'completed' -> 'paid'
@@ -1215,6 +1247,7 @@ export class OrderService {
         initial_payment: isRoomChargeOrder ? null : normalizedInitialPayment,
         ...tableMetadata,
         room_id: isRoomChargeOrder ? normalizedRoomId : null,
+        currency: frozenOrderCurrency,
 
         // Optional fields - use ?? for numbers to handle 0 values correctly
         customer_id:
@@ -1342,6 +1375,10 @@ export class OrderService {
 
       return newOrder;
     } catch (error) {
+      const retained = error as { paymentNotSaved?: boolean; checkoutInProgress?: boolean; code?: string } | null;
+      if (retained?.paymentNotSaved === true || retained?.checkoutInProgress === true) throw error;
+      const currencyError = currencyAdmissionError(error);
+      if (currencyError && retained?.code !== 'FISCAL_CHECKOUT_NOT_APPROVED') throw currencyError;
       if ((error as { code?: string } | null)?.code === 'FISCAL_CHECKOUT_NOT_APPROVED') {
         debugLogger.error('Fiscal checkout rejected order creation', error, 'OrderService');
         throw error;

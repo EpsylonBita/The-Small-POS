@@ -15,7 +15,10 @@ vi.mock('../../../services/address-workflow', () => ({
   extractStreetNumber: vi.fn(), getSuggestionStreetLabel: vi.fn(), resolveAddressSuggestion: vi.fn(),
   searchAddressSuggestions: vi.fn().mockResolvedValue([]), upsertVerifiedLocalCandidate: vi.fn(), validateAddressForDelivery: vi.fn(),
 }));
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'el' } }) }));
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-i18next')>(),
+  useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'el' } }),
+}));
 vi.mock('../../ui/pos-glass-components', () => ({ LiquidGlassModal: ({ children, isOpen }: any) => isOpen ? <div>{children}</div> : null }));
 vi.mock('../../forms/FloorPresetPicker', () => ({ FloorPresetPicker: ({ value, onChange, placeholder }: any) => <input placeholder={placeholder} value={value} onChange={event => onChange(event.target.value)} /> }));
 import { AddCustomerModal } from '../AddCustomerModal';

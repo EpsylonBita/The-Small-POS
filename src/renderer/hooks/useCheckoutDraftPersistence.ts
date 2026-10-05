@@ -1,0 +1,114 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createCheckoutDraft, getCheckoutDraftStore, type CheckoutDraft, type CheckoutDraftStore } from '../services/CheckoutDraftStore';
+
+/** Hydration is explicit: an empty first render must never overwrite a saved cart. */
+export function useCheckoutDraftPersistence(enabled: boolean) {
+  const [status, setStatus] = useState<'loading' | 'loaded' | 'ready' | 'error'>('loading');
+  const [restored, setRestored] = useState<CheckoutDraft | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const store = useRef<CheckoutDraftStore | null>(null);
+  const current = useRef<CheckoutDraft>(createCheckoutDraft());
+  const active = useRef(false);
+  const lastSaved = useRef('');
+  const epoch = useRef(0);
+
+  useEffect(() => {
+    if (!enabled) { active.current = false; return; }
+    const generation = ++epoch.current;
+    active.current = false;
+    setStatus('loading');
+    setError(null);
+    void getCheckoutDraftStore().then(async owner => {
+      let draft = await owner.load();
+      if (generation !== epoch.current) return;
+      if (draft?.phase === 'editing') {
+        // An old editable preimage must not hide a provider reservation or held
+        // payment under the same identity, even if its modal was never acknowledged.
+        const proof = await owner.inspect(draft.checkoutRequestId);
+        if (proof.outcome !== 'not_found') {
+          draft = { ...draft, phase: 'checkout_pending' };
+          await owner.save(draft);
+        }
+      }
+      if (generation !== epoch.current) return;
+      store.current = owner;
+      current.current = draft || createCheckoutDraft();
+      lastSaved.current = draft ? JSON.stringify(draft) : '';
+      setRestored(draft);
+      setStatus('loaded');
+    }).catch(() => {
+      if (generation !== epoch.current) return;
+      setError('draftReadFailed');
+      setStatus('error');
+    });
+    return () => { ++epoch.current; active.current = false; };
+  }, [enabled]);
+
+  const markHydrated = useCallback(() => { active.current = true; setStatus('ready'); }, []);
+
+  const persist = useCallback(async (snapshot: Pick<CheckoutDraft, 'cartItems' | 'context' | 'state'>) => {
+    if (!active.current || !store.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    if (current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+    const draft = { ...current.current, ...snapshot };
+    const signature = JSON.stringify(draft);
+    if (signature !== lastSaved.current) {
+      await store.current.save(draft);
+      if (current.current.phase === 'editing') current.current = draft;
+      lastSaved.current = signature;
+    }
+    setError(null);
+    return draft.checkoutRequestId;
+  }, []);
+
+  const freeze = useCallback(async (snapshot: Pick<CheckoutDraft, 'cartItems' | 'context' | 'state'>, submission: Record<string, any>) => {
+    if (!active.current || !store.current || current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+    const draft: CheckoutDraft = { ...current.current, ...snapshot, phase: 'checkout_pending', submission };
+    // Freeze before the native await so a concurrent autosave cannot change its preimage.
+    current.current = draft;
+    await store.current.save(draft);
+    lastSaved.current = JSON.stringify(draft);
+    setRestored(draft);
+    return draft.checkoutRequestId;
+  }, []);
+
+  const clear = useCallback(async (accepted: boolean) => {
+    if (!store.current || (!accepted && !active.current)) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    const draft = current.current;
+    await store.current.clear(draft.draftId, accepted);
+    current.current = createCheckoutDraft();
+    lastSaved.current = '';
+    active.current = false;
+    setRestored(null);
+  }, []);
+
+  const failedSave = useCallback(() => {
+    setError('draftSaveFailed');
+  }, []);
+
+  const resumeDeclined = useCallback(async () => {
+    if (!active.current || !store.current || current.current.phase !== 'checkout_pending') throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    const owner = store.current;
+    const generation = epoch.current;
+    const requestId = current.current.checkoutRequestId;
+    const resumed = await owner.resumeDeclined(requestId);
+    if (generation !== epoch.current || !active.current || owner !== store.current || current.current.checkoutRequestId !== requestId) {
+      throw new Error('CHECKOUT_DRAFT_CHANGED');
+    }
+    current.current = resumed;
+    lastSaved.current = JSON.stringify(resumed);
+    active.current = false;
+    setError(null);
+    setRestored(resumed);
+    setStatus('loaded');
+    return resumed;
+  }, []);
+
+  return { status, restored, error, markHydrated, persist, freeze, clear, failedSave, resumeDeclined,
+    identity: () => current.current.checkoutRequestId,
+    isPending: () => current.current.phase === 'checkout_pending',
+    inspect: () => {
+      if (!store.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+      return store.current.inspect(current.current.checkoutRequestId);
+    },
+  };
+}

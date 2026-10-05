@@ -1976,7 +1976,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
            orderId,
            method: normalizedMethod,
            amount: paymentData.amount,
-           currency: paymentData.currency || 'EUR',
+           currency: paymentData.currency,
            cashReceived: paymentData.cashReceived,
            changeGiven: paymentData.changeGiven,
            transactionRef: transactionId,
@@ -2095,6 +2095,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         if (!boxOrderStatusMutationAllowed(targetOrder, 'confirmed', { kind: 'accept', estimatedTime })) return false;
         const result = await bridge.orders.approve(orderId, estimatedTime);
         if (result?.success) {
+          if (result.roomChargeConfirmed === true) {
+            // Native persisted the acknowledged paid snapshot, possibly already
+            // ready/completed. Read it instead of regressing it to confirmed.
+            get()._invalidateCache();
+            await get().silentRefresh();
+            return true;
+          }
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
         const updatedOrders = combined.map(order =>

@@ -1801,6 +1801,8 @@ struct TransitionFileIdentity {
 thread_local! {
     static TRANSITION_IDENTITY_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TRANSITION_DIRECTORY_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    #[cfg(unix)]
+    static TRANSITION_TEST_DIRECTORY_CAPABILITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     #[cfg(windows)]
     static TRANSITION_WINDOWS_REPLACEMENT_ATTEMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -2347,6 +2349,17 @@ fn capability_remove_transition_directory(
     _journal: &RepairTransitionJournal,
     _expected: TransitionFileIdentity,
 ) -> Result<(), String> {
+    // Only selected journal/rollback tests simulate the supported platform's
+    // cleanup capability. Production Unix remains fail-closed below.
+    #[cfg(test)]
+    if TRANSITION_TEST_DIRECTORY_CAPABILITY.with(|enabled| enabled.get()) {
+        if transition_file_identity(_directory)? != _expected {
+            return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
+        }
+        validate_transition_marker(_directory, _journal)?;
+        return fs::remove_dir_all(_directory)
+            .map_err(|_| "REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
+    }
     Err("REPAIR_TRANSITION_DURABILITY_UNSUPPORTED".to_string())
 }
 
@@ -2811,7 +2824,12 @@ pub(crate) fn begin_authoritative_access_reconciliation(
                         && !metadata.file_type().is_symlink()
                         && !metadata_is_reparse_point(&metadata) =>
                 {
+                    #[cfg(not(test))]
                     return Err("REPAIR_TRANSITION_DURABILITY_UNSUPPORTED".to_string());
+                    #[cfg(test)]
+                    if !TRANSITION_TEST_DIRECTORY_CAPABILITY.with(|enabled| enabled.get()) {
+                        return Err("REPAIR_TRANSITION_DURABILITY_UNSUPPORTED".to_string());
+                    }
                 }
                 Ok(_) => return Err("REPAIR_STAGING_PATH_UNSAFE".to_string()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -8978,6 +8996,31 @@ mod tests {
         reset_lifecycle_state_for_test();
     }
 
+    // Exercise journal and compensation behavior on Unix without claiming that
+    // Unix implements the production pinned-directory cleanup capability.
+    // Thread-local RAII ensures panic/unwind cannot affect a following test.
+    struct TestTransitionDirectoryCapability {
+        #[cfg(unix)]
+        previous: bool,
+    }
+
+    impl TestTransitionDirectoryCapability {
+        fn new() -> Self {
+            Self {
+                #[cfg(unix)]
+                previous: TRANSITION_TEST_DIRECTORY_CAPABILITY
+                    .with(|enabled| enabled.replace(true)),
+            }
+        }
+    }
+
+    impl Drop for TestTransitionDirectoryCapability {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            TRANSITION_TEST_DIRECTORY_CAPABILITY.with(|enabled| enabled.set(self.previous));
+        }
+    }
+
     fn scope() -> RepairScopeState {
         RepairScopeState {
             version: 1,
@@ -11636,6 +11679,7 @@ mod tests {
     #[test]
     fn failed_identity_purge_rolls_back_graph_and_never_leaks_payload_or_publishes_new_identity() {
         let _serial = test_state_lock();
+        let _capability = TestTransitionDirectoryCapability::new();
         reset_test_lifecycle();
         let initial = scope();
         let _keyring = install_native_state(&initial);
@@ -11958,6 +12002,7 @@ mod tests {
     #[test]
     fn transition_journal_recovers_each_precommit_and_postcommit_interruption_idempotently() {
         let _serial = test_state_lock();
+        let _capability = TestTransitionDirectoryCapability::new();
         for (fault, committed_b) in [
             ("after_journal_prepared", false),
             ("after_marker_create", false),
@@ -12341,6 +12386,7 @@ mod tests {
     #[test]
     fn purge_failure_identity_compensation_keeps_journal_latched_until_verified_recovery() {
         let _serial = test_state_lock();
+        let _capability = TestTransitionDirectoryCapability::new();
         reset_test_lifecycle();
         let initial = scope();
         let initial_scope_bytes = serde_json::to_vec(&initial).unwrap();
@@ -12595,11 +12641,15 @@ mod tests {
             phase: RepairTransitionJournalPhase::FilesRestored,
         })
         .unwrap();
-        fs::remove_dir_all(&original).unwrap();
+        // Retain the original inode/file ID so immediate allocator reuse cannot
+        // make the replacement accidentally satisfy the recorded identity.
+        let retained_original = original.with_extension("retained-original");
+        fs::rename(&original, &retained_original).unwrap();
         write_test_file(
             &original.join("foreign/keep.bin"),
             b"ROUND2D8_FOREIGN_BYTES",
         );
+        assert_ne!(transition_file_identity(&original).unwrap(), identity);
         let before = janitor_filesystem_fingerprint(&staging_root(&connection).unwrap());
         assert_eq!(
             recover_interrupted_scope_transition(&connection).unwrap_err(),
@@ -16278,11 +16328,17 @@ mod tests {
         seed_valid_repair_queue_aes_key();
         let binding = terminal_rollback_binding();
         let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        // The fake keyring is thread-local. Model the scope visible to the
+        // competitor once the parent's held transition boundary is released.
+        let mut worker_scope = initial.clone();
+        worker_scope.transition_pending = true;
+        worker_scope.scope_epoch += 1;
 
         let envelope = prepare_and_arm_terminal_identity_transition(&binding, |envelope| {
             assert!(envelope.is_some());
             assert!(lifecycle().0.lock().unwrap().blocked);
             std::thread::spawn(move || {
+                let _worker_keyring = install_native_state(&worker_scope);
                 let result = arm_scope_transition().map(|_guard| ());
                 let _ = finished_tx.send(result);
             });

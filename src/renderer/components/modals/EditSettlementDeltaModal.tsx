@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 import React, { useEffect, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { Banknote, CreditCard, AlertTriangle, X } from 'lucide-react';
@@ -30,7 +31,7 @@ export type EditSettlementDeltaMethod = 'cash' | 'card';
 export interface EditSettlementDeltaModalProps {
   isOpen: boolean;
   mode: EditSettlementDeltaMode;
-  /** Absolute delta amount in euros. Always positive; the mode distinguishes direction. */
+  /** Absolute delta amount in the store currency. Always positive; the mode distinguishes direction. */
   amount: number;
   /** Display hint — shown in the subtitle if provided. */
   orderNumber?: string | null;
@@ -68,12 +69,12 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
 
   const subtitle = isRefund
     ? t('modals.editSettlementDelta.refundBody', {
-        defaultValue: 'Return €{{amount}} to the customer — choose the method used.',
-        amount: displayAmount.toFixed(2),
+        defaultValue: 'Return {{amount}} to the customer — choose the method used.',
+        amount: formatCurrency(displayAmount),
       })
     : t('modals.editSettlementDelta.collectBody', {
-        defaultValue: 'Collect an additional €{{amount}} — choose the method used.',
-        amount: displayAmount.toFixed(2),
+        defaultValue: 'Collect an additional {{amount}} — choose the method used.',
+        amount: formatCurrency(displayAmount),
       });
 
   const handlePick = async (method: EditSettlementDeltaMethod) => {
@@ -132,7 +133,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
               isRefund ? 'text-orange-900 dark:text-orange-200' : 'text-emerald-900 dark:text-emerald-200'
             }`}
           >
-            €{displayAmount.toFixed(2)}
+            {formatCurrency(displayAmount)}
           </div>
           <div className="mt-2 text-sm liquid-glass-modal-text-muted">
             {orderNumber ? `#${orderNumber} • ${subtitle}` : subtitle}

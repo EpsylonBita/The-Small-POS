@@ -6,7 +6,6 @@ import {
   Check,
   ChevronDown,
   ClipboardList,
-  Euro,
   FileText,
   Pencil,
   Receipt,
@@ -1627,7 +1626,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     disabled={!canRecord}
                     className={`${drawerInputClass} !pl-10 text-lg font-bold`}
                   />
-                  <Euro className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                  <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
                 </div>
               </div>
             </div>
@@ -1838,7 +1837,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   disabled={!canRecord}
                   className={`${drawerInputClass} !pl-10 text-lg font-bold`}
                 />
-                <Euro className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+                <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
               </div>
             </div>
 

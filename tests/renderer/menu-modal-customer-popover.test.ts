@@ -110,15 +110,21 @@ test('MenuModal header cannot horizontally clip the full/edit modal off the view
   // The close control is always reachable (never the clipped element).
   assert.match(source, /liquid-glass-modal-button p-2 min-h-0 min-w-0 flex-shrink-0/);
 
-  // The customer chips are width-bounded and truncate so a long name/phone can't
-  // expand the header past the viewport. The older blue customer chip is gone;
-  // both populated customer states now use the green customer accent, and the
-  // saved-pickup/dine-in chip's accent is theme-aware (dark vs light tones).
-  assert.match(
-    source,
-    /max-w-\[16rem\][\s\S]*?resolvedTheme === 'dark'[\s\S]*?bg-green-500\/20 text-green-300 border-green-500\/30[\s\S]*?bg-green-100 text-green-800 border-green-300/,
+  // Both populated states share a bounded, truncating neutral chip in either theme.
+  const chipSource = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'menu', 'OrderContextChip.tsx'), 'utf8',
   );
-  assert.match(source, /border-green-500\/40[\s\S]*?max-w-\[16rem\]/);
+  const chipCss = readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'menu', 'order-context-chip.css'), 'utf8',
+  );
+  assert.equal((source.match(/<OrderContextChip(?:\s|>)/g) ?? []).length, 2);
+  assert.match(source, /<OrderContextChip>\s*<span className="truncate">\{selectedCustomer\.name\}/);
+  assert.match(source, /<OrderContextChip onClick=\{\(\) => setShowCustomerPopover\(true\)\}>\s*<span className="truncate">/);
+  assert.match(chipSource, /order-context-chip--\$\{resolvedTheme\}/);
+  assert.match(chipCss, /max-width:\s*16rem/);
+  assert.match(chipCss, /\.order-context-chip > span\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap/);
+  assert.match(chipCss, /background:\s*#f4f5f6;\s*color:\s*#27272a/);
+  assert.match(chipCss, /\.order-context-chip--dark\s*\{[^}]*background:\s*#24272b;\s*color:\s*#f4f4f5/);
   assert.doesNotMatch(source, /border-blue-500\/40/);
 
   // The menu panel keeps its min-w-0/overflow guard so the grid/tabs start in-viewport.
@@ -237,11 +243,11 @@ test('MenuModal discard confirmation is a topmost portaled blurred dialog with c
     /if \(!showDiscardConfirm\) \{\s*return;\s*\}\s*const onEscape = \(event: KeyboardEvent\) => \{\s*if \(event\.key === 'Escape'\) \{\s*setShowDiscardConfirm\(false\);/,
   );
 
-  // "Keep editing" closes only the confirmation; "Discard order" clears the cart then closes.
+  // "Keep editing" closes only the confirmation; "Discard order" first clears the durable draft, then the cart and modal.
   assert.match(source, /onClick=\{\(\) => setShowDiscardConfirm\(false\)\}/);
   assert.match(
     source,
-    /const handleDiscardOrder = useCallback\(\(\) => \{\s*setShowDiscardConfirm\(false\);\s*setCartItems\(\[\]\);\s*onClose\(\);\s*\}, \[onClose\]\);/,
+    /const handleDiscardOrder = async \(\) => \{\s*try \{\s*await draftPersistence\.clear\(false\);\s*setShowDiscardConfirm\(false\);\s*setCartItems\(\[\]\);\s*onClose\(\);\s*\} catch \{ toast\.error\(t\('modals\.menu\.draftDiscardFailed'/,
   );
   assert.match(source, /onClick=\{handleDiscardOrder\}/);
   // No native confirm.

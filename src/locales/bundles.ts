@@ -1,3 +1,15 @@
+import sqCheckoutRecovery from './overlays/sq.checkout-recovery.json';
+import itCheckoutRecovery from './overlays/it.checkout-recovery.json';
+import frCheckoutRecovery from './overlays/fr.checkout-recovery.json';
+import deCheckoutRecovery from './overlays/de.checkout-recovery.json';
+import elCheckoutRecovery from './overlays/el.checkout-recovery.json';
+import enCheckoutRecovery from './overlays/en.checkout-recovery.json';
+import enCafeLan from './overlays/en.cafe-lan.json';
+import elCafeLan from './overlays/el.cafe-lan.json';
+import deCafeLan from './overlays/de.cafe-lan.json';
+import frCafeLan from './overlays/fr.cafe-lan.json';
+import itCafeLan from './overlays/it.cafe-lan.json';
+import sqCafeLan from './overlays/sq.cafe-lan.json';
 import itPlatforms from './overlays/it.platforms.json';
 import frPlatforms from './overlays/fr.platforms.json';
 import dePlatforms from './overlays/de.platforms.json';
@@ -92,10 +104,10 @@ const mergeLocaleLayers = (...layers: unknown[]): LocaleBundle =>
   layers.reduce(mergeLocaleBundle) as LocaleBundle;
 
 export const localeBundles = {
-  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit, enPlatforms),
-  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit, elPlatforms),
-  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms),
-  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms),
-  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms),
-  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms),
+  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit, enPlatforms, enCafeLan, enCheckoutRecovery),
+  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit, elPlatforms, elCafeLan, elCheckoutRecovery),
+  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms, deCafeLan, deCheckoutRecovery),
+  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms, frCafeLan, frCheckoutRecovery),
+  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms, itCafeLan, itCheckoutRecovery),
+  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms, sqCafeLan, sqCheckoutRecovery),
 } as const;

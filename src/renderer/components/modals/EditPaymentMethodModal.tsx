@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 
 type EditablePaymentMethod = 'cash' | 'card';
@@ -8,6 +9,7 @@ export interface EditablePaymentRow {
   id: string;
   method: EditablePaymentMethod;
   amount: number;
+  currency?: string | null;
   transactionRef?: string | null;
 }
 
@@ -105,10 +107,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
                       {t('modals.editPaymentMethod.paymentNumber', { number: index + 1 })}
                     </span>
                     <span className="liquid-glass-modal-text font-semibold">
-                      {new Intl.NumberFormat(undefined, {
-                        style: 'currency',
-                        currency: 'EUR',
-                      }).format(payment.amount)}
+                      {formatCurrency(payment.amount, payment.currency ?? null)}
                     </span>
                   </div>
                   <div className="liquid-glass-modal-text-muted mt-1 text-sm">

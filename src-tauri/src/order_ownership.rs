@@ -325,6 +325,28 @@ pub fn upsert_driver_earning(
         )
         .ok();
 
+    let shift_currency = crate::shifts::recorded_operating_currency(
+        conn,
+        "staff_shifts",
+        &assignment.driver_shift_id,
+    )?;
+    let order_currency = crate::shifts::recorded_operating_currency(conn, "orders", order_id)?;
+    let currency = if let Some(id) = &existing_id {
+        let original = crate::shifts::recorded_operating_currency(conn, "driver_earnings", id)?;
+        if original.is_some() && (original != shift_currency || original != order_currency) {
+            return Err("DRIVER_EARNING_CURRENCY_MISMATCH".to_string());
+        }
+        original
+    } else {
+        let current =
+            crate::shifts::require_shift_operating_currency(conn, &assignment.driver_shift_id)?;
+        if order_currency.as_deref() != Some(current.as_str())
+            || crate::shifts::require_operating_currency(conn, &assignment.branch_id)? != current
+        {
+            return Err("DRIVER_EARNING_CURRENCY_MISMATCH".to_string());
+        }
+        Some(current)
+    };
     let total_earning = assignment.delivery_fee + assignment.tip_amount;
     let cash_to_return = assignment.cash_collected;
     // W4c dual-write: every monetary REAL column gets its `_cents` sibling.
@@ -386,8 +408,8 @@ pub fn upsert_driver_earning(
                 cash_collected, cash_collected_cents,
                 card_amount, card_amount_cents,
                 cash_to_return, cash_to_return_cents,
-                settled, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0, ?19, ?19)",
+                settled, created_at, updated_at, currency
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0, ?19, ?19, ?20)",
             params![
                 earning_id,
                 driver_id,
@@ -407,7 +429,8 @@ pub fn upsert_driver_earning(
                 card_amount_cents,
                 cash_to_return,
                 cash_to_return_cents,
-                now
+                now,
+                currency
             ],
         )
         .map_err(|e| format!("insert driver earning: {e}"))?;
@@ -949,7 +972,7 @@ pub fn build_driver_earning_sync_payload(
         )
         .map_err(|e| format!("load courier earning sync payload: {e}"))?;
 
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "id": id,
         "driver_id": driver_id,
         "staff_shift_id": staff_shift_id,
@@ -970,7 +993,14 @@ pub fn build_driver_earning_sync_payload(
         "cash_to_return_cents": cash_to_return_cents,
         "createdAt": created_at,
         "updatedAt": updated_at,
-    }))
+    });
+    crate::shifts::append_recorded_operating_currency(
+        conn,
+        "driver_earnings",
+        earning_id,
+        &mut payload,
+    )?;
+    Ok(payload)
 }
 
 /// Replace the outstanding canonical financial sync row for an earning.

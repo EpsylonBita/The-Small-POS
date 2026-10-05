@@ -67,6 +67,7 @@ import {
   resolveCheckoutTaxRate,
 } from '../utils/checkoutMoneySettings';
 import { useCheckoutRequestId } from '../hooks/useCheckoutRequestId';
+import { getCheckoutDraftStore } from '../services/CheckoutDraftStore';
 import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from '../utils/checkoutOutcome';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
@@ -484,8 +485,33 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   // Fix review 30/09/2026: one checkout id per cart, reused by every press
   // of Pay until the checkout ends, so a slow card terminal is never paid
   // twice.
-  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId } =
+  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId } =
     useCheckoutRequestId();
+
+  const [restoredCheckoutContext, setRestoredCheckoutContext] = useState<Record<string, any> | null>(null);
+  const restoreCheckoutContext = useCallback((context: Record<string, any>) => {
+    if (context.editMode) { navigate('/'); return; }
+    if (!['pickup', 'delivery', 'dine-in'].includes(context.orderType)) return;
+    restoreCheckoutRequestId(context.checkoutRequestId);
+    setRestoredCheckoutContext(context);
+    setSelectedOrderType(context.orderType);
+    setOrderType(context.orderType);
+    setExistingCustomer(context.selectedCustomer || null);
+    if (context.selectedCustomer) setCustomerInfo(context.selectedCustomer);
+    setTableId(context.selectedTable?.id || context.tableId || '');
+    setTableNumber(context.tableNumber || '');
+    setShowMenuModal(true);
+  }, [navigate, restoreCheckoutRequestId]);
+  useEffect(() => {
+    if (!organizationId || !branchId || !terminalId) return;
+    let mounted = true;
+    void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
+      if (mounted && saved && (saved.cartItems.length || saved.phase === 'checkout_pending')) {
+        restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+      }
+    }).catch(() => { /* Native read errors are shown at cart admission. */ });
+    return () => { mounted = false; };
+  }, [organizationId, branchId, terminalId, restoreCheckoutContext]);
 
   const handleOrderComplete = useCallback(async (orderData: any): Promise<boolean> => {
     // Item H (fix review 30/09/2026): the store's tax rate could not be read.
@@ -692,7 +718,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return true;
       }
 
-      const clientRequestId = takeCheckoutRequestId();
+      const clientRequestId = takeCheckoutRequestId(orderData.clientRequestId);
       const tableOrderFields = buildTableOrderCreateFields({
         serviceOrderType: currentOrderType,
         pricingOrderType: currentOrderType,
@@ -732,7 +758,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         country_code: 'GR',
         pricing_mode: 'tax_inclusive',
         status: 'pending' as const,
-        payment_method: isGhostOrder ? null : (paymentMethod || null),
+        payment_method: isGhostOrder || paymentMethod === 'table' ? null : (paymentMethod || null),
         room_id: isRoomChargePayment ? roomId : null,
         roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
@@ -810,6 +836,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       resetCheckoutRequestId();
 
       const roomCharge = (result as any).roomCharge;
+        if (isRoomChargePayment && orderData.paymentData) orderData.paymentData.roomChargeApplied = roomCharge?.applied === true;
       if (isRoomChargePayment && roomCharge?.applied === false) {
         await silentRefresh().catch(() => {});
         orderData.paymentData.existingOrderId = result.orderId;
@@ -1503,13 +1530,17 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       {showMenuModal && (
         <MenuModal
           isOpen={showMenuModal}
-          onClose={handleMenuModalClose}
-          selectedCustomer={getCustomerForMenu()}
-          selectedAddress={getSelectedAddress()}
+          onClose={() => { setRestoredCheckoutContext(null); handleMenuModalClose(); }}
+          selectedCustomer={restoredCheckoutContext?.selectedCustomer || getCustomerForMenu()}
+          selectedAddress={restoredCheckoutContext?.selectedAddress || getSelectedAddress()}
           orderType={orderType}
           isProcessingOrder={isProcessingOrder}
           onRepickDeliveryAddress={handleRepickDeliveryAddress}
           onOrderComplete={handleOrderComplete}
+          roomChargeContext={restoredCheckoutContext?.roomChargeContext}
+          draftContext={{ tableId, tableNumber }}
+          onDraftRestore={restoreCheckoutContext}
+          onRecoveredOrder={async () => { resetCheckoutRequestId(); await silentRefresh(); navigate('/'); }}
         />
       )}
 

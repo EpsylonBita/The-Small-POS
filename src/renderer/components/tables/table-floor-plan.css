@@ -1,0 +1,11 @@
+.table-floor-plan { --plan-stroke: #9ba3af; --plan-fill: #e9ecf0; }
+.table-floor-plan[data-theme='dark'] { --plan-stroke: #626a74; --plan-fill: #24272b; }
+.floor-plan-fixtures [stroke] { stroke: var(--plan-stroke); }
+.floor-plan-fixtures [fill]:not([fill='none']):not([fill='transparent']):not(text) { fill: var(--plan-fill); }
+.floor-plan-table-node:focus-visible { outline: none; }
+.floor-plan-table-node:focus-visible > path { stroke: #facc15; stroke-width: 3; }
+
+.floor-plan-dialog { width: 95vw !important; height: 95dvh; max-height: 95dvh !important; border-radius: 12px !important; padding: 0 !important; }
+.floor-plan-dialog--dark { background: #101113 !important; }
+.floor-plan-dialog--light { background: #f8f9fa !important; }
+.floor-plan-dialog-content { display: flex; flex-direction: column; min-height: 0; height: 100%; padding: 0 !important; }

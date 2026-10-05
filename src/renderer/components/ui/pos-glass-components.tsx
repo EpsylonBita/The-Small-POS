@@ -4,6 +4,7 @@ import React from 'react'
 import ReactDOM from 'react-dom'
 import { cn } from '../../utils/cn'
 import { useI18n } from '../../contexts/i18n-context'
+import { CashierRecoveryContext, useCashierOperationsLocked } from '../../contexts/cashier-gate-context'
 import { useBlockerRegistration } from '../../hooks/useBlockerRegistration'
 
 // Import the glassmorphism CSS
@@ -566,6 +567,9 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
  * Props for the LiquidGlassModal component
  */
 interface LiquidGlassModalProps {
+  modalId?: string;
+  /** Only check-in/checkout, Z completion and setup/support recovery. */
+  recoveryAccess?: boolean;
   /** Disable backdrop sampling for frequently used, dense POS workflows. */
   blur?: boolean;
   /**
@@ -719,6 +723,8 @@ const getFocusableElements = (container: HTMLElement): HTMLElement[] => {
 }
 
 export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
+  modalId,
+  recoveryAccess = false,
   isOpen,
   blur = true,
   onClose,
@@ -740,6 +746,9 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   enterKeyEnabled = true
 }) => {
   const { t } = useI18n()
+  const inheritedRecovery = React.useContext(CashierRecoveryContext)
+  const cashierLocked = useCashierOperationsLocked()
+  const isRecovery = recoveryAccess || inheritedRecovery
   const isServerRender = typeof document === 'undefined'
   const containerRef = React.useRef<HTMLDivElement>(null)
   const backdropRef = React.useRef<HTMLDivElement>(null)
@@ -755,13 +764,14 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const closeDisabledRef = React.useRef(closeDisabled)
 
   const isTopMostDialog = React.useCallback(() => {
+    if (cashierLocked && !isRecovery) return false
     if (!containerRef.current) {
       return false
     }
 
     const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
     return dialogs.length === 0 || dialogs[dialogs.length - 1] === containerRef.current
-  }, [])
+  }, [cashierLocked, isRecovery])
 
   // Internal state for closing animation
   const [isClosing, setIsClosing] = React.useState(false)
@@ -867,7 +877,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
   // Focus management and keyboard navigation
   React.useEffect(() => {
-    if (mounted && !isClosing) {
+    if (mounted && !isClosing && (!cashierLocked || isRecovery)) {
       // Store currently focused element
       previousActiveElementRef.current = document.activeElement as HTMLElement
 
@@ -1038,6 +1048,16 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         document.removeEventListener('keydown', handleEnterKey)
         document.removeEventListener('focusin', handleFocusIn)
         document.body.style.overflow = previousOverflowRef.current
+        // Parent-owned dialogs can be removed in the same commit as their action.
+        // In that case the !mounted branch never runs. Restore after the commit,
+        // allowing any replacement dialog to claim focus first.
+        const previous = previousActiveElementRef.current
+        setTimeout(() => {
+          if (previous?.isConnected && document.querySelectorAll('[role="dialog"]').length === 0 &&
+              (!document.activeElement || document.activeElement === document.body)) {
+            previous.focus()
+          }
+        }, 0)
       }
     } else if (!mounted) {
       const activeElement = document.activeElement as HTMLElement | null
@@ -1051,7 +1071,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         previousActiveElementRef.current?.focus()
       }
     }
-  }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef, isTopMostDialog])
+  }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef, isTopMostDialog, cashierLocked, isRecovery])
 
   // Early return if not mounted
   if (!mounted) return null
@@ -1068,7 +1088,11 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   const showDefaultHeader = !header && !!title;
 
   const modalContent = (
-    <div className={cn('liquid-glass-modal-viewport', !blur && 'liquid-glass-modal-viewport--solid')} data-liquid-glass-modal-viewport>
+    <div className={cn('liquid-glass-modal-viewport', !blur && 'liquid-glass-modal-viewport--solid')} data-liquid-glass-modal-viewport
+      data-cashier-recovery={isRecovery ? 'true' : undefined}
+      inert={cashierLocked && !isRecovery}
+      aria-hidden={cashierLocked && !isRecovery || undefined}
+      style={{ zIndex: isRecovery ? 2147483100 : undefined, visibility: cashierLocked && !isRecovery ? 'hidden' : undefined }}>
       {/* Backdrop */}
       <div
         ref={backdropRef}
@@ -1080,6 +1104,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
       {/* Modal container */}
       <div
         ref={containerRef}
+        id={modalId}
         className={cn('liquid-glass-modal-shell flex flex-col', sizeClasses[size], isClosing && 'leaving', className)}
         role="dialog"
         aria-modal="true"
@@ -1132,7 +1157,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     return modalContent
   }
 
-  return ReactDOM.createPortal(modalContent, document.body)
+  return ReactDOM.createPortal(<CashierRecoveryContext.Provider value={isRecovery}>{modalContent}</CashierRecoveryContext.Provider>, document.body)
 }
 
 LiquidGlassModal.displayName = 'LiquidGlassModal'

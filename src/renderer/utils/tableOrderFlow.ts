@@ -11,6 +11,8 @@ interface TableLike {
   currentOrderId?: string | null;
   table_session_id?: string | null;
   tableSessionId?: string | null;
+  occupiedSince?: string | null;
+  occupied_since?: string | null;
   unpaidBalance?: number | string | null;
   balance?: {
     order_total?: number | string | null;
@@ -305,17 +307,12 @@ export function shouldShowInStandardOrderLane(
 }
 
 /**
- * The delivered/completed lane. Same table gate as the active lane, so a settled
- * check follows its open check to the same place.
+ * Completion history includes every fulfillment type, including settled table
+ * checks. Module availability only separates live checks into the Tables tab.
  */
 export function shouldShowInCompletedOrderLane(
   order: OrderLike,
-  options: OrderLaneVisibilityOptions,
 ): boolean {
-  if (isHandledByTablesWorkspace(order, options)) {
-    return false;
-  }
-
   const status = String(order.status || '').toLowerCase();
   return status === 'delivered' || status === 'completed';
 }
@@ -470,6 +467,7 @@ export function resolveTableDisplayStatus(table: TableLike | null | undefined): 
 export function shouldApplyOptimisticTableOverride(
   table: TableLike | null | undefined,
   override: Partial<TableLike> | null | undefined,
+  nowMs = Date.now(),
 ): boolean {
   if (!table || !override) {
     return false;
@@ -494,7 +492,16 @@ export function shouldApplyOptimisticTableOverride(
   // drop it (the next clean refetch shows available/cleaning on its own).
   if ((override as { __released?: boolean }).__released === true) {
     const serverStatus = normalizeTableStatus(table.status);
-    return serverStatus === 'occupied' || serverStatus === 'reserved';
+    if (serverStatus !== 'occupied' && serverStatus !== 'reserved') return false;
+    const released = override as { __releasedAt?: number; __releasedSessionId?: string | null; __releasedOrderId?: string | null };
+    if (!Number.isFinite(released.__releasedAt) || nowMs - Number(released.__releasedAt) > 30_000) return false;
+    const currentSession = String(table.tableSessionId || table.table_session_id || '');
+    const currentOrder = String(table.currentOrderId || table.current_order_id || '');
+    if (currentSession && released.__releasedSessionId && currentSession !== released.__releasedSessionId) return false;
+    if (currentOrder && released.__releasedOrderId && currentOrder !== released.__releasedOrderId) return false;
+    if (serverStatus === 'occupied' && (currentSession || currentOrder) && !released.__releasedSessionId && !released.__releasedOrderId) return false;
+    const occupiedAt = Date.parse(String(table.occupiedSince || table.occupied_since || ''));
+    return !Number.isFinite(occupiedAt) || occupiedAt <= Number(released.__releasedAt);
   }
 
   return true;

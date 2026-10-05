@@ -238,7 +238,7 @@ const PurchaseOrdersTab: React.FC = () => {
     : 'border-gray-200 bg-white text-gray-800 active:bg-gray-100';
 
   const formatMoney = useCallback(
-    (amount: number) => formatCurrency(amount, 'EUR', i18n.language),
+    (amount: number) => formatCurrency(amount, undefined, i18n.language),
     [i18n.language],
   );
   const formatShortDate = useCallback(

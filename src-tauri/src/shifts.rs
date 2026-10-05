@@ -131,10 +131,110 @@ fn load_checkout_payment_blockers_with_auto_repair(
 // Open shift
 // ---------------------------------------------------------------------------
 
+/// An aggregate has a unit only when every recorded contributor agrees. Historical
+/// missing provenance stays unknown, even if today's country happens to match.
+pub(crate) fn shift_summary_currency(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(currency) = recorded_operating_currency(conn, "staff_shifts", shift_id)? else {
+        return Ok(None);
+    };
+    let uncertain: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM (
+           SELECT currency FROM cash_drawer_sessions WHERE staff_shift_id=?1
+           UNION ALL SELECT currency FROM orders WHERE staff_shift_id=?1 AND COALESCE(is_ghost,0)=0
+           UNION ALL SELECT op.currency FROM order_payments op JOIN orders o ON o.id=op.order_id WHERE COALESCE(op.staff_shift_id,o.staff_shift_id)=?1 AND op.status IN ('completed','refunded') AND COALESCE(o.is_ghost,0)=0
+           UNION ALL SELECT currency FROM shift_expenses WHERE staff_shift_id=?1
+           UNION ALL SELECT currency FROM driver_earnings WHERE staff_shift_id=?1
+           UNION ALL SELECT currency FROM staff_payments WHERE cashier_shift_id=?1
+           UNION ALL SELECT currency FROM staff_shifts WHERE transferred_to_cashier_shift_id=?1
+           UNION ALL SELECT currency FROM satellite_cash_handovers WHERE cashier_shift_id=?1 AND state='applied'
+         ) WHERE currency IS NULL OR currency<>?2)", params![shift_id,currency], |row|row.get(0))
+        .map_err(|error|format!("read shift currency provenance: {error}"))?;
+    Ok((!uncertain).then_some(currency))
+}
+
 /// Open a new shift for a staff member.
 ///
 /// Creates a `staff_shifts` row and, for cashier roles, a matching
 /// `cash_drawer_sessions` row. Returns error if staff already has an active shift.
+/// A validated snapshot may authorize new money only for this terminal's branch.
+pub(crate) fn require_operating_currency(
+    conn: &Connection,
+    branch_id: &str,
+) -> Result<String, String> {
+    if crate::db::get_setting(conn, "terminal", "branch_id").as_deref() != Some(branch_id) {
+        return Err("OPERATING_CURRENCY_BRANCH_MISMATCH".to_string());
+    }
+    crate::fiscal::payload_builder::resolve_store_currency_code(conn)
+        .ok_or_else(|| "STORE_CURRENCY_UNAVAILABLE".to_string())
+}
+
+pub(crate) fn recorded_operating_currency(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+) -> Result<Option<String>, String> {
+    if !matches!(
+        table,
+        "orders"
+            | "staff_shifts"
+            | "cash_drawer_sessions"
+            | "shift_expenses"
+            | "driver_earnings"
+            | "staff_payments"
+    ) {
+        return Err("OPERATING_CURRENCY_INVALID_TABLE".to_string());
+    }
+    conn.query_row(
+        &format!("SELECT currency FROM {table} WHERE id = ?1"),
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(|value| value.flatten())
+    .map_err(|error| format!("read operating currency: {error}"))
+}
+
+pub(crate) fn require_shift_operating_currency(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<String, String> {
+    let (branch_id, currency): (String, Option<String>) = conn
+        .query_row(
+            "SELECT branch_id, currency FROM staff_shifts WHERE id = ?1",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("read shift currency: {error}"))?;
+    let currency = currency.ok_or_else(|| "SHIFT_CURRENCY_UNAVAILABLE".to_string())?;
+    if require_operating_currency(conn, &branch_id)? != currency {
+        return Err("SHIFT_CURRENCY_MISMATCH".to_string());
+    }
+    Ok(currency)
+}
+
+/// Add a known recorded snapshot only; legacy bodies keep their original key shape.
+pub(crate) fn append_recorded_operating_currency(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    payload: &mut Value,
+) -> Result<(), String> {
+    if let Some(currency) = recorded_operating_currency(conn, table, id)? {
+        if payload
+            .get("currency")
+            .and_then(Value::as_str)
+            .is_some_and(|existing| existing != currency)
+        {
+            return Err("OPERATING_CURRENCY_MISMATCH".to_string());
+        }
+        payload["currency"] = Value::String(currency);
+    }
+    Ok(())
+}
+
 pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -193,6 +293,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     let branch_id = resolve_tenant_id("branchId", "branch_id", "branch_id")?;
     let terminal_id = resolve_tenant_id("terminalId", "terminal_id", "terminal_id")?;
+    let currency = require_operating_currency(&conn, &branch_id)?;
     let role_type = str_field(payload, "roleType")
         .or_else(|| str_field(payload, "role_type"))
         .unwrap_or_else(|| "cashier".to_string());
@@ -272,6 +373,11 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         } else {
             None
         };
+        if let Some((cashier_shift_id, _)) = &responsible_cashier_assignment {
+            if require_shift_operating_currency(&conn, cashier_shift_id)? != currency {
+                return Err("SHIFT_CURRENCY_MISMATCH".to_string());
+            }
+        }
         let responsible_cashier_shift_id = responsible_cashier_assignment
             .as_ref()
             .map(|(cashier_shift_id, _)| cashier_shift_id.clone());
@@ -297,8 +403,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 check_in_time, report_date, period_start_at,
                 opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, transferred_to_cashier_shift_id,
-                sync_status, created_at, updated_at, is_day_start
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', 2, ?12, 'pending', ?13, ?13, ?14)",
+                sync_status, created_at, updated_at, is_day_start, currency
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', 2, ?12, 'pending', ?13, ?13, ?14, ?15)",
             params![
                 shift_id,
                 staff_id,
@@ -314,6 +420,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 responsible_cashier_shift_id,
                 now,
                 is_day_start,
+                currency,
             ],
         )
         .map_err(|e| format!("insert shift: {e}"))?;
@@ -338,10 +445,10 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                             COALESCE(closed_at, '')
                      FROM cash_drawer_sessions
                      WHERE terminal_id = ?1 AND closed_at IS NOT NULL
-                       AND COALESCE(reconciled, 0) = 1
+                       AND COALESCE(reconciled, 0) = 1 AND currency = ?2
                      ORDER BY closed_at DESC
                      LIMIT 1",
-                    params![terminal_id],
+                    params![terminal_id, currency],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
@@ -370,8 +477,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             conn.execute(
                 "INSERT INTO cash_drawer_sessions (
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
-                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at, currency
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
                 params![
                     drawer_id,
                     shift_id,
@@ -382,6 +489,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     opening_cash_cents,
                     now,
                     now,
+                    currency,
                 ],
             )
             .map_err(|e| format!("insert cash drawer: {e}"))?;
@@ -457,6 +565,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         );
 
         sync_payload["isDayStart"] = Value::Bool(is_day_start);
+        sync_payload["currency"] = Value::String(currency.clone());
 
         sync_queue::enqueue_payload_item(
             &conn,
@@ -490,6 +599,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let mut response = serde_json::json!({
         "success": true,
         "shiftId": shift_id,
+        "currency": currency,
         "isDayStart": is_day_start,
         "message": format!("Shift opened for {} ({})", staff_id, role_type)
     });
@@ -572,7 +682,7 @@ fn load_cash_drawer_snapshot_for_shift(
                 COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
                 COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0),
                 opened_at, closed_at, reconciled,
-                reconciled_at, reconciled_by
+                reconciled_at, reconciled_by, currency
          FROM cash_drawer_sessions
          WHERE staff_shift_id = ?1",
         params![shift_id],
@@ -591,7 +701,7 @@ fn load_cash_drawer_snapshot_for_shift(
             let driver_cash_given_cents = row.get::<_, i64>(11)?;
             let driver_cash_returned_cents = row.get::<_, i64>(12)?;
             let total_staff_payments_cents = row.get::<_, i64>(13)?;
-            Ok(serde_json::json!({
+            let mut snapshot = serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "cashierId": row.get::<_, Option<String>>(1)?,
                 "openingAmount": Cents::new(opening_amount_cents).to_f64_dp2(),
@@ -623,7 +733,9 @@ fn load_cash_drawer_snapshot_for_shift(
                 "reconciled": row.get::<_, Option<i64>>(16)?.unwrap_or(0) != 0,
                 "reconciledAt": row.get::<_, Option<String>>(17)?,
                 "reconciledBy": row.get::<_, Option<String>>(18)?,
-            }))
+            });
+            if let Some(currency) = row.get::<_, Option<String>>(19)? { snapshot["currency"] = Value::String(currency); }
+            Ok(snapshot)
         },
     )
     .optional()
@@ -823,6 +935,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    crate::satellite_handover::ensure_receiver_can_close(&conn, &shift_id)?;
 
     // Wrap the entire reconciliation + close in a single IMMEDIATE transaction so
     // that no order/payment can be inserted between the aggregate SELECTs and the
@@ -1276,6 +1390,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         let expected_cents = Cents::round_half_even(expected).as_i64();
         let variance_cents = Cents::round_half_even(variance).as_i64();
 
+        let shift_currency = recorded_operating_currency(&conn, "staff_shifts", &shift_id)?;
         // The shift-close sync payload, shared by the ordinary close and the
         // prospective gift-bound original.
         let close_sync_payload = |totals: (i64, f64, f64, f64), cash_drawer: Option<Value>| {
@@ -1303,6 +1418,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "closedBy": closed_by,
                 "paymentAmount": persisted_payment_amount,
             });
+            if let Some(currency) = &shift_currency { sync_payload["currency"] = Value::String(currency.clone()); }
             if let Some(drawer_snapshot) = cash_drawer {
                 sync_payload["cashDrawer"] = drawer_snapshot;
             }
@@ -1399,6 +1515,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 &shift_terminal_id,
             )? {
                 Some((cashier_shift_id, drawer_id)) => {
+                    require_same_recorded_shift_currency(&conn, &shift_id, &cashier_shift_id)?;
+                    if recorded_operating_currency(&conn, "cash_drawer_sessions", &drawer_id)?
+                        != recorded_operating_currency(&conn, "staff_shifts", &shift_id)? {
+                        return Err("SHIFT_CURRENCY_MISMATCH: receiver drawer must retain the original staff currency".to_string());
+                    }
                     // W4c dual-write: driver_cash_returned → driver_cash_returned_cents.
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
@@ -1591,6 +1712,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "variance": variance,
                 "expected": expected,
                 "closing": closing_cash,
+                "currency": shift_summary_currency(&conn, &shift_id)?,
                 "message": format!("Shift closed. Variance: {:.2}", variance)
             }))
         }
@@ -1983,6 +2105,7 @@ fn gift_close_response(
     serde_json::json!({
         "success": true,
         "shiftId": shift_id,
+        "currency": shift_summary_currency(conn, shift_id).ok().flatten(),
         "variance": Cents::new(variance_cents).to_f64_dp2(),
         "expected": Cents::new(drawer.expected_cents).to_f64_dp2(),
         "closing": Cents::new(original.counted_cents).to_f64_dp2(),
@@ -2277,7 +2400,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     COALESCE(total_cash_sales_cents, CAST(ROUND(total_cash_sales * 100) AS INTEGER), 0),
                     COALESCE(total_card_sales_cents, CAST(ROUND(total_card_sales * 100) AS INTEGER), 0),
                     branch_id, terminal_id, calculation_version,
-                    COALESCE(payment_amount_cents, CAST(ROUND(payment_amount * 100) AS INTEGER))
+                    COALESCE(payment_amount_cents, CAST(ROUND(payment_amount * 100) AS INTEGER)), currency
              FROM staff_shifts WHERE id = ?1",
             params![shift_id],
             |row| {
@@ -2287,6 +2410,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 let ci: String = row.get(9)?;
                 let val = serde_json::json!({
                     "id": row.get::<_, String>(0)?,
+                    "currency": row.get::<_, Option<String>>(19)?,
                     "staff_id": row.get::<_, String>(1)?,
                     "staff_name": row.get::<_, Option<String>>(2)?,
                     "role_type": &rt,
@@ -2337,12 +2461,13 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                     COALESCE(driver_cash_given_cents, CAST(ROUND(driver_cash_given * 100) AS INTEGER), 0),
                     COALESCE(driver_cash_returned_cents, CAST(ROUND(driver_cash_returned * 100) AS INTEGER), 0),
                     COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER), 0),
-                    opened_at, closed_at, reconciled
+                    opened_at, closed_at, reconciled, currency
              FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
             params![shift_id],
             |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
+                    "currency": row.get::<_, Option<String>>(16)?,
                     "opening_amount": Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
                     "closing_amount": row.get::<_, Option<i64>>(2)?.map(|c| Cents::new(c).to_f64_dp2()),
                     "expected_amount": row.get::<_, Option<i64>>(3)?.map(|c| Cents::new(c).to_f64_dp2()),
@@ -2680,6 +2805,12 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                 } else {
                     "cash".to_string()
                 };
+                let shift_unit = recorded_operating_currency(&conn, "staff_shifts", shift_id)?;
+                let order_unit = recorded_operating_currency(&conn, "orders", oid)?;
+                let original_currency = match (&shift_unit, &order_unit) {
+                    (Some(shift), Some(order)) if shift == order => Some(shift.clone()),
+                    _ => None,
+                };
                 let eid = uuid::Uuid::new_v4().to_string();
                 let delivery_fee_cents = Cents::round_half_even(*del_fee).as_i64();
                 let tip_cents = Cents::round_half_even(*tip).as_i64();
@@ -2697,12 +2828,12 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                         cash_collected, cash_collected_cents,
                         card_amount, card_amount_cents,
                         cash_to_return, cash_to_return_cents,
-                        settled, created_at, updated_at
+                        settled, created_at, updated_at, currency
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5,
                         ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?13, ?14,
-                        0, ?17, ?17
+                        0, ?17, ?17, ?18
                     )",
                     params![
                         eid,
@@ -2721,7 +2852,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                         cash_cents,
                         card,
                         card_cents,
-                        now
+                        now,
+                        original_currency
                     ],
                 );
             }
@@ -2875,6 +3007,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     };
 
     let mut result = serde_json::json!({
+        "currency": shift_summary_currency(&conn, shift_id)?,
         "shift": shift,
         "cashDrawer": cash_drawer,
         "expenses": expense_items,
@@ -2941,6 +3074,7 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         )
         .map_err(|_| format!("No active shift found with id {shift_id}"))?;
 
+    let currency = require_shift_operating_currency(&conn, &shift_id)?;
     let expense_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
@@ -2954,8 +3088,8 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
             "INSERT INTO shift_expenses (
                 id, staff_shift_id, staff_id, branch_id, expense_type,
                 amount, amount_cents, description, receipt_number, status, sync_status,
-                created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 'pending', ?10, ?10)",
+                created_at, updated_at, currency
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 'pending', ?10, ?10, ?11)",
             params![
                 expense_id,
                 shift_id,
@@ -2967,6 +3101,7 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
                 description,
                 receipt_number,
                 now,
+                currency,
             ],
         )
         .map_err(|e| format!("insert expense: {e}"))?;
@@ -2987,6 +3122,7 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         // v47/v49) inside `prepare_financial_request`, so the producer no
         // longer stamps a volatile UUID per-enqueue (C17).
         let sync_payload = serde_json::json!({
+            "currency": currency,
             "expenseId": expense_id,
             "shiftId": shift_id,
             "staffId": staff_id,
@@ -3047,7 +3183,7 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
                     COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
                     description, receipt_number, status,
                     approved_by, approved_at, rejection_reason,
-                    created_at, updated_at
+                    created_at, updated_at, currency
              FROM shift_expenses
              WHERE staff_shift_id = ?1
              ORDER BY created_at DESC",
@@ -3071,6 +3207,7 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
                 "rejection_reason": row.get::<_, Option<String>>(11)?,
                 "created_at": row.get::<_, String>(12)?,
                 "updated_at": row.get::<_, String>(13)?,
+                "currency": row.get::<_, Option<String>>(14)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -3727,6 +3864,7 @@ fn build_shift_update_sync_payload_from_db(
         payload["cashDrawer"] = drawer_snapshot;
     }
 
+    append_recorded_operating_currency(conn, "staff_shifts", shift_id, &mut payload)?;
     Ok(payload.to_string())
 }
 
@@ -3820,9 +3958,10 @@ fn enqueue_staff_payment_upsert_sync(
         created_at,
         updated_at,
     );
-    let sync_payload: Value = serde_json::from_str(&sync_payload_str)
+    let mut sync_payload: Value = serde_json::from_str(&sync_payload_str)
         .map_err(|e| format!("parse staff payment upsert payload: {e}"))?;
 
+    append_recorded_operating_currency(conn, "staff_payments", payment_id, &mut sync_payload)?;
     let parity_op = operation.to_uppercase();
     sync_queue::enqueue_payload_item(
         conn,
@@ -3941,6 +4080,7 @@ pub fn record_staff_payment(db: &DbState, payload: &Value) -> Result<Value, Stri
         return Err("Staff payments require a cashier or manager drawer".into());
     }
 
+    let currency = require_shift_operating_currency(&conn, &cashier_shift_id)?;
     let payment_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
@@ -3951,8 +4091,8 @@ pub fn record_staff_payment(db: &DbState, payload: &Value) -> Result<Value, Stri
         conn.execute(
             "INSERT INTO staff_payments (
                 id, cashier_shift_id, paid_to_staff_id, amount, payment_type,
-                notes, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                notes, created_at, updated_at, currency
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
             params![
                 payment_id,
                 cashier_shift_id,
@@ -3961,6 +4101,7 @@ pub fn record_staff_payment(db: &DbState, payload: &Value) -> Result<Value, Stri
                 payment_type,
                 notes,
                 now,
+                currency,
             ],
         )
         .map_err(|e| format!("insert staff payment: {e}"))?;
@@ -4239,71 +4380,7 @@ fn resolve_check_in_eligibility(
     })
 }
 
-/// Satellite remote checkout (v1.4.84): after the MAIN register closes a
-/// satellite shift through the admin remote-checkout endpoint, the received
-/// cash enters day math through THIS terminal's open cashier drawer —
-/// `driver_cash_given += opening` (pairs the float that was never ledgered
-/// at satellite check-in, so the day does not gain money from nowhere) and
-/// `driver_cash_returned += counted`. Exactly-once by design: the server
-/// endpoint deliberately performs no drawer write, and the drawer snapshot
-/// pushed at this cashier's own close converges the server copy.
-pub fn record_satellite_handover(
-    db: &DbState,
-    branch_id: &str,
-    terminal_id: &str,
-    satellite_shift_id: &str,
-    opening_cash: f64,
-    counted_cash: f64,
-) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let assignment = find_active_cashier_assignment(&conn, branch_id, terminal_id)?;
-    let (cashier_shift_id, drawer_id) = assignment.ok_or_else(|| {
-        "No active cashier drawer on this register. A cashier must be checked in to receive satellite cash.".to_string()
-    })?;
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let opening_cents = Cents::round_half_even(opening_cash).as_i64();
-    let counted_cents = Cents::round_half_even(counted_cash).as_i64();
-
-    if opening_cash > 0.0 {
-        conn.execute(
-            "UPDATE cash_drawer_sessions SET
-                driver_cash_given = COALESCE(driver_cash_given, 0) + ?1,
-                driver_cash_given_cents = COALESCE(driver_cash_given_cents, 0) + ?2,
-                updated_at = ?3
-             WHERE id = ?4",
-            params![opening_cash, opening_cents, now, drawer_id],
-        )
-        .map_err(|e| format!("record satellite handover (given): {e}"))?;
-    }
-    if counted_cash > 0.0 {
-        conn.execute(
-            "UPDATE cash_drawer_sessions SET
-                driver_cash_returned = COALESCE(driver_cash_returned, 0) + ?1,
-                driver_cash_returned_cents = COALESCE(driver_cash_returned_cents, 0) + ?2,
-                updated_at = ?3
-             WHERE id = ?4",
-            params![counted_cash, counted_cents, now, drawer_id],
-        )
-        .map_err(|e| format!("record satellite handover (returned): {e}"))?;
-    }
-
-    info!(
-        satellite_shift = %satellite_shift_id,
-        cashier_shift = %cashier_shift_id,
-        drawer = %drawer_id,
-        opening = %opening_cash,
-        counted = %counted_cash,
-        "Satellite handover recorded on cashier drawer"
-    );
-
-    Ok(serde_json::json!({
-        "cashierShiftId": cashier_shift_id,
-        "drawerId": drawer_id,
-    }))
-}
-
-fn find_active_cashier_assignment(
+pub(crate) fn find_active_cashier_assignment(
     conn: &rusqlite::Connection,
     branch_id: &str,
     terminal_id: &str,
@@ -4623,6 +4700,19 @@ fn resolve_cashier_drawer_for_staff_return(
     find_active_cashier_assignment(conn, branch_id, terminal_id)
 }
 
+fn require_same_recorded_shift_currency(
+    conn: &Connection,
+    source: &str,
+    target: &str,
+) -> Result<(), String> {
+    if recorded_operating_currency(conn, "staff_shifts", source)?
+        != recorded_operating_currency(conn, "staff_shifts", target)?
+    {
+        return Err("SHIFT_CURRENCY_MISMATCH: cash cannot transfer between different or unknown shift currencies".to_string());
+    }
+    Ok(())
+}
+
 /// Transfer active driver/server shifts currently assigned to this cashier.
 ///
 /// Marks each shift as transfer-pending and returns the opening cash total so the
@@ -4668,9 +4758,21 @@ fn transfer_active_cash_staff(
         .filter_map(|r| r.ok())
         .collect();
 
+    // A new cashier must open in the current store unit. If it changed, an
+    // inherited original wallet could no longer be claimed safely. Settle it
+    // against this still-open original drawer before closing the cashier.
+    if !drivers.is_empty() {
+        let original = recorded_operating_currency(conn, "staff_shifts", closing_cashier_shift_id)?;
+        let current = require_operating_currency(conn, branch_id).ok();
+        if original.is_none() || original != current {
+            return Err("SHIFT_CURRENCY_SETTLEMENT_REQUIRED: Settle active driver and server cash in the original currency before closing this cashier shift".to_string());
+        }
+    }
+
     let mut total_starting = 0.0;
 
     for (driver_shift_id, opening_cash) in &drivers {
+        require_same_recorded_shift_currency(conn, driver_shift_id, closing_cashier_shift_id)?;
         conn.execute(
             "UPDATE staff_shifts SET
                 is_transfer_pending = 1,
@@ -4692,11 +4794,17 @@ fn transfer_active_cash_staff(
 
         // Wave 5 Session 6: transfer-pending staff_shifts update routes
         // through parity's module_type="shifts" endpoint.
-        let sync_payload = serde_json::json!({
+        let mut sync_payload = serde_json::json!({
             "shiftId": driver_shift_id,
             "isTransferPending": true,
             "transferredToCashierShiftId": null,
         });
+        append_recorded_operating_currency(
+            conn,
+            "staff_shifts",
+            driver_shift_id,
+            &mut sync_payload,
+        )?;
 
         sync_queue::enqueue_payload_item(
             conn,
@@ -4764,6 +4872,7 @@ fn claim_transferred_cash_staff(
         .collect();
 
     for driver_shift_id in &drivers {
+        require_same_recorded_shift_currency(conn, driver_shift_id, new_cashier_shift_id)?;
         conn.execute(
             "UPDATE staff_shifts SET
                 transferred_to_cashier_shift_id = ?1,
@@ -4791,11 +4900,17 @@ fn claim_transferred_cash_staff(
 
         // Wave 5 Session 6: claim-transferred staff_shifts update routes
         // through parity's module_type="shifts" endpoint.
-        let sync_payload = serde_json::json!({
+        let mut sync_payload = serde_json::json!({
             "shiftId": driver_shift_id,
             "transferredToCashierShiftId": new_cashier_shift_id,
             "isTransferPending": false,
         });
+        append_recorded_operating_currency(
+            conn,
+            "staff_shifts",
+            driver_shift_id,
+            &mut sync_payload,
+        )?;
 
         sync_queue::enqueue_payload_item(
             conn,
@@ -5249,7 +5364,7 @@ fn load_cashier_staff_payments(
                      FROM staff_shifts ss
                      WHERE ss.staff_id = sp.paid_to_staff_id
                      ORDER BY ss.check_in_time DESC
-                     LIMIT 1) AS check_out_time
+                     LIMIT 1) AS check_out_time, sp.currency
              FROM staff_payments sp
              WHERE sp.cashier_shift_id = ?1
              ORDER BY sp.created_at DESC",
@@ -5274,6 +5389,7 @@ fn load_cashier_staff_payments(
                 "updated_at": row.get::<_, String>(7)?,
                 "check_in_time": row.get::<_, Option<String>>(10)?,
                 "check_out_time": row.get::<_, Option<String>>(11)?,
+                "currency": row.get::<_, Option<String>>(12)?,
             }))
         })
         .map_err(|e| format!("query staff payments: {e}"))?
@@ -5522,6 +5638,7 @@ mod tests {
     fn ordinary_cashier_and_driver_closes_stay_outside_the_gift_close() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "control-branch", "EUR");
         let open = |staff: &str, role: &str, cash: f64| -> String {
             open_shift(&db, &serde_json::json!({
                 "staffId": staff, "branchId": "control-branch", "terminalId": "control-terminal",
@@ -5586,6 +5703,218 @@ mod tests {
             })
             .unwrap();
         assert_eq!(originals, 0);
+    }
+
+    fn seed_operating_currency_for_test(db: &DbState, branch: &str, currency: &str) {
+        let conn = db.conn.lock().unwrap();
+        for (category, key, value) in [
+            ("terminal", "branch_id", branch),
+            ("restaurant", "store_currency_branch_id", branch),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", currency),
+        ] {
+            db::set_setting(&conn, category, key, value).unwrap();
+        }
+    }
+
+    #[test]
+    fn operating_currency_cashier_country_change_requires_original_staff_settlement() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "currency-branch", "CHF");
+        let cashier = open_shift(&db, &serde_json::json!({"staffId":"cashier","branchId":"currency-branch","terminalId":"currency-terminal","roleType":"cashier","openingCash":100})).unwrap()["shiftId"].as_str().unwrap().to_string();
+        let driver = open_shift(&db, &serde_json::json!({"staffId":"driver","branchId":"currency-branch","terminalId":"currency-terminal","roleType":"driver","openingCash":20})).unwrap()["shiftId"].as_str().unwrap().to_string();
+        seed_operating_currency_for_test(&db, "currency-branch", "USD");
+        assert!(close_shift(
+            &db,
+            &serde_json::json!({"shiftId":cashier,"closingCash":100})
+        )
+        .unwrap_err()
+        .contains("SHIFT_CURRENCY_SETTLEMENT_REQUIRED"));
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM staff_shifts WHERE id=?1",
+                    [&cashier],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "active"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT is_transfer_pending FROM staff_shifts WHERE id=?1",
+                    [&driver],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+        let returned =
+            close_shift(&db, &serde_json::json!({"shiftId":driver,"closingCash":20})).unwrap();
+        assert_eq!(returned["success"], true);
+        assert_eq!(returned["currency"], "CHF");
+        let closed = close_shift(
+            &db,
+            &serde_json::json!({"shiftId":cashier,"closingCash":100}),
+        )
+        .unwrap();
+        assert_eq!(closed["success"], true);
+        assert_eq!(closed["currency"], "CHF");
+    }
+
+    #[test]
+    fn operating_currency_summary_keeps_original_and_marks_missing_or_mixed_children_unknown() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "currency-branch", "CHF");
+        let response = open_shift(&db, &serde_json::json!({"staffId":"currency-cashier","branchId":"currency-branch","terminalId":"currency-terminal","roleType":"cashier","openingCash":30})).unwrap();
+        let id = response["shiftId"].as_str().unwrap();
+        seed_operating_currency_for_test(&db, "currency-branch", "USD");
+        let summary = get_shift_summary(&db, id).unwrap();
+        assert_eq!(summary["currency"], "CHF");
+        assert_eq!(summary["shift"]["currency"], "CHF");
+        assert_eq!(summary["cashDrawer"]["currency"], "CHF");
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO shift_expenses(id,staff_shift_id,staff_id,branch_id,expense_type,amount,description,created_at,updated_at) VALUES('unknown-expense',?1,'currency-cashier','currency-branch','other',1,'Historical','now','now')",[id]).unwrap();
+        assert_eq!(shift_summary_currency(&conn, id).unwrap(), None);
+        conn.execute(
+            "UPDATE shift_expenses SET currency='USD' WHERE id='unknown-expense'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(shift_summary_currency(&conn, id).unwrap(), None);
+    }
+
+    #[test]
+    fn operating_currency_cash_transfers_require_matching_original_evidence() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (id, unit) in [
+            ("known-chf", Some("CHF")),
+            ("other-chf", Some("CHF")),
+            ("known-usd", Some("USD")),
+            ("unknown", None),
+            ("other-unknown", None),
+        ] {
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,check_in_time,status,created_at,updated_at,currency) VALUES(?1,?1,'server','now','active','now','now',?2)",params![id,unit]).unwrap();
+        }
+        require_same_recorded_shift_currency(&conn, "known-chf", "other-chf").unwrap();
+        require_same_recorded_shift_currency(&conn, "unknown", "other-unknown").unwrap();
+        assert!(require_same_recorded_shift_currency(&conn, "known-chf", "known-usd").is_err());
+        assert!(require_same_recorded_shift_currency(&conn, "known-chf", "unknown").is_err());
+    }
+
+    #[test]
+    fn operating_currency_opening_is_durable_immutable_and_legacy_stays_unknown() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let payload = serde_json::json!({"staffId":"currency-cashier","branchId":"currency-branch","terminalId":"currency-terminal","roleType":"cashier","openingCash":30});
+        assert!(super::open_shift(&db, &payload).is_err());
+        seed_operating_currency_for_test(&db, "currency-branch", "CHF");
+        let response = super::open_shift(&db, &payload).unwrap();
+        let id = response["shiftId"].as_str().unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            recorded_operating_currency(&conn, "staff_shifts", id)
+                .unwrap()
+                .as_deref(),
+            Some("CHF")
+        );
+        let drawer = load_cash_drawer_snapshot_for_shift(&conn, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(drawer["currency"], "CHF");
+        let original: Value = conn.query_row("SELECT data FROM parity_sync_queue WHERE table_name='staff_shifts' AND record_id=?1", [id], |row| row.get::<_, String>(0)).map(|raw| serde_json::from_str(&raw).unwrap()).unwrap();
+        assert_eq!(original["currency"], "CHF");
+        assert!(conn
+            .execute("UPDATE staff_shifts SET currency='USD' WHERE id=?1", [id])
+            .is_err());
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,check_in_time,status,created_at,updated_at) VALUES('legacy-currency-shift','legacy-staff','cashier','now','closed','now','now')", []).unwrap();
+        let mut legacy = serde_json::json!({"shiftId":"legacy-currency-shift"});
+        append_recorded_operating_currency(
+            &conn,
+            "staff_shifts",
+            "legacy-currency-shift",
+            &mut legacy,
+        )
+        .unwrap();
+        assert!(legacy.get("currency").is_none());
+    }
+
+    #[test]
+    fn operating_currency_children_capture_original_and_changed_country_blocks_new_money() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "currency-branch", "CHF");
+        let response = super::open_shift(&db, &serde_json::json!({"staffId":"currency-cashier","branchId":"currency-branch","terminalId":"currency-terminal","roleType":"cashier","openingCash":30})).unwrap();
+        let id = response["shiftId"].as_str().unwrap();
+        let expense = record_expense(
+            &db,
+            &serde_json::json!({"shiftId":id,"amount":2,"description":"Supplies"}),
+        )
+        .unwrap();
+        let payment = record_staff_payment(
+            &db,
+            &serde_json::json!({"cashierShiftId":id,"paidToStaffId":"other-staff","amount":5}),
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                recorded_operating_currency(
+                    &conn,
+                    "shift_expenses",
+                    expense["expenseId"].as_str().unwrap()
+                )
+                .unwrap()
+                .as_deref(),
+                Some("CHF")
+            );
+            assert_eq!(
+                recorded_operating_currency(
+                    &conn,
+                    "staff_payments",
+                    payment["paymentId"].as_str().unwrap()
+                )
+                .unwrap()
+                .as_deref(),
+                Some("CHF")
+            );
+            let mut stmt = conn.prepare("SELECT data FROM parity_sync_queue WHERE table_name IN ('shift_expenses','staff_payments')").unwrap();
+            for raw in stmt.query_map([], |row| row.get::<_, String>(0)).unwrap() {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&raw.unwrap()).unwrap()["currency"],
+                    "CHF"
+                );
+            }
+        }
+        seed_operating_currency_for_test(&db, "currency-branch", "USD");
+        assert_eq!(
+            record_expense(
+                &db,
+                &serde_json::json!({"shiftId":id,"amount":1,"description":"New expense"})
+            )
+            .unwrap_err(),
+            "SHIFT_CURRENCY_MISMATCH"
+        );
+        assert_eq!(
+            record_staff_payment(
+                &db,
+                &serde_json::json!({"cashierShiftId":id,"paidToStaffId":"other-staff","amount":1})
+            )
+            .unwrap_err(),
+            "SHIFT_CURRENCY_MISMATCH"
+        );
+        let conn = db.conn.lock().unwrap();
+        let original: Value =
+            serde_json::from_str(&build_shift_update_sync_payload_from_db(&conn, id).unwrap())
+                .unwrap();
+        assert_eq!(original["currency"], "CHF");
+        assert_eq!(original["cashDrawer"]["currency"], "CHF");
     }
 
     fn test_db() -> DbState {
@@ -5962,6 +6291,7 @@ mod tests {
     fn test_cancelled_order_payment_does_not_count_as_drawer_cash() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b-cx", "EUR");
         let open = serde_json::json!({
             "staffId": "staff-cx", "branchId": "b-cx", "terminalId": "t-cx",
             "roleType": "cashier", "openingCash": 100.0,
@@ -5977,18 +6307,18 @@ mod tests {
                 ("ord-cx-dead", "pay-cx-dead", "cancelled", 11.4, 1140),
             ] {
                 conn.execute(
-                    "INSERT INTO orders (
+                    "INSERT INTO orders (currency, branch_id,
                         id, items, order_type, total_amount, total_amount_cents,
                         status, payment_status, staff_shift_id, sync_status, created_at, updated_at
-                     ) VALUES (?1, '[]', 'pickup', ?2, ?3, ?4, 'paid', ?5, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                     ) VALUES ('EUR', 'b-cx', ?1, '[]', 'pickup', ?2, ?3, ?4, 'paid', ?5, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                     params![oid, amount, cents, status, shift_id],
                 )
                 .unwrap();
                 conn.execute(
-                    "INSERT INTO order_payments (
+                    "INSERT INTO order_payments (currency,
                         id, order_id, method, amount, amount_cents, staff_shift_id,
                         status, sync_status, sync_state, created_at, updated_at
-                     ) VALUES (?1, ?2, 'cash', ?3, ?4, ?5, 'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                     ) VALUES ('EUR', ?1, ?2, 'cash', ?3, ?4, ?5, 'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                     params![pid, oid, amount, cents, shift_id],
                 )
                 .unwrap();
@@ -6031,6 +6361,7 @@ mod tests {
     fn test_refunds_count_cash_only_and_follow_the_paying_drawer() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b-rf", "EUR");
         let open = serde_json::json!({
             "staffId": "staff-rf", "branchId": "b-rf", "terminalId": "t-rf",
             "roleType": "cashier", "openingCash": 100.0,
@@ -6044,17 +6375,15 @@ mod tests {
             // A cashier cash sale of 50 with a CARD refund of 5: the 5 went
             // back onto the card, the drawer still holds all 50.
             conn.execute(
-                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
-                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
-                 VALUES ('ord-rf-card', '[]', 'pickup', 50.0, 5000, 'completed', 'paid', ?1,
+                "INSERT INTO orders (currency, branch_id, id, items, order_type, total_amount, total_amount_cents,
+                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at) VALUES ('EUR', 'b-rf', 'ord-rf-card', '[]', 'pickup', 50.0, 5000, 'completed', 'paid', ?1,
                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 params![shift_id],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
-                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
-                 VALUES ('pay-rf-card', 'ord-rf-card', 'cash', 50.0, 5000, ?1,
+                "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents,
+                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at) VALUES ('EUR', 'pay-rf-card', 'ord-rf-card', 'cash', 50.0, 5000, ?1,
                     'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 params![shift_id],
             )
@@ -6072,26 +6401,23 @@ mod tests {
             // A DRIVER-shift order whose 0,09 cash refund the cashier drawer
             // paid out (cash_handler = 'cashier_drawer').
             conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, terminal_id,
                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
-                    status, calculation_version, sync_status, created_at, updated_at)
-                 VALUES ('rf-driver', 'driver-rf', 'driver', 'b-rf', 't-rf',
+                    status, calculation_version, sync_status, created_at, updated_at) VALUES ('EUR', 'rf-driver', 'driver-rf', 'driver', 'b-rf', 't-rf',
                     strftime('%Y-%m-%dT%H:%M:%fZ','now'), 0.0, 0, 'active', 2, 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 [],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
-                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
-                 VALUES ('ord-rf-drv', '[]', 'delivery', 41.34, 4134, 'completed', 'paid', 'rf-driver',
+                "INSERT INTO orders (currency, branch_id, id, items, order_type, total_amount, total_amount_cents,
+                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at) VALUES ('EUR', 'b-rf', 'ord-rf-drv', '[]', 'delivery', 41.34, 4134, 'completed', 'paid', 'rf-driver',
                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 [],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
-                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
-                 VALUES ('pay-rf-drv', 'ord-rf-drv', 'cash', 41.34, 4134, 'rf-driver',
+                "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents,
+                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at) VALUES ('EUR', 'pay-rf-drv', 'ord-rf-drv', 'cash', 41.34, 4134, 'rf-driver',
                     'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 [],
             )
@@ -6162,6 +6488,7 @@ mod tests {
     fn test_the_drawer_counts_only_the_refunds_it_paid() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b-r3", "EUR");
         let open = serde_json::json!({
             "staffId": "staff-r3", "branchId": "b-r3", "terminalId": "t-r3",
             "roleType": "cashier", "openingCash": 100.0,
@@ -6178,17 +6505,15 @@ mod tests {
                 ("ord-r3-courier", "delivery", "pay-r3-courier", "cash"),
             ] {
                 conn.execute(
-                    "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
-                        status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
-                     VALUES (?1, '[]', ?2, 20.0, 2000, 'completed', 'paid', ?3, 'pending',
+                    "INSERT INTO orders (currency, branch_id, id, items, order_type, total_amount, total_amount_cents,
+                        status, payment_status, staff_shift_id, sync_status, created_at, updated_at) VALUES ('EUR', 'b-r3', ?1, '[]', ?2, 20.0, 2000, 'completed', 'paid', ?3, 'pending',
                         strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                     params![order_id, order_type, shift_id],
                 )
                 .unwrap();
                 conn.execute(
-                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
-                        staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, 20.0, 2000, ?4, 'completed', 'pending', 'pending',
+                    "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents,
+                        staff_shift_id, status, sync_status, sync_state, created_at, updated_at) VALUES ('EUR', ?1, ?2, ?3, 20.0, 2000, ?4, 'completed', 'pending', 'pending',
                         strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                     params![payment_id, order_id, method, shift_id],
                 )
@@ -6224,10 +6549,9 @@ mod tests {
             .unwrap();
             // The courier's order carries a courier earning.
             conn.execute(
-                "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
+                "INSERT INTO driver_earnings (currency, id, driver_id, staff_shift_id, order_id, branch_id,
                     delivery_fee, tip_amount, total_earning, payment_method, cash_collected,
-                    card_amount, cash_to_return, settled, created_at, updated_at)
-                 VALUES ('earning-r3', 'driver-r3', NULL, 'ord-r3-courier', 'b-r3',
+                    card_amount, cash_to_return, settled, created_at, updated_at) VALUES ('EUR', 'earning-r3', 'driver-r3', NULL, 'ord-r3-courier', 'b-r3',
                     0, 0, 0, 'cash', 17.0, 0, 17.0, 0,
                     strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 [],
@@ -6270,6 +6594,7 @@ mod tests {
     fn test_opening_that_breaks_the_closing_carry_gets_a_continuity_warning() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b-cc", "EUR");
         let open1 = serde_json::json!({
             "staffId": "staff-cc1", "branchId": "b-cc", "terminalId": "t-cc",
             "roleType": "cashier", "openingCash": 132.67,
@@ -6324,6 +6649,7 @@ mod tests {
     fn test_cancelled_then_refunded_order_nets_zero() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b-cr", "EUR");
         let open = serde_json::json!({
             "staffId": "staff-cr", "branchId": "b-cr", "terminalId": "t-cr",
             "roleType": "cashier", "openingCash": 100.0,
@@ -6335,17 +6661,15 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents,
-                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at)
-                 VALUES ('ord-cr', '[]', 'pickup', 11.4, 1140, 'cancelled', 'paid', ?1,
+                "INSERT INTO orders (currency, branch_id, id, items, order_type, total_amount, total_amount_cents,
+                    status, payment_status, staff_shift_id, sync_status, created_at, updated_at) VALUES ('EUR', 'b-cr', 'ord-cr', '[]', 'pickup', 11.4, 1140, 'cancelled', 'paid', ?1,
                     'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 params![shift_id],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
-                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at)
-                 VALUES ('pay-cr', 'ord-cr', 'cash', 11.4, 1140, ?1,
+                "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents,
+                    staff_shift_id, status, sync_status, sync_state, created_at, updated_at) VALUES ('EUR', 'pay-cr', 'ord-cr', 'cash', 11.4, 1140, ?1,
                     'completed', 'pending', 'pending', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 params![shift_id],
             )
@@ -6401,23 +6725,22 @@ mod tests {
     fn test_recovery_sentinel_close_does_not_trigger_continuity_warning() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b-rec", "EUR");
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, terminal_id,
                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
-                    status, calculation_version, sync_status, created_at, updated_at)
-                 VALUES ('shift-recovered', 'cashier-rec', 'cashier', 'b-rec', 't-rec',
+                    status, calculation_version, sync_status, created_at, updated_at) VALUES ('EUR', 'shift-recovered', 'cashier-rec', 'cashier', 'b-rec', 't-rec',
                     strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'), 120.0, 12000, 'abandoned', 2, 'pending',
                     strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'), strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 minutes'))",
                 [],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                "INSERT INTO cash_drawer_sessions (currency, id, staff_shift_id, cashier_id, branch_id, terminal_id,
                     opening_amount, opening_amount_cents, closing_amount, closing_amount_cents,
-                    opened_at, closed_at, created_at, updated_at)
-                 VALUES ('drawer-recovered', 'shift-recovered', 'cashier-rec', 'b-rec', 't-rec',
+                    opened_at, closed_at, created_at, updated_at) VALUES ('EUR', 'drawer-recovered', 'shift-recovered', 'cashier-rec', 'b-rec', 't-rec',
                     120.0, 12000, 0.0, 0,
                     strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 hour'),
                     strftime('%Y-%m-%dT%H:%M:%fZ','now','-30 minutes'),
@@ -6588,6 +6911,7 @@ mod tests {
     fn test_shift_open_blocks_non_cashier_before_first_cashier_of_business_day() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
 
         let result = open_shift(
@@ -6612,6 +6936,7 @@ mod tests {
     fn test_shift_open_allows_cashier_as_first_shift_of_business_day() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
 
         let result = open_shift(
@@ -6638,6 +6963,7 @@ mod tests {
     fn test_shift_open_allows_non_cashier_after_first_cashier_of_business_day() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
 
         open_shift(
@@ -6673,6 +6999,7 @@ mod tests {
     fn test_efood_day_start_bootstrap_without_previous_z_report() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
         let first = open_shift(
             &db,
             &serde_json::json!({
@@ -6694,6 +7021,7 @@ mod tests {
     fn test_efood_day_start_requires_first_live_cashier_in_current_z_period() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
         set_business_day_start(&db, "2026-03-22T08:00:00Z");
         let first = open_shift(
             &db,
@@ -6801,17 +7129,18 @@ mod tests {
     fn test_shift_open_sync_payload_includes_actual_check_in_and_cashier_context() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
 
         {
             let conn = db.conn.lock().unwrap();
             // W4e Step 0: dual-populate (200.0/0.0 → 20000/0).
             conn.execute(
-                "INSERT INTO staff_shifts (
+                "INSERT INTO staff_shifts (currency,
                     id, staff_id, staff_name, role_type, branch_id, terminal_id,
                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
                     status, calculation_version, sync_status,
                     created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR',
                     'cashier-sync-open', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
                     '2026-03-18T08:00:00Z', 200.0, 20000, 'active', 2, 'pending',
                     '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
@@ -6820,12 +7149,12 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO cash_drawer_sessions (
+                "INSERT INTO cash_drawer_sessions (currency,
                     id, staff_shift_id, cashier_id, branch_id, terminal_id,
                     opening_amount, opening_amount_cents,
                     driver_cash_given, driver_cash_given_cents,
                     opened_at, created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR',
                     'drawer-sync-open', 'cashier-sync-open', 'cashier-1', 'branch-1', 'term-1',
                     200.0, 20000, 0.0, 0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
                  )",
@@ -6892,6 +7221,7 @@ mod tests {
     fn workflow_audit_cashier_refund_and_split_payment_close_exactly_once() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "audit-branch", "EUR");
         let shift_id = open_shift(&db, &serde_json::json!({
             "staffId": "audit-cashier", "branchId": "audit-branch", "terminalId": "audit-terminal",
             "roleType": "cashier", "openingCash": 100.0,
@@ -6903,9 +7233,8 @@ mod tests {
                 ("audit-edited", 4.0, "pickup"),
                 ("audit-table", 30.0, "dine-in"),
             ] {
-                conn.execute("INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
-                    status, payment_status, order_type, staff_shift_id, branch_id, created_at, updated_at)
-                    VALUES (?1, ?1, '[]', ?2, ?3, 'completed', 'paid', ?4, ?5, 'audit-branch', ?6, ?6)",
+                conn.execute("INSERT INTO orders (currency, id, order_number, items, total_amount, total_amount_cents,
+                    status, payment_status, order_type, staff_shift_id, branch_id, created_at, updated_at) VALUES ('EUR', ?1, ?1, '[]', ?2, ?3, 'completed', 'paid', ?4, ?5, 'audit-branch', ?6, ?6)",
                     params![id, amount, Cents::round_half_even(amount).as_i64(), kind, shift_id, now]).unwrap();
             }
             for (id, order, method, amount, status, tip) in [
@@ -6930,15 +7259,14 @@ mod tests {
                     "audit-table-card",
                     "audit-table",
                     "card",
-                    15.0,
+                    17.0, // 15.00 merchandise principal plus the receipt's own 2.00 tip.
                     "completed",
                     2.0,
                 ),
             ] {
                 conn.execute(
-                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
-                    status, staff_shift_id, tip_amount, tip_amount_cents, created_at, updated_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                    "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents,
+                    status, staff_shift_id, tip_amount, tip_amount_cents, created_at, updated_at) VALUES ('EUR', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
                     params![
                         id,
                         order,
@@ -6973,6 +7301,7 @@ mod tests {
             &serde_json::json!({"shiftId": shift_id, "closingCash": 115.0}),
         )
         .unwrap();
+        assert_eq!(result["success"], true, "{result}");
         assert_eq!(result["expected"], 115.0);
         assert_eq!(result["variance"], 0.0);
         let conn = db.conn.lock().unwrap();
@@ -7007,6 +7336,7 @@ mod tests {
     fn workflow_audit_waiter_alias_opens_canonical_server_shift() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "audit-branch", "EUR");
         open_shift(
             &db,
             &serde_json::json!({"staffId": "audit-cashier", "branchId": "audit-branch",
@@ -7299,6 +7629,7 @@ mod tests {
     fn test_non_financial_shift_ignores_cash_amounts_on_open_and_close() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
 
         open_shift(
             &db,
@@ -7538,6 +7869,7 @@ mod tests {
         // When a cashier closes, active drivers should be marked is_transfer_pending = 1
         // and driver_cash_given should be reduced by their starting amounts.
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b1", "EUR");
 
         {
             let conn = db.conn.lock().unwrap();
@@ -7545,20 +7877,18 @@ mod tests {
             // W4e Step 0: dual-populate (500/75/50/25 → 50000/7500/5000/2500).
             // Cashier shift + drawer
             conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, terminal_id,
                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
                     status, calculation_version, sync_status,
-                    created_at, updated_at)
-                 VALUES ('cashier-1', 'staff-c1', 'cashier', 'b1', 't1',
+                    created_at, updated_at) VALUES ('EUR', 'cashier-1', 'staff-c1', 'cashier', 'b1', 't1',
                     datetime('now'), 500.0, 50000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
             conn.execute(
-                "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
+                "INSERT INTO cash_drawer_sessions (currency, id, staff_shift_id, cashier_id, branch_id,
                     terminal_id, opening_amount, opening_amount_cents,
                     driver_cash_given, driver_cash_given_cents,
-                    opened_at, created_at, updated_at)
-                 VALUES ('cd-1', 'cashier-1', 'staff-c1', 'b1', 't1',
+                    opened_at, created_at, updated_at) VALUES ('EUR', 'cd-1', 'cashier-1', 'staff-c1', 'b1', 't1',
                     500.0, 50000, 75.0, 7500, datetime('now'), datetime('now'), datetime('now'))",
                 [],
             )
@@ -7566,22 +7896,20 @@ mod tests {
 
             // Active driver 1 (opening_cash = 50 → 5000)
             conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, terminal_id,
                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
                     status, calculation_version, sync_status,
-                    created_at, updated_at)
-                 VALUES ('driver-a', 'staff-d1', 'driver', 'b1', 't1',
+                    created_at, updated_at) VALUES ('EUR', 'driver-a', 'staff-d1', 'driver', 'b1', 't1',
                     datetime('now'), 50.0, 5000, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
 
             // Active driver 2 (opening_cash = 25 → 2500)
             conn.execute(
-                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, terminal_id,
                     check_in_time, opening_cash_amount, opening_cash_amount_cents,
                     status, calculation_version, sync_status,
-                    created_at, updated_at)
-                 VALUES ('driver-b', 'staff-d2', 'driver', 'b1', 't1',
+                    created_at, updated_at) VALUES ('EUR', 'driver-b', 'staff-d2', 'driver', 'b1', 't1',
                     datetime('now'), 25.0, 2500, 'active', 2, 'pending', datetime('now'), datetime('now'))",
                 [],
             ).unwrap();
@@ -7723,6 +8051,7 @@ mod tests {
         let _fake = crate::tests::fake_keyring::install_empty();
         // Full cycle: cashier1 -> driver -> close cashier1 -> cashier2 opens -> driver claimed by cashier2
         let db = test_db();
+        seed_operating_currency_for_test(&db, "b1", "EUR");
 
         // Step 1: Open cashier1 shift
         let c1_payload = serde_json::json!({
@@ -7751,11 +8080,11 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO orders (
+                "INSERT INTO orders (currency, branch_id,
                     id, order_number, items, total_amount, total_amount_cents,
                     status, order_type, payment_status, staff_shift_id,
                     sync_status, created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR', 'b1',
                     'order-before-cashier-handoff', '#039', '[]', 7.20, 720,
                     'completed', 'delivery', 'paid', ?1,
                     'pending', datetime('now'), datetime('now')
@@ -7776,13 +8105,13 @@ mod tests {
             )
             .expect("insert payment before cashier handoff");
             conn.execute(
-                "INSERT INTO driver_earnings (
+                "INSERT INTO driver_earnings (currency,
                     id, driver_id, staff_shift_id, order_id, branch_id,
                     total_earning, total_earning_cents, payment_method,
                     cash_collected, cash_collected_cents,
                     cash_to_return, cash_to_return_cents,
                     settled, is_transferred, created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR',
                     'earning-before-cashier-handoff', 'staff-d1', ?1,
                     'order-before-cashier-handoff', 'b1',
                     0.0, 0, 'cash', 7.20, 720, 7.20, 720,
@@ -8876,6 +9205,16 @@ mod tests {
         const OPENED_AT: &str = "2026-09-30T08:00:00.000Z";
         const CLOSED_AT: &str = "2026-09-30T18:00:00.000Z";
 
+        for (category, key, value) in [
+            ("terminal", "branch_id", BRANCH),
+            ("restaurant", "store_currency_branch_id", BRANCH),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            db::set_setting(conn, category, key, value).unwrap();
+        }
+
         conn.execute(
             "INSERT INTO gift_financial_openings (
                 opening_key, organization_id, branch_id, terminal_id, staff_id, staff_name,
@@ -8903,35 +9242,35 @@ mod tests {
         )
         .expect("seed the confirmed opening");
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
                 opening_cash_amount, opening_cash_amount_cents,
                 closing_cash_amount, closing_cash_amount_cents,
                 expected_cash_amount, expected_cash_amount_cents,
                 cash_variance, cash_variance_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (?1, ?2, 'cashier', ?3, ?4, ?5, ?6, 100.0, 10000, 74.5, 7450, 73.0, 7300,
+            ) VALUES ('EUR', ?1, ?2, 'cashier', ?3, ?4, ?5, ?6, 100.0, 10000, 74.5, 7450, 73.0, 7300,
                       1.5, 150, 'closed', 2, 'pending', ?5, ?6)",
             params![GIFT_SHIFT, STAFF, BRANCH, TERMINAL, OPENED_AT, CLOSED_AT],
         )
         .expect("seed the closed gift shift");
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents, closing_amount, closing_amount_cents,
                 expected_amount, expected_amount_cents, variance_amount, variance_amount_cents,
                 total_staff_payments, total_staff_payments_cents,
                 opened_at, closed_at, reconciled, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 100.0, 10000, 74.5, 7450, 73.0, 7300, 1.5, 150,
+            ) VALUES ('EUR', ?1, ?2, ?3, ?4, ?5, 100.0, 10000, 74.5, 7450, 73.0, 7300, 1.5, 150,
                       20.0, 2000, ?6, ?7, 1, ?6, ?7)",
             params![DRAWER, GIFT_SHIFT, STAFF, BRANCH, TERMINAL, OPENED_AT, CLOSED_AT],
         )
         .expect("seed the closed gift drawer");
         conn.execute(
-            "INSERT INTO staff_payments (
+            "INSERT INTO staff_payments (currency,
                 id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes,
                 created_at, updated_at
-            ) VALUES (?1, ?2, 'staff-1', 20.0, 'wage', NULL, ?3, ?3)",
+            ) VALUES ('EUR', ?1, ?2, 'staff-1', 20.0, 'wage', NULL, ?3, ?3)",
             params![GIFT_PAYMENT, GIFT_SHIFT, OPENED_AT],
         )
         .expect("seed the staff payment");
@@ -9356,6 +9695,7 @@ mod tests {
     fn test_get_shift_sync_state_returns_pending_queue_metadata_for_open_shift() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
         let result = open_shift(
             &db,
             &serde_json::json!({
@@ -9602,6 +9942,7 @@ mod tests {
             ("terminal_id", "terminal-seeded"),
         ]);
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-seeded", "EUR");
 
         let payload = serde_json::json!({
             "staffId": "staff-match",
@@ -9675,6 +10016,7 @@ mod tests {
             ("terminal_id", "terminal-from-keyring"),
         ]);
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-from-keyring", "EUR");
 
         // Renderer sends only staffId — everything else must fill from keyring.
         let payload = serde_json::json!({
@@ -9707,6 +10049,7 @@ mod tests {
         // already prevents unprovisioned terminals from hitting real tenants.
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-renderer", "EUR");
 
         let payload = serde_json::json!({
             "staffId": "staff-onboarding",

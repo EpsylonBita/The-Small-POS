@@ -9,6 +9,7 @@ import {
 import { resolveTableDisplayStatus } from '../../utils/tableOrderFlow';
 import { formatTableDisplayNumber } from '../../utils/table-display';
 import { getFixturePreset } from '../../utils/floorPlanFixtures';
+import './table-floor-plan.css';
 
 /** Wall segment as the admin editor persists it on floor_plans.walls. */
 export interface FloorPlanWallSegment {
@@ -60,13 +61,9 @@ interface TableFloorPlanViewProps {
   animated?: boolean;
 }
 
-const statusColors: Record<TableStatus, { fill: string; stroke: string; text: string }> = {
-  available: { fill: '#86efac', stroke: '#16a34a', text: '#14141c' },
-  occupied: { fill: '#fca5a5', stroke: '#dc2626', text: '#14141c' },
-  reserved: { fill: '#fde68a', stroke: '#d97706', text: '#14141c' },
-  cleaning: { fill: '#d4d4d8', stroke: '#71717a', text: '#14141c' },
-  maintenance: { fill: '#fdba74', stroke: '#ea580c', text: '#14141c' },
-  unavailable: { fill: '#e9e5e8', stroke: '#7a7186', text: '#14141c' },
+const statusColors: Record<TableStatus, string> = {
+  available: '#16a34a', occupied: '#f59e0b', reserved: '#3b82f6',
+  cleaning: '#9ca3af', maintenance: '#f97316', unavailable: '#71717a',
 };
 
 export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
@@ -76,7 +73,6 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
   onTableSelect,
   className = '',
   fit = false,
-  animated = false,
   walls = [],
   fixtures = [],
   canvas = null,
@@ -142,7 +138,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
       {...(fit ? {} : { width: bounds.width, height: bounds.height })}
       viewBox={`0 0 ${bounds.width} ${bounds.height}`}
       preserveAspectRatio="xMidYMid meet"
-      role="img"
+      role="group"
       aria-label={t('tablesDashboard.floorPlanAriaLabel', {
         defaultValue: 'Table floor plan',
       })}
@@ -152,9 +148,9 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
           <path
             d="M 32 0 L 0 0 0 32"
             fill="none"
-            stroke={isDark ? '#243044' : '#e8dcc9'}
+            stroke={isDark ? '#35383c' : '#e4e6e9'}
             strokeWidth="1"
-            opacity="0.55"
+            opacity="0.24"
           />
         </pattern>
       </defs>
@@ -164,7 +160,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
         width={bounds.width}
         height={bounds.height}
         rx="18"
-        fill={isDark ? '#080d16' : '#fffaf1'}
+        fill={isDark ? '#101113' : '#f8f9fa'}
       />
       <rect
         x="0"
@@ -181,7 +177,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
         height={Math.max(0, bounds.height - 32)}
         rx="12"
         fill="none"
-        stroke={isDark ? '#475569' : '#c7b99f'}
+        stroke={isDark ? '#464c54' : '#c9ced6'}
         strokeWidth="2"
         opacity="0.8"
         pointerEvents="none"
@@ -194,7 +190,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
           key={`${wall.id || 'wall'}-${index}`}
           points={(wall.points ?? []).map((p) => `${p[0]},${p[1]}`).join(' ')}
           fill="none"
-          stroke={wall.color || '#43394C'}
+          stroke={isDark ? '#626a74' : '#9ba3af'}
           strokeWidth={wall.thickness || 8}
           strokeLinecap="butt"
           strokeLinejoin="miter"
@@ -204,6 +200,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
       ))}
 
       {/* Placed fixtures (decor) — same glyph library the admin editor uses. */}
+      <g className="floor-plan-fixtures">
       {fixtures.map((fixture, index) => {
         const preset = getFixturePreset(fixture.presetId);
         const width = fixture.width ?? preset?.defaultWidth ?? 60;
@@ -220,11 +217,11 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
               y={0}
               width={width}
               height={height}
-              fill={preset?.bgColor ?? '#fee2e2'}
-              stroke={preset?.strokeColor ?? '#b91c1c'}
+              fill={preset?.bgColor === 'transparent' ? 'transparent' : isDark ? '#24272b' : '#e9ecf0'}
+              stroke={isDark ? '#626a74' : '#9ba3af'}
               strokeWidth={2}
               rx={4}
-              strokeDasharray={preset ? undefined : '4 4'}
+              strokeDasharray={undefined}
             />
             {preset ? preset.renderGlyph(width, height) : null}
             {fixture.label ? (
@@ -233,7 +230,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
                 y={-4}
                 fontSize={11}
                 textAnchor="middle"
-                fill={preset?.strokeColor ?? '#b91c1c'}
+                fill={isDark ? '#aeb4bc' : '#58616c'}
                 fontWeight="500"
               >
                 {fixture.label}
@@ -243,8 +240,9 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
         );
       })}
 
+      </g>
       {nodes.map(({ table, node, status }) => {
-        const colors = statusColors[status] || statusColors.available;
+        const colors = { fill: isDark ? '#24272b' : '#ffffff', stroke: isDark ? '#626a74' : '#9ba3af', text: isDark ? '#f8fafc' : '#18181b' };
         const selected = selectedTableId === table.id;
         const path = getTableShapePathForFloorPlan(node.shape, node.width, node.height);
         // Display only: route the visible SVG text, aria-label and <title>
@@ -254,8 +252,6 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
         // continue to read it directly).
         const label = formatTableDisplayNumber(node.label);
         const tableDescription = `${label} ${statusLabel(status)}`;
-        const pulseOccupied = animated && status === 'occupied';
-        const marchCleaning = animated && (status === 'cleaning' || status === 'maintenance');
 
         return (
           <g
@@ -264,7 +260,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
             tabIndex={0}
             aria-label={tableDescription}
             transform={`translate(${node.x}, ${node.y}) rotate(${node.rotation}, ${node.width / 2}, ${node.height / 2})`}
-            className="cursor-pointer outline-none"
+            className="floor-plan-table-node cursor-pointer"
             onClick={() => onTableSelect(table)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
@@ -284,73 +280,24 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
                 fill="none"
                 stroke="#eab308"
                 strokeWidth="3"
-                strokeDasharray="7 4"
+
               />
-            ) : null}
-            {pulseOccupied ? (
-              // Breathing halo: an oversized ring fading in and out around the
-              // occupied table (SMIL keeps it dependency-free in WebView2).
-              <path
-                d={path}
-                fill="none"
-                stroke={colors.stroke}
-                strokeWidth="7"
-                opacity="0.7"
-                pointerEvents="none"
-              >
-                <animate
-                  attributeName="opacity"
-                  values="0.75;0.1;0.75"
-                  dur="1.6s"
-                  repeatCount="indefinite"
-                />
-                <animate
-                  attributeName="stroke-width"
-                  values="7;12;7"
-                  dur="1.6s"
-                  repeatCount="indefinite"
-                />
-              </path>
-            ) : null}
-            {marchCleaning ? (
-              // Marching-ants dashed ring: reads as "work in progress".
-              <path
-                d={path}
-                fill="none"
-                stroke={isDark ? '#e2e8f0' : '#475569'}
-                strokeWidth="3.5"
-                strokeDasharray="9 7"
-                pointerEvents="none"
-              >
-                <animate
-                  attributeName="stroke-dashoffset"
-                  from="0"
-                  to="-64"
-                  dur="1.4s"
-                  repeatCount="indefinite"
-                />
-              </path>
             ) : null}
             <path
               d={path}
               fill={colors.fill}
               stroke={selected ? '#eab308' : colors.stroke}
               strokeWidth={selected ? 3 : 2}
-              opacity="0.96"
-              style={{
-                filter: selected
-                  ? 'drop-shadow(0 12px 18px rgba(234, 179, 8, 0.28))'
-                  : 'drop-shadow(0 5px 10px rgba(15, 23, 42, 0.18))',
-              }}
             />
+            <circle cx={node.width / 2} cy={Math.max(7, node.height / 2 - 23)} r={3.5} fill={statusColors[status]} pointerEvents="none" />
             <text
               x={node.width / 2}
-              y={node.height / 2 - 6}
+              y={node.height / 2 - 3}
               textAnchor="middle"
               dominantBaseline="middle"
               fill={colors.text}
               fontSize="14"
-              fontWeight="800"
+              fontWeight="600"
               style={{ userSelect: 'none', pointerEvents: 'none' }}
             >
               {label}
@@ -362,11 +309,11 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
               dominantBaseline="middle"
               fill={colors.text}
               fontSize="10"
-              fontWeight="700"
+              fontWeight="400"
               opacity="0.72"
               style={{ userSelect: 'none', pointerEvents: 'none' }}
             >
-              {t('floorPlan.tableProperties.pax', { count: node.capacity ?? table.capacity, defaultValue: '{{count}} pax' })}
+              {t('tables.seats', { count: node.capacity ?? table.capacity, defaultValue: '{{count}} seats' })}
             </text>
           </g>
         );
@@ -376,13 +323,13 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
 
   const legend = (
     <div className={`absolute bottom-3 left-3 flex flex-wrap gap-2 rounded-lg px-3 py-2 text-xs font-semibold shadow-sm ${
-      isDark ? 'bg-slate-950/80 text-slate-200' : 'bg-white/85 text-slate-700'
+      isDark ? 'bg-[#1b1d20] text-zinc-200' : 'bg-white text-zinc-700'
     }`}>
       {(Object.keys(statusColors) as TableStatus[]).map(status => (
         <span key={status} className="inline-flex items-center gap-1.5">
           <span
             className="h-2.5 w-2.5 rounded-full"
-            style={{ backgroundColor: statusColors[status].stroke }}
+            style={{ backgroundColor: statusColors[status] }}
           />
           {statusLabel(status)}
         </span>
@@ -397,8 +344,9 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
     return (
       <div
         data-testid="tables-floor-plan-view"
-        className={`relative h-full w-full overflow-hidden rounded-xl ${
-          isDark ? 'bg-black/20' : 'bg-[#fffdf8]/70'
+        data-theme={isDark ? 'dark' : 'light'}
+        className={`table-floor-plan relative h-full w-full overflow-hidden rounded-xl ${
+          isDark ? 'bg-[#101113]' : 'bg-[#f8f9fa]'
         } ${className}`}
       >
         {svgPlan}
@@ -411,8 +359,9 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
     <div
       ref={scrollRef}
       data-testid="tables-floor-plan-view"
-      className={`floor-plan-scrollbar scrollbar-hide h-full min-h-[360px] overflow-auto rounded-xl ${
-        isDark ? 'bg-black/20' : 'bg-[#fffdf8]/70'
+      data-theme={isDark ? 'dark' : 'light'}
+      className={`table-floor-plan floor-plan-scrollbar scrollbar-hide h-full min-h-[360px] overflow-auto rounded-xl ${
+        isDark ? 'bg-[#101113]' : 'bg-[#f8f9fa]'
       } ${className}`}
     >
       <div

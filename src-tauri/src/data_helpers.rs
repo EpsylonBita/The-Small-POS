@@ -294,7 +294,7 @@ mod tests {
             Some("branch-A"),
             0,
         );
-        let mut seed_payment = |id: &str, order_id: &str, method: &str| {
+        let seed_payment = |id: &str, order_id: &str, method: &str| {
             conn.execute(
                 "INSERT INTO order_payments (
                     id, order_id, method, amount, amount_cents, status, sync_status, created_at, updated_at

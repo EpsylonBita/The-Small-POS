@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 /**
  * ProductCatalogModal - POS Product Selection Modal for Retail Vertical
  * 
@@ -9,6 +10,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { X, Package, Search, Barcode, Plus, Minus, ShoppingCart, DollarSign, Gift } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
+import { useCashierOperationsLocked } from '../../contexts/cashier-gate-context';
 import { useModules } from '../../contexts/module-context';
 import { useProductCatalog } from '../../hooks/useProductCatalog';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
@@ -160,6 +162,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const isDark = resolvedTheme === 'dark';
 
   const [branchId, setBranchId] = useState<string | null>(null);
+  const cashierLocked = useCashierOperationsLocked();
+  const cashierLockedRef = useRef(cashierLocked);
+  cashierLockedRef.current = cashierLocked;
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
@@ -500,10 +505,11 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 
   // Handle global barcode scanner (USB barcode scanner support)
   const handleGlobalBarcodeScan = useCallback(async (barcode: string) => {
-    if (!isOpen) return; // Only process when modal is open
+    if (!isOpen || cashierLockedRef.current) return;
 
     console.log('[ProductCatalogModal] Received barcode scan:', barcode);
     const scan = await scanBarcode(barcode);
+    if (cashierLockedRef.current) return;
     if (scan) {
       addScannedToCart(scan);
       // Also update the input field to show what was scanned
@@ -755,7 +761,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   );
   const deliveryFeeText =
     deliveryFeeStatus === 'resolved'
-      ? `€${deliveryFee.toFixed(2)}`
+      ? formatCurrency(deliveryFee)
       : deliveryFeeStatus === 'not_checked'
         ? t('menu.cart.deliveryFeeZoneNotChecked')
       : deliveryFeeStatus === 'requires_selection'
@@ -982,7 +988,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       <p className="text-sm text-gray-400 truncate">{product.sku}</p>
                       <div className="flex items-center justify-between mt-2">
                         <span className="text-lg font-bold text-green-400">
-                          €{product.price.toFixed(2)}
+                          {formatCurrency(product.price)}
                         </span>
                         <span className="text-sm text-gray-500">
                           {product.quantity} {t('productCatalog.inStock', 'in stock')}
@@ -1096,7 +1102,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         </span>
                       ) : (
                         <span className="text-green-400 font-medium">
-                          €{(item.price * item.cartQuantity).toFixed(2)}
+                          {formatCurrency((item.price * item.cartQuantity))}
                         </span>
                       )}
                     </div>
@@ -1124,7 +1130,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             <div className="mt-4 pt-4 border-t border-white/20">
               <div className="flex justify-between text-gray-400 mb-1">
                 <span>{t('productCatalog.subtotal', 'Subtotal')}</span>
-                <span>€{subtotal.toFixed(2)}</span>
+                <span>{formatCurrency(subtotal)}</span>
               </div>
               {offerDiscountAmount > 0 && (
                 <div className="flex justify-between text-emerald-400 mb-1">
@@ -1135,19 +1141,19 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         })
                       : t('menu.cart.offerDiscount', 'Offers')}
                   </span>
-                  <span>-€{offerDiscountAmount.toFixed(2)}</span>
+                  <span>-{formatCurrency(offerDiscountAmount)}</span>
                 </div>
               )}
               {discountAmount > 0 && (
                 <div className="flex justify-between text-red-400 mb-1">
                   <span>{t('productCatalog.discountLabel', 'Discount')}</span>
-                  <span>-€{discountAmount.toFixed(2)}</span>
+                  <span>-{formatCurrency(discountAmount)}</span>
                 </div>
               )}
               {depositTotal > 0 && (
                 <div className="flex justify-between text-gray-400 mb-1">
                   <span>{t('productCatalog.depositTotal', 'Deposits')}</span>
-                  <span>€{depositTotal.toFixed(2)}</span>
+                  <span>{formatCurrency(depositTotal)}</span>
                 </div>
               )}
               {orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus === 'not_checked' && (
@@ -1193,7 +1199,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               )}
               <div className="flex justify-between text-white text-xl font-bold mt-2">
                 <span>{t('productCatalog.total', 'Total')}</span>
-                <span>€{total.toFixed(2)}</span>
+                <span>{formatCurrency(total)}</span>
               </div>
             </div>
             {/* Checkout Button */}

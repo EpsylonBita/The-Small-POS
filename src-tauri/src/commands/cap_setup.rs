@@ -1927,38 +1927,54 @@ PASSWORD=your_test_password\r\n";
         );
     }
 
+    // Keep native Path semantics in these pure helper tests. Windows CI exercises
+    // the actual service paths; Unix runs exercise the same absolute-path guards.
+    fn native_service_test_directory() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\CapDriverService")
+        } else {
+            PathBuf::from("/CapDriverService")
+        }
+    }
+
     #[test]
     fn the_service_executable_is_recovered_from_quoted_and_argument_bearing_image_paths() {
+        let executable = native_service_test_directory().join("CapDriverSVC.exe");
         assert_eq!(
-            executable_from_image_path("\"C:\\CapDriverService\\CapDriverSVC.exe\" -service"),
-            Some(PathBuf::from("C:\\CapDriverService\\CapDriverSVC.exe"))
+            executable_from_image_path(&format!("\"{}\" -service", executable.display())),
+            Some(executable.clone())
         );
         assert_eq!(
-            executable_from_image_path("C:\\CapDriverService\\CapDriverSVC.exe /run"),
-            Some(PathBuf::from("C:\\CapDriverService\\CapDriverSVC.exe"))
+            executable_from_image_path(&format!("{} /run", executable.display())),
+            Some(executable)
         );
         assert_eq!(executable_from_image_path(""), None);
         assert_eq!(executable_from_image_path("CapDriverSVC.exe"), None);
-        assert_eq!(executable_from_image_path("C:\\svc\\run.bat"), None);
+        assert_eq!(
+            executable_from_image_path(
+                &native_service_test_directory()
+                    .join("run.bat")
+                    .to_string_lossy()
+            ),
+            None
+        );
     }
 
     #[test]
     fn an_installation_directory_is_only_taken_from_the_services_own_binary() {
+        let directory = native_service_test_directory();
         let snapshot = ServiceSnapshot {
             installed: true,
             running: true,
-            image_path: "\"C:\\CapDriverService\\CapDriverSVC.exe\"".into(),
+            image_path: format!("\"{}\"", directory.join("CapDriverSVC.exe").display()),
         };
-        assert_eq!(
-            installation_directory(&snapshot),
-            Some(PathBuf::from("C:\\CapDriverService"))
-        );
+        assert_eq!(installation_directory(&snapshot), Some(directory.clone()));
         assert_eq!(installation_directory(&ServiceSnapshot::default()), None);
         assert_eq!(
             installation_directory(&ServiceSnapshot {
                 installed: true,
                 running: false,
-                image_path: "C:\\Windows\\System32\\svchost.exe -k netsvcs".into(),
+                image_path: format!("{} -k netsvcs", directory.join("svchost.exe").display()),
             }),
             None,
             "only CapDriverSVC.exe identifies the installation"
@@ -1989,19 +2005,17 @@ PASSWORD=your_test_password\r\n";
     #[test]
     fn an_installed_service_is_read_from_its_own_directory() {
         let mut seen: Option<PathBuf> = None;
+        let directory = native_service_test_directory();
         let snapshot = ServiceSnapshot {
             installed: true,
             running: true,
-            image_path: "\"C:\\CapDriverService\\CapDriverSVC.exe\"".into(),
+            image_path: format!("\"{}\"", directory.join("CapDriverSVC.exe").display()),
         };
         let result = status_from_snapshot(&snapshot, |path| {
             seen = Some(path.to_path_buf());
             Ok(SAMPLE_INI.as_bytes().to_vec())
         });
-        assert_eq!(
-            seen,
-            Some(PathBuf::from("C:\\CapDriverService\\CapDriverSVC.ini"))
-        );
+        assert_eq!(seen, Some(directory.join("CapDriverSVC.ini")));
         assert!(result.service_running);
         assert!(result.settings.is_some());
         assert_eq!(result.target.expect("target").kind, "network");

@@ -32,6 +32,14 @@ fn seed(conn: &rusqlite::Connection) {
     crate::db::set_setting(conn, "terminal", "__ignore_keyring", "1").unwrap();
     crate::db::set_setting(conn, "terminal", "terminal_id", TERMINAL_ID).unwrap();
     crate::db::set_setting(conn, "terminal", "branch_id", BRANCH_ID).unwrap();
+    for (key, value) in [
+        ("store_currency_branch_id", BRANCH_ID),
+        ("store_currency_available", "true"),
+        ("store_currency_source", "branch_country"),
+        ("currency", "EUR"),
+    ] {
+        crate::db::set_setting(conn, "restaurant", key, value).unwrap();
+    }
     let hash = bcrypt::hash(TERMINAL_STAFF_PIN, 4).unwrap();
     crate::db::set_setting(conn, "staff", "staff_pin_hash", &hash).unwrap();
     // The staff directory as the till stores it (synthetic staff).
@@ -66,20 +74,20 @@ fn seed(conn: &rusqlite::Connection) {
     conn.execute(
         "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id,
             role_type, check_in_time, check_out_time, opening_cash_amount,
-            opening_cash_amount_cents, status, sync_status, created_at, updated_at)
+            opening_cash_amount_cents, status, sync_status, created_at, updated_at, currency)
          VALUES ('shift-closed', 'staff-cashier', 'Cashier', ?1, ?2, 'cashier',
                  '2026-09-30T08:00:00Z', '2026-09-30T20:00:00Z', 100.0, 10000, 'closed',
-                 'pending', '2026-09-30T08:00:00Z', '2026-09-30T20:00:00Z')",
+                 'pending', '2026-09-30T08:00:00Z', '2026-09-30T20:00:00Z', 'EUR')",
         params![BRANCH_ID, TERMINAL_ID],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
             terminal_id, opening_amount, opening_amount_cents, total_cash_sales,
-            total_cash_sales_cents, opened_at, closed_at, created_at, updated_at)
+            total_cash_sales_cents, opened_at, closed_at, created_at, updated_at, currency)
          VALUES ('drawer-closed', 'shift-closed', 'staff-cashier', ?1, ?2, 100.0, 10000,
                  0.0, 0, '2026-09-30T08:00:00Z', '2026-09-30T20:00:00Z',
-                 '2026-09-30T08:00:00Z', '2026-09-30T20:00:00Z')",
+                 '2026-09-30T08:00:00Z', '2026-09-30T20:00:00Z', 'EUR')",
         params![BRANCH_ID, TERMINAL_ID],
     )
     .unwrap();
@@ -87,9 +95,9 @@ fn seed(conn: &rusqlite::Connection) {
     conn.execute(
         "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
             status, order_type, payment_status, sync_status, branch_id, terminal_id,
-            staff_shift_id, created_at, updated_at)
+            staff_shift_id, created_at, updated_at, currency)
          VALUES (?1, 'A-0451', '[]', 13.0, 1300, 'completed', 'takeaway', 'pending', 'synced',
-                 ?2, ?3, 'shift-closed', '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+                 ?2, ?3, 'shift-closed', '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z', 'EUR')",
         params![ORDER_ID, BRANCH_ID, TERMINAL_ID],
     )
     .unwrap();
@@ -99,10 +107,10 @@ fn open_cashier_shift(conn: &rusqlite::Connection) {
     conn.execute(
         "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id,
             role_type, check_in_time, opening_cash_amount, opening_cash_amount_cents,
-            status, sync_status, created_at, updated_at)
+            status, sync_status, created_at, updated_at, currency)
          VALUES ('shift-open', 'staff-cashier', 'Cashier', ?1, ?2, 'cashier',
                  '2026-09-30T21:00:00Z', 100.0, 10000, 'active', 'pending',
-                 '2026-09-30T21:00:00Z', '2026-09-30T21:00:00Z')",
+                 '2026-09-30T21:00:00Z', '2026-09-30T21:00:00Z', 'EUR')",
         params![BRANCH_ID, TERMINAL_ID],
     )
     .unwrap();

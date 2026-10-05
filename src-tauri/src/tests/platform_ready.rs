@@ -23,10 +23,9 @@ const PREPAID_FLEET: &str = r#"{"food_delivery":{"prepaid":true,"payment_method"
 
 fn seed_platform_order(conn: &rusqlite::Connection, id: &str, status: &str) {
     conn.execute(
-        "INSERT INTO orders (id, order_number, supabase_id, items, total_amount, total_amount_cents,
+        "INSERT INTO orders (currency, id, order_number, supabase_id, items, total_amount, total_amount_cents,
             status, order_type, payment_status, sync_status, plugin, external_plugin_order_id,
-            ghost_metadata, created_at, updated_at)
-         VALUES (?1, ?1, ?2, '[]', 12.0, 1200, ?3, 'delivery', 'pending', 'synced', 'efood',
+            ghost_metadata, created_at, updated_at) VALUES ('EUR', ?1, ?1, ?2, '[]', 12.0, 1200, ?3, 'delivery', 'pending', 'synced', 'efood',
                  ?4, ?5, '2026-10-01T08:00:00Z', '2026-10-01T08:00:00Z')",
         params![
             id,

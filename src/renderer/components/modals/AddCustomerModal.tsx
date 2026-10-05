@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 import React, { useState, useRef, useEffect } from 'react';
 import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash, Minus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -1992,7 +1993,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                         <span className="text-sm">
                           {t('modals.addCustomer.deliveryAvailable')}
                           {deliveryValidationResult.selectedZone && (
-                            <span> • {deliveryValidationResult.selectedZone.name} • €{deliveryValidationResult.selectedZone.delivery_fee} {t('modals.addCustomer.deliveryFee')}</span>
+                            <span> • {deliveryValidationResult.selectedZone.name} • {formatCurrency(Number(deliveryValidationResult.selectedZone.delivery_fee))} {t('modals.addCustomer.deliveryFee')}</span>
                           )}
                         </span>
                       </div>
@@ -2023,11 +2024,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                     </div>
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.deliveryFee')}:</span>
-                      <span className="ml-2 font-medium">€{deliveryValidationResult.selectedZone.delivery_fee}</span>
+                      <span className="ml-2 font-medium">{formatCurrency(Number(deliveryValidationResult.selectedZone.delivery_fee))}</span>
                     </div>
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.minimumOrder')}:</span>
-                      <span className="ml-2 font-medium">€{deliveryValidationResult.selectedZone.minimum_order_amount}</span>
+                      <span className="ml-2 font-medium">{formatCurrency(Number(deliveryValidationResult.selectedZone.minimum_order_amount))}</span>
                     </div>
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.estimatedTime')}:</span>

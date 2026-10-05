@@ -1,6 +1,10 @@
 import type { ZReportData, ZReportDayOrder, StaffPerformance } from '../types/reports';
 import { buildZReportGiftCloseCsvRows, resolveZReportPeriod, resolveZReportPresentation, resolveZReportTwintTotal } from './zReport';
 
+function recordedCurrency(value: string | null | undefined): string {
+  return typeof value === 'string' && /^[A-Z]{3}$/.test(value) ? value : 'Unknown';
+}
+
 export function exportArrayToCSV(data: Record<string, any>[], filename: string) {
   if (!data || data.length === 0) {
     const headers = Object.keys(data?.[0] || { Empty: '' });
@@ -35,6 +39,7 @@ export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-r
   };
 
   rows.push({ Section: 'Report', Metric: 'Business Day', Value: zReport.date });
+  rows.push({ Section: 'Report', Metric: 'Currency', Value: recordedCurrency(zReport.currency) });
   rows.push({ Section: 'Report', Metric: 'Period Start', Value: period.start ?? '' });
   rows.push({ Section: 'Report', Metric: 'Period End', Value: period.end ?? '' });
 
@@ -77,6 +82,7 @@ export function exportStaffPerformanceToCSV(staff: StaffPerformance[], filename:
     'Staff ID': s.staffId,
     Name: s.name,
     Role: s.role || '',
+    Currency: recordedCurrency(s.currency),
     Hours: s.hours ?? '',
     Orders: s.orders ?? '',
     Sales: s.sales ?? '',
@@ -111,6 +117,7 @@ export function exportDayOrdersToCSV(
         ? (order.tableNumber ? `Table ${order.tableNumber}` : '—')
         : '—',
     'Amount': order.amount,
+    'Currency': recordedCurrency(order.currency),
     'Payment Method': order.paymentMethod === 'twint' ? 'TWINT' : order.paymentMethod || '—',
     'Status': order.status,
     'Time': order.createdAt,

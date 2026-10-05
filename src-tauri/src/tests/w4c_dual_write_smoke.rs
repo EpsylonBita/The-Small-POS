@@ -24,6 +24,39 @@ use rusqlite::Connection;
 
 use crate::db::{self, DbState};
 use crate::money::Cents;
+use crate::tests::fake_keyring;
+
+fn seed_currency(conn: &Connection, branch_id: &str, terminal_id: &str) {
+    for (category, key, value) in [
+        ("terminal", "__ignore_keyring", "1"),
+        ("terminal", "branch_id", branch_id),
+        ("terminal", "terminal_id", terminal_id),
+        ("restaurant", "store_currency_branch_id", branch_id),
+        ("restaurant", "store_currency_available", "true"),
+        ("restaurant", "store_currency_source", "branch_country"),
+        ("restaurant", "currency", "EUR"),
+    ] {
+        db::set_setting(conn, category, key, value).unwrap();
+    }
+}
+
+fn seed_payment_shift(conn: &Connection) {
+    conn.execute(
+        "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+            check_in_time, status, sync_status, created_at, updated_at, currency)
+         VALUES ('shift-payment-w4c', 'staff-payment-w4c', 'cashier', 'branch-w4c', 'term-w4c',
+            datetime('now'), 'active', 'pending', datetime('now'), datetime('now'), 'EUR')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+            opening_amount, opening_amount_cents, opened_at, created_at, updated_at, currency)
+         VALUES ('drawer-payment-w4c', 'shift-payment-w4c', 'staff-payment-w4c', 'branch-w4c', 'term-w4c',
+            0, 0, datetime('now'), datetime('now'), datetime('now'), 'EUR')",
+        [],
+    ).unwrap();
+}
 
 fn test_db() -> DbState {
     let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -34,6 +67,7 @@ fn test_db() -> DbState {
     )
     .expect("pragma setup");
     db::run_migrations_for_test(&conn);
+    seed_currency(&conn, "branch-w4c", "term-w4c");
     DbState {
         conn: std::sync::Mutex::new(conn),
         db_path: std::path::PathBuf::from(":memory:"),
@@ -52,12 +86,14 @@ fn assert_dual_write_consistent(real: f64, cents: i64, label: &str) {
 
 #[test]
 fn w4c_record_payment_dual_writes_order_payments_and_payment_items() {
+    let _keyring = fake_keyring::install_empty();
     let db = test_db();
     let conn = db.conn.lock().unwrap();
+    seed_payment_shift(&conn);
     conn.execute(
-        "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+        "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at, currency, branch_id, staff_shift_id)
          VALUES ('ord-w4c-1', '[]', 12.34, 'pending', 'pending',
-                 datetime('now'), datetime('now'))",
+                 datetime('now'), datetime('now'), 'EUR', 'branch-w4c', 'shift-payment-w4c')",
         [],
     )
     .expect("insert order");
@@ -133,13 +169,15 @@ fn w4c_record_payment_dual_writes_order_payments_and_payment_items() {
 
 #[test]
 fn w4c_record_refund_dual_writes_payment_adjustments_amount() {
+    let _keyring = fake_keyring::install_empty();
     let db = test_db();
     let conn = db.conn.lock().unwrap();
+    seed_payment_shift(&conn);
     conn.execute(
         "INSERT INTO orders (id, items, total_amount, status, payment_status, sync_status,
-                              created_at, updated_at)
+                              created_at, updated_at, currency, branch_id, staff_shift_id)
          VALUES ('ord-w4c-refund', '[]', 20.00, 'completed', 'paid', 'pending',
-                 datetime('now'), datetime('now'))",
+                 datetime('now'), datetime('now'), 'EUR', 'branch-w4c', 'shift-payment-w4c')",
         [],
     )
     .expect("insert order");
@@ -187,29 +225,30 @@ fn w4c_record_refund_dual_writes_payment_adjustments_amount() {
 
 #[test]
 fn w4c_record_payment_dual_writes_cash_drawer_sales_increment() {
+    let _keyring = fake_keyring::install_empty();
     let db = test_db();
     let conn = db.conn.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO staff_shifts (id, staff_id, role_type, check_in_time, status, sync_status,
-                                    created_at, updated_at)
-         VALUES ('shift-w4c', 'staff-w4c', 'cashier', ?1, 'active', 'pending', ?1, ?1)",
+                                    created_at, updated_at, currency, branch_id, terminal_id)
+         VALUES ('shift-w4c', 'staff-w4c', 'cashier', ?1, 'active', 'pending', ?1, ?1, 'EUR', 'branch-w4c', 'term-w4c')",
         rusqlite::params![now],
     )
     .expect("insert shift");
     conn.execute(
         "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
                                             opening_amount, opening_amount_cents, opened_at,
-                                            created_at, updated_at)
+                                            created_at, updated_at, currency)
          VALUES ('drawer-w4c', 'shift-w4c', 'staff-w4c', 'branch-w4c', 'term-w4c',
-                 50.00, 5000, ?1, ?1, ?1)",
+                 50.00, 5000, ?1, ?1, ?1, 'EUR')",
         rusqlite::params![now],
     )
     .expect("insert drawer");
     conn.execute(
         "INSERT INTO orders (id, items, total_amount, status, sync_status, staff_shift_id,
-                              created_at, updated_at)
-         VALUES ('ord-w4c-drawer', '[]', 8.50, 'pending', 'pending', 'shift-w4c', ?1, ?1)",
+                              created_at, updated_at, currency, branch_id, terminal_id)
+         VALUES ('ord-w4c-drawer', '[]', 8.50, 'pending', 'pending', 'shift-w4c', ?1, ?1, 'EUR', 'branch-w4c', 'term-w4c')",
         rusqlite::params![now],
     )
     .expect("insert order");
@@ -249,6 +288,7 @@ fn w4c_record_payment_dual_writes_cash_drawer_sales_increment() {
 
 #[test]
 fn w4c_z_report_insert_dual_writes_all_thirteen_money_columns() {
+    let _keyring = fake_keyring::install_empty();
     let db = test_db();
     let conn = db.conn.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
@@ -337,23 +377,25 @@ fn w4c_z_report_insert_dual_writes_all_thirteen_money_columns() {
 
 #[test]
 fn w4c_shift_expense_dual_writes_amount_and_drawer_total_expenses() {
+    let _keyring = fake_keyring::install_empty();
     let db = test_db();
     let conn = db.conn.lock().unwrap();
+    seed_currency(&conn, "branch-exp", "term-exp");
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO staff_shifts (id, staff_id, role_type, check_in_time, status, sync_status,
-                                    branch_id, created_at, updated_at)
+                                    branch_id, created_at, updated_at, currency, terminal_id)
          VALUES ('shift-exp', 'staff-exp', 'cashier', ?1, 'active', 'pending',
-                 'branch-exp', ?1, ?1)",
+                 'branch-exp', ?1, ?1, 'EUR', 'term-exp')",
         rusqlite::params![now],
     )
     .expect("insert shift");
     conn.execute(
         "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
                                             opening_amount, opening_amount_cents,
-                                            opened_at, created_at, updated_at)
+                                            opened_at, created_at, updated_at, currency)
          VALUES ('drawer-exp', 'shift-exp', 'staff-exp', 'branch-exp', 'term-exp',
-                 0.00, 0, ?1, ?1, ?1)",
+                 0.00, 0, ?1, ?1, ?1, 'EUR')",
         rusqlite::params![now],
     )
     .expect("insert drawer");

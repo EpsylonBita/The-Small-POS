@@ -178,20 +178,20 @@ describe('table floor-plan capacity (pax) label', () => {
   const POS_LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq'] as const
   const GREEK_LETTER = new RegExp('[\\u0370-\\u03FF]')
 
-  it('renders the capacity label via the count-aware floorPlan.tableProperties.pax key', () => {
+  it('renders the capacity label via the count-aware seats key', () => {
     assert.match(
       floorPlanViewSource,
-      /t\('floorPlan\.tableProperties\.pax', \{ count: node\.capacity \?\? table\.capacity/,
+      /t\('tables\.seats', \{ count: node\.capacity \?\? table\.capacity/,
     )
     // The once-computed raw paxLabel const and the "{capacity} {paxLabel}" render are gone.
     assert.doesNotMatch(floorPlanViewSource, /const paxLabel =/)
     assert.doesNotMatch(floorPlanViewSource, /\{paxLabel\}/)
   })
 
-  it('floorPlan.tableProperties.pax plural keys exist in every POS locale with {{count}}', () => {
+  it('seats plural keys exist in every POS locale with {{count}}', () => {
     for (const lng of POS_LOCALES) {
-      const tp = loadLocale(lng).floorPlan?.tableProperties ?? {}
-      for (const key of ['pax_one', 'pax_other']) {
+      const tp = loadLocale(lng).tables ?? {}
+      for (const key of ['seats_one', 'seats_other']) {
         assert.equal(typeof tp[key], 'string', `${lng}.floorPlan.tableProperties.${key} missing`)
         assert.ok((tp[key] as string).length > 0, `${lng}.floorPlan.tableProperties.${key} empty`)
         assert.match(tp[key], /\{\{count\}\}/, `${lng}.floorPlan.tableProperties.${key} lost {{count}}`)
@@ -201,8 +201,8 @@ describe('table floor-plan capacity (pax) label', () => {
 
   it('Greek 2D capacity label is localized and never shows raw "pax"', async () => {
     const el = await createPaxT('el')
-    const one = el('floorPlan.tableProperties.pax', { count: 1 })
-    const many = el('floorPlan.tableProperties.pax', { count: 4 })
+    const one = el('tables.seats', { count: 1 })
+    const many = el('tables.seats', { count: 4 })
 
     assert.match(one, GREEK_LETTER, `el pax (1) should be Greek: "${one}"`)
     assert.match(many, GREEK_LETTER, `el pax (4) should be Greek: "${many}"`)
@@ -213,8 +213,8 @@ describe('table floor-plan capacity (pax) label', () => {
     assert.match(many, /4/)
     assert.notEqual(one, many)
 
-    // English still renders the compact "pax" unit.
+    // English renders the same seat count in its own language.
     const enT = await createPaxT('en')
-    assert.ok(enT('floorPlan.tableProperties.pax', { count: 2 }).includes('pax'))
+    assert.ok(enT('tables.seats', { count: 2 }).includes('seats'))
   })
 })

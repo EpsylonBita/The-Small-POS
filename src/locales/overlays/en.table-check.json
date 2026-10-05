@@ -103,6 +103,7 @@
       "applyDiscountToSelected": "Apply to Selected"
     },
     "messages": {
+      "savedCheckReadOnly": "Saved check — amounts may be stale. Reconnect to collect payment or make changes.",
       "loading": "Loading table check...",
       "noOpenCheck": "No open check found for this table.",
       "noItems": "No items on this check yet.",
@@ -134,14 +135,18 @@
       "noActiveOrder": "No active order is linked to this table.",
       "paymentAmountRequired": "Enter a payment amount greater than zero.",
       "paymentFailed": "Payment failed",
+      "paymentSavedTableCloseFailed": "The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.",
       "orderItemUpdateFailed": "Order item update failed",
+      "scopedItemEditUnavailable": "Price and discount changes here require the complete unpaid, unsplit order. Paid checks need the settlement workflow; split or transferred items cannot be changed here yet.",
       "selectItemAndTargetTable": "Select an item and target table.",
       "localSessionTransferSyncing": "This table check is still syncing. Refresh after sync before moving items.",
       "quantityUpTo": "Enter a quantity up to {{quantity}}.",
       "itemTransferFailed": "Item transfer failed",
       "noBatchPayableItems": "Select at least one unpaid item.",
       "noBatchTransferItems": "Select at least one unpaid item to move.",
-      "noBatchSelectedItems": "Select at least one item."
+      "noBatchSelectedItems": "Select at least one item.",
+      "originalCancelApproverRequired": "A cancellation attempt is pending. Its original approving staff member must retry after reconnecting. The table was not released.",
+      "canonicalCancelSyncRequired": "Reconnect and finish syncing or resolve this order’s pending changes before cancelling. The table was not released."
     }
   },
   "tablesDashboard": {
@@ -184,6 +189,7 @@
     "time": {
       "hoursMinutes": "{{hours}}h {{minutes}}m",
       "minutes": "{{minutes}}m"
-    }
+    },
+    "floorPlanAriaLabel": "Table floor plan"
   }
 }

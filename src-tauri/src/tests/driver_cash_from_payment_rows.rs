@@ -29,12 +29,21 @@ const OPENING: f64 = 20.0;
 const NOW: &str = "2026-09-30T12:00:00Z";
 
 fn seed_shifts(conn: &Connection) {
+    for (category, key, value) in [
+        ("terminal", "branch_id", BRANCH),
+        ("restaurant", "store_currency_branch_id", BRANCH),
+        ("restaurant", "store_currency_available", "true"),
+        ("restaurant", "store_currency_source", "branch_country"),
+        ("restaurant", "currency", "EUR"),
+    ] {
+        crate::db::set_setting(conn, category, key, value).unwrap();
+    }
     conn.execute(
         "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
             check_in_time, opening_cash_amount, opening_cash_amount_cents,
-            status, calculation_version, sync_status, created_at, updated_at)
+            status, calculation_version, sync_status, created_at, updated_at, currency)
          VALUES (?1, 'cashier-courier', 'cashier', ?2, ?3, '2026-09-30T08:00:00Z',
-            100.0, 10000, 'active', 2, 'pending', '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z')",
+            100.0, 10000, 'active', 2, 'pending', '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z', 'EUR')",
         params![CASHIER_SHIFT, BRANCH, TERMINAL],
     )
     .expect("cashier shift");
@@ -42,9 +51,9 @@ fn seed_shifts(conn: &Connection) {
         "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
             terminal_id, opening_amount, opening_amount_cents,
             driver_cash_given, driver_cash_given_cents,
-            opened_at, created_at, updated_at)
+            opened_at, created_at, updated_at, currency)
          VALUES ('drawer-courier', ?1, 'cashier-courier', ?2, ?3, 100.0, 10000,
-            ?4, ?5, '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z')",
+            ?4, ?5, '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z', 'EUR')",
         params![
             CASHIER_SHIFT,
             BRANCH,
@@ -57,9 +66,9 @@ fn seed_shifts(conn: &Connection) {
     conn.execute(
         "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
             check_in_time, opening_cash_amount, opening_cash_amount_cents,
-            status, calculation_version, sync_status, created_at, updated_at)
+            status, calculation_version, sync_status, created_at, updated_at, currency)
          VALUES (?1, ?2, 'driver', ?3, ?4, '2026-09-30T08:30:00Z',
-            ?5, ?6, 'active', 2, 'pending', '2026-09-30T08:30:00Z', '2026-09-30T08:30:00Z')",
+            ?5, ?6, 'active', 2, 'pending', '2026-09-30T08:30:00Z', '2026-09-30T08:30:00Z', 'EUR')",
         params![
             DRIVER_SHIFT,
             DRIVER,
@@ -79,10 +88,10 @@ fn seed_delivery(conn: &Connection, order_id: &str) {
              id, order_number, items, order_type, total_amount, total_amount_cents,
              tip_amount, tip_amount_cents, delivery_fee, delivery_fee_cents,
              status, payment_status, sync_status, branch_id, terminal_id,
-             created_at, updated_at
+             created_at, updated_at, currency
          ) VALUES (?1, ?1, '[]', 'delivery', 13.0, 1300, 1.0, 100, 2.0, 200,
                    'pending', 'pending', 'synced', ?2, ?3,
-                   '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+                   '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z', 'EUR')",
         params![order_id, BRANCH, TERMINAL],
     )
     .expect("seed delivery");

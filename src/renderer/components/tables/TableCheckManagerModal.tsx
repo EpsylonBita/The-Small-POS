@@ -28,6 +28,7 @@ import { useI18n } from '../../contexts/i18n-context';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
   isOwingCancelDismissed,
+  emitCanonicalTableCancellation,
   owingCancelFailureMessage,
   refuseOwingCancelUpFront,
 } from '../../hooks/useTableReleaseGuard';
@@ -121,6 +122,7 @@ interface TableSessionOrderItem {
 
 interface TableSessionAllocation {
   id?: string;
+  order_id?: string | null;
   order_item_id?: string | null;
   table_id?: string | null;
   seat_number?: number | null;
@@ -148,6 +150,7 @@ interface TableSessionDetails {
     order_number?: string | null;
     total_amount?: number | string | null;
     payment_status?: string | null;
+    version?: number | null;
     order_items?: TableSessionOrderItem[];
   } | null;
   items?: TableSessionAllocation[];
@@ -471,6 +474,51 @@ const buildLocalSessionFromOrder = (table: RestaurantTable, order: Order, itemFa
   };
 };
 
+// updateItems replaces the complete source order. A session's allocated items
+// are a display projection, so they must never become that replacement list.
+const checkContainsCompleteCanonicalOrder = (
+  session: TableSessionDetails | null,
+  canonicalOrder: Order | null,
+): boolean => {
+  if (!session || !canonicalOrder) return false;
+  // A paid line/label needs the existing ledger-aware settlement/refund path,
+  // even when every displayed quantity belongs to this check.
+  const paidLabels = ['paid', 'completed', 'partially_paid', 'partial'];
+  if (readOrderPaidTotal(canonicalOrder) > 0 || Number(session.balance?.paid_total || 0) > 0 ||
+    [readOrderPaymentStatus(canonicalOrder), session.order?.payment_status, session.balance?.payment_status]
+      .some(status => paidLabels.includes(String(status || '').trim().toLowerCase())) ||
+    session.payments?.some(payment => paidLabels.includes(String(payment.status || '').toLowerCase()) && paymentRecordAmount(payment) > 0)) return false;
+  const orderReferences = [canonicalOrder.id, (canonicalOrder as any).supabase_id, (canonicalOrder as any).supabaseId];
+  if (!orderReferences.includes(session.active_order_id || session.order?.id)) return false;
+  const ownerSessionId = session.order?.table_session_id ||
+    (canonicalOrder as any).table_session_id || (canonicalOrder as any).tableSessionId;
+  if (ownerSessionId && ownerSessionId !== session.id) return false;
+  if (session.metadata?.created_by_transfer_from_session_id ||
+    (Array.isArray(session.metadata?.merged_session_ids) && session.metadata.merged_session_ids.length > 0)) return false;
+  if (session.items?.some(allocation =>
+    Number(allocation.paid_quantity || 0) > 0 ||
+    allocation.status === 'transferred' || allocation.status === 'voided' ||
+    (allocation.order_id && !orderReferences.includes(allocation.order_id)) ||
+    allocation.metadata?.transferred_from_session_id || allocation.metadata?.transferred_to_session_id,
+  )) return false;
+
+  const canonicalItems = localOrderItems(canonicalOrder);
+  const displayedItems = session.order?.order_items || [];
+  if (canonicalItems.length === 0 || canonicalItems.length !== displayedItems.length) return false;
+  const unmatchedItems = [...canonicalItems];
+  return displayedItems.every(item => {
+    const references = [item.id, item.order_item_id, item.source_order_item_id].filter(Boolean);
+    const index = unmatchedItems.findIndex(canonicalItem =>
+      [canonicalItem.id, canonicalItem.order_item_id, canonicalItem.source_order_item_id]
+        .some(reference => reference && references.includes(reference)) &&
+      Math.abs(Number(canonicalItem.quantity) - Number(item.quantity)) < 0.0005,
+    );
+    if (index < 0) return false;
+    unmatchedItems.splice(index, 1);
+    return true;
+  });
+};
+
 const mergeSessionWithLocalOrder = (
   table: RestaurantTable,
   remoteSession: TableSessionDetails,
@@ -621,7 +669,8 @@ const fetchLocalPaymentSnapshot = async (
     ]);
     return {
       payments: unwrapBridgeArray<PaymentHistoryRecord>(paymentResult)
-        .filter(payment => ['completed', 'paid'].includes(String(payment.status || '').toLowerCase()))
+        .filter(payment => ['completed', 'paid'].includes(String(payment.status || '').toLowerCase()) ||
+          (String(payment.method || payment.payment_method || '').toLowerCase().startsWith('gift') && payment.status === 'partially_refunded'))
         .sort((left, right) =>
           new Date(String(right.createdAt || right.created_at || 0)).getTime()
           - new Date(String(left.createdAt || left.created_at || 0)).getTime(),
@@ -636,7 +685,7 @@ const fetchLocalPaymentSnapshot = async (
 
 const paymentRecordAmount = (payment: PaymentHistoryRecord): number => {
   const cents = Number(payment.amount_cents ?? payment.amountCents);
-  if (Number.isFinite(cents) && cents > 0) {
+  if (Number.isFinite(cents) && cents >= 0) {
     return Number((cents / 100).toFixed(2));
   }
   return Number(payment.amount || 0) || 0;
@@ -644,10 +693,29 @@ const paymentRecordAmount = (payment: PaymentHistoryRecord): number => {
 
 const paymentRecordTip = (payment: PaymentHistoryRecord): number => {
   const cents = Number(payment.tip_amount_cents ?? payment.tipAmountCents);
-  if (Number.isFinite(cents) && cents > 0) {
+  if (Number.isFinite(cents) && cents >= 0) {
     return Number((cents / 100).toFixed(2));
   }
   return Number(payment.tipAmount ?? payment.tip_amount ?? 0) || 0;
+};
+
+const paymentRecordPrincipal = (payment: PaymentHistoryRecord): number => {
+  const status = String(payment.status || 'completed').toLowerCase();
+  const gift = String(payment.method || payment.payment_method || '').toLowerCase().startsWith('gift');
+  if (!['completed', 'paid'].includes(status) && !(gift && status === 'partially_refunded')) return 0;
+  const remaining = Number(payment.remainingRefundable ?? payment.remaining_refundable);
+  const refunded = Math.max(0, Number(payment.refundedAmount ?? payment.refunded_amount ?? 0) || 0);
+  let metadata: Record<string, unknown> = {};
+  if (payment.metadata && typeof payment.metadata === 'object') metadata = payment.metadata as Record<string, unknown>;
+  else if (typeof payment.metadata === 'string') {
+    try { metadata = JSON.parse(payment.metadata); } catch { /* no canonical return floor */ }
+  }
+  const giftReturned = gift ? Math.max(0, Number(metadata?.gift_reversed_amount_cents || 0) / 100) : 0;
+  const gross = paymentRecordAmount(payment);
+  const retained = Number.isFinite(remaining)
+    ? Math.min(gross, Math.max(0, remaining))
+    : Math.max(0, gross - Math.max(refunded, giftReturned));
+  return Number(Math.max(0, retained - Math.max(0, paymentRecordTip(payment))).toFixed(2));
 };
 
 const formatPaymentTimestamp = (value: unknown): string => {
@@ -1002,6 +1070,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   useEffect(() => { setMovedTableId(null); }, [selectedTable?.id]);
   const table = tables.find(candidate => candidate.id === movedTableId) || selectedTable;
   const [session, setSession] = useState<TableSessionDetails | null>(null);
+  const canonicalOrderRef = useRef<Order | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isSavedSession, setIsSavedSession] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [secondaryModal, setSecondaryModal] = useState<SecondaryModal>(null);
@@ -1194,6 +1265,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     }
 
     setIsLoading(true);
+    setLoadError(null);
+    setIsSavedSession(false);
+    setSession(null);
+    setSecondaryModal(null);
+    if (pressTimerRef.current) clearTimeout(pressTimerRef.current);
+    canonicalOrderRef.current = null;
     let localPaymentSnapshot: { payments: PaymentHistoryRecord[]; paidItems: PaidItemRecord[] } = { payments: [], paidItems: [] };
     const applySession = (nextSession: TableSessionDetails) => {
       const ownerSessionId = nextSession.order?.table_session_id || (localOrder as any)?.table_session_id || (localOrder as any)?.tableSessionId;
@@ -1208,8 +1285,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       setPaymentHistory(scopedPayments);
       setPaidItemRecords(localPaymentSnapshot.paidItems.filter(item => paymentIds.has(String(item.paymentId ?? item.payment_id ?? ''))));
       if (Array.isArray(nextSession.payments) && (scopedPayments.length > 0 || nextSession.items?.some(item => item.order_item_id))) {
-        const receiptPaid = Number(scopedPayments.reduce((sum, payment) => sum + paymentRecordAmount(payment), 0).toFixed(2));
-        const receiptTips = Number(scopedPayments.reduce((sum, payment) => sum + paymentRecordTip(payment), 0).toFixed(2));
+        // A paid claim must survive a missing receipt mirror. Recovery resolves
+        // that claim; opening a check must never turn it into a fresh charge.
+        const receiptPaid = Math.max(Number(nextSession.balance?.paid_total || 0), Number(scopedPayments.reduce((sum, payment) => sum + paymentRecordPrincipal(payment), 0).toFixed(2)));
+        const receiptTips = Math.max(Number(nextSession.balance?.tip_total || 0), Number(scopedPayments.reduce((sum, payment) => sum + paymentRecordTip(payment), 0).toFixed(2)));
         const total = Number(nextSession.balance?.order_total ?? 0);
         const due = Math.max(0, Number((total - receiptPaid).toFixed(2)));
         // Session-tagged unsynced local receipts remain visible after reopening.
@@ -1232,6 +1311,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     let localOrder: Order | null = null;
     let localFallback: TableSessionDetails | null = null;
     let localOrderRepairId = '';
+    let requestedSessionId = table.tableSessionId;
 
     try {
       const localOrderFromState =
@@ -1247,7 +1327,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         findOpenTableOrderForTable(bridgeOrders, table) ||
         localOrderFromState ||
         (table.currentOrderId ? findTableOrderForTable(bridgeOrders, table) : null);
-      localFallback = localOrder ? buildLocalSessionFromOrder(table, localOrder, translatedItemFallback) : null;
+      canonicalOrderRef.current = localOrder;
+      const localSession = localOrder ? buildLocalSessionFromOrder(table, localOrder, translatedItemFallback) : null;
+      // A known server check may contain only part of this source order. Its
+      // allocation/payment scope cannot be reconstructed from orders.items.
+      const remoteOrderId = (localOrder as any)?.supabase_id || (localOrder as any)?.supabaseId;
+      localFallback = localSession && isLocalSessionId(localSession.id) && !remoteOrderId ? localSession : null;
       localOrderRepairId = localOrder
         ? String(
             (localOrder as any).supabase_id ??
@@ -1339,6 +1424,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         throw new Error(tr('errors.noActiveSession', 'No active table session found for this table.'));
       }
 
+      requestedSessionId = sessionId;
       const detailResult = await posApiGet<{ success?: boolean; session?: TableSessionDetails }>(
         `/api/pos/table-sessions/${encodeURIComponent(sessionId)}`,
       );
@@ -1357,7 +1443,22 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         applySession(localFallback);
         return;
       }
+      if (requestedSessionId && !isLocalSessionId(requestedSessionId) && isRetryableTableServiceError(error)) {
+        try {
+          const cached = await getBridge().invoke('orders:get-table-session-snapshot', {
+            sessionId: requestedSessionId, tableId: table.id, orderId: table.currentOrderId || undefined,
+          });
+          if (cached?.success === true && cached.stale === true && cached.session?.id === requestedSessionId) {
+            setIsSavedSession(true);
+            applySession(cached.session);
+            return;
+          }
+        } catch (cacheError) {
+          console.warn('[TableCheckManagerModal] No valid saved scoped check:', cacheError);
+        }
+      }
       console.error('[TableCheckManagerModal] Failed to load table check:', error);
+      setLoadError(tr('errors.loadCheckFailed', 'Failed to load table check'));
       toast.error(error instanceof Error ? error.message : tr('errors.loadCheckFailed', 'Failed to load table check'));
     } finally {
       setIsLoading(false);
@@ -1477,6 +1578,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
   const openItemActions = (item: TableSessionOrderItem) => {
     setSelectedItem(item);
+    setTipAmount('0.00');
     setTransferItemId(item.id);
     setItemPayQuantity('1');
     setItemPriceValue(itemUnitPrice(item).toFixed(2));
@@ -1583,6 +1685,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
   const patchSession = async (body: Record<string, unknown>, successMessage: string) => {
     if (!session) return;
+    if (isSavedSession) return;
     if (isSessionLocalOnly) {
       toast.error(tr('errors.localSessionDetailsSyncing', 'This table check is still syncing. Refresh after sync before changing table details.'));
       return;
@@ -1686,10 +1789,15 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           });
         } catch (queueError) {
           console.warn('[TableCheckManagerModal] Failed to queue settled table close:', queueError);
+          toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
+          closeSecondaryModal();
+          return;
         }
       } else {
         console.error('[TableCheckManagerModal] Failed to close settled table:', error);
-        toast.error(error instanceof Error ? error.message : tr('errors.sessionUpdateFailed', 'Table session update failed'));
+        toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
+        closeSecondaryModal();
+        return;
       }
     }
 
@@ -1711,6 +1819,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       items?: Array<{ item: TableSessionOrderItem; itemQuantity: number; itemAmount?: number }>;
     },
   ): Promise<boolean> => {
+    if (isSavedSession) return false;
     if (!session?.active_order_id) {
       toast.error(tr('errors.noActiveOrder', 'No active order is linked to this table.'));
       return false;
@@ -1725,7 +1834,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             itemAmount: options.itemAmount,
           }]
         : [];
-    const amount = itemPaymentEntries.length > 0
+    const principal = itemPaymentEntries.length > 0
       ? Number(itemPaymentEntries.reduce((sum, entry) => {
           const quantity = Math.max(1, Number(entry.itemQuantity || 1));
           const itemAmount = entry.itemAmount !== undefined
@@ -1735,12 +1844,15 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         }, 0).toFixed(2))
       : parseMoneyInput(paymentAmount);
 
-    if (amount <= 0) {
+    if (principal <= 0) {
       toast.error(tr('errors.paymentAmountRequired', 'Enter a payment amount greater than zero.'));
       return false;
     }
-    const tipValue = parseMoneyInput(tipAmount);
-    const nextPaidAfterPayment = Number((paidTotal + amount).toFixed(2));
+    const tipValue = Math.max(0, parseMoneyInput(tipAmount));
+    // Amount inputs and item allocations describe principal; canonical receipts
+    // store the total collected, including this receipt's tip exactly once.
+    const amount = Number((principal + tipValue).toFixed(2));
+    const nextPaidAfterPayment = Number((paidTotal + principal).toFixed(2));
     const nextOutstandingAfterPayment = Number(Math.max(0, orderTotal - nextPaidAfterPayment).toFixed(2));
     const isFullySettledAfterPayment = nextOutstandingAfterPayment <= 0.01;
     const localPaymentItems: RecordPaymentParams['items'] | undefined = itemPaymentEntries.length > 0
@@ -1782,7 +1894,6 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       payment_method: method,
       amount,
       amount_cents: Math.round(amount * 100),
-      currency: 'EUR',
       cashReceived: method === 'cash' ? amount : undefined,
       changeGiven: method === 'cash' ? 0 : undefined,
       tipAmount: tipValue,
@@ -1810,7 +1921,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         if (!current?.balance) {
           return current;
         }
-        const nextPaid = Number(((Number(current.balance.paid_total || 0) + amount)).toFixed(2));
+        const nextPaid = Number(((Number(current.balance.paid_total || 0) + principal)).toFixed(2));
         const nextTip = Number(((Number(current.balance.tip_total || 0) + tipValue)).toFixed(2));
         const nextOutstanding = Number(Math.max(0, Number(current.balance.order_total || 0) - nextPaid).toFixed(2));
         return {
@@ -1900,13 +2011,36 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       toast.error(tr('errors.noActiveOrder', 'No active order is linked to this table.'));
       return;
     }
+    if (isSavedSession || !checkContainsCompleteCanonicalOrder(session, canonicalOrderRef.current)) {
+      toast.error(tr('errors.scopedItemEditUnavailable', 'Price and discount changes here require the complete unpaid, unsplit order. Paid checks need the settlement workflow; split or transferred items cannot be changed here yet.'));
+      return;
+    }
 
     setIsSaving(true);
     try {
       const bridge = getBridge();
-      const result: any = await bridge.orders.updateItems(orderId, nextItems as any);
+      const result: any = await bridge.orders.updateItems(orderId, nextItems as any, {
+        expectedVersion: session?.order?.version ?? (isSessionLocalOnly ? Number((canonicalOrderRef.current as any)?.version || 1) : undefined),
+        tableSessionId: session?.id,
+      });
       if (result?.success === false) {
         throw new Error(result.error || tr('errors.orderItemUpdateFailed', 'Order item update failed'));
+      }
+
+      if (!isSessionLocalOnly) {
+        // A known server check is displayed only from its scoped response,
+        // never from a guessed total of the replacement source-order lines.
+        if (result?.session?.id === session?.id) {
+          setSession(result.session);
+          setPaymentAmount(Number(result.session.balance?.outstanding_balance || 0).toFixed(2));
+          emitTableSessionBalanceUpdate(table?.id, result.session, guestCount);
+        } else {
+          await loadSession();
+        }
+        toast.success(successMessage);
+        closeSecondaryModal();
+        await Promise.resolve(onRefreshOrders());
+        return;
       }
 
       const nextOrderItems = nextItems.map(tableItemFromEditable);
@@ -2017,6 +2151,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   };
 
   const transferItem = async () => {
+    if (isSavedSession) return;
     if (!session || !selectedTransferItem || !targetTableId) {
       toast.error(tr('errors.selectItemAndTargetTable', 'Select an item and target table.'));
       return;
@@ -2093,6 +2228,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   };
 
   const transferBatchItems = async () => {
+    if (isSavedSession) return;
     if (!session || !targetTableId) {
       toast.error(tr('errors.selectItemAndTargetTable', 'Select an item and target table.'));
       return;
@@ -2116,6 +2252,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       ...buildTransferPricingPayload(entry.item, entry.itemQuantity),
       client_event_id: `pos-tauri-table-batch-transfer-${session.id}-${entry.item.id}-${Date.now()}-${index}`,
     }));
+    let acknowledgedTransferCount = 0;
 
     try {
       let nextSourceSession: TableSessionDetails | null = null;
@@ -2128,6 +2265,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         if (!result.success || result.data?.success === false) {
           throw new Error(result.error || result.data?.error || tr('errors.itemTransferFailed', 'Item transfer failed'));
         }
+        acknowledgedTransferCount += 1;
         nextSourceSession = result.data?.source_session || nextSourceSession;
         nextTargetSession = result.data?.target_session || nextTargetSession;
       }
@@ -2151,7 +2289,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       console.error('[TableCheckManagerModal] Batch item transfer failed:', error);
       if (isRetryableTableServiceError(error)) {
         try {
-          await Promise.all(transferPayloads.map(payload => enqueueTableItemTransfer({
+          // Keep the ambiguous request's original event ID for server dedupe,
+          // but never replay the prefix the server already acknowledged.
+          await Promise.all(transferPayloads.slice(acknowledgedTransferCount).map(payload => enqueueTableItemTransfer({
             organizationId: table?.organizationId,
             branchId: table?.branchId,
             sourceSessionId: session.id,
@@ -2245,45 +2385,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     );
   };
 
-  // The order is cancelled: its session ends and the table is freed. Forced,
-  // like the automatic close, since the cancellation may reach the server
-  // after the close; queued when the check is still syncing.
-  const releaseCancelledTable = async (tableSessionId: string) => {
-    const requestBody = {
-      action: 'close',
-      status: 'cancelled',
-      release_status: 'available',
-      force: true,
-      client_event_id: `pos-tauri-table-cancel-${tableSessionId}-${Date.now()}`,
-    };
-    const queue = () =>
-      enqueueTableSessionUpdate({
-        organizationId: table?.organizationId,
-        branchId: table?.branchId,
-        sessionId: tableSessionId,
-        payload: requestBody,
-      });
-    try {
-      if (isSessionLocalOnly) {
-        await queue();
-      } else {
-        const result = await posApiPatch<{ success?: boolean; error?: string }>(
-          `/api/pos/table-sessions/${encodeURIComponent(tableSessionId)}`,
-          requestBody,
-        );
-        if (!result.success || result.data?.success === false) {
-          throw new Error(result.error || result.data?.error || 'Table session update failed');
-        }
-      }
-    } catch (error) {
-      console.warn('[TableCheckManagerModal] Releasing the cancelled table failed; queued:', error);
-      await queue().catch((queueError) => {
-        console.warn('[TableCheckManagerModal] Queueing the cancelled table release failed:', queueError);
-      });
-    }
-  };
-
   const cancelOrderFromCheck = async () => {
+    if (isSavedSession) return;
     const orderId = session?.active_order_id;
     const tableSessionId = session?.id;
     const reason = cancelReason.trim();
@@ -2292,9 +2395,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     }
     setIsSaving(true);
     try {
-      await runCancelApproval({
+      const result = await runCancelApproval({
         scope: 'cash_drawer_control',
-        action: () => getBridge().orders.cancelWithApproval({ orderId, reason }),
+        action: (managerPin) => getBridge().orders.cancelWithApproval({ orderId, reason, tableSessionId, managerPin }),
         title: String(t('tableRelease.cancelApprovalTitle', {
           defaultValue: 'Approve cancelling the order',
         })),
@@ -2302,6 +2405,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           defaultValue: 'Enter the cashier or manager PIN. Nothing is charged.',
         })),
       });
+      emitCanonicalTableCancellation(result, table!.id, orderId, tableSessionId);
     } catch (error) {
       setIsSaving(false);
       if (isOwingCancelDismissed(error)) {
@@ -2310,18 +2414,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       toast.error(owingCancelFailureMessage(error, t));
       return;
     }
-    await releaseCancelledTable(tableSessionId);
     setIsSaving(false);
     setCancelReason('');
     toast.success(String(t('tableRelease.orderCancelled', {
       defaultValue: 'Order cancelled and table released.',
     })));
-    emitCompatEvent('table-session-settled', {
-      tableId: table?.id,
-      tableSessionId,
-      orderId,
-      releaseStatus: 'available',
-    });
     closeSecondaryModal();
     onClose();
     void Promise.all([
@@ -2400,13 +2497,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className={`rounded-lg border px-3 py-1 text-xs font-semibold ${
+            {session ? <span className={`rounded-lg border px-3 py-1 text-xs font-semibold ${
               outstanding > 0
                 ? 'liquid-glass-modal-warning'
                 : 'liquid-glass-modal-success'
             }`}>
               {outstanding > 0 ? tr('status.open', 'Open') : tr('status.settled', 'Settled')}
-            </span>
+            </span> : null}
             <button
               type="button"
               onClick={onClose}
@@ -2418,6 +2515,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           </div>
         </div>
 
+        {isSavedSession ? <div role="status" className="px-5 py-3 text-sm liquid-glass-modal-text-muted">
+          {tr('messages.savedCheckReadOnly', 'Saved check — amounts may be stale. Reconnect to collect payment or make changes.')}
+        </div> : null}
         {isLoading ? (
           <div className="flex flex-1 items-center justify-center liquid-glass-modal-text-muted">
             <Loader2 className="mr-2 h-6 w-6 animate-spin" />
@@ -2425,7 +2525,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           </div>
         ) : !session ? (
           <div className="flex flex-1 items-center justify-center liquid-glass-modal-text-muted">
-            {tr('messages.noOpenCheck', 'No open check found for this table.')}
+            {loadError || tr('messages.noOpenCheck', 'No open check found for this table.')}
           </div>
         ) : (
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-hidden p-5 lg:grid-cols-[1fr_360px]">
@@ -2447,7 +2547,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       {tr('actions.clearSelection', 'Clear')}
                     </button>
                   ) : null}
-                  <ActionButton onClick={() => onAddItems(table, guestCount, session)} tone="card" className="min-h-10">
+                  <ActionButton onClick={() => onAddItems(table, guestCount, session)} disabled={isSavedSession} tone="card" className="min-h-10">
                     <Plus className="h-4 w-4" />
                     {tr('actions.addItems', 'Add Items')}
                   </ActionButton>
@@ -2670,11 +2770,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               ) : null}
 
               <div className="grid grid-cols-2 gap-2">
-                <ActionButton onClick={() => openPayTableModal()} tone="card" disabled={outstanding <= 0}>
+                <ActionButton onClick={() => openPayTableModal()} tone="card" disabled={isSavedSession || outstanding <= 0}>
                   <HandCoins className="h-4 w-4" />
                   {tr('actions.pay', 'Pay')}
                 </ActionButton>
-                <ActionButton onClick={() => openPayTableModal(outstanding / Math.max(1, guestCount))} disabled={outstanding <= 0}>
+                <ActionButton onClick={() => openPayTableModal(outstanding / Math.max(1, guestCount))} disabled={isSavedSession || outstanding <= 0}>
                   <Users className="h-4 w-4" />
                   {tr('actions.perPerson', 'Per Person')}
                 </ActionButton>
@@ -2696,7 +2796,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 <p className="mb-2 text-xs font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
                   {tr('labels.settlement', 'Settlement')}
                 </p>
-                <ActionButton onClick={closeTable} disabled={isSaving || outstanding > 0} tone="cash" className="w-full">
+                <ActionButton onClick={closeTable} disabled={isSaving || isSavedSession || outstanding > 0} tone="cash" className="w-full">
                   <Check className="h-4 w-4" />
                   {tr('actions.closeTable', 'Close Table')}
                 </ActionButton>
@@ -2714,7 +2814,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                         setSecondaryModal('cancel-order');
                       })();
                     }}
-                    disabled={isSaving}
+                    disabled={isSaving || isSavedSession}
                     tone="warn"
                     className="mt-2 w-full"
                   >
@@ -2773,12 +2873,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   {tr('actions.perPerson', 'Per Person')}
                 </ActionButton>
               </div>
+              <MetricTile label={tr('labels.total', 'Total')} value={money(Number((parseMoneyInput(paymentAmount) + Math.max(0, parseMoneyInput(tipAmount))).toFixed(2)))} />
               <div className="grid grid-cols-2 gap-2">
-                <ActionButton onClick={() => void recordPayment('cash')} disabled={isSaving} tone="cash">
+                <ActionButton onClick={() => void recordPayment('cash')} disabled={isSaving || isSavedSession} tone="cash">
                   <Banknote className="h-4 w-4" />
                   {tr('paymentMethods.cash', 'Cash')}
                 </ActionButton>
-                <ActionButton onClick={() => void recordPayment('card')} disabled={isSaving} tone="card">
+                <ActionButton onClick={() => void recordPayment('card')} disabled={isSaving || isSavedSession} tone="card">
                   <CreditCard className="h-4 w-4" />
                   {tr('paymentMethods.card', 'Card')}
                 </ActionButton>
@@ -2825,12 +2926,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   </div>
                 ))}
               </div>
+              <MetricTile label={tr('labels.total', 'Total')} value={money(Number((batchSelectedTotal + Math.max(0, parseMoneyInput(tipAmount))).toFixed(2)))} />
               <div className="grid grid-cols-2 gap-2">
-                <ActionButton onClick={() => void recordBatchPayment('cash')} disabled={isSaving || batchSelectedTotal <= 0} tone="cash">
+                <ActionButton onClick={() => void recordBatchPayment('cash')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="cash">
                   <Banknote className="h-4 w-4" />
                   {tr('paymentMethods.cash', 'Cash')}
                 </ActionButton>
-                <ActionButton onClick={() => void recordBatchPayment('card')} disabled={isSaving || batchSelectedTotal <= 0} tone="card">
+                <ActionButton onClick={() => void recordBatchPayment('card')} disabled={isSaving || isSavedSession || batchSelectedTotal <= 0} tone="card">
                   <CreditCard className="h-4 w-4" />
                   {tr('paymentMethods.card', 'Card')}
                 </ActionButton>
@@ -2876,7 +2978,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   </div>
                 ))}
               </div>
-              <ActionButton onClick={() => void transferBatchItems()} disabled={isSaving || !targetTableId} tone="warn" className="w-full">
+              <ActionButton onClick={() => void transferBatchItems()} disabled={isSaving || isSavedSession || !targetTableId} tone="warn" className="w-full">
                 <MoveRight className="h-4 w-4" />
                 {tr('actions.moveSelectedQuantities', 'Move Selected Quantities')}
               </ActionButton>
@@ -2927,7 +3029,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   className={glassInputClass}
                 />
               </FormField>
-              <ActionButton onClick={applyBatchItemDiscount} disabled={isSaving} tone="cash" className="w-full">
+              <ActionButton onClick={applyBatchItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
                 <Check className="h-4 w-4" />
                 {tr('actions.applyDiscountToSelected', 'Apply to Selected')}
               </ActionButton>
@@ -3003,7 +3105,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                         itemQuantity: Math.min(Number(itemPayQuantity || 1), selectedItemAvailable || 1),
                         itemAmount: selectedItemPayAmount,
                       })}
-                      disabled={isSaving}
+                      disabled={isSaving || isSavedSession}
                       tone="cash"
                     >
                       <Banknote className="h-4 w-4" />
@@ -3015,7 +3117,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                         itemQuantity: Math.min(Number(itemPayQuantity || 1), selectedItemAvailable || 1),
                         itemAmount: selectedItemPayAmount,
                       })}
-                      disabled={isSaving}
+                      disabled={isSaving || isSavedSession}
                       tone="card"
                     >
                       <CreditCard className="h-4 w-4" />
@@ -3036,7 +3138,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       className={glassInputClass}
                     />
                   </FormField>
-                  <ActionButton onClick={applySelectedItemPrice} disabled={isSaving} tone="card" className="w-full">
+                  <ActionButton onClick={applySelectedItemPrice} disabled={isSaving || isSavedSession} tone="card" className="w-full">
                     <Check className="h-4 w-4" />
                     {tr('actions.savePrice', 'Save Price')}
                   </ActionButton>
@@ -3076,7 +3178,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       className={glassInputClass}
                     />
                   </FormField>
-                  <ActionButton onClick={applySelectedItemDiscount} disabled={isSaving} tone="cash" className="w-full">
+                  <ActionButton onClick={applySelectedItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
                     <Check className="h-4 w-4" />
                     {tr('actions.applyDiscount', 'Apply Discount')}
                   </ActionButton>
@@ -3121,7 +3223,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 </FormField>
                 <MetricTile label={tr('labels.available', 'Available')} value={String(selectedTransferAvailable)} />
               </div>
-              <ActionButton onClick={() => void transferItem()} disabled={isSaving || !targetTableId} tone="warn" className="w-full">
+              <ActionButton onClick={() => void transferItem()} disabled={isSaving || isSavedSession || !targetTableId} tone="warn" className="w-full">
                 <MoveRight className="h-4 w-4" />
                 {tr('actions.moveQuantity', 'Move Quantity')}
               </ActionButton>
@@ -3151,7 +3253,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   { action: 'move_table', target_table_id: targetTableId, release_source_tables: true },
                   tr('messages.tableMoved', 'Table moved'),
                 )}
-                disabled={isSaving || !targetTableId}
+                disabled={isSaving || isSavedSession || !targetTableId}
                 tone="card"
                 className="w-full"
               >
@@ -3185,7 +3287,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   { action: 'merge_table', table_ids: [mergeTableId] },
                   tr('messages.tableMerged', 'Table merged into check'),
                 )}
-                disabled={isSaving || !mergeTableId}
+                disabled={isSaving || isSavedSession || !mergeTableId}
                 tone="purple"
                 className="w-full"
               >
@@ -3248,7 +3350,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   ))
                 )}
               </div>
-              <ActionButton onClick={saveWaiterAssignment} disabled={isSaving} tone="card" className="w-full">
+              <ActionButton onClick={saveWaiterAssignment} disabled={isSaving || isSavedSession} tone="card" className="w-full">
                 <Check className="h-4 w-4" />
                 {tr('actions.saveWaiter', 'Save Waiter')}
               </ActionButton>
@@ -3286,7 +3388,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 onClick={() => {
                   void cancelOrderFromCheck();
                 }}
-                disabled={isSaving || cancelReason.trim().length === 0}
+                disabled={isSaving || isSavedSession || cancelReason.trim().length === 0}
                 tone="warn"
                 className="w-full"
               >
@@ -3317,7 +3419,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <Plus className="h-5 w-5" />
                 </ActionButton>
               </div>
-              <ActionButton onClick={saveGuestCount} disabled={isSaving} tone="card" className="w-full">
+              <ActionButton onClick={saveGuestCount} disabled={isSaving || isSavedSession} tone="card" className="w-full">
                 <Check className="h-4 w-4" />
                 {tr('actions.saveCovers', 'Save Covers')}
               </ActionButton>

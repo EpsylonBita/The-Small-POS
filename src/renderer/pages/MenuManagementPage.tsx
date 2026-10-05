@@ -306,7 +306,7 @@ export const MenuManagementPage: React.FC = () => {
   const renderMenuItemPrice = (item: MenuItem) => (
     <>
       {item.is_customizable ? t('menu.item.from') : ''}
-      {formatCurrency(getMenuItemDisplayPrice(item), 'EUR', language)}
+      {formatCurrency(getMenuItemDisplayPrice(item), undefined, language)}
     </>
   );
 
@@ -495,7 +495,7 @@ export const MenuManagementPage: React.FC = () => {
               </div>
               {ingredient.price != null && ingredient.price > 0 && (
                 <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  {formatCurrency(ingredient.price, 'EUR', language)}
+                  {formatCurrency(ingredient.price, undefined, language)}
                 </p>
               )}
             </div>

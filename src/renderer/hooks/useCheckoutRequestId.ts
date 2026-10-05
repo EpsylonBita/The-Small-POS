@@ -18,7 +18,11 @@ const newCheckoutRequestId = (): string =>
  */
 export function useCheckoutRequestId() {
   const idRef = useRef<string | null>(null);
-  const take = useCallback((): string => {
+  const take = useCallback((persistedId?: string): string => {
+    if (persistedId) {
+      if (idRef.current && idRef.current !== persistedId) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
+      idRef.current = persistedId;
+    }
     if (!idRef.current) {
       idRef.current = newCheckoutRequestId();
     }
@@ -27,7 +31,11 @@ export function useCheckoutRequestId() {
   const reset = useCallback(() => {
     idRef.current = null;
   }, []);
-  return { take, reset };
+  const restore = useCallback((persistedId: string) => {
+    if (!persistedId.trim()) throw new Error('CHECKOUT_REQUEST_ID_REQUIRED');
+    idRef.current = persistedId;
+  }, []);
+  return { take, reset, restore };
 }
 
 export default useCheckoutRequestId;

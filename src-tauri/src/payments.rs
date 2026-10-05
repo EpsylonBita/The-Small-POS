@@ -434,6 +434,8 @@ pub(crate) struct PaymentInsertOptions {
     /// Record the payment set aside for review instead of as a collection
     /// (`payment_review`): money that moved but found the order covered.
     pub set_aside: Option<SetAsideInsert>,
+    /// Internal platform bookkeeping, never deserialized from renderer input.
+    platform_settlement: bool,
 }
 
 /// How a payment recorded set aside found its order (see
@@ -460,6 +462,7 @@ impl PaymentInsertOptions {
             created_at: None,
             updated_at: None,
             set_aside: None,
+            platform_settlement: false,
         }
     }
 
@@ -476,6 +479,7 @@ impl PaymentInsertOptions {
             created_at: None,
             updated_at: None,
             set_aside: None,
+            platform_settlement: false,
         }
     }
 
@@ -495,6 +499,17 @@ impl PaymentInsertOptions {
             created_at: None,
             updated_at: None,
             set_aside: Some(set_aside),
+            platform_settlement: false,
+        }
+    }
+
+    fn platform_settlement() -> Self {
+        Self {
+            platform_settlement: true,
+            update_cash_drawer: false,
+            sync_order_owner_with_payment: false,
+            mark_order_sync_pending_on_owner_change: false,
+            ..Self::local()
         }
     }
 }
@@ -657,13 +672,23 @@ pub(crate) fn prepare_outstanding_collection_payload(
     if outstanding_cents <= 0 {
         return Err("Order has no outstanding balance to collect".to_string());
     }
-    let outstanding_amount = Cents::new(outstanding_cents).to_f64_dp2();
+    // `amount` is the gross receipt, including its own tip. Only the
+    // merchandise principal settles the balance captured above.
+    let tip_cents = Cents::round_half_even(
+        num_field(payload, "tipAmount")
+            .or_else(|| num_field(payload, "tip_amount"))
+            .unwrap_or(0.0)
+            .max(0.0),
+    )
+    .as_i64();
+    let gross_cents = outstanding_cents + tip_cents;
+    let outstanding_amount = Cents::new(gross_cents).to_f64_dp2();
     if method == "twint"
         && payload
             .get("amount")
             .and_then(Value::as_f64)
             .map(|amount| Cents::round_half_even(amount).as_i64())
-            != Some(outstanding_cents)
+            != Some(gross_cents)
     {
         return Err("TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED".into());
     }
@@ -678,7 +703,7 @@ pub(crate) fn prepare_outstanding_collection_payload(
             .filter(|value| value.is_finite())
             .ok_or("Missing cashReceived for outstanding cash collection")?;
         let cash_received_cents = Cents::round_half_even(cash_received).as_i64();
-        if cash_received_cents < outstanding_cents {
+        if cash_received_cents < gross_cents {
             return Err(format!(
                 "Cash received {:.2} is below outstanding balance {:.2}",
                 Cents::new(cash_received_cents).to_f64_dp2(),
@@ -691,7 +716,7 @@ pub(crate) fn prepare_outstanding_collection_payload(
         );
         payment.insert(
             "changeGiven".to_string(),
-            serde_json::json!(Cents::new(cash_received_cents - outstanding_cents).to_f64_dp2()),
+            serde_json::json!(Cents::new(cash_received_cents - gross_cents).to_f64_dp2()),
         );
     } else {
         payment.remove("cashReceived");
@@ -757,6 +782,14 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         .or_else(|| num_field(payload, "tip_amount"))
         .unwrap_or(0.0)
         .max(0.0);
+    // Outstanding collection replaces the provisional UI gross amount with
+    // due principal + tip before persistence or dispatch. Its final principal
+    // guard still validates the prepared receipt.
+    if !payload_collects_outstanding_balance(payload)
+        && Cents::round_half_even(tip_amount).as_i64() > Cents::round_half_even(amount).as_i64()
+    {
+        return Err("Tip amount cannot exceed the gross payment amount".into());
+    }
     let requested_tip_recipient_role = str_field(payload, "tipRecipientRole")
         .or_else(|| str_field(payload, "tip_recipient_role"))
         .map(|value| value.trim().to_ascii_lowercase())
@@ -820,7 +853,7 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         order_id,
         method,
         amount,
-        currency: str_field(payload, "currency").unwrap_or_else(|| "EUR".to_string()),
+        currency: str_field(payload, "currency").unwrap_or_default(),
         tip_amount,
         cash_received,
         change_given,
@@ -1009,7 +1042,17 @@ pub(crate) fn load_net_paid_for_order(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<f64, String> {
-    load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"))
+    load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"), false)
+        .map(|cents| Cents::new(cents).to_f64_dp2())
+}
+
+/// Merchandise coverage after each receipt's own tip and effective refunds.
+/// Gross received-money readers remain separate for reporting and cancellation.
+pub(crate) fn load_principal_paid_for_order(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<f64, String> {
+    load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"), true)
         .map(|cents| Cents::new(cents).to_f64_dp2())
 }
 
@@ -1166,7 +1209,7 @@ pub(crate) fn load_store_taken_net_paid_cents(
         counted_completed_payment_sql("op"),
         platform_settlement_row_sql("op")
     );
-    load_net_paid_cents_matching(conn, order_id, &filter)
+    load_net_paid_cents_matching(conn, order_id, &filter, false)
 }
 
 /// The order's completed money the SERVER already holds, net of refunds, in
@@ -1182,7 +1225,7 @@ pub(crate) fn load_server_held_net_paid_cents(
         counted_completed_payment_sql("op"),
         server_held_payment_sql("op")
     );
-    load_net_paid_cents_matching(conn, order_id, &filter)
+    load_net_paid_cents_matching(conn, order_id, &filter, false)
 }
 
 /// Completed money net of refunds over the rows `row_filter` (an SQL
@@ -1191,8 +1234,14 @@ fn load_net_paid_cents_matching(
     conn: &rusqlite::Connection,
     order_id: &str,
     row_filter: &str,
+    exclude_tips: bool,
 ) -> Result<i64, String> {
     let load_err = |e: rusqlite::Error| format!("load net paid for order {order_id}: {e}");
+    let tip_cents_sql = if exclude_tips {
+        "MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)"
+    } else {
+        "0"
+    };
     let ordinary_cents: i64 = conn
         .query_row(
             // W4b: aggregate using cents-with-real-fallback shim. The shim
@@ -1202,13 +1251,8 @@ fn load_net_paid_cents_matching(
             // the REAL columns are dropped.
             &format!(
                 "SELECT COALESCE(SUM(
-                    CASE
-                        WHEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                             > COALESCE(refunds.refunded_cents, 0)
-                            THEN COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                                 - COALESCE(refunds.refunded_cents, 0)
-                        ELSE 0
-                    END
+                    MAX(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                        - COALESCE(refunds.refunded_cents, 0) - {tip_cents_sql}, 0)
                 ), 0)
                  FROM order_payments op
                  LEFT JOIN (
@@ -1237,7 +1281,7 @@ fn load_net_paid_cents_matching(
                         FROM payment_adjustments pa
                         WHERE pa.payment_id = op.id
                           AND pa.adjustment_type = 'refund'
-                    ), 0)
+                    ), 0), {tip_cents_sql}
              FROM order_payments op
              WHERE op.order_id = ?1
                AND {row_filter}
@@ -1250,12 +1294,13 @@ fn load_net_paid_cents_matching(
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })
         .map_err(load_err)?;
     let mut net_cents = ordinary_cents;
     for row in rows {
-        let (payment_id, gross_cents, refunded_cents) = row.map_err(load_err)?;
+        let (payment_id, gross_cents, refunded_cents, tip_cents) = row.map_err(load_err)?;
         let reversed_cents = effective_reversed_cents(
             conn,
             &payment_id,
@@ -1264,7 +1309,7 @@ fn load_net_paid_cents_matching(
             gross_cents,
             refunded_cents,
         )?;
-        net_cents += (gross_cents - reversed_cents).max(0);
+        net_cents += (gross_cents - reversed_cents - tip_cents).max(0);
     }
     Ok(net_cents)
 }
@@ -1309,7 +1354,7 @@ pub(crate) fn load_order_payment_balance_snapshot(
             |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
         )
         .map_err(|e| format!("load order total for payment balance snapshot {order_id}: {e}"))?;
-    let net_paid = load_net_paid_for_order(conn, order_id)?;
+    let net_paid = load_principal_paid_for_order(conn, order_id)?;
     let completed_payment_count = conn
         .query_row(
             &format!(
@@ -1347,7 +1392,8 @@ fn load_completed_payment_ledger_generation(
                         FROM payment_adjustments pa
                         WHERE pa.payment_id = op.id
                           AND pa.adjustment_type = 'refund'
-                    ), 0)
+                    ), 0),
+                    MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)
              FROM order_payments op
              WHERE op.order_id = ?1
                AND $COUNTED
@@ -1364,20 +1410,22 @@ fn load_completed_payment_ledger_generation(
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         })
         .map_err(|error| format!("query payment-ledger generation for {order_id}: {error}"))?;
 
     let mut digest = Sha256::new();
+    // Keep the original zero-tip generation stable for already held receipts.
     digest.update(b"order-settlement-v1\0");
     digest.update((order_id.len() as u64).to_le_bytes());
     digest.update(order_id.as_bytes());
     digest.update(order_total_cents.to_le_bytes());
     for row in rows {
-        let (payment_id, method, gross_cents, reference, origin, refunded_cents) =
-            row.map_err(|error| {
-                format!("read completed payment for ledger generation {order_id}: {error}")
-            })?;
+        let (payment_id, method, gross_cents, reference, origin, refunded_cents, tip_cents) = row
+            .map_err(
+            |error| format!("read completed payment for ledger generation {order_id}: {error}"),
+        )?;
         // A gift row fingerprints its effective reversal, so a newly proven
         // return floor invalidates a held settlement; other rows hash as before.
         let reversed_cents = effective_reversed_cents(
@@ -1399,6 +1447,10 @@ fn load_completed_payment_ledger_generation(
         .map_err(|error| format!("encode payment-ledger generation: {error}"))?;
         digest.update((encoded.len() as u64).to_le_bytes());
         digest.update(encoded);
+        if tip_cents > 0 {
+            digest.update(b"receipt-tip-cents\0");
+            digest.update(tip_cents.to_le_bytes());
+        }
     }
     let finalized = digest.finalize();
     let mut generation = [0_u8; 32];
@@ -1459,12 +1511,12 @@ fn validate_payment_amount_against_outstanding(
     // path required (Wave 2a C3) goes away because integer comparison
     // is exact by construction. Both sides round half-even at the
     // f64-to-Cents boundary, then compare as i64.
-    let input_amount_cents = Cents::round_half_even(input.amount).as_i64();
+    let input_amount_cents = payment_principal_cents(input)?;
     let outstanding_cents = Cents::round_half_even(snapshot.outstanding_amount).as_i64();
-    if input_amount_cents > outstanding_cents {
+    if outstanding_cents <= 0 || input_amount_cents > outstanding_cents {
         return Err(format!(
             "Payment amount {:.2} exceeds outstanding balance {:.2} for order {} (total {:.2}, settled {:.2})",
-            input.amount,
+            Cents::new(input_amount_cents).to_f64_dp2(),
             snapshot.outstanding_amount,
             input.order_id,
             snapshot.order_total,
@@ -1473,6 +1525,15 @@ fn validate_payment_amount_against_outstanding(
     }
 
     Ok(())
+}
+
+fn payment_principal_cents(input: &PaymentRecordInput) -> Result<i64, String> {
+    let gross = Cents::round_half_even(input.amount).as_i64();
+    let tip = Cents::round_half_even(input.tip_amount.max(0.0)).as_i64();
+    if tip > gross {
+        return Err("Tip amount cannot exceed the gross payment amount".into());
+    }
+    Ok((gross - tip).max(0))
 }
 
 /// Derive the effective payment method for an order from its completed
@@ -1805,7 +1866,16 @@ pub(crate) fn server_ledger_backs_claimed_status(
     if order_is_folio_charged(conn, order_id)? {
         return Ok(true);
     }
-    let held_cents = load_server_held_net_paid_cents(conn, order_id)?;
+    let held_cents = load_net_paid_cents_matching(
+        conn,
+        order_id,
+        &format!(
+            "{} AND {}",
+            counted_completed_payment_sql("op"),
+            server_held_payment_sql("op")
+        ),
+        true,
+    )?;
     Ok(match claimed {
         "paid" => held_cents >= order_total_cents,
         _ => held_cents > 0,
@@ -1961,11 +2031,240 @@ fn resolve_tip_recipient(
     }
 }
 
+fn retained_currency_matches_input(
+    conn: &Connection,
+    entry: &crate::unsaved_payments::UnsavedChargedPayment,
+    input: &PaymentRecordInput,
+) -> Result<bool, String> {
+    let same_order = entry.order_id == input.order_id
+        || (entry.is_new_order_checkout()
+            && conn
+                .query_row(
+                    "SELECT client_request_id FROM orders WHERE id = ?1",
+                    params![input.order_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+                .flatten()
+                .as_deref()
+                == Some(entry.order_id.as_str()));
+    if !same_order
+        || entry.method != input.method
+        || entry.amount_cents != Cents::round_half_even(input.amount).as_i64()
+    {
+        return Ok(false);
+    }
+    let mut payload = if entry.is_new_order_checkout() {
+        entry
+            .request
+            .get("initialPayment")
+            .or_else(|| entry.request.get("initial_payment"))
+            .cloned()
+            .ok_or("PAYMENT_RECOVERY_IDENTITY_MISMATCH")?
+    } else {
+        entry.request.clone()
+    };
+    payload
+        .as_object_mut()
+        .ok_or("PAYMENT_RECOVERY_IDENTITY_MISMATCH")?
+        .insert("orderId".into(), serde_json::json!(input.order_id));
+    let original = build_payment_record_input(&payload)?;
+    Ok(original.tip_amount == input.tip_amount
+        && original.transaction_ref == input.transaction_ref
+        && original.discount_amount == input.discount_amount
+        && original.terminal_device_id == input.terminal_device_id)
+}
+
+/// Resolve before charging and again inside the durable write. Already approved
+/// terminal money uses the original ECR row, even after the store country changes.
+pub(crate) fn resolve_local_payment_currency(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+) -> Result<String, String> {
+    use crate::fiscal::payload_builder::{normalize_currency_code, resolve_order_payment_currency};
+    if let Some(reference) = input.transaction_ref.as_deref() {
+        let original: Option<(String, Option<String>, String, i64, String)> = conn.query_row(
+            "SELECT currency, order_id, transaction_type, amount, device_id FROM ecr_transactions WHERE id = ?1 AND status = 'approved' LIMIT 1",
+            params![reference], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).optional().map_err(|error| format!("read approved payment currency: {error}"))?;
+        if let Some((currency, original_order, kind, cents, device)) = original {
+            let client_request_id: Option<String> = conn
+                .query_row(
+                    "SELECT client_request_id FROM orders WHERE id = ?1",
+                    params![input.order_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+                .flatten();
+            let same_order = original_order.as_deref().is_some_and(|original| {
+                original == input.order_id
+                    || client_request_id.as_deref() == Some(original)
+                    || (kind == "fiscal_receipt"
+                        && original
+                            .starts_with(&format!("{}:collect-outstanding:", input.order_id)))
+            });
+            if !same_order
+                || (kind == "sale"
+                    && (input.method != "card"
+                        || cents != Cents::round_half_even(input.amount).as_i64()
+                        || input
+                            .terminal_device_id
+                            .as_deref()
+                            .is_some_and(|requested| requested != device)))
+                || !matches!(kind.as_str(), "sale" | "fiscal_receipt")
+            {
+                return Err("PAYMENT_RECOVERY_IDENTITY_MISMATCH".into());
+            }
+            return normalize_currency_code(&currency)
+                .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string());
+        }
+    }
+    // A durable recovery record is evidence of money already confirmed. Its
+    // original key, order, method, amount, tip and reference must still match.
+    if let Some(key) = input.idempotency_key.as_deref() {
+        if let Some(entry) = crate::unsaved_payments::load(conn, key)? {
+            if retained_currency_matches_input(conn, &entry, input)? {
+                return entry
+                    .currency
+                    .as_deref()
+                    .and_then(normalize_currency_code)
+                    .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string());
+            }
+            return Err("PAYMENT_RECOVERY_IDENTITY_MISMATCH".into());
+        }
+    }
+    if let Some(key) = input.idempotency_key.as_deref() {
+        let original: Option<(String, String, i64, i64, String, Option<String>)> = conn.query_row(
+            "SELECT order_id, method, COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER)), COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0), currency, transaction_ref FROM order_payments WHERE idempotency_key = ?1 AND status = 'completed' LIMIT 1",
+            params![key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        ).optional().map_err(|error| format!("read original payment currency: {error}"))?;
+        if let Some((order, method, amount, tip, currency, reference)) = original {
+            if order != input.order_id
+                || method != input.method
+                || amount != Cents::round_half_even(input.amount).as_i64()
+                || tip != Cents::round_half_even(input.tip_amount).as_i64()
+                || reference != input.transaction_ref
+            {
+                // Currency resolution runs before the tender-specific replay
+                // checks. Preserve TWINT's established conflict contract here.
+                return Err(if input.method == "twint" {
+                    "TWINT_IDEMPOTENCY_CONFLICT"
+                } else {
+                    "PAYMENT_RECOVERY_IDENTITY_MISMATCH"
+                }
+                .into());
+            }
+            return normalize_currency_code(&currency)
+                .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string());
+        }
+    }
+    // A retry of a reserved fiscal checkout has an immutable currency even
+    // when the response/ledger write was interrupted before a ref reached UI.
+    let fiscal_currency: Option<String> = conn.query_row(
+        "SELECT currency FROM ecr_transactions WHERE order_id = ?1
+         AND transaction_type = 'fiscal_receipt' AND status IN ('pending','processing','timeout','approved')
+         ORDER BY created_at DESC LIMIT 1",
+        params![input.order_id], |row| row.get(0),
+    ).optional().map_err(|error| format!("read original fiscal currency: {error}"))?;
+    if let Some(currency) = fiscal_currency {
+        return normalize_currency_code(&currency)
+            .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string());
+    }
+    if input.payment_origin == "terminal" {
+        // External approved terminal evidence has its own immutable unit.
+        if let Some(code) = normalize_currency_code(&input.currency) {
+            return Ok(code);
+        }
+        return Err("PAYMENT_CURRENCY_UNAVAILABLE".into());
+    }
+    // New money is admitted only in its order and owning shift's recorded unit.
+    // Approved ECR/fiscal originals and durable recovery journals returned above.
+    let (order_branch, order_shift): (String, Option<String>) = conn
+        .query_row(
+            "SELECT COALESCE(branch_id, ''), staff_shift_id FROM orders WHERE id = ?1",
+            params![input.order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("read fresh payment operating scope: {error}"))?;
+    let order_currency =
+        crate::shifts::recorded_operating_currency(conn, "orders", &input.order_id)?;
+    let ledger_currency = resolve_order_payment_currency(conn, &input.order_id)?;
+    if order_currency
+        .as_ref()
+        .zip(ledger_currency.as_ref())
+        .is_some_and(|(order, ledger)| order != ledger)
+    {
+        return Err("ORDER_CURRENCY_MISMATCH".to_string());
+    }
+    let currency = order_currency
+        .or(ledger_currency)
+        .ok_or_else(|| "ORDER_CURRENCY_UNAVAILABLE".to_string())?;
+    if crate::shifts::require_operating_currency(conn, &order_branch)? != currency {
+        return Err("ORDER_CURRENCY_MISMATCH".to_string());
+    }
+    let payment_shift = input.requested_staff_shift_id.clone().or(order_shift).or_else(|| conn.query_row(
+        "SELECT id FROM staff_shifts WHERE branch_id = ?1 AND status = 'active' AND role_type IN ('cashier', 'manager') ORDER BY check_in_time DESC LIMIT 1",
+        params![order_branch], |row| row.get::<_, String>(0),
+    ).optional().ok().flatten());
+    let payment_shift = payment_shift.ok_or_else(|| "SHIFT_CURRENCY_UNAVAILABLE".to_string())?;
+    if crate::shifts::require_shift_operating_currency(conn, &payment_shift)? != currency {
+        return Err("SHIFT_CURRENCY_MISMATCH".to_string());
+    }
+    if !input.currency.trim().is_empty()
+        && normalize_currency_code(&input.currency).as_deref() != Some(currency.as_str())
+    {
+        return Err("PAYMENT_CURRENCY_MISMATCH".into());
+    }
+    Ok(currency)
+}
+
+pub(crate) fn prepare_local_payment_currency(
+    conn: &Connection,
+    payload: &mut Value,
+) -> Result<(), String> {
+    let mut input = build_payment_record_input(payload)?;
+    input.order_id = resolve_order_id(conn, &input.order_id).unwrap_or(input.order_id);
+    let currency = resolve_local_payment_currency(conn, &input)?;
+    payload
+        .as_object_mut()
+        .ok_or("Invalid payment payload")?
+        .insert("currency".to_string(), Value::String(currency));
+    Ok(())
+}
+
 pub(crate) fn record_payment_in_connection(
     conn: &Connection,
     input: &PaymentRecordInput,
     options: &PaymentInsertOptions,
 ) -> Result<RecordedPayment, String> {
+    let mut resolved_input = input.clone();
+    if options.platform_settlement {
+        let kind = platform_settlement_kind(conn, &input.order_id)
+            .ok_or("PLATFORM_SETTLEMENT_IDENTITY_INVALID")?;
+        if input.method != "other"
+            || input.payment_origin != "manual"
+            || input.transaction_ref.as_deref()
+                != Some(kind.transaction_ref(&input.order_id).as_str())
+            || input.idempotency_key.as_deref()
+                != Some(format!("platform-settle-{}", input.order_id).as_str())
+            || input.tip_amount != 0.0
+        {
+            return Err("PLATFORM_SETTLEMENT_IDENTITY_INVALID".into());
+        }
+        let original =
+            crate::fiscal::payload_builder::resolve_order_document_currency(conn, &input.order_id)?;
+        if input.currency != original {
+            return Err("PAYMENT_CURRENCY_MISMATCH".into());
+        }
+        resolved_input.currency = original;
+    } else if options.enqueue_sync {
+        resolved_input.currency = resolve_local_payment_currency(conn, input)?;
+    } else if crate::fiscal::payload_builder::normalize_currency_code(&input.currency).is_none() {
+        return Err("PAYMENT_CURRENCY_UNAVAILABLE".into());
+    }
+    let input = &resolved_input;
     if input.method == "twint" && options.enqueue_sync {
         if !crate::db::order_payments_support_twint(conn)? {
             return Err("TWINT_PAYMENT_CAPABILITY_UNAVAILABLE".into());
@@ -1975,8 +2274,6 @@ pub(crate) fn record_payment_in_connection(
             .as_ref()
             .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
         if input.currency != "CHF"
-            || crate::fiscal::payload_builder::resolve_store_currency_code(conn).as_deref()
-                != Some("CHF")
             || input.payment_origin != "manual"
             || metadata.as_object().is_none_or(|fields| fields.len() != 4)
             || input
@@ -2023,9 +2320,28 @@ pub(crate) fn record_payment_in_connection(
                 sync_state: "pending".into(),
             });
         }
+        let retained = input
+            .idempotency_key
+            .as_deref()
+            .map(|key| crate::unsaved_payments::load(conn, key))
+            .transpose()?
+            .flatten();
+        let original_confirmed = match retained.as_ref() {
+            Some(entry) if entry.is_manual_twint() && entry.currency.as_deref() == Some("CHF") => {
+                retained_currency_matches_input(conn, entry, input)?
+            }
+            _ => false,
+        };
+        if crate::fiscal::payload_builder::resolve_store_currency_code(conn).as_deref()
+            != Some("CHF")
+            && !original_confirmed
+        {
+            return Err("TWINT_MANUAL_CONFIRMATION_REQUIRED".into());
+        }
         let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
-        if Cents::round_half_even(input.amount).as_i64()
-            > Cents::round_half_even(balance.outstanding_amount).as_i64()
+        if balance.outstanding_amount <= 0.0
+            || payment_principal_cents(input)?
+                > Cents::round_half_even(balance.outstanding_amount).as_i64()
         {
             return Err("TWINT_AMOUNT_EXCEEDS_OUTSTANDING".into());
         }
@@ -2186,7 +2502,11 @@ pub(crate) fn record_payment_in_connection(
             .filter(|value| !value.is_empty())
             .is_some();
 
-    let (resolved_shift_id, resolved_staff_id) = if explicit_cashier_drawer_shift {
+    let (resolved_shift_id, resolved_staff_id) = if options.platform_settlement {
+        // A later cashier or country change cannot take ownership of an old
+        // platform receivable that is only now reaching this terminal.
+        (order_staff_shift_id.clone(), order_staff_id.clone())
+    } else if explicit_cashier_drawer_shift {
         let shift_id = input
             .requested_staff_shift_id
             .as_deref()
@@ -2780,7 +3100,7 @@ pub(crate) fn auto_settle_platform_order(
         order_id: order_id.to_string(),
         method: "other".to_string(),
         amount: snapshot.outstanding_amount,
-        currency: "EUR".to_string(),
+        currency: crate::fiscal::payload_builder::resolve_order_document_currency(conn, order_id)?,
         tip_amount: 0.0,
         cash_received: None,
         change_given: None,
@@ -2808,7 +3128,8 @@ pub(crate) fn auto_settle_platform_order(
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| format!("begin platform settlement: {e}"))?;
     }
-    let outcome = record_payment_in_connection(conn, &input, &PaymentInsertOptions::local());
+    let outcome =
+        record_payment_in_connection(conn, &input, &PaymentInsertOptions::platform_settlement());
     match outcome {
         Ok(_) => {
             if own_transaction {
@@ -2920,9 +3241,9 @@ fn decide_moved_money_collection(
     }
 
     let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
-    let amount_cents = Cents::round_half_even(input.amount).as_i64();
+    let amount_cents = payment_principal_cents(input)?;
     let outstanding_cents = Cents::round_half_even(balance.outstanding_amount).as_i64();
-    if amount_cents <= outstanding_cents {
+    if outstanding_cents > 0 && amount_cents <= outstanding_cents {
         return Ok(MovedMoneyDecision::Collect);
     }
     Ok(MovedMoneyDecision::SetAside(SetAsideInsert {
@@ -2994,6 +3315,10 @@ pub(crate) fn record_payment_with_expected_balance(
     expected_balance: Option<OrderPaymentBalanceSnapshot>,
 ) -> Result<Value, String> {
     let mut prepared_payload = payload.clone();
+    {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        prepare_local_payment_currency(&conn, &mut prepared_payload)?;
+    }
     let mut input = build_payment_record_input(&prepared_payload)?;
     if input.method != "cash"
         && input.method != "card"
@@ -4582,7 +4907,8 @@ pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String
     // Resolve layout config (template, store info, currency, etc.)
     let profile = printers::resolve_printer_profile_for_role(db, None, Some("receipt"))?
         .unwrap_or_else(|| serde_json::json!({}));
-    let layout = print::resolve_layout_config(db, &profile, "order_receipt")?;
+    let mut layout = print::resolve_layout_config(db, &profile, "order_receipt")?;
+    print::apply_order_currency_to_layout(db, order_id, &mut layout)?;
 
     // Render using the canonical receipt renderer
     let html = receipt_renderer::render_html(&doc, &layout);
@@ -4644,18 +4970,357 @@ mod tests {
         )
         .expect("pragma setup");
         db::run_migrations_for_test(&conn);
+        // Tests model a configured store; legacy/missing authority is tested explicitly.
+        for (category, key, value) in [
+            ("terminal", "branch_id", "b1"),
+            ("restaurant", "store_currency_branch_id", "b1"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            db::set_setting(&conn, category, key, value).unwrap();
+        }
         DbState {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
     }
 
-    fn twint_manual_fixture() -> (DbState, Value) {
+    /// Fresh-collection fixtures must name a trusted store and an active owner.
+    /// Individual SQL rows below explicitly carry their original currency; this
+    /// helper never fills historical rows or changes a recorded money snapshot.
+    fn configure_current_money_fixture(
+        db: &DbState,
+        branch: &str,
+        currency: &str,
+        seed_cashier: bool,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "branch_id", branch).unwrap();
+        db::set_setting(&conn, "restaurant", "store_currency_branch_id", branch).unwrap();
+        db::set_setting(&conn, "restaurant", "currency", currency).unwrap();
+        if seed_cashier {
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, branch_id, terminal_id, role_type, check_in_time, status, currency, created_at, updated_at)
+                 VALUES ('configured-payment-cashier', 'configured-cashier', ?1, 'test-terminal', 'cashier', 'now', 'active', ?2, 'now', 'now')",
+                params![branch, currency],
+            ).unwrap();
+        }
+    }
+
+    #[test]
+    fn operating_currency_fresh_payment_requires_original_order_and_shift_units() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let mut input = build_payment_record_input(
+            &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":12}),
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            resolve_local_payment_currency(&conn, &input).unwrap(),
+            "EUR"
+        );
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('other-unit','other-staff','b1','driver','now','active','CHF','now','now')", []).unwrap();
+        input.requested_staff_shift_id = Some("other-unit".into());
+        assert_eq!(
+            resolve_local_payment_currency(&conn, &input).unwrap_err(),
+            "SHIFT_CURRENCY_MISMATCH"
+        );
+        conn.execute("INSERT INTO orders(id,items,total_amount,status,order_type,payment_status,branch_id,created_at,updated_at) VALUES('legacy-unit','[]',12,'pending','pickup','pending','b1','old','old')", []).unwrap();
+        input.order_id = "legacy-unit".into();
+        input.requested_staff_shift_id = None;
+        assert_eq!(
+            resolve_local_payment_currency(&conn, &input).unwrap_err(),
+            "ORDER_CURRENCY_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn new_payments_use_country_currency_and_existing_money_keeps_its_unit() {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
-            conn.execute("INSERT INTO local_settings(setting_category,setting_key,setting_value) VALUES ('organization','currency','CHF')", []).unwrap();
-            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at) VALUES ('twint-order','[]',12,1200,'completed','takeaway','pending','pending','now','now')", []).unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "CHF").unwrap();
+        }
+        principal_tip_order(&db);
+        record_payment(&db, &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":6,"idempotencyKey":"country-first"})).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                crate::fiscal::payload_builder::resolve_order_payment_currency(
+                    &conn,
+                    "principal-tip-order"
+                )
+                .unwrap()
+                .as_deref(),
+                Some("CHF")
+            );
+            db::set_setting(&conn, "restaurant", "currency", "EUR").unwrap();
+        }
+        assert_eq!(record_payment(&db, &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":6,"idempotencyKey":"country-remaining"})).unwrap_err(), "ORDER_CURRENCY_MISMATCH");
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::fiscal::payload_builder::resolve_order_payment_currency(
+                &conn,
+                "principal-tip-order"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("CHF")
+        );
+    }
+
+    #[test]
+    fn explicit_stale_currency_cannot_override_a_new_store_payment() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "CHF").unwrap();
+        }
+        principal_tip_order(&db);
+        let error = record_payment(&db, &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":12,"currency":"EUR"})).unwrap_err();
+        assert_eq!(error, "PAYMENT_CURRENCY_MISMATCH");
+    }
+
+    #[test]
+    fn approved_terminal_currency_survives_country_change_before_recording() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO ecr_devices (id,name,device_type,brand,protocol,connection_type,connection_details) VALUES ('device-1','Card','payment_terminal','generic','generic','network','{}')", []).unwrap();
+        db::ecr_insert_transaction(
+            &conn,
+            &serde_json::json!({
+                "id":"country-approved","deviceId":"device-1","orderId":"principal-tip-order",
+                "transactionType":"sale","amount":1200,"currency":"CHF","status":"approved",
+                "startedAt":"2026-10-04T10:00:00Z"
+            }),
+        )
+        .unwrap();
+        db::set_setting(&conn, "restaurant", "store_currency_available", "false").unwrap();
+        let input = build_payment_record_input(&serde_json::json!({"orderId":"principal-tip-order","method":"card","amount":12,"paymentOrigin":"terminal","transactionRef":"country-approved"})).unwrap();
+        assert_eq!(
+            resolve_local_payment_currency(&conn, &input).unwrap(),
+            "CHF"
+        );
+    }
+
+    #[test]
+    fn durable_cash_recovery_keeps_original_currency_when_store_becomes_unavailable() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let payload = serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":12,"currency":"CHF","idempotencyKey":"confirmed-cash"});
+        let entry = crate::unsaved_payments::UnsavedChargedPayment::for_payment(
+            "principal-tip-order",
+            &payload,
+            None,
+            "now",
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+            db::set_setting(&conn, "restaurant", "store_currency_available", "false").unwrap();
+        }
+        crate::unsaved_payments::write_recorded_payment(&db, &entry).unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::fiscal::payload_builder::resolve_order_payment_currency(
+                &conn,
+                "principal-tip-order"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("CHF")
+        );
+    }
+
+    #[test]
+    fn another_orders_ecr_reference_cannot_supply_payment_currency() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO ecr_devices (id,name,device_type,brand,protocol,connection_type,connection_details) VALUES ('device-other','Card','payment_terminal','generic','generic','network','{}')", []).unwrap();
+        db::ecr_insert_transaction(&conn, &serde_json::json!({"id":"foreign-approved","deviceId":"device-other","orderId":"other-order","transactionType":"sale","amount":1200,"currency":"CHF","status":"approved","startedAt":"now"})).unwrap();
+        let input = build_payment_record_input(&serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":12,"transactionRef":"foreign-approved"})).unwrap();
+        assert_eq!(
+            resolve_local_payment_currency(&conn, &input).unwrap_err(),
+            "PAYMENT_RECOVERY_IDENTITY_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn missing_country_currency_refuses_a_new_payment_without_ledger_writes() {
+        let db = test_db();
+        principal_tip_order(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "store_currency_available", "false").unwrap();
+        }
+        let error = record_payment(
+            &db,
+            &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":12}),
+        )
+        .unwrap_err();
+        assert_eq!(error, "STORE_CURRENCY_UNAVAILABLE");
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    fn principal_tip_order(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        let currency = crate::shifts::require_operating_currency(&conn, "b1").unwrap();
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('principal-tip-cashier','principal-cashier','b1','test-terminal','cashier','now','active',?1,'now','now')", [&currency]).unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,branch_id,currency,created_at,updated_at) VALUES ('principal-tip-order','[]',12,1200,'completed','delivery','pending','pending','b1',?1,'now','now')", [&currency]).unwrap();
+    }
+
+    #[test]
+    fn payment_principal_tip_partial_then_topup_and_duplicate_guard() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let first = record_payment(&db, &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":14,"tipAmount":8,"idempotencyKey":"tip-first"})).unwrap();
+        assert_eq!(first["success"], true);
+        {
+            let conn = db.conn.lock().unwrap();
+            let balance =
+                load_order_payment_balance_snapshot(&conn, "principal-tip-order").unwrap();
+            assert_eq!((balance.net_paid, balance.outstanding_amount), (6.0, 6.0));
+            assert_eq!(
+                conn.query_row(
+                    "SELECT payment_status FROM orders WHERE id='principal-tip-order'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "partially_paid"
+            );
+            assert_eq!(
+                load_net_paid_for_order(&conn, "principal-tip-order").unwrap(),
+                14.0
+            );
+        }
+        record_payment(&db, &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":6,"idempotencyKey":"tip-topup"})).unwrap();
+        assert!(record_payment(&db, &serde_json::json!({"orderId":"principal-tip-order","method":"cash","amount":2,"tipAmount":2,"idempotencyKey":"tip-duplicate"})).is_err());
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT payment_status FROM orders WHERE id='principal-tip-order'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "paid"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(conn.query_row("SELECT amount_cents,tip_amount_cents FROM order_payments WHERE idempotency_key='tip-first'", [], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?))).unwrap(), (1400,800));
+        assert_eq!(
+            load_store_taken_net_paid_cents(&conn, "principal-tip-order").unwrap(),
+            2000
+        );
+    }
+
+    #[test]
+    fn payment_principal_tip_refund_and_legacy_real_reader() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,tip_amount,status,created_at,updated_at) VALUES ('tip-legacy','principal-tip-order','cash',14,8,'completed','now','now')", []).unwrap();
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,created_at,updated_at) VALUES ('tip-refund','tip-legacy','principal-tip-order','refund',2,200,'tip test refund','now','now')", []).unwrap();
+        let balance = load_order_payment_balance_snapshot(&conn, "principal-tip-order").unwrap();
+        assert_eq!((balance.net_paid, balance.outstanding_amount), (4.0, 8.0));
+        assert_eq!(
+            load_net_paid_for_order(&conn, "principal-tip-order").unwrap(),
+            12.0
+        );
+    }
+
+    #[test]
+    fn payment_principal_tip_generation_fences_tip_only_changes() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,status,created_at,updated_at) VALUES ('tip-generation','principal-tip-order','cash',2,200,2,200,'completed','now','now')", []).unwrap();
+        let before = load_order_payment_balance_snapshot(&conn, "principal-tip-order").unwrap();
+        conn.execute(
+            "UPDATE order_payments SET tip_amount=3,tip_amount_cents=300 WHERE id='tip-generation'",
+            [],
+        )
+        .unwrap();
+        let after = load_order_payment_balance_snapshot(&conn, "principal-tip-order").unwrap();
+        assert_eq!(before.net_paid, after.net_paid);
+        assert_ne!(before.ledger_generation, after.ledger_generation);
+    }
+
+    #[test]
+    fn payment_principal_tip_server_claim_and_approved_card_admission() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        let mut input = collection_input("principal-tip-order", "card");
+        input.amount = 14.0;
+        input.tip_amount = 8.0;
+        input.transaction_ref = Some("tip-approved-card".into());
+        assert!(matches!(
+            decide_moved_money_collection(&conn, &input).unwrap(),
+            MovedMoneyDecision::Collect
+        ));
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,status,sync_status,sync_state,created_at,updated_at) VALUES ('tip-held','principal-tip-order','card',14,1400,8,800,'completed','synced','applied','now','now')", []).unwrap();
+        assert!(!server_ledger_backs_claimed_status(&conn, "principal-tip-order", "paid").unwrap());
+        assert!(
+            server_ledger_backs_claimed_status(&conn, "principal-tip-order", "partially_paid")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn payment_principal_tip_outstanding_preparation_keeps_tip_inside_gross() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,created_at,updated_at) VALUES ('tip-prepaid','principal-tip-order','cash',6,600,'completed','now','now')", []).unwrap();
+        drop(conn);
+        let result = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId":"principal-tip-order", "method":"cash", "amount":1,
+                "tipAmount":2, "cashReceived":10, "collectOutstandingBalance":true,
+                "idempotencyKey":"tip-outstanding",
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(conn.query_row("SELECT amount_cents,tip_amount_cents,change_given_cents FROM order_payments WHERE idempotency_key='tip-outstanding'", [], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?))).unwrap(), (800,200,200));
+        let balance = load_order_payment_balance_snapshot(&conn, "principal-tip-order").unwrap();
+        assert_eq!((balance.net_paid, balance.outstanding_amount), (12.0, 0.0));
+    }
+
+    #[test]
+    fn payment_principal_tip_cannot_exceed_received_gross() {
+        assert!(build_payment_record_input(
+            &serde_json::json!({"orderId":"tip-order","method":"cash","amount":2,"tipAmount":3})
+        )
+        .is_err());
+    }
+
+    fn twint_manual_fixture() -> (DbState, Value) {
+        let db = test_db();
+        configure_current_money_fixture(&db, "b1", "CHF", true);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "CHF").unwrap();
+            conn.execute("INSERT INTO orders (currency, branch_id, id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at) VALUES ('CHF', 'b1', 'twint-order','[]',12,1200,'completed','takeaway','pending','pending','now','now')", []).unwrap();
         }
         let payload = serde_json::json!({ "orderId":"twint-order", "method":"twint", "amount":12, "currency":"CHF", "idempotencyKey":"twint-manual-original", "paymentOrigin":"manual", "metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"confirm","qr_mode":"static_qr_manual"} });
         (db, payload)
@@ -4665,6 +5330,10 @@ mod tests {
     fn twint_manual_confirmation_keeps_distinct_tender_and_replays_once() {
         let (db, payload) = twint_manual_fixture();
         let first = record_payment(&db, &payload).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "store_currency_available", "false").unwrap();
+        }
         let second = record_payment(&db, &payload).unwrap();
         assert_eq!(first["paymentId"], second["paymentId"]);
         let conn = db.conn.lock().unwrap();
@@ -4706,9 +5375,12 @@ mod tests {
             if mutate == "currency" {
                 payload["currency"] = serde_json::json!("EUR");
             }
-            assert!(record_payment(&db, &payload)
-                .unwrap_err()
-                .contains("TWINT_MANUAL_CONFIRMATION_REQUIRED"));
+            let error = record_payment(&db, &payload).unwrap_err();
+            assert!(error.contains(if mutate == "currency" {
+                "PAYMENT_CURRENCY_MISMATCH"
+            } else {
+                "TWINT_MANUAL_CONFIRMATION_REQUIRED"
+            }));
             assert_eq!(
                 db.conn
                     .lock()
@@ -4726,14 +5398,30 @@ mod tests {
         let (db, mut payload) = twint_manual_fixture();
         record_payment(&db, &payload).unwrap();
         payload["amount"] = serde_json::json!(10);
-        assert!(record_payment(&db, &payload)
-            .unwrap_err()
-            .contains("TWINT_IDEMPOTENCY_CONFLICT"));
+        assert_eq!(
+            record_payment(&db, &payload).unwrap_err(),
+            "TWINT_IDEMPOTENCY_CONFLICT"
+        );
         payload["amount"] = serde_json::json!(12);
+        payload["tipAmount"] = serde_json::json!(1);
+        assert_eq!(
+            record_payment(&db, &payload).unwrap_err(),
+            "TWINT_IDEMPOTENCY_CONFLICT"
+        );
+        payload["tipAmount"] = serde_json::json!(0);
         payload["idempotencyKey"] = serde_json::json!("new-twint-key");
         assert!(record_payment(&db, &payload)
             .unwrap_err()
             .contains("TWINT_AMOUNT_EXCEEDS_OUTSTANDING"));
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*), SUM(amount_cents), SUM(tip_amount_cents) FROM order_payments WHERE order_id='twint-order'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            ).unwrap(),
+            (1, 1200, 0)
+        );
     }
 
     #[test]
@@ -6182,12 +6870,12 @@ mod tests {
     #[test]
     fn test_record_payment_and_query() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
 
         // Insert an order — W4e Step 0: dual-populate (25.0 → 2500).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-             VALUES ('ord-1', '[{\"name\":\"Pizza\",\"quantity\":2,\"totalPrice\":20.0}]', 25.0, 2500, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-1', '[{\"name\":\"Pizza\",\"quantity\":2,\"totalPrice\":20.0}]', 25.0, 2500, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .expect("insert order");
@@ -6262,6 +6950,15 @@ mod tests {
         let db_path = tmp.path().join("payment-upgrade.db");
         let conn = Connection::open(&db_path).unwrap();
         crate::db::run_migrations_for_test(&conn);
+        for (category, key, value) in [
+            ("terminal", "branch_id", "branch-1"),
+            ("restaurant", "store_currency_branch_id", "branch-1"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            db::set_setting(&conn, category, key, value).unwrap();
+        }
         let db = DbState {
             conn: std::sync::Mutex::new(conn),
             db_path,
@@ -6269,15 +6966,13 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO orders (id, items, order_type, total_amount, total_amount_cents, status)
-                 VALUES ('qa-table-payment', '[]', 'dine-in', 20, 2000, 'pending')", [],
+                "INSERT INTO orders (currency, branch_id, id, items, order_type, total_amount, total_amount_cents, status) VALUES ('EUR', 'branch-1', 'qa-table-payment', '[]', 'dine-in', 20, 2000, 'pending')", [],
             ).unwrap();
         }
         let session_id = "4112057f-4000-4000-8000-000000000001";
         let source_item_id = "4112057f-4000-4000-8000-000000000002";
         db.conn.lock().unwrap().execute(
-            "INSERT INTO staff_shifts (id,staff_id,role_type,check_in_time,status,created_at,updated_at)
-             VALUES ('qa-tip-shift','qa-cashier','cashier',datetime('now'),'active',datetime('now'),datetime('now'))", [],
+            "INSERT INTO staff_shifts (currency, branch_id, id,staff_id,role_type,check_in_time,status,created_at,updated_at) VALUES ('EUR', 'branch-1', 'qa-tip-shift','qa-cashier','cashier',datetime('now'),'active',datetime('now'),datetime('now'))", [],
         ).unwrap();
         record_payment(
             &db,
@@ -6341,13 +7036,14 @@ mod tests {
     #[test]
     fn test_record_delivery_tip_stays_pending_until_driver_assignment() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
 
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                  id, items, order_type, total_amount, total_amount_cents,
                  tip_amount, tip_amount_cents, status, sync_status, created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                  'ord-delivery-tip', '[]', 'delivery', 12.0, 1200,
                  2.0, 200, 'pending', 'pending', datetime('now'), datetime('now')
              )",
@@ -6397,12 +7093,13 @@ mod tests {
     #[test]
     fn test_record_payment_accepts_supabase_order_id() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
 
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'local-table-order', 'remote-table-order', '[]', 22.0, 2200, 'pending', 'synced',
                 datetime('now'), datetime('now')
              )",
@@ -6437,12 +7134,12 @@ mod tests {
     #[test]
     fn test_get_order_payments_includes_refund_balances() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
 
         // W4e Step 0: dual-populate (12.8 → 1280).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-             VALUES ('ord-refund-balance', '[]', 12.8, 1280, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-refund-balance', '[]', 12.8, 1280, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .expect("insert refund balance order");
@@ -6490,12 +7187,12 @@ mod tests {
     #[test]
     fn test_record_split_payment_items_and_status_transitions() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
 
         // W4e Step 0: dual-populate (16.0 → 1600).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-             VALUES (
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1',
                 'ord-split',
                 '[{\"name\":\"Burger\",\"quantity\":1,\"totalPrice\":6.0},{\"name\":\"Fries\",\"quantity\":1,\"totalPrice\":4.0},{\"name\":\"Drink\",\"quantity\":1,\"totalPrice\":6.0}]',
                 16.0,
@@ -6579,6 +7276,7 @@ mod tests {
                 "transactionRef": "SPLIT-CARD-2",
                 "discountAmount": 1.5,
                 "paymentOrigin": "terminal",
+                "currency": "EUR",
                 "terminalDeviceId": "device-1",
                 "items": [
                     {
@@ -6642,12 +7340,13 @@ mod tests {
     #[test]
     fn test_record_payment_rejects_amount_above_outstanding_balance() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (9.7 → 970).
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, items, total_amount, total_amount_cents, status, payment_status, sync_status, created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'ord-fully-paid', '[]', 9.7, 970, 'completed', 'pending', 'pending',
                 datetime('now'), datetime('now')
              )",
@@ -6725,6 +7424,7 @@ mod tests {
             "amount": 5.0,
             "transactionRef": "REMOTE-MIRROR-1",
             "paymentOrigin": "sync_reconstructed",
+            "currency": "EUR",
         });
         let input = build_payment_record_input(&payload).expect("prepare reconstructed payment");
         let mut options =
@@ -6805,13 +7505,14 @@ mod tests {
     #[test]
     fn test_update_payment_method_requeues_payment_sync_and_updates_snapshot() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (12.0 → 1200).
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
                 supabase_id, created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'ord-method-edit',
                 '[]',
                 12.0,
@@ -6951,12 +7652,13 @@ mod tests {
     #[test]
     fn test_update_payment_method_rejects_multiple_completed_payments_with_stable_code() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
                 created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'ord-method-split',
                 '[]',
                 10.0,
@@ -7022,12 +7724,13 @@ mod tests {
     #[test]
     fn test_update_payment_method_targets_one_completed_split_payment() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
                 created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'ord-method-targeted-split',
                 '[]',
                 10.0,
@@ -7234,13 +7937,14 @@ mod tests {
     #[test]
     fn test_update_payment_method_same_method_requeues_failed_payment_sync() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (9.5 → 950).
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
                 supabase_id, created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'ord-method-retry',
                 '[]',
                 9.5,
@@ -7347,13 +8051,14 @@ mod tests {
     #[test]
     fn test_update_payment_method_same_method_noop_when_sync_is_healthy() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (6.25 → 625).
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency, branch_id,
                 id, items, total_amount, total_amount_cents, status, sync_status, payment_status,
                 supabase_id, created_at, updated_at
-             ) VALUES (
+             ) VALUES ('EUR', 'b1',
                 'ord-method-noop',
                 '[]',
                 6.25,
@@ -7430,11 +8135,11 @@ mod tests {
     #[test]
     fn test_void_payment() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
         // W4e Step 0: dual-populate (10.0 → 1000).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-             VALUES ('ord-2', '[]', 10.0, 1000, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-2', '[]', 10.0, 1000, 'pending', 'pending', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -7510,23 +8215,21 @@ mod tests {
     #[test]
     fn test_record_payment_updates_drawer_cash_sales() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", false);
         let conn = db.conn.lock().unwrap();
 
         // Create shift + drawer + order
         conn.execute(
-            "INSERT INTO staff_shifts (id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at)
-             VALUES ('shift-cs', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO staff_shifts (currency, branch_id, id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'shift-cs', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         // W4e Step 0: dual-populate (100.0 → 10000, 25.0 → 2500).
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at)
-             VALUES ('cd-1', 'shift-cs', 'staff-1', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
+            "INSERT INTO cash_drawer_sessions (currency, id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at) VALUES ('EUR', 'cd-1', 'shift-cs', 'staff-1', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, created_at, updated_at)
-             VALUES ('ord-cs1', '[]', 25.0, 2500, 'pending', 'pending', 'shift-cs', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-cs1', '[]', 25.0, 2500, 'pending', 'pending', 'shift-cs', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         drop(conn);
@@ -7564,23 +8267,21 @@ mod tests {
     #[test]
     fn test_record_payment_updates_drawer_card_sales() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", false);
         let conn = db.conn.lock().unwrap();
 
         // Create shift + drawer + order
         conn.execute(
-            "INSERT INTO staff_shifts (id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at)
-             VALUES ('shift-cd', 'staff-2', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO staff_shifts (currency, branch_id, id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'shift-cd', 'staff-2', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         // W4e Step 0: dual-populate (100.0 → 10000, 30.0 → 3000).
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at)
-             VALUES ('cd-2', 'shift-cd', 'staff-2', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
+            "INSERT INTO cash_drawer_sessions (currency, id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at) VALUES ('EUR', 'cd-2', 'shift-cd', 'staff-2', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, created_at, updated_at)
-             VALUES ('ord-cd1', '[]', 30.0, 3000, 'pending', 'pending', 'shift-cd', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-cd1', '[]', 30.0, 3000, 'pending', 'pending', 'shift-cd', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         drop(conn);
@@ -7618,6 +8319,7 @@ mod tests {
     #[test]
     fn test_resolve_unsettled_payment_blocker_backfills_historical_cashier_payment() {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-z", "EUR", false);
         let conn = db.conn.lock().unwrap();
         let check_in = "2026-03-26T08:00:00Z";
         let historical_at = "2026-03-26T21:15:00Z";
@@ -7625,14 +8327,14 @@ mod tests {
 
         // W4e Step 0: dual-populate every monetary column (100.0/113.7/13.7 → 10000/11370/1370).
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
                 opening_cash_amount, opening_cash_amount_cents,
                 closing_cash_amount, closing_cash_amount_cents,
                 expected_cash_amount, expected_cash_amount_cents,
                 cash_variance, cash_variance_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'shift-z-block', 'cashier-z', 'cashier', 'branch-z', 'terminal-z', ?1, ?2,
                 100.0, 10000, 113.7, 11370, 100.0, 10000, 13.7, 1370,
                 'closed', 2, 'synced', ?1, ?2
@@ -7641,7 +8343,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents,
                 closing_amount, closing_amount_cents,
@@ -7650,7 +8352,7 @@ mod tests {
                 total_cash_sales, total_cash_sales_cents,
                 total_card_sales, total_card_sales_cents,
                 opened_at, closed_at, reconciled, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-z-block', 'shift-z-block', 'cashier-z', 'branch-z', 'terminal-z',
                 100.0, 10000, 113.7, 11370, 100.0, 10000, 13.7, 1370,
                 0.0, 0, 0.0, 0, ?1, ?2, 1, ?1, ?2
@@ -7660,10 +8362,10 @@ mod tests {
         .unwrap();
         conn.execute(
             // W4e Step 0: dual-populate (13.7 → 1370).
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 sync_status, branch_id, terminal_id, staff_shift_id, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'ord-z-block', 'ORD-20260326-0049', '[]', 13.7, 1370, 'completed', 'pending',
                 'synced', 'branch-z', 'terminal-z', 'shift-z-block', ?1, ?1
             )",
@@ -7807,16 +8509,17 @@ mod tests {
     #[test]
     fn test_resolve_unsettled_payment_blocker_uses_checkout_cashier_shift_for_delivery_delta() {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-repair", "EUR", false);
         let conn = db.conn.lock().unwrap();
         let check_in = "2026-04-27T17:00:00Z";
         let order_at = "2026-04-27T20:00:00Z";
 
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
                 opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'shift-checkout-repair', 'cashier-repair', 'cashier', 'branch-repair', 'terminal-repair', ?1,
                 100.0, 10000, 'active', 2, 'synced', ?1, ?1
             )",
@@ -7824,13 +8527,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents,
                 total_cash_sales, total_cash_sales_cents,
                 total_card_sales, total_card_sales_cents,
                 opened_at, reconciled, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-checkout-repair', 'shift-checkout-repair', 'cashier-repair', 'branch-repair', 'terminal-repair',
                 100.0, 10000, 0.0, 0, 0.0, 0, ?1, 0, ?1, ?1
             )",
@@ -7838,10 +8541,10 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 order_type, sync_status, branch_id, terminal_id, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'ord-delivery-delta', 'ORD-DELTA', '[]', 6.40, 640, 'completed', 'partially_paid',
                 'delivery', 'synced', 'branch-repair', 'terminal-repair', ?1, ?1
             )",
@@ -7917,16 +8620,17 @@ mod tests {
     #[test]
     fn test_resolve_unsettled_payment_blocker_checkout_shift_repairs_driver_delivery_delta() {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-repair", "EUR", false);
         let conn = db.conn.lock().unwrap();
         let check_in = "2026-04-27T17:00:00Z";
         let order_at = "2026-04-27T20:00:00Z";
 
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
                 opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'shift-driver-owner', 'driver-owner', 'driver', 'branch-repair', 'terminal-repair', ?1,
                 20.0, 2000, 'active', 2, 'synced', ?1, ?1
             )",
@@ -7934,11 +8638,11 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
                 opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'shift-cashier-owner', 'cashier-owner', 'cashier', 'branch-repair', 'terminal-repair', ?1,
                 100.0, 10000, 'active', 2, 'synced', ?1, ?1
             )",
@@ -7946,13 +8650,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents,
                 total_cash_sales, total_cash_sales_cents,
                 total_card_sales, total_card_sales_cents,
                 opened_at, reconciled, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-cashier-owner', 'shift-cashier-owner', 'cashier-owner', 'branch-repair', 'terminal-repair',
                 100.0, 10000, 0.0, 0, 0.0, 0, ?1, 0, ?1, ?1
             )",
@@ -7960,11 +8664,11 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 order_type, driver_id, sync_status, branch_id, terminal_id, staff_shift_id,
                 created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'ord-driver-delta', 'ORD-DRIVER-DELTA', '[]', 6.40, 640, 'completed', 'partially_paid',
                 'delivery', 'driver-owner', 'synced', 'branch-repair', 'terminal-repair', 'shift-driver-owner',
                 ?1, ?1
@@ -8024,6 +8728,7 @@ mod tests {
     fn test_resolve_unsettled_payment_blocker_z_report_uses_cashier_drawer_for_driver_delivery_delta(
     ) {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-z-delivery", "EUR", false);
         let conn = db.conn.lock().unwrap();
         let check_in = "2026-04-22T20:00:00Z";
         let driver_check_in = "2026-04-27T16:00:00Z";
@@ -8031,11 +8736,11 @@ mod tests {
         let checkout_at = "2026-04-28T20:08:01Z";
 
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
                 check_out_time, opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'shift-z-cashier-delivery', 'cashier-z-delivery', 'cashier', 'branch-z-delivery', 'terminal-z-delivery', ?1,
                 ?2, 100.0, 10000, 'closed', 2, 'synced', ?1, ?2
             )",
@@ -8043,11 +8748,11 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, role_type, branch_id, terminal_id, check_in_time,
                 check_out_time, opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'shift-z-driver-delivery', 'driver-z-delivery', 'driver', 'branch-z-delivery', 'terminal-z-delivery', ?1,
                 ?2, 20.0, 2000, 'closed', 2, 'synced', ?1, ?2
             )",
@@ -8055,13 +8760,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents,
                 total_cash_sales, total_cash_sales_cents,
                 total_card_sales, total_card_sales_cents,
                 opened_at, closed_at, reconciled, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-z-cashier-delivery', 'shift-z-cashier-delivery', 'cashier-z-delivery', 'branch-z-delivery', 'terminal-z-delivery',
                 100.0, 10000, 0.0, 0, 0.0, 0, ?1, ?2, 1, ?1, ?2
             )",
@@ -8069,11 +8774,11 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, order_number, items, total_amount, total_amount_cents, status, payment_status,
                 order_type, driver_id, sync_status, branch_id, terminal_id, staff_shift_id,
                 created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'ord-z-driver-delivery', 'ORD-Z-DRIVER-DELIVERY', '[]', 6.40, 640, 'delivered', 'partially_paid',
                 'delivery', 'driver-z-delivery', 'synced', 'branch-z-delivery', 'terminal-z-delivery', 'shift-z-driver-delivery',
                 ?1, ?1
@@ -8202,14 +8907,15 @@ mod tests {
     #[test]
     fn test_record_pickup_payment_reassigns_to_active_cashier_from_driver_shift_context() {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-1", "EUR", false);
         let conn = db.conn.lock().unwrap();
 
         // W4e Step 0: dual-populate (100.0 → 10000).
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
                 check_in_time, opening_cash_amount, opening_cash_amount_cents, status, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'cash-shift', 'cashier-1', 'Cashier', 'branch-1', 'terminal-1', 'cashier',
                 datetime('now'), 100.0, 10000, 'active', 'pending', datetime('now'), datetime('now')
             )",
@@ -8217,10 +8923,10 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents, opened_at, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-1', 'cash-shift', 'cashier-1', 'branch-1', 'terminal-1',
                 100.0, 10000, datetime('now'), datetime('now'), datetime('now')
             )",
@@ -8229,10 +8935,10 @@ mod tests {
         .unwrap();
         // W4e Step 0: dual-populate (20.0/18.0 → 2000/1800).
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
                 check_in_time, opening_cash_amount, opening_cash_amount_cents, status, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'driver-shift', 'driver-1', 'Driver', 'branch-1', 'terminal-1', 'driver',
                 datetime('now'), 20.0, 2000, 'active', 'pending', datetime('now'), datetime('now')
             )",
@@ -8240,13 +8946,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, items, total_amount, total_amount_cents, status, order_type, sync_status,
                 branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
                 created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'pickup-order', '[]', 18.0, 1800, 'pending', 'pickup', 'pending',
-                '', '', 'driver-shift', 'driver-1', 'driver-1',
+                'branch-1', 'terminal-1', 'driver-shift', 'driver-1', 'driver-1',
                 datetime('now'), datetime('now')
             )",
             [],
@@ -8297,14 +9003,15 @@ mod tests {
     #[test]
     fn test_record_delivery_payment_stays_with_driver_shift() {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-2", "EUR", false);
         let conn = db.conn.lock().unwrap();
 
         // W4e Step 0: dual-populate (100.0/20.0/24.0 → 10000/2000/2400).
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
                 check_in_time, opening_cash_amount, opening_cash_amount_cents, status, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'cash-shift-2', 'cashier-2', 'Cashier', 'branch-2', 'terminal-2', 'cashier',
                 datetime('now'), 100.0, 10000, 'active', 'pending', datetime('now'), datetime('now')
             )",
@@ -8312,10 +9019,10 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents, opened_at, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-2', 'cash-shift-2', 'cashier-2', 'branch-2', 'terminal-2',
                 100.0, 10000, datetime('now'), datetime('now'), datetime('now')
             )",
@@ -8323,10 +9030,10 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
                 check_in_time, opening_cash_amount, opening_cash_amount_cents, status, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'driver-shift-2', 'driver-2', 'Driver', 'branch-2', 'terminal-2', 'driver',
                 datetime('now'), 20.0, 2000, 'active', 'pending', datetime('now'), datetime('now')
             )",
@@ -8334,13 +9041,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, items, total_amount, total_amount_cents, status, order_type, sync_status,
                 branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
                 created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'delivery-order', '[]', 24.0, 2400, 'pending', 'delivery', 'pending',
-                '', '', 'cash-shift-2', 'cashier-2', 'driver-2',
+                'branch-2', 'terminal-2', 'cash-shift-2', 'cashier-2', 'driver-2',
                 datetime('now'), datetime('now')
             )",
             [],
@@ -8391,14 +9098,15 @@ mod tests {
     #[test]
     fn test_record_unassigned_delivery_payment_stays_neutral_until_dispatch_choice() {
         let db = test_db();
+        configure_current_money_fixture(&db, "branch-neutral", "EUR", false);
         let conn = db.conn.lock().unwrap();
 
         // W4e Step 0: dual-populate (100.0/19.0 → 10000/1900).
         conn.execute(
-            "INSERT INTO staff_shifts (
+            "INSERT INTO staff_shifts (currency,
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
                 check_in_time, opening_cash_amount, opening_cash_amount_cents, status, sync_status, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'cash-shift-neutral', 'cashier-neutral', 'Cashier Neutral', 'branch-neutral', 'terminal-neutral', 'cashier',
                 datetime('now'), 100.0, 10000, 'active', 'pending', datetime('now'), datetime('now')
             )",
@@ -8406,10 +9114,10 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (
+            "INSERT INTO cash_drawer_sessions (currency,
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents, opened_at, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'drawer-neutral', 'cash-shift-neutral', 'cashier-neutral', 'branch-neutral', 'terminal-neutral',
                 100.0, 10000, datetime('now'), datetime('now'), datetime('now')
             )",
@@ -8417,10 +9125,10 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO orders (
+            "INSERT INTO orders (currency,
                 id, items, total_amount, total_amount_cents, status, order_type, sync_status,
                 branch_id, terminal_id, created_at, updated_at
-            ) VALUES (
+            ) VALUES ('EUR',
                 'delivery-neutral-order', '[]', 19.0, 1900, 'pending', 'delivery', 'pending',
                 'branch-neutral', 'terminal-neutral', datetime('now'), datetime('now')
             )",
@@ -8485,13 +9193,13 @@ mod tests {
     #[test]
     fn paying_exactly_one_cent_short_is_not_marked_paid() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             let now = chrono::Utc::now().to_rfc3339();
             // W4e Step 0: dual-populate (10.00 → 1000).
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-1c-short', '[]', 10.00, 1000, 'pending', 'pending', ?1, ?1)",
+                "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-1c-short', '[]', 10.00, 1000, 'pending', 'pending', ?1, ?1)",
                 params![now],
             )
             .expect("insert 10.00 order");
@@ -8523,13 +9231,13 @@ mod tests {
     #[test]
     fn total_paid_exactly_equals_total_is_paid() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             let now = chrono::Utc::now().to_rfc3339();
             // W4e Step 0: dual-populate (10.00 → 1000).
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-exact', '[]', 10.00, 1000, 'pending', 'pending', ?1, ?1)",
+                "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-exact', '[]', 10.00, 1000, 'pending', 'pending', ?1, ?1)",
                 params![now],
             )
             .expect("insert exact-total order");
@@ -8559,13 +9267,13 @@ mod tests {
     #[test]
     fn overpaying_by_sub_half_cent_rounds_to_outstanding_and_is_accepted() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             let now = chrono::Utc::now().to_rfc3339();
             // W4e Step 0: dual-populate (10.00 → 1000).
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-                 VALUES ('ord-half-cent-over', '[]', 10.00, 1000, 'pending', 'pending', ?1, ?1)",
+                "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', 'ord-half-cent-over', '[]', 10.00, 1000, 'pending', 'pending', ?1, ?1)",
                 params![now],
             )
             .expect("insert overpay order");
@@ -8605,8 +9313,7 @@ mod tests {
     ) {
         // W4e Step 0: dual-populate (10.00 → 1000; payment amount → cents via helper).
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
-             VALUES (?1, '[]', 10.00, 1000, 'pending', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at) VALUES ('EUR', 'b1', ?1, '[]', 10.00, 1000, 'pending', 'pending', datetime('now'), datetime('now'))",
             params![order_id],
         )
         .expect("seed order");
@@ -8701,13 +9408,14 @@ mod tests {
     #[test]
     fn collect_outstanding_cash_uses_authoritative_balance_and_returns_post_insert_snapshot() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO orders (
+                "INSERT INTO orders (currency, branch_id,
                     id, items, total_amount, total_amount_cents, status, sync_status,
                     payment_status, created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR', 'b1',
                     'ord-collect-outstanding', '[]', 42.50, 4250, 'pending', 'pending',
                     'pending', datetime('now'), datetime('now')
                  )",
@@ -8759,13 +9467,14 @@ mod tests {
     #[test]
     fn collect_outstanding_cash_rejects_tender_below_authoritative_balance() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO orders (
+                "INSERT INTO orders (currency, branch_id,
                     id, items, total_amount, total_amount_cents, status, sync_status,
                     payment_status, created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR', 'b1',
                     'ord-collect-insufficient', '[]', 42.50, 4250, 'pending', 'pending',
                     'pending', datetime('now'), datetime('now')
                  )",
@@ -8804,6 +9513,7 @@ mod tests {
     #[test]
     fn collect_outstanding_card_uses_the_authoritative_remaining_partial_balance() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             seed_order_with_payments(
@@ -8840,13 +9550,14 @@ mod tests {
     #[test]
     fn authoritative_collection_rolls_back_when_ledger_generation_changed() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO orders (
+                "INSERT INTO orders (currency, branch_id,
                     id, items, total_amount, total_amount_cents, status, sync_status,
                     payment_status, created_at, updated_at
-                 ) VALUES (
+                 ) VALUES ('EUR', 'b1',
                     'ord-collect-generation-change', '[]', 42.50, 4250, 'pending', 'pending',
                     'pending', datetime('now'), datetime('now')
                  )",
@@ -9054,14 +9765,14 @@ mod tests {
     #[test]
     fn platform_held_money_cannot_be_collected_as_cash_or_card() {
         let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
         let conn = db.conn.lock().unwrap();
 
         let insert = |id: &str, metadata: &str| {
             conn.execute(
-                "INSERT INTO orders (id, items, total_amount, total_amount_cents, status,
+                "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status,
                     payment_status, sync_status, plugin, external_plugin_order_id,
-                    ghost_metadata, created_at, updated_at)
-                 VALUES (?1, '[]', 12.0, 1200, 'in_transit', 'pending', 'pending', 'efood',
+                    ghost_metadata, created_at, updated_at) VALUES ('EUR', 'b1', ?1, '[]', 12.0, 1200, 'in_transit', 'pending', 'pending', 'efood',
                          'ext-1', ?2, datetime('now'), datetime('now'))",
                 params![id, metadata],
             )
@@ -9215,23 +9926,152 @@ mod tests {
     }
 
     #[test]
-    fn test_platform_auto_settlement_books_bank_money_not_drawer_cash() {
+    fn platform_settlement_first_delivery_after_country_change_keeps_original_unit_and_owner() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('original-platform-shift','original-staff','b1','t1','cashier','old','closed','CHF','old','old'),('current-platform-shift','current-staff','b1','t1','cashier','now','active','USD','now','now')", []).unwrap();
+        conn.execute("INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opening_amount_cents,currency,opened_at,created_at,updated_at) VALUES('current-platform-drawer','current-platform-shift','current-staff','b1','t1',100,10000,'USD','now','now','now')", []).unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,order_type,payment_status,branch_id,terminal_id,staff_shift_id,staff_id,currency,ghost_metadata,created_at,updated_at) VALUES('original-platform-order','[]',12,1200,'delivered','delivery','pending','b1','t1','original-platform-shift','original-staff','CHF','{\"food_delivery\":{\"payment_method\":\"online\",\"prepaid\":true}}','old','old')", []).unwrap();
 
+        assert!(auto_settle_platform_order(&conn, "original-platform-order").unwrap());
+        assert!(!auto_settle_platform_order(&conn, "original-platform-order").unwrap());
+        let payment: (String, String, String) = conn.query_row(
+            "SELECT method,currency,staff_shift_id FROM order_payments WHERE order_id='original-platform-order'", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            payment,
+            (
+                "other".into(),
+                "CHF".into(),
+                "original-platform-shift".into()
+            )
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT staff_shift_id FROM orders WHERE id='original-platform-order'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "original-platform-shift"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id='original-platform-order'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(conn.query_row("SELECT COALESCE(total_cash_sales_cents,0)+COALESCE(total_card_sales_cents,0) FROM cash_drawer_sessions WHERE id='current-platform-drawer'", [], |row|row.get::<_,i64>(0)).unwrap(), 0);
+        let queued: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE table_name='payments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&queued).unwrap()["currency"],
+            "CHF"
+        );
+    }
+
+    #[test]
+    fn platform_settlement_refuses_unknown_or_conflicting_original_currency() {
+        for known_order in [false, true] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,payment_status,branch_id,currency,ghost_metadata,created_at,updated_at) VALUES('uncertain-platform-order','[]',12,1200,'delivered','pending','b1',?1,'{\"food_delivery\":{\"payment_method\":\"online\",\"prepaid\":true}}','old','old')", [known_order.then_some("CHF")]).unwrap();
+            if known_order {
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,created_at,updated_at) VALUES('conflicting-platform-payment','uncertain-platform-order','other',1,100,'EUR','completed','old','old')", []).unwrap();
+            }
+            let error = auto_settle_platform_order(&conn, "uncertain-platform-order").unwrap_err();
+            assert_eq!(
+                error,
+                if known_order {
+                    "PAYMENT_CURRENCY_MISMATCH"
+                } else {
+                    "PAYMENT_CURRENCY_UNAVAILABLE"
+                }
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                i64::from(known_order)
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='payments'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn renderer_cannot_claim_platform_settlement_to_bypass_fresh_money_admission() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,payment_status,branch_id,currency,created_at,updated_at) VALUES('ordinary-original-order','[]',12,1200,'completed','pending','b1','CHF','old','old')", []).unwrap();
+        }
+        let error = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId":"ordinary-original-order", "method":"other", "amount":12,
+                "platformSettlement":true, "platform_settlement":true,
+                "transactionRef":"platform_settlement:online:ordinary-original-order",
+                "idempotencyKey":"platform-settle-ordinary-original-order",
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error, "ORDER_CURRENCY_MISMATCH");
+        let conn = db.conn.lock().unwrap();
+        let mut input = collection_input("ordinary-original-order", "other");
+        input.currency = "CHF".into();
+        assert_eq!(
+            record_payment_in_connection(
+                &conn,
+                &input,
+                &PaymentInsertOptions::platform_settlement()
+            )
+            .unwrap_err(),
+            "PLATFORM_SETTLEMENT_IDENTITY_INVALID"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_platform_auto_settlement_books_bank_money_not_drawer_cash() {
+        let db = test_db();
+        configure_current_money_fixture(&db, "b1", "CHF", false);
+        let conn = db.conn.lock().unwrap();
+
+        db::set_setting(&conn, "restaurant", "currency", "CHF").unwrap();
+        db::set_setting(&conn, "organization", "currency", "EUR").unwrap();
         conn.execute(
-            "INSERT INTO staff_shifts (id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at)
-             VALUES ('shift-ps', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
+            "INSERT INTO staff_shifts (currency, branch_id, id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at) VALUES ('CHF', 'b1', 'shift-ps', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at)
-             VALUES ('cd-ps', 'shift-ps', 'staff-1', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
+            "INSERT INTO cash_drawer_sessions (currency, id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, opening_amount_cents, opened_at, created_at, updated_at) VALUES ('CHF', 'cd-ps', 'shift-ps', 'staff-1', 'b1', 't1', 100.0, 10000, datetime('now'), datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, plugin, external_plugin_order_id, ghost_metadata, created_at, updated_at)
-             VALUES ('ord-ps1', '[]', 25.0, 2500, 'in_transit', 'pending', 'shift-ps', 'efood', 'ext-ps1',
+            "INSERT INTO orders (currency, branch_id, id, items, total_amount, total_amount_cents, status, sync_status, staff_shift_id, plugin, external_plugin_order_id, ghost_metadata, created_at, updated_at) VALUES ('CHF', 'b1', 'ord-ps1', '[]', 25.0, 2500, 'in_transit', 'pending', 'shift-ps', 'efood', 'ext-ps1',
                      '{\"food_delivery\":{\"payment_method\":\"cash\",\"prepaid\":false,\"delivery_provider\":\"platform_delivery\"}}',
                      datetime('now'), datetime('now'))",
             [],
@@ -9250,6 +10090,13 @@ mod tests {
         assert_eq!(method, "other");
         assert_eq!(tx_ref, "platform_settlement:cod:ord-ps1");
         assert!((amount - 25.0).abs() < 0.001);
+
+        assert_eq!(
+            crate::fiscal::payload_builder::resolve_order_payment_currency(&conn, "ord-ps1")
+                .unwrap()
+                .as_deref(),
+            Some("CHF")
+        );
 
         // The order is settled.
         let payment_status: String = conn

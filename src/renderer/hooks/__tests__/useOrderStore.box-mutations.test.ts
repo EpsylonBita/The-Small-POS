@@ -117,4 +117,23 @@ describe('desktop BOX store mutation boundary', () => {
     expect(await useOrderStore.getState().approveOrder('box-order')).toBe(true);
     expect(mocks.approve).toHaveBeenCalledWith('box-order', undefined);
   });
+
+  it.each(['ready', 'completed'])('loads the persisted paid room approval without regressing %s', async status => {
+    seed('pending', '');
+    mocks.approve.mockResolvedValue({ success: true, roomChargeConfirmed: true });
+    const originalRefresh = useOrderStore.getState().silentRefresh;
+    const refresh = vi.fn(async () => {
+      useOrderStore.setState({ orders: [{
+        id: 'box-order', status, payment_method: 'room_charge', payment_status: 'paid',
+      }] as never });
+    });
+    useOrderStore.setState({ silentRefresh: refresh });
+    try {
+      expect(await useOrderStore.getState().approveOrder('box-order', 25)).toBe(true);
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(useOrderStore.getState().orders[0]).toMatchObject({ status, payment_status: 'paid' });
+    } finally {
+      useOrderStore.setState({ silentRefresh: originalRefresh });
+    }
+  });
 });

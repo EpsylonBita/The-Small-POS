@@ -1,15 +1,17 @@
+import { configuredStoreCurrency } from '../utils/store-currency';
 import { supabase, isSupabaseConfigured } from '../../shared/supabase';
 import { ErrorFactory, ErrorHandler, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
 import { TIMING, RETRY } from '../../shared/constants';
 import { isOwnEvent, addSessionId } from '../utils/session-utils';
 import { getBridge, isBrowser } from '../../lib';
 import { posApiGet } from '../utils/api-helpers';
+import { getPosMenuImageUrl, projectPosMenuComboImages } from '../utils/menuImages';
 
 const DEFAULT_ADMIN_DASHBOARD_SETTINGS = {
   tax_rate: 0.24,
   service_fee: 0,
   delivery_fee: 0,
-  currency: 'EUR',
+  currency: null,
   timezone: 'Europe/Athens'
 };
 
@@ -42,7 +44,6 @@ function normalizeAdminDashboardSettings(payload: unknown) {
   const generalSettings = asRecord(groupedSettings?.general);
   const taxSettings = asRecord(groupedSettings?.tax);
   const deliverySettings = asRecord(groupedSettings?.delivery);
-  const receiptSettings = asRecord(groupedSettings?.receipt);
   const terminalCategory = asRecord(groupedSettings?.terminal);
 
   return {
@@ -62,12 +63,7 @@ function normalizeAdminDashboardSettings(payload: unknown) {
         terminalSettings?.delivery_fee,
       DEFAULT_ADMIN_DASHBOARD_SETTINGS.delivery_fee
     ),
-    currency: readString(
-      receiptSettings?.currency ??
-        terminalCategory?.currency ??
-        terminalSettings?.currency,
-      DEFAULT_ADMIN_DASHBOARD_SETTINGS.currency
-    ),
+    currency: configuredStoreCurrency(terminalSettings || {}),
     timezone: readString(
       generalSettings?.timezone ??
         terminalCategory?.timezone ??
@@ -202,6 +198,8 @@ export interface MenuItem {
   delivery_price?: number; // DB field (NOT NULL) - delivery-specific price
   dine_in_price?: number; // DB field (NOT NULL) - dine-in-specific price
   image_url?: string | null; // DB field (nullable)
+  show_image_in_pos?: boolean;
+  show_image_in_kiosk?: boolean;
   preparation_time?: number | null; // DB field (nullable, default 0)
   preparationTime?: number; // Computed field (alias for preparation_time)
   calories?: number | null; // DB field (nullable)
@@ -756,7 +754,9 @@ class MenuService {
       base_price: raw.base_price,
       pickup_price: raw.pickup_price || 0,
       delivery_price: raw.delivery_price || 0,
-      image_url: raw.image_url,
+      image_url: getPosMenuImageUrl(raw),
+      show_image_in_pos: raw.show_image_in_pos !== false,
+      show_image_in_kiosk: raw.show_image_in_kiosk !== false,
       preparation_time: raw.preparation_time || 0,
       preparationTime: raw.preparation_time || 0, // Compatibility alias
       calories: raw.calories,
@@ -1000,7 +1000,9 @@ class MenuService {
         base_price: data.base_price,
         pickup_price: data.pickup_price,
         delivery_price: data.delivery_price,
-        image_url: data.image_url,
+        image_url: getPosMenuImageUrl(data),
+        show_image_in_pos: data.show_image_in_pos !== false,
+        show_image_in_kiosk: data.show_image_in_kiosk !== false,
         is_available: data.is_available ?? true,
         is_customizable: data.is_customizable ?? false,
         preparationTime: data.preparation_time || 15,
@@ -1232,6 +1234,8 @@ class MenuService {
         const localSnapshot = await getBridge().settings.getLocal(cacheKey).catch(() => null);
         if (localSnapshot && typeof localSnapshot === 'object') {
           const normalized = normalizeAdminDashboardSettings(localSnapshot);
+          const nativeSettings = await getBridge().terminalConfig.getSettings().catch(() => ({}));
+          normalized.currency = configuredStoreCurrency(nativeSettings);
           this.setCache(cacheKey, normalized);
           return normalized;
         }
@@ -1313,7 +1317,7 @@ class MenuService {
       const ipcCombos = await this.fetchViaIpc<any[]>('menu:get-combos');
       if (ipcCombos) {
         const now = new Date();
-        const availableCombos = ipcCombos.filter((combo: any) => {
+        const availableCombos = ipcCombos.map(projectPosMenuComboImages).filter((combo: any) => {
           if (combo?.is_active === false) return false;
           if (!combo.has_time_restriction) return true;
 
@@ -1355,7 +1359,7 @@ class MenuService {
                 *,
                 items:menu_combo_items(
                   *,
-                  subcategory:subcategories(id, name, name_en, name_el, base_price, pickup_price, delivery_price, dine_in_price, image_url, is_customizable, max_ingredients, category_id),
+                  subcategory:subcategories(id, name, name_en, name_el, base_price, pickup_price, delivery_price, dine_in_price, image_url, show_image_in_pos, show_image_in_kiosk, is_customizable, max_ingredients, category_id),
                   category:menu_categories(id, name, name_en, name_el)
                 )
               `)
@@ -1373,7 +1377,7 @@ class MenuService {
 
       // Filter combos that are currently available (time restrictions)
       const now = new Date();
-      const availableCombos = (data || []).filter((combo: any) => {
+      const availableCombos = (data || []).map(projectPosMenuComboImages).filter((combo: any) => {
         if (!combo.has_time_restriction) return true;
 
         // Check valid_from/valid_until

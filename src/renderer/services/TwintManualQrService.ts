@@ -1,21 +1,13 @@
 import { readTwintManualQr } from '../../../../shared/payments/twint-qr';
 import { getBridge } from '../../lib';
+import { configuredStoreCurrency } from '../utils/store-currency';
+export { configuredStoreCurrency } from '../utils/store-currency';
 import { getCachedTerminalCredentials } from './terminal-credentials';
 
 export type TwintManualConfiguration = { qrImageData: string; currency: 'CHF'; scope: string };
 export function currentTwintScope(): string {
   const { organizationId, branchId, terminalId } = getCachedTerminalCredentials();
   return organizationId && branchId && terminalId ? `${organizationId}|${branchId}|${terminalId}` : '';
-}
-export function configuredStoreCurrency(settings: Record<string, unknown>): string | null {
-  for (const category of ['organization', 'payment', 'restaurant', 'terminal']) {
-    const nested = settings[category] as Record<string, unknown> | undefined;
-    const raw = settings[`${category}.currency`] ?? nested?.currency;
-    if (typeof raw !== 'string') continue;
-    const code = raw.trim().replace(/^"|"$/g, '').trim().toUpperCase();
-    if (/^[A-Z]{3}$/.test(code)) return code;
-  }
-  return null;
 }
 /** A fresh scoped online read; nothing is cached for later payment admission. */
 export async function loadTwintManualConfiguration(): Promise<TwintManualConfiguration | null> {

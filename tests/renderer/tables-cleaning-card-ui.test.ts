@@ -5,6 +5,7 @@ import path from 'node:path';
 
 const read = (rel: string) => readFileSync(path.join(process.cwd(), rel), 'utf8');
 const orderDashboardSource = () => read('src/renderer/components/OrderDashboard.tsx');
+const workspaceSource = () => read('src/renderer/components/tables/TableWorkspace.tsx');
 const tablesDashboardSource = () =>
   read('src/renderer/components/tables/TablesDashboard.tsx');
 
@@ -36,12 +37,9 @@ test('OrderDashboard table grid gates ready/new-order affordances on cleaning ta
     source,
     /const needsAttention =\s*!hasOpenCheck &&[\s\S]*?displayStatus === "cleaning"[\s\S]*?displayStatus === "maintenance"[\s\S]*?displayStatus === "unavailable"/,
   );
-  assert.match(source, /tablesDashboard\.needsCleaning/);
-  assert.match(source, /tablesDashboard\.outOfService/);
-  assert.match(
-    source,
-    /\{needsAttention \? \([\s\S]*?\{attentionActionLabel\}[\s\S]*?\) : \(/,
-  );
+  assert.match(source, /needsAttention=\{needsAttention\}/);
+  assert.match(source, /attentionLabel=\{attentionActionLabel\}/);
+  assert.match(workspaceSource(), /needsAttention && <span className="table-workspace-attention"/);
 });
 
 test('OrderDashboard recovers the table filter when a paid table leaves the active status', () => {
@@ -96,49 +94,7 @@ test('OrderDashboard dine-in header label uses the shared display helper, not th
   }
 });
 
-test('OrderDashboard table-grid secondary button is honest per status: pay / manage reservation / new reservation', () => {
-  const source = orderDashboardSource();
-
-  // A dedicated handler opens the (portalled/blurred) reservation form directly for
-  // the chosen available table, instead of routing to the new-order action modal.
-  assert.match(
-    source,
-    /const handleTableReserve = useCallback\(\(table: RestaurantTable\) => \{[\s\S]*?setSelectedTable\(table\);[\s\S]*?setShowReservationForm\(true\);[\s\S]*?\}, \[\]\);/,
-    'handleTableReserve should open the reservation form for the given table',
-  );
-
-  // Reserved (no open check) tables are detected so they keep their management path.
-  assert.match(
-    source,
-    /const isReservedTable =\s*!hasOpenCheck && displayStatus === "reserved";/,
-    'reserved tables must be distinguished from plain available tables',
-  );
-
-  // Three-way secondary button: open-check OR reserved -> handleTableSelect (Pay /
-  // manage existing reservation via TableActionModal's edit/no-show/cancel path);
-  // only a plain available table reserves directly.
-  assert.match(
-    source,
-    /if \(hasOpenCheck \|\| isReservedTable\) \{\s*handleTableSelect\(table\);\s*\} else \{\s*handleTableReserve\(table\);\s*\}/,
-    'reserved tables must keep the TableActionModal management path; only available tables reserve directly',
-  );
-  // The old two-way branch (which sent reserved tables to a duplicate new-reservation form) is gone.
-  assert.doesNotMatch(source, /if \(hasOpenCheck\) \{\s*handleTableSelect\(table\);\s*\} else \{\s*handleTableReserve\(table\);\s*\}/);
-
-  // Honest, distinct labels per branch (open check / reserved / available).
-  assert.match(source, /t\("tablesDashboard\.pay", "Pay"\)/);
-  assert.match(source, /t\("tableActionModal\.editReservation", \{\s*defaultValue: "Edit Reservation",\s*\}\)/);
-  assert.match(source, /t\("tableActionModal\.newReservation", \{\s*defaultValue: "New Reservation",\s*\}\)/);
-  // The misleading "Assign" label is gone; "New order" (primary) unchanged.
-  assert.doesNotMatch(source, /tablesDashboard\.assign/);
-  assert.match(source, /t\("tablesDashboard\.newOrder", "New order"\)/);
-
-  // The reserved-management and new-reservation buttons show genuinely different
-  // localized labels (Greek), so the two branches are not interchangeable.
-  const el = JSON.parse(read('src/locales/el.json')).tableActionModal;
-  assert.notEqual(
-    el.editReservation,
-    el.newReservation,
-    'edit-reservation and new-reservation must be distinct localized labels',
-  );
+test('compact table tiles keep the existing order/check/attention controller route', () => {
+  assert.match(orderDashboardSource(), /onPrimary=\{\(\) => handleTableSelect\(table\)\}/);
+  assert.doesNotMatch(workspaceSource(), /onSecondary/);
 });

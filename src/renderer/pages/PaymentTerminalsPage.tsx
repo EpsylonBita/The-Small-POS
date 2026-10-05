@@ -1061,8 +1061,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
       {/* Payment Dialog */}
       <PaymentDialog
         isOpen={showPaymentDialog}
-        amount={100} // Test amount: 1.00 EUR
-        currency="EUR"
+        amount={100} // Test amount: 1.00 in the configured store currency
         onClose={() => {
           setShowPaymentDialog(false)
           setPaymentDeviceId(undefined)

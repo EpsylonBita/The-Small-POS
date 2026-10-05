@@ -26,9 +26,9 @@ fn seed(conn: &rusqlite::Connection) {
     conn.execute(
         "INSERT INTO orders (
              id, order_number, items, total_amount, total_amount_cents, status, order_type,
-             payment_status, sync_status, branch_id, terminal_id, created_at, updated_at
+             payment_status, sync_status, branch_id, terminal_id, created_at, updated_at, currency
          ) VALUES (?1, 'A-0077', '[]', 13.0, 1300, 'completed', 'takeaway', 'pending', 'synced',
-                   ?2, ?3, '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
+                   ?2, ?3, '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z', 'EUR')",
         params![ORDER_ID, BRANCH_ID, TERMINAL_ID],
     )
     .expect("seed order");
@@ -43,6 +43,7 @@ fn approved_card(reference: &str, amount: f64) -> Value {
         "paymentOrigin": "terminal",
         "terminalApproved": true,
         "terminalDeviceId": "eft-1",
+        "currency": "EUR",
     })
 }
 

@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "cafeLan": {
+      "title": "Connessione locale dei camerieri",
+      "internetRequired": "Il terminale principale richiede Internet per registrare ordini, pagamenti e modifiche ai tavoli. Se la connessione fallisce, l’azione originale resta in attesa.",
+      "desktopMainOnly": "Questo computer riceve richieste come terminale principale. Importa il codice su un terminale cameriere Android.",
+      "port": "Porta",
+      "listening": "In ascolto dei camerieri",
+      "stopped": "Ascolto arrestato",
+      "connected": "Terminale principale connesso",
+      "pending": "Connessione in attesa; azioni conservate",
+      "refresh": "Aggiorna",
+      "start": "Avvia ascolto",
+      "stop": "Arresta ascolto",
+      "child": "Terminale cameriere",
+      "selectChild": "Seleziona un cameriere",
+      "noChildren": "Nessun terminale cameriere collegato disponibile.",
+      "host": "Indirizzo LAN del terminale principale",
+      "generate": "Genera o rinnova codice",
+      "revoke": "Revoca abbinamento",
+      "codeHelp": "Condividi questo codice solo con il cameriere selezionato. Viene nascosto dopo cinque minuti.",
+      "code": "Codice di abbinamento",
+      "copy": "Copia codice",
+      "hide": "Nascondi codice",
+      "failed": "Connessione non riuscita. Controlla Internet, la configurazione del terminale e l’indirizzo LAN, poi riprova.",
+      "rotationHelp": "Generare o revocare un codice sostituisce l’abbinamento ed elimina le risposte cifrate in attesa. Il cameriere deve importare il nuovo codice; le azioni originali restano in attesa. Continuare?",
+      "unavailable": "Il servizio LAN non è pronto su questo dispositivo.",
+      "import": "Importa codice di abbinamento",
+      "test": "Verifica connessione principale"
+    }
+  }
+}

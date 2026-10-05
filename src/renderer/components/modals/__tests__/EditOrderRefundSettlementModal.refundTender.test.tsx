@@ -22,6 +22,8 @@ vi.mock('react-i18next', () => ({
   }),
 }))
 
+vi.mock('../../../../lib/i18n', () => ({ default: { language: 'en-US' } }));
+
 vi.mock('react-hot-toast', () => ({
   default: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() }),
 }))
@@ -137,3 +139,17 @@ describe('refund tender (R5)', () => {
     })
   })
 })
+
+it('keeps the original CHF refund unit after the store changes to GBP', async () => {
+  const { setStoreCurrencyFromSettings } = await import('../../../utils/store-currency');
+  setStoreCurrencyFromSettings({ terminal: { branch_id: 'branch' }, restaurant: {
+    currency: 'GBP', store_currency_available: true, store_currency_source: 'branch_country', store_currency_branch_id: 'branch',
+  } });
+  const original = preview('cash');
+  original.completedPayments[0].currency = 'CHF';
+  const { container } = render(<EditOrderRefundSettlementModal isOpen preview={original} onConfirm={vi.fn()} />);
+  expect(container.textContent).toContain('CHF');
+  expect(container.textContent).not.toContain('GBP');
+  expect(container.textContent).not.toContain('€');
+  setStoreCurrencyFromSettings({});
+});

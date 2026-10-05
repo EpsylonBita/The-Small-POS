@@ -1,8 +1,11 @@
+import { shiftSummaryCurrency } from '../../utils/shift-currency';
+import { recordedFolioCurrency } from '../../utils/folio-currency';
+import { submitSatelliteHandover } from '../../utils/satellite-handover';
 import React, { useState, useEffect, useRef } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { toast } from 'react-hot-toast';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
+import { X, Clock, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense, StaffPayment } from '../../types';
@@ -11,7 +14,7 @@ import { liquidGlassModalCard } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
-import { formatTime, formatCurrency } from '../../utils/format';
+import { formatTime, formatCurrency as formatMoney } from '../../utils/format';
 import { normalizeShiftRole, type StaffShiftRole } from '../../utils/shift-role';
 import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { calculateDriverReturn } from '../../utils/driver-checkout';
@@ -30,13 +33,14 @@ import {
   type RecordPaymentBlockerOutcome,
 } from '../../hooks/useRecordPaymentBlocker';
 import { StaffShiftCheckoutFooterActions } from './StaffShiftCheckoutFooterActions';
+import './staff-shift-checkout-footer.css';
 import {
   buildShiftCheckoutPrintSnapshot,
   canPrintShiftCheckoutSnapshot,
   queueShiftCheckoutPrint,
   resolveCashierCheckoutExpenseTotal,
 } from '../../utils/staffShiftCheckoutPrint';
-import { getBridge } from '../../../lib';
+import { emitCompatEvent, getBridge } from '../../../lib';
 import { GiftCardsApiService } from '../../services/GiftCardsApiService';
 import { getCachedTerminalCredentials } from '../../services/terminal-credentials';
 import { financialOpening, openingMatchesScope, parseOpeningCents, type FinancialOpeningScope } from '../../lib/financial-opening';
@@ -88,8 +92,9 @@ interface ShiftIpcResult extends PaymentIntegrityErrorPayload {
   expected?: number;
   closing?: number;
   variance?: number;
+  currency?: string | null;
   error?: string;
-  data?: { shiftId?: string; id?: string; expected?: number; closing?: number; variance?: number };
+  data?: { shiftId?: string; id?: string; expected?: number; closing?: number; variance?: number; currency?: string | null };
 }
 
 interface ShiftPrintCheckoutResult extends ShiftIpcResult {
@@ -399,6 +404,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const bridge = getBridge();
   const { t } = useTranslation();
   const { staff, activeShift, refreshActiveShift, setStaff, setActiveShiftImmediate } = useShift();
+  const keyboardDialogId = React.useId();
+  const isOwnTopmostDialog = () => {
+    const ownDialog = document.getElementById(keyboardDialogId);
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(dialog =>
+      !dialog.closest('[inert]') && !dialog.closest('[aria-hidden="true"]'));
+    return !!ownDialog && dialogs[dialogs.length - 1] === ownDialog;
+  };
 
   // Turn an unknown role slug (e.g. "housekeeping_supervisor") into a readable
   // label ("Housekeeping Supervisor") so raw snake_case codes never reach the UI,
@@ -656,6 +668,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     loading: boolean;
     error: string | null;
     figures: {
+      currency?: string | null;
       total_orders_count: number;
       total_sales_amount: number;
       total_cash_sales: number;
@@ -666,15 +679,18 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   }>({ loading: false, error: null, figures: null });
   const [satelliteCountedCash, setSatelliteCountedCash] = useState('');
   const [satelliteSubmitting, setSatelliteSubmitting] = useState(false);
+  const [satellitePending, setSatellitePending] = useState(false);
   const [satelliteResult, setSatelliteResult] = useState<{
     counted: number;
     expected: number;
     variance: number;
     staffName: string;
+    currency: string;
   } | null>(null);
 
   // Variance result state
   const [lastShiftResult, setLastShiftResult] = useState<{
+    currency: string | null;
     variance: number;
     breakdown?: {
       calculationVersion: number;
@@ -730,8 +746,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   // Keyboard shortcuts for large payment confirmation
   useEffect(() => {
-    if (showPaymentConfirm) {
+    if (isOpen && showPaymentConfirm) {
       const handleKeyDown = (e: KeyboardEvent) => {
+        if (!isOwnTopmostDialog()) return;
         if (e.key === 'Escape') {
           handleCancelLargePayment();
           e.stopPropagation();
@@ -744,7 +761,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       window.addEventListener('keydown', handleKeyDown, true); // Capture phase to prevent other handlers
       return () => window.removeEventListener('keydown', handleKeyDown, true);
     }
-  }, [showPaymentConfirm]);
+  }, [isOpen, showPaymentConfirm, keyboardDialogId]);
 
   // Bring opened inline closeout forms into view so they are immediately usable
   // above the sticky footer instead of opening hidden beneath it.
@@ -1149,6 +1166,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   }, [checkInStep, selectedStaff]);
   const [shiftSummary, setShiftSummary] = useState<any | null>(null);
+  const checkoutDisplayCurrency = lastShiftResult
+    ? lastShiftResult.currency : shiftSummaryCurrency(shiftSummary, effectiveShift);
+  const formatCurrency = (amount: number, currency?: string | null) => formatMoney(
+    amount, currency !== undefined ? currency : effectiveMode === 'checkout' ? checkoutDisplayCurrency : undefined,
+  );
   const cashierCheckoutExpenseTotal = React.useMemo(
     () => resolveCashierCheckoutExpenseTotal(shiftSummary, expenses, effectiveShift?.id),
     [shiftSummary, expenses, effectiveShift?.id],
@@ -2340,6 +2362,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setSatelliteCheckout({ shift: satelliteShift, staff: staffMember });
       setSatelliteCountedCash('');
       setSatelliteResult(null);
+      setSatellitePending(false);
       setSatellitePreview({ loading: true, error: null, figures: null });
       void bridge.shifts
         .remoteCheckout({ shiftId: String(satelliteShift.id), action: 'preview' })
@@ -3071,6 +3094,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       if (result.success) {
         const shiftId = result?.shiftId || result?.data?.shiftId || result?.data?.id;
+        emitCompatEvent('shift-updated', { shiftId, status: 'active' });
         // Z-17/08 forensics: when the typed opening float breaks the
         // terminal's close→open carry (drawer closed on one number, opened
         // on another with nothing in between), confront the cashier NOW —
@@ -3085,8 +3109,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         ) {
           toast(
             t('modals.staffShift.drawerContinuityWarning', {
-              previous: continuity.previousClosing.toFixed(2),
-              opening: continuity.opening.toFixed(2),
+              previous: formatCurrency(continuity.previousClosing),
+              opening: formatCurrency(continuity.opening),
             }),
             { duration: 15000, icon: '⚠️' },
           );
@@ -3352,7 +3376,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     if (closingAmount === 0 && !bypassZeroConfirm && !isNonFinancialCheckoutRole) {
       openConfirm({
         title: t('modals.staffShift.confirmZeroTitle', 'Confirm Zero Closing Cash'),
-        message: t('modals.staffShift.confirmZeroMessage', 'Are you sure you want to close the shift with $0.00 closing cash?'),
+        message: t('modals.staffShift.confirmZeroMessage', 'Are you sure you want to close the shift with zero closing cash?'),
         variant: 'warning',
         onConfirm: () => { closeConfirm(); handleCheckOut(true); }
       });
@@ -3385,10 +3409,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         // A retained gift original is never a generic success or print.
         rediscoverGiftClose();
       } else if (result.success) {
+        emitCompatEvent('shift-updated', { shiftId: effectiveShift.id, status: 'closed', branchId: effectiveShift.branch_id,
+          terminalId: effectiveShift.terminal_id, roleType: effectiveShift.role_type });
         setCheckoutPaymentBlockers([]);
         const variance = result?.variance ?? result?.data?.variance ?? 0;
+        const closedCurrency = shiftSummaryCurrency(result?.data ?? result, null);
         const varianceText = t(variance >= 0 ? 'shiftManager.overage' : 'shiftManager.shortage', {
-          amount: formatCurrency(Math.abs(variance)),
+          amount: formatCurrency(Math.abs(variance), closedCurrency),
         });
         // Check for cashier logic to populate items
         const isCashier = effectiveShift.role_type === 'cashier';
@@ -3409,6 +3436,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           const actual = closingAmount;
 
           setLastShiftResult({
+            currency: closedCurrency,
             variance, // Use backend variance directly
             breakdown: {
               calculationVersion: breakdown.calculationVersion,
@@ -3427,7 +3455,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             }
           });
         } else {
-          setLastShiftResult({ variance, breakdown: undefined });
+          setLastShiftResult({ variance, currency: closedCurrency, breakdown: undefined });
         }
 
         setSuccess(t('modals.staffShift.shiftClosedSuccess', 'Shift closed successfully!'));
@@ -3455,7 +3483,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       } else {
         const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
         setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-        setError(result.error || t('modals.staffShift.closeShiftFailed'));
+        setError(result.error?.includes('SHIFT_CURRENCY_SETTLEMENT_REQUIRED') ? t('modals.staffShift.currencySettlementRequired') : result.error || t('modals.staffShift.closeShiftFailed'));
         if (readRefusalCode(result, '').startsWith('GIFT_CLOSING_')) {
           rediscoverGiftClose();
         }
@@ -3519,6 +3547,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     const outcome = readGiftCloseResult(result);
     if (outcome.kind === 'retained') {
+      emitCompatEvent('shift-updated', { shiftId, status: 'closed', branchId: shift.branch_id,
+        terminalId: shift.terminal_id, roleType: shift.role_type });
       setClosingCash('');
       setGiftCheckout({ kind: 'retained', shiftId, opening });
       setGiftRecoveryTarget({
@@ -4274,67 +4304,36 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setSatellitePreview({ loading: false, error: null, figures: null });
     setSatelliteCountedCash('');
     setSatelliteResult(null);
+    setSatellitePending(false);
     setSelectedStaff(null);
   };
 
   const handleSatelliteRemoteCheckout = async () => {
     if (!satelliteCheckout || !satellitePreview.figures || satelliteSubmitting) return;
-    const counted = parseFloat(satelliteCountedCash.replace(',', '.'));
-    if (!Number.isFinite(counted) || counted < 0) return;
+    const counted = Number(satelliteCountedCash.replace(',', '.'));
+    const currency = recordedFolioCurrency(satellitePreview.figures.currency);
+    if (!satelliteCountedCash.trim() || !Number.isFinite(counted) || counted < 0 || !currency) return;
     setSatelliteSubmitting(true);
+    setError('');
     try {
-      const res: any = await bridge.shifts.remoteCheckout({
-        shiftId: String(satelliteCheckout.shift.id),
-        action: 'close',
-        countedCash: counted,
-        closedBy: staff?.databaseStaffId ?? null,
+      const local = (await bridge.settings.get()) as any;
+      const outcome = await submitSatelliteHandover(bridge.shifts, {
+        branchId: String(local?.['terminal.branch_id'] ?? local?.terminal?.branch_id ?? ''),
+        terminalId: String(local?.['terminal.terminal_id'] ?? local?.terminal?.terminal_id ?? ''),
+        satelliteShiftId: String(satelliteCheckout.shift.id),
+        openingCash: Number(satellitePreview.figures.opening_cash_amount || 0),
+        countedCash: counted, currency, closedBy: staff?.databaseStaffId ?? null,
       });
-      const payload = res?.data ?? res;
-      if (!payload?.success) {
-        setError(
-          payload?.error ||
-            t('modals.staffShift.satelliteCheckout.closeFailed', {
-              defaultValue: 'The remote checkout was rejected by the server.',
-            }),
-        );
+      if (outcome.status === 'pending') {
+        setSatellitePending(true);
         return;
       }
-
-      // Local drawer credit — exactly-once entry of the received cash into
-      // this register's day math (the server wrote no drawer field).
-      try {
-        const local = (await bridge.settings.get()) as any;
-        const branchId =
-          local?.['terminal.branch_id'] ?? local?.terminal?.branch_id ?? '';
-        const terminalId =
-          local?.['terminal.terminal_id'] ?? local?.terminal?.terminal_id ?? '';
-        await bridge.shifts.recordSatelliteHandover({
-          branchId: String(branchId),
-          terminalId: String(terminalId),
-          satelliteShiftId: String(satelliteCheckout.shift.id),
-          openingCash: Number(satellitePreview.figures.opening_cash_amount || 0),
-          countedCash: counted,
-        });
-      } catch (drawerError) {
-        // The shift IS closed server-side; surface the drawer failure loudly
-        // so the operator reconciles by hand instead of losing the amount.
-        setError(
-          t('modals.staffShift.satelliteCheckout.drawerCreditFailed', {
-            defaultValue:
-              'Shift closed, but crediting this drawer failed: {{error}}. Record the received cash manually.',
-            error: String((drawerError as Error)?.message || drawerError),
-          }),
-        );
-      }
-
-      const expected = Number(satellitePreview.figures.expected_cash_amount || 0);
-      setSatelliteResult({
-        counted,
-        expected,
-        variance: Math.round((counted - expected) * 100) / 100,
-        staffName: satelliteCheckout.staff.name,
-      });
+      setSatellitePending(false);
+      setSatelliteResult({ counted: outcome.counted, expected: outcome.expected, currency: outcome.currency,
+        variance: outcome.variance, staffName: satelliteCheckout.staff.name });
       void loadStaff();
+    } catch (failure) {
+      setError(String((failure as Error)?.message || failure));
     } finally {
       setSatelliteSubmitting(false);
     }
@@ -4343,7 +4342,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const renderSatelliteCheckoutView = () => {
     if (!satelliteCheckout) return null;
     const figures = satellitePreview.figures;
-    const countedValue = parseFloat(satelliteCountedCash.replace(',', '.'));
+    const countedValue = Number(satelliteCountedCash.replace(',', '.'));
+    const currency = recordedFolioCurrency(figures?.currency);
+    const formatSatelliteMoney = (amount: number) => formatCurrency(amount, satelliteResult?.currency ?? currency);
     const varianceValue =
       figures && Number.isFinite(countedValue)
         ? countedValue - Number(figures.expected_cash_amount || 0)
@@ -4367,18 +4368,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               : ''}
           </p>
 
+          {satellitePending && <p role="status" className="mt-4 text-sm text-amber-700 dark:text-amber-300">{t('modals.staffShift.satelliteCheckout.pending')}</p>}
+          {figures && !currency && <p role="alert" className="mt-4 text-sm text-rose-500">{t('guestBilling.errors.shiftCurrency')}</p>}
           {satelliteResult ? (
             <div className={`mt-4 ${checkoutInsetSurfaceClass}`} data-testid="satellite-checkout-success">
               <p className="text-base font-bold liquid-glass-modal-text">
                 {t('modals.staffShift.satelliteCheckout.success', {
                   defaultValue:
                     'Shift closed. Expected {{expected}}, received {{counted}}.',
-                  expected: formatCurrency(satelliteResult.expected),
-                  counted: formatCurrency(satelliteResult.counted),
+                  expected: formatSatelliteMoney(satelliteResult.expected),
+                  counted: formatSatelliteMoney(satelliteResult.counted),
                 })}
               </p>
               <div className="mt-2">
-                <VarianceBadge variance={satelliteResult.variance} />
+                <VarianceBadge variance={satelliteResult.variance} currency={satelliteResult.currency} />
               </div>
               <button
                 type="button"
@@ -4401,11 +4404,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               <div className={`mt-4 grid grid-cols-2 gap-3 ${checkoutInsetSurfaceClass}`}>
                 {[
                   ['orders', t('modals.staffShift.satelliteCheckout.orders', { defaultValue: 'Orders' }), String(figures.total_orders_count)],
-                  ['sales', t('modals.staffShift.satelliteCheckout.sales', { defaultValue: 'Total sales' }), formatCurrency(figures.total_sales_amount)],
-                  ['cash', t('modals.staffShift.satelliteCheckout.cashSales', { defaultValue: 'Cash sales' }), formatCurrency(figures.total_cash_sales)],
-                  ['card', t('modals.staffShift.satelliteCheckout.cardSales', { defaultValue: 'Card sales' }), formatCurrency(figures.total_card_sales)],
-                  ['float', t('modals.staffShift.satelliteCheckout.openingFloat', { defaultValue: 'Opening float' }), formatCurrency(figures.opening_cash_amount)],
-                  ['expected', t('modals.staffShift.satelliteCheckout.expectedCash', { defaultValue: 'Expected cash' }), formatCurrency(figures.expected_cash_amount)],
+                  ['sales', t('modals.staffShift.satelliteCheckout.sales', { defaultValue: 'Total sales' }), formatSatelliteMoney(figures.total_sales_amount)],
+                  ['cash', t('modals.staffShift.satelliteCheckout.cashSales', { defaultValue: 'Cash sales' }), formatSatelliteMoney(figures.total_cash_sales)],
+                  ['card', t('modals.staffShift.satelliteCheckout.cardSales', { defaultValue: 'Card sales' }), formatSatelliteMoney(figures.total_card_sales)],
+                  ['float', t('modals.staffShift.satelliteCheckout.openingFloat', { defaultValue: 'Opening float' }), formatSatelliteMoney(figures.opening_cash_amount)],
+                  ['expected', t('modals.staffShift.satelliteCheckout.expectedCash', { defaultValue: 'Expected cash' }), formatSatelliteMoney(figures.expected_cash_amount)],
                 ].map(([key, label, value]) => (
                   <div key={key as string}>
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
@@ -4426,15 +4429,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <input
                   type="text"
                   inputMode="decimal"
+                  disabled={satellitePending || satelliteSubmitting}
                   value={satelliteCountedCash}
                   onChange={event => setSatelliteCountedCash(event.target.value)}
-                  placeholder={formatCurrency(figures.expected_cash_amount)}
+                  placeholder={formatSatelliteMoney(figures.expected_cash_amount)}
                   className="mt-2 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-lg font-bold text-slate-900 dark:border-white/15 dark:bg-black/30 dark:text-white"
                   data-testid="satellite-counted-cash"
                 />
                 {varianceValue !== null ? (
                   <div className="mt-2">
-                    <VarianceBadge variance={Math.round(varianceValue * 100) / 100} />
+                    <VarianceBadge variance={Math.round(varianceValue * 100) / 100} currency={currency} />
                   </div>
                 ) : null}
               </div>
@@ -4442,13 +4446,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               <button
                 type="button"
                 onClick={() => void handleSatelliteRemoteCheckout()}
-                disabled={satelliteSubmitting || !Number.isFinite(countedValue) || countedValue < 0}
+                disabled={satelliteSubmitting || !currency || !satelliteCountedCash.trim() || !Number.isFinite(countedValue) || countedValue < 0}
                 className="mt-5 w-full rounded-2xl bg-yellow-400 px-5 py-4 text-base font-black text-black disabled:opacity-50"
                 data-testid="satellite-checkout-confirm"
               >
                 {satelliteSubmitting
                   ? t('modals.staffShift.satelliteCheckout.closing', { defaultValue: 'Closing…' })
-                  : t('modals.staffShift.satelliteCheckout.confirm', {
+                  : satellitePending ? t('modals.staffShift.satelliteCheckout.retry') : t('modals.staffShift.satelliteCheckout.confirm', {
                       defaultValue: 'Close shift & receive cash',
                     })}
               </button>
@@ -5204,7 +5208,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     </p>
                   ) : (
                     <div className="mt-4 flex justify-center">
-                      <VarianceBadge variance={variance} size="lg" showIcon />
+                      <VarianceBadge currency={checkoutDisplayCurrency} variance={variance} size="lg" showIcon />
                     </div>
                   )}
                 </div>
@@ -5698,7 +5702,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </p>
                 ) : (
                   <div className="mt-4 flex justify-center">
-                    <VarianceBadge variance={variance} size="lg" showIcon />
+                    <VarianceBadge currency={checkoutDisplayCurrency} variance={variance} size="lg" showIcon />
                   </div>
                 )}
               </div>
@@ -5879,7 +5883,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </p>
                 ) : (
                   <div className="mt-4 flex justify-center">
-                    <VarianceBadge variance={variance} size="lg" showIcon />
+                    <VarianceBadge currency={checkoutDisplayCurrency} variance={variance} size="lg" showIcon />
                   </div>
                 )}
               </div>
@@ -6754,7 +6758,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div className="mt-4 flex items-center gap-4">
                   {roleType === 'cashier' && financialEntry.status !== 'ordinary' ? (
                     <span data-testid="financial-opening-currency" className="text-xl font-bold">{financialEntry.currency ?? '—'}</span>
-                  ) : <Euro
+                  ) : <Banknote
                     className={`h-14 w-14 shrink-0 ${selectedRolePresentation.iconColor}`}
                     strokeWidth={3}
                   />}
@@ -6952,6 +6956,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   // Keyboard Shortcuts
   useKeyboardShortcut('ctrl+s', (e) => {
+    if (!isOpen || !isOwnTopmostDialog()) return;
     if (confirmDialog.isOpen && confirmDialog.onConfirm) {
       confirmDialog.onConfirm();
       return;
@@ -6966,7 +6971,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     } else if (effectiveMode === 'checkout') {
       handleCheckOut();
     }
-  });
+  }, { enabled: isOpen });
 
   // Closed-state early return (same pattern as OrderDetailsModal). Without it,
   // the whole check-in/checkout vDOM below — including the eagerly evaluated
@@ -6986,6 +6991,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   return (
     <>
       <LiquidGlassModal
+        modalId={keyboardDialogId}
+        recoveryAccess
         blur={effectiveMode !== 'checkin'}
         isOpen={isOpen}
         onClose={handleModalClose}
@@ -7063,7 +7070,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className="space-y-4">
               <div className="flex flex-col items-center justify-center py-4 bg-white/5 dark:bg-gray-800/20 rounded-2xl border liquid-glass-modal-border">
                 <span className="text-sm text-gray-400 mb-2">{t('modals.staffShift.varianceLabel', 'Cash Variance')}</span>
-                <VarianceBadge variance={lastShiftResult.variance} size="lg" showIcon />
+                <VarianceBadge currency={lastShiftResult.currency} variance={lastShiftResult.variance} size="lg" showIcon />
                 <p className="text-xs text-gray-500 mt-2 max-w-xs text-center">
                   {lastShiftResult.variance === 0
                     ? t('modals.staffShift.varianceBalanced', 'Perfect! The drawer is balanced.')
@@ -7154,7 +7161,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {/* Fallback for other roles or missing breakdown */}
           {lastShiftResult && !lastShiftResult.breakdown && (
             <div className="flex justify-center">
-              <VarianceBadge variance={lastShiftResult.variance} size="md" />
+              <VarianceBadge currency={lastShiftResult.currency} variance={lastShiftResult.variance} size="md" />
             </div>
           )}
 
@@ -7435,21 +7442,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 <div className="space-y-1 text-sm">
                                   <div className="flex justify-between text-red-300">
                                     <span>{t('modals.staffShift.driverStarting')}</span>
-                                    <span>-€{driver.starting.toFixed(2)}</span>
+                                    <span>-{formatCurrency(driver.starting)}</span>
                                   </div>
                                   <div className="flex justify-between text-green-300">
                                     <span>+ {t('modals.staffShift.driverEarnings')}</span>
-                                    <span>+€{driver.earnings.toFixed(2)}</span>
+                                    <span>+{formatCurrency(driver.earnings)}</span>
                                   </div>
                                   {driver.expenses > 0 && (
                                     <div className="flex justify-between text-red-300">
                                       <span>- {t('modals.staffShift.expenses')}</span>
-                                      <span>-€{driver.expenses.toFixed(2)}</span>
+                                      <span>-{formatCurrency(driver.expenses)}</span>
                                     </div>
                                   )}
                                   <div className={`flex justify-between border-t border-slate-200/80 pt-1 font-bold dark:border-white/20 ${isPositive ? 'text-green-500 dark:text-green-400' : 'text-red-500 dark:text-red-400'}`}>
                                     <span>= {isPositive ? t('modals.staffShift.driverReturns') : t('modals.staffShift.driverTakes')}</span>
-                                    <span>{isPositive ? '+' : '-'}€{Math.abs(returns).toFixed(2)}</span>
+                                    <span>{isPositive ? '+' : '-'}{formatCurrency(Math.abs(returns))}</span>
                                   </div>
                                 </div>
                               </div>
@@ -8322,16 +8329,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <div className="grid grid-cols-3 gap-2 text-sm">
                               <div>
                                 <div className="text-xs text-gray-400">{t('modals.staffShift.driverStarting', 'Starting Amount')}</div>
-                                <div className="font-medium liquid-glass-modal-text">€{startingAmount.toFixed(2)}</div>
+                                <div className="font-medium liquid-glass-modal-text">{formatCurrency(startingAmount)}</div>
                               </div>
                               <div>
                                 <div className="text-xs text-gray-400">{t('modals.staffShift.driverEarnings')}</div>
-                                <div className="font-medium liquid-glass-modal-text">€{earnings.toFixed(2)}</div>
+                                <div className="font-medium liquid-glass-modal-text">{formatCurrency(earnings)}</div>
                               </div>
                               <div>
                                 <div className="text-xs text-gray-400">{isPositive ? t('modals.staffShift.driverReturns') : t('modals.staffShift.driverTakes')}</div>
                                 <div className={`font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-                                  €{Math.abs(returns).toFixed(2)}
+                                  {formatCurrency(Math.abs(returns))}
                                 </div>
                               </div>
                             </div>
@@ -8425,7 +8432,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               {t('modals.staffShift.paymentHistoryToday', "Today's Payments")}
                             </h4>
                             <POSGlassBadge variant="info" size="sm">
-                              {t('modals.staffShift.todayTotal', { amount: dailyPaymentTotal.toFixed(2) })}
+                              {t('modals.staffShift.todayTotal', { amount: formatCurrency(dailyPaymentTotal) })}
                             </POSGlassBadge>
                           </div>
 
@@ -8438,7 +8445,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 <div className="flex-1">
                                   <div className="flex items-center gap-2">
                                     <span className="font-medium text-white">
-                                      €{payment.amount.toFixed(2)}
+                                      {formatCurrency(payment.amount)}
                                     </span>
                                     <POSGlassBadge variant="info" size="sm">
                                       {t(`modals.staffShift.paymentTypes.${payment.payment_type}`, payment.payment_type) as string}
@@ -8484,12 +8491,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           {t('modals.staffShift.amountLabel', 'Amount')}
                           {expectedPayment !== null && (
                             <span className="ml-2 text-xs text-slate-400">
-                              ({t('modals.staffShift.expected', 'Expected')}: €{(expectedPayment ?? 0).toFixed(2)})
+                              ({t('modals.staffShift.expected', 'Expected')}: {formatCurrency((expectedPayment ?? 0))})
                             </span>
                           )}
                         </label>
                         <div className="relative">
-                          <Euro className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <Banknote className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                           <input
                             type="text"
                             inputMode="decimal"
@@ -8498,7 +8505,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               setPaymentAmount(formatMoneyInputWithCents(e.target.value));
                             }}
                             onFocus={(e) => e.target.select()}
-                            placeholder={expectedPayment ? `€${(expectedPayment ?? 0).toFixed(2)}` : '0,00'}
+                            placeholder={expectedPayment ? formatCurrency(expectedPayment ?? 0) : '0,00'}
                             className="liquid-glass-modal-input w-full pl-9"
                           />
                         </div>
@@ -8659,7 +8666,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   {/* Cashier Payment */}
                   <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/5 dark:shadow-none">
                     <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide flex items-center gap-2">
-                      <Euro className="w-4 h-4 text-green-500" />
+                      <Banknote className="w-4 h-4 text-green-500" />
                       {t('modals.staffShift.cashierPaymentLabel')}
                     </label>
                     <div className="flex items-center gap-3">
@@ -8681,7 +8688,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   {/* Closing Cash */}
                   <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/5 dark:shadow-none">
                     <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide flex items-center gap-2">
-                      <Euro className="w-4 h-4 text-green-500" />
+                      <Banknote className="w-4 h-4 text-green-500" />
                       {t('modals.staffShift.closingCashLabel')}
                     </label>
                     <div className="flex items-center gap-3">
@@ -8721,7 +8728,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     return (
                       <div className="flex flex-col items-center gap-2 mt-4 animate-in fade-in slide-in-from-top-2">
                         <POSGlassTooltip content={t('modals.staffShift.varianceExplanation', 'Difference between counted cash and expected cash')}>
-                          <VarianceBadge variance={variance} size="lg" showIcon />
+                          <VarianceBadge currency={checkoutDisplayCurrency} variance={variance} size="lg" showIcon />
                         </POSGlassTooltip>
                       </div>
                     );
@@ -8880,7 +8887,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               data-testid="staff-checkout-footer"
               className="absolute inset-x-0 bottom-0 z-20 pr-2 pb-1"
             >
-              <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-[0_14px_36px_rgba(15,23,42,0.08)] sm:flex-row sm:items-center sm:justify-between dark:border-white/10 dark:bg-black/20 dark:shadow-[0_14px_36px_rgba(2,6,23,0.32)]">
+              <div className="staff-checkout-footer-panel flex flex-col gap-3 rounded-2xl p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
                     {checkoutFooterData.label}
@@ -8937,8 +8944,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 </h3>
                 <p id="confirm-large-payment-desc" className="text-gray-300">
                   {t('modals.staffShift.largePaymentWarning', {
-                    amount: `€${pendingPaymentAmount.toFixed(2)}`,
-                    threshold: `€${LARGE_PAYMENT_THRESHOLD}`
+                    amount: formatCurrency(pendingPaymentAmount),
+                    threshold: formatCurrency(LARGE_PAYMENT_THRESHOLD)
                   })}
                 </p>
               </div>

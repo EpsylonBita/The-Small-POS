@@ -16,7 +16,6 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronUp,
-  Euro,
   Gift,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -2039,7 +2038,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                         <div className="space-y-3 pt-2 border-t border-orange-500/20 animate-in fade-in slide-in-from-top-2 duration-200">
                           <div>
                             <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
-                              <Euro className="w-4 h-4 inline mr-1" />
+                              <Banknote className="w-4 h-4 inline mr-1" />
                               {t("modals.refund.refundAmount", {
                                 defaultValue: "Refund Amount",
                               })}
@@ -2057,7 +2056,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                                 placeholder="0.00"
                                 className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
                               />
-                              <Euro className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
+                              <Banknote className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
                             </div>
                             {balance && (
                               <p className="text-xs liquid-glass-modal-text-muted mt-1">

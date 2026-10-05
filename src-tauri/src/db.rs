@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 95;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 96;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -161,37 +161,23 @@ fn open_and_configure(path: &Path) -> Result<Connection, String> {
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
          PRAGMA busy_timeout = 5000;
-         PRAGMA synchronous = NORMAL;",
+         PRAGMA synchronous = FULL;",
     )
     .map_err(|e| format!("pragma setup: {e}"))?;
 
     Ok(conn)
 }
 
-/// Wave 10 H32: bracket a closure with `PRAGMA synchronous = FULL` for
-/// power-loss durability of monetary writes.
-///
-/// SQLite's default `synchronous = NORMAL` (set in `open_and_configure`)
-/// fsyncs the WAL only at checkpoint time, so a power loss between two
-/// checkpoints can lose committed-but-not-checkpointed writes. For
-/// monetary data (`order_payments`, `payment_adjustments`, `z_reports`,
-/// `staff_shifts`) this is unacceptable — the customer paid, the cash
-/// drawer moved, but the row may not survive. `FULL` fsyncs every commit
-/// at a measurable per-commit latency cost (see the bench harness in
-/// `h32_pragma_bench_normal_vs_full` for current numbers and the 15% P99
-/// ceiling that gated shipping).
-///
-/// **Status**: production wrap is descoped per the bench numbers
-/// (P99 +47.8% on the dev machine). Helper kept as ready-to-use
-/// infrastructure for a future re-bench on different hardware /
-/// storage / OS, or for a targeted opt-in by a single high-value
-/// transaction. See `project_w10_h32_pragma_descoped.md`.
+/// Ensure commit durability without weakening the connection's existing policy.
+/// Production WAL connections use FULL: ordinary accepted work must survive a
+/// power cut before the next checkpoint. Callers with EXTRA retain EXTRA, and
+/// the guard restores the previous mode on success, error or panic.
 ///
 /// Contract:
 /// - The PRAGMA is per-connection in WAL mode (verified by SQLite docs).
 ///   This helper is therefore safe to call concurrently from different
 ///   connections without affecting each other.
-/// - The `Restore` Drop guard puts the PRAGMA back to NORMAL on any
+/// - The `Restore` Drop guard puts the PRAGMA back to its previous mode on any
 ///   exit path (Ok return, Err return, panic). Without the guard, a
 ///   panic mid-closure would leave the connection in FULL mode for the
 ///   rest of its lifetime — a subtle and hard-to-trace performance bug.
@@ -210,15 +196,15 @@ fn open_and_configure(path: &Path) -> Result<Connection, String> {
 ///
 ///   The closure can also commit-and-then-do-more; the PRAGMA reset on
 ///   Drop is unaffected by what happens inside.
-#[allow(dead_code)] // W10 H32 descoped per bench (P99 +47.8%); kept for re-bench.
 pub(crate) fn with_full_sync<F, T>(conn: &Connection, f: F) -> Result<T, String>
 where
     F: FnOnce(&Connection) -> Result<T, String>,
 {
-    /// Drop guard that restores `PRAGMA synchronous = NORMAL` on any
+    /// Drop guard that restores the original durability policy on any
     /// exit path — including panic unwinding through the closure.
     struct Restore<'c> {
         conn: &'c Connection,
+        previous: i64,
     }
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
@@ -226,19 +212,25 @@ where
             // in a state where PRAGMA can't run (e.g. connection
             // closed), there is nothing useful to do. Log at debug so
             // a forensic trace is possible.
-            if let Err(e) = self.conn.execute_batch("PRAGMA synchronous = NORMAL;") {
+            if let Err(e) = self.conn.pragma_update(None, "synchronous", self.previous) {
                 tracing::debug!(
                     error = %e,
-                    "Wave 10 H32: failed to restore PRAGMA synchronous = NORMAL on Drop"
+                    "Failed to restore SQLite durability policy"
                 );
             }
         }
     }
 
-    conn.execute_batch("PRAGMA synchronous = FULL;")
+    let previous: i64 = conn
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(|e| format!("read synchronous policy: {e}"))?;
+    if previous >= 2 {
+        return f(conn);
+    }
+    conn.pragma_update(None, "synchronous", previous.max(2))
         .map_err(|e| format!("with_full_sync set FULL: {e}"))?;
 
-    let _guard = Restore { conn };
+    let _guard = Restore { conn, previous };
     f(conn)
 }
 
@@ -735,6 +727,9 @@ where
     }
     if current < 95 || needs_v95_backfill {
         run_migration_tx(conn, 95, migrate_v95)?;
+    }
+    if current < 96 {
+        run_migration_tx(conn, 96, migrate_v96)?;
     }
 
     Ok(())
@@ -1277,6 +1272,47 @@ fn needs_v95_twint_payment_backfill(conn: &Connection, current: i32) -> Result<b
         .db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
         .map_err(|e| e.to_string())?;
     Ok(known_check && !defensive)
+}
+
+/// Prospective operating currency snapshots. Historic unknown money remains unknown;
+/// no country/default-based backfill is safe after a store-country change.
+fn migrate_v96(conn: &Connection) -> Result<(), String> {
+    crate::satellite_handover::ensure_schema(conn)?;
+    crate::shifts::ensure_staff_payments_table(conn)?;
+    for table in [
+        "orders",
+        "staff_shifts",
+        "cash_drawer_sessions",
+        "shift_expenses",
+        "driver_earnings",
+        "staff_payments",
+    ] {
+        if !column_exists(conn, table, "currency")? {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN currency TEXT;"))
+                .map_err(|error| format!("v96 {table}.currency: {error}"))?;
+        }
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS {table}_currency_immutable
+             BEFORE UPDATE OF currency ON {table}
+             WHEN OLD.currency IS NOT NULL AND NEW.currency IS NOT OLD.currency
+             BEGIN SELECT RAISE(ABORT, 'OPERATING_CURRENCY_IMMUTABLE'); END;
+             CREATE TRIGGER IF NOT EXISTS {table}_currency_insert_valid
+             BEFORE INSERT ON {table}
+             WHEN NEW.currency IS NOT NULL AND NEW.currency NOT GLOB '[A-Z][A-Z][A-Z]'
+             BEGIN SELECT RAISE(ABORT, 'OPERATING_CURRENCY_INVALID'); END;
+             CREATE TRIGGER IF NOT EXISTS {table}_currency_update_valid
+             BEFORE UPDATE OF currency ON {table}
+             WHEN NEW.currency IS NOT NULL AND NEW.currency NOT GLOB '[A-Z][A-Z][A-Z]'
+             BEGIN SELECT RAISE(ABORT, 'OPERATING_CURRENCY_INVALID'); END;"
+        ))
+        .map_err(|error| format!("v96 {table} currency guards: {error}"))?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (96)",
+        [],
+    )
+    .map_err(|error| format!("v96 schema version: {error}"))?;
+    Ok(())
 }
 
 fn migrate_v95(conn: &Connection) -> Result<(), String> {
@@ -1968,7 +2004,7 @@ enum PreMigrationRecoveryMode {
 }
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
-    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
 ];
 
 fn computed_pending_migrations(
@@ -7508,7 +7544,9 @@ pub fn ecr_insert_transaction(conn: &Connection, tx: &serde_json::Value) -> Resu
                 .and_then(|v| v.as_str())
                 .unwrap_or("sale"),
             tx.get("amount").and_then(|v| v.as_i64()).unwrap_or(0),
-            tx.get("currency").and_then(|v| v.as_str()).unwrap_or("EUR"),
+            tx.get("currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UNKNOWN"),
             tx.get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("pending"),
@@ -8023,7 +8061,7 @@ mod tests {
     use rusqlite::Connection;
     use std::cell::Cell;
 
-    /// Open an in-memory database and apply pragmas (mirrors open_and_configure).
+    /// NORMAL fixture for testing opt-in FULL and restoration of weaker modes.
     fn test_db() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
@@ -8035,11 +8073,103 @@ mod tests {
         conn
     }
 
+    #[test]
+    fn operating_currency_v96_adds_nullable_immutable_snapshots_without_backfill() {
+        let conn = test_db();
+        run_migrations_for_test(&conn);
+        for table in [
+            "orders",
+            "staff_shifts",
+            "cash_drawer_sessions",
+            "shift_expenses",
+            "driver_earnings",
+            "staff_payments",
+        ] {
+            assert!(column_exists(&conn, table, "currency").unwrap());
+        }
+        conn.execute("INSERT INTO orders(id,items,total_amount,status,order_type,payment_status,created_at,updated_at) VALUES('legacy-unit','[]',5,'pending','pickup','pending','old','old')", []).unwrap();
+        migrate_v96(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT currency FROM orders WHERE id='legacy-unit'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        conn.execute("INSERT INTO orders(id,items,total_amount,status,order_type,payment_status,currency,created_at,updated_at) VALUES('known-unit','[]',5,'pending','pickup','pending','CHF','now','now')", []).unwrap();
+        assert!(conn
+            .execute("UPDATE orders SET currency='EUR' WHERE id='known-unit'", [])
+            .is_err());
+        assert!(conn
+            .execute("UPDATE orders SET currency=NULL WHERE id='known-unit'", [])
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE orders SET currency='chf' WHERE id='legacy-unit'",
+                []
+            )
+            .is_err());
+    }
+
     fn file_db() -> (crate::tests::harness::TempDir, Connection) {
         let tmp = crate::tests::harness::TempDir::new();
         let db_path = tmp.path().join("pos.db");
         let conn = open_and_configure(&db_path).expect("open file-backed fixture");
         (tmp, conn)
+    }
+
+    #[test]
+    fn crash_durability_file_commit_and_queue_survive_reopen_with_full_sync() {
+        let tmp = crate::tests::harness::TempDir::new();
+        let path = tmp.path().join("crash-recovery.db");
+        {
+            let conn = open_and_configure(&path).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+            conn.execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE work(id TEXT PRIMARY KEY, body TEXT); CREATE TABLE queue(id TEXT PRIMARY KEY, body TEXT); BEGIN IMMEDIATE; INSERT INTO work VALUES('original','unchanged'); INSERT INTO queue VALUES('original','unchanged'); COMMIT;").unwrap();
+        }
+        let reopened = open_and_configure(&path).unwrap();
+        assert_eq!(
+            reopened
+                .query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            reopened
+                .query_row("SELECT work.body FROM work JOIN queue USING(id)", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "unchanged"
+        );
+    }
+
+    #[test]
+    fn crash_durability_helper_never_downgrades_full_or_extra_connections() {
+        let (_tmp, conn) = file_db();
+        for mode in [2, 3] {
+            conn.pragma_update(None, "synchronous", mode).unwrap();
+            let result: Result<(), String> = with_full_sync(&conn, |inner| {
+                assert!(
+                    inner
+                        .query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                        .unwrap()
+                        >= mode
+                );
+                Err("expected failure".into())
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                mode
+            );
+        }
     }
 
     fn current_file_fixture() -> (crate::tests::harness::TempDir, Connection) {
@@ -9375,16 +9505,17 @@ mod tests {
         assert_eq!(
             computed_pending_migrations(75, true, false, false, false),
             vec![
-                56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95
+                56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+                96
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
         // the newest version and MAX(schema_version) says the database is current.
@@ -9405,6 +9536,9 @@ mod tests {
         // v95 performs the same atomic method-CHECK widening as v83 and adds
         // an idempotency index; it does not read or write native repair state.
         assert!(native_repair_atomic_only_allowed(94, &[95]));
+        // v96 adds nullable prospective snapshots, validation triggers, and a
+        // satellite handover journal. It never backfills or rewrites repair data.
+        assert!(native_repair_atomic_only_allowed(95, &[96]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -9687,7 +9821,7 @@ mod tests {
         // guard trigger; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(85, false, false, false, false),
-            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
     }
@@ -9698,7 +9832,7 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94, 95]
+            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -9804,7 +9938,7 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94, 95]
+            vec![88, 89, 90, 91, 92, 93, 94, 95, 96]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -9844,7 +9978,7 @@ mod tests {
         gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
         assert_eq!(
             computed_pending_migrations(83, false, false, false, true),
-            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
+            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
         );
         let error = run_migrations_with_preflight(
             &conn,

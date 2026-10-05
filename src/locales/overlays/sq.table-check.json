@@ -103,6 +103,7 @@
       "applyDiscountToSelected": "Apliko te të zgjedhurit"
     },
     "messages": {
+      "savedCheckReadOnly": "Llogari e ruajtur — shumat mund të jenë të vjetra. Rilidhuni për pagesë ose ndryshime.",
       "loading": "Duke ngarkuar llogarinë e tavolinës...",
       "noOpenCheck": "S'u gjet llogari e hapur për këtë tavolinë.",
       "noItems": "Ende s'ka artikuj në këtë llogari.",
@@ -134,14 +135,18 @@
       "noActiveOrder": "Asnjë porosi aktive s'është e lidhur me këtë tavolinë.",
       "paymentAmountRequired": "Shkruaj një shumë pagese më të madhe se zero.",
       "paymentFailed": "Pagesa dështoi",
+      "paymentSavedTableCloseFailed": "Pagesa është regjistruar, por tavolina nuk u lirua. Provoni përsëri të mbyllni llogarinë; mos e arkëtoni pagesën përsëri.",
       "orderItemUpdateFailed": "Artikulli i porosisë nuk u përditësua",
+      "scopedItemEditUnavailable": "Ndryshimet e çmimit dhe zbritjes këtu kërkojnë porosinë e plotë, të papaguar dhe të pandarë. Llogaritë e paguara kërkojnë procesin e shlyerjes. Artikujt e ndarë ose të transferuar nuk mund të ndryshohen ende këtu.",
       "selectItemAndTargetTable": "Zgjidh një artikull dhe tavolinën pritëse.",
       "localSessionTransferSyncing": "Kjo llogari tavoline është ende duke u sinkronizuar. Rifresko pas sinkronizimit, para se të zhvendosësh artikuj.",
       "quantityUpTo": "Shkruaj një sasi deri në {{quantity}}.",
       "itemTransferFailed": "Kalimi i artikullit dështoi",
       "noBatchPayableItems": "Zgjidh të paktën një artikull pa paguar.",
       "noBatchTransferItems": "Zgjidh të paktën një artikull pa paguar për ta zhvendosur.",
-      "noBatchSelectedItems": "Zgjidh të paktën një artikull."
+      "noBatchSelectedItems": "Zgjidh të paktën një artikull.",
+      "originalCancelApproverRequired": "Një përpjekje anulimi është në pritje. Punonjësi që e miratoi fillimisht duhet të provojë përsëri pas rilidhjes. Tavolina nuk u lirua.",
+      "canonicalCancelSyncRequired": "Rilidhuni dhe përfundoni sinkronizimin ose zgjidhni ndryshimet në pritje të porosisë para anulimit. Tavolina nuk u lirua."
     }
   },
   "tablesDashboard": {
@@ -184,6 +189,7 @@
     "time": {
       "hoursMinutes": "{{hours}} orë {{minutes}} min",
       "minutes": "{{minutes}} min"
-    }
+    },
+    "floorPlanAriaLabel": "Plani i tavolinave"
   }
 }

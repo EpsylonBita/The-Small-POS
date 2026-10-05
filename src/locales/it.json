@@ -4076,8 +4076,8 @@
     "editSettlementDelta": {
       "collectTitle": "Pagamento aggiuntivo",
       "refundTitle": "Rimborso",
-      "collectBody": "Incassa altri €{{amount}} — scegli il metodo usato.",
-      "refundBody": "Restituisci €{{amount}} al cliente — scegli il metodo usato.",
+      "collectBody": "Incassa altri {{amount}} — scegli il metodo usato.",
+      "refundBody": "Restituisci {{amount}} al cliente — scegli il metodo usato.",
       "collectAmountLabel": "Importo aggiuntivo",
       "refundAmountLabel": "Importo del rimborso",
       "payWithCash": "Paga in contanti",
@@ -4392,8 +4392,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Prezzi per tipo ordine",
-      "pickupPrice": "Prezzo ritiro (€)",
-      "deliveryPrice": "Prezzo consegna (€)",
+      "pickupPrice": "Prezzo ritiro",
+      "deliveryPrice": "Prezzo consegna",
       "pricingHelp": "Imposta prezzi diversi per ritiro e consegna.",
       "savePricing": "Salva prezzi",
       "title": "Imposta prezzi"
@@ -4415,7 +4415,7 @@
       "unavailable": "Non disponibile",
       "noStaffSelected": "Seleziona un membro del personale",
       "shiftStarted": "Turno iniziato",
-      "drawerContinuityWarning": "Cassetto non coerente: l'ultima chiusura era a {{previous}} € ma hai aperto con {{opening}} €. Riconta il cassetto prima di continuare.",
+      "drawerContinuityWarning": "Cassetto non coerente: l'ultima chiusura era a {{previous}} ma hai aperto con {{opening}}. Riconta il cassetto prima di continuare.",
       "shiftEnded": "Turno terminato",
       "failedToLoad": "Impossibile caricare la lista del personale. Riprova.",
       "shiftSummary": "Riepilogo turno",
@@ -4590,7 +4590,7 @@
       "ordersCountValue": "{{count}} ordini",
       "paymentHistory": "Storico pagamenti",
       "paymentHistoryToday": "Pagamenti di oggi",
-      "todayTotal": "Totale di oggi: €{{amount}}",
+      "todayTotal": "Totale di oggi: {{amount}}",
       "paymentRecorded": "Pagamento registrato",
       "paymentFailed": "Impossibile registrare il pagamento",
       "selectStaffPlaceholder": "-- Seleziona personale --",
@@ -4723,9 +4723,9 @@
       "driverStartingCashHelper": "Facoltativo: inserisci l'eventuale contante che il fattorino ha ricevuto dal cassiere attivo prima di iniziare le consegne.",
       "serverStartingCashTitle": "Inserisci il fondo iniziale del cameriere",
       "serverStartingCashHelper": "Facoltativo: inserisci l'eventuale contante ricevuto dal cameriere dal cassiere attivo prima di iniziare il servizio.",
-      "skipCash": "Salta (€0)",
+      "skipCash": "Salta (0)",
       "startShift": "Avvia turno",
-      "noCashierWarning": "Nessun cassiere attivo disponibile. Puoi continuare solo con €0.",
+      "noCashierWarning": "Nessun cassiere attivo disponibile. Puoi continuare solo con 0.",
       "activeSince": "Attivo dalle {{time}}",
       "pinNotConfigured": "Per questo membro del personale non è impostato un PIN POS. Impostalo prima dall'admin.",
       "posLoginDisabled": "Questo membro del personale non è autorizzato ad accedere al POS.",
@@ -4763,8 +4763,11 @@
         "expectedCash": "Contanti previsti",
         "countedLabel": "Contanti ricevuti da {{name}}",
         "closing": "Chiusura…",
-        "confirm": "Chiudi turno e ricevi contanti"
-      }
+        "confirm": "Chiudi turno e ricevi contanti",
+        "pending": "La consegna è salvata su questa cassa e attende conferma. Verrà riprovata automaticamente; non registrare di nuovo i contanti.",
+        "retry": "Riprova la consegna salvata"
+      },
+      "currencySettlementRequired": "Regola e chiudi i turni del personale nella valuta originale prima di chiudere questo turno di cassa."
     },
     "zReport": {
       "title": "Rapporto Z - {{date}}",
@@ -5692,8 +5695,8 @@
       "editSettlementReducedRequired": "Questa modifica riduce un ordine pagato e richiede un rimborso registrato",
       "editSettlementTitle": "Rimborso della modifica",
       "enterAmountFirst": "Inserisci un importo di rimborso per scegliere come è stato restituito questo pagamento.",
-      "netPaidAfterRefunds": "Pagato dopo i rimborsi precedenti: €{{amount}}",
-      "originalVsNext": "Il totale dell'ordine è passato da €{{from}} a €{{to}}",
+      "netPaidAfterRefunds": "Pagato dopo i rimborsi precedenti: {{amount}}",
+      "originalVsNext": "Il totale dell'ordine è passato da {{from}} a {{to}}",
       "requiredAmount": "Rimborso richiesto",
       "selectAllocation": "Assegna il rimborso ad almeno un pagamento",
       "useRemaining": "Usa il rimanente"
@@ -6134,7 +6137,9 @@
     "loadingAddress": "Caricamento indirizzo...",
     "customer": "Cliente",
     "paymentPending": "IN ATTESA",
-    "paymentPendingA11y": "Pagamento in attesa"
+    "paymentPendingA11y": "Pagamento in attesa",
+    "platformPayment": "PAGAMENTO PIATTAFORMA",
+    "platformPaymentA11y": "Pagamento regolato dalla piattaforma; il negozio non incassa"
   },
   "incomingOrderAlert": {
     "title": "Nuovo ordine {{platform}}",
@@ -6244,6 +6249,8 @@
     "tableNumber": "Tavolo {{number}}",
     "capacity": "Capacità",
     "seats": "{{count}} posti",
+    "seats_one": "{{count}} posto",
+    "seats_other": "{{count}} posti",
     "section": "Sezione",
     "floor": "Piano",
     "status": {
@@ -7678,7 +7685,7 @@
     "title": "Programma fedeltà",
     "programInactive": "Programma fedeltà inattivo",
     "programInactiveDesc": "Il programma fedeltà è attualmente disattivato. Attivalo dal pannello di amministrazione.",
-    "pointsPerEuro": "punto per 1 €",
+    "pointsPerEuro": "punto per {{amount}}",
     "perPoint": "per punto",
     "members": "Membri",
     "totalPoints": "Punti totali",
@@ -9588,7 +9595,11 @@
     },
     "errors": {
       "moduleRequired": "La fatturazione ospiti non è abilitata per questo terminale.",
-      "actionFailed": "Impossibile aggiornare il conto."
+      "actionFailed": "Impossibile aggiornare il conto.",
+      "currencyUnavailable": "La valuta originale del conto ospite non è disponibile. Controlla il conto prima di registrare importi.",
+      "currencyMismatch": "Questo conto usa una valuta diversa da quella del negozio. Non è possibile aggiungere nuovi addebiti.",
+      "shiftCurrency": "La valuta del turno di cassa è diversa o sconosciuta. Chiudi il turno e aprine uno nuovo prima di nuovi ordini o pagamenti.",
+      "storeCurrency": "La valuta del negozio non è disponibile o è cambiata. Aggiorna le impostazioni del terminale prima di nuovi ordini o pagamenti."
     },
     "error": {
       "title": "Impossibile caricare i conti ospite"
@@ -9597,7 +9608,8 @@
       "amount": "Inserisci un importo maggiore di zero.",
       "quantity": "La quantità deve essere maggiore di zero.",
       "description": "La descrizione è obbligatoria."
-    }
+    },
+    "roomChargePending": "Ordine salvato. L’addebito alla camera attende la conferma del server; non incassarlo di nuovo."
   },
   "filters": {
     "all": "Tutti"
@@ -9832,7 +9844,7 @@
       "revenue": "Ricavi",
       "status": "Stato kiosk",
       "title": "Gestione kiosk",
-      "todayOrders": "Ordini di oggi",
+      "todayOrders": "Ordini del giorno operativo",
       "toggleError": "Aggiornamento dello stato del kiosk non riuscito"
     },
     "launchPurchase": {
@@ -9902,5 +9914,12 @@
     "unsavedReturnedAction": "Denaro restituito al cliente",
     "unsavedSaving": "Salvataggio...",
     "unsavedResolving": "Registrazione..."
+  },
+  "cashierGate": {
+    "title": "È richiesto un turno di cassa",
+    "body": "Le normali operazioni POS sono bloccate. Un cassiere o responsabile deve iniziare il turno su questa cassa per aprire la giornata.",
+    "waiterBody": "La cassa principale è chiusa. Un cassiere o responsabile deve iniziare il turno sulla cassa principale associata a questo dispositivo. Potrai poi iniziare il tuo turno e continuare.",
+    "checking": "Verifica del turno di cassa…",
+    "recheck": "Verifica di nuovo"
   }
 }

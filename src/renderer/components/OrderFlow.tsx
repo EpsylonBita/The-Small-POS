@@ -79,6 +79,8 @@ import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveOrderCompletionOutcome } from '../utils/orderCompletionOutcome';
+import { getCheckoutDraftStore } from '../services/CheckoutDraftStore';
+import { buildOrderServiceTableMetadata, tableHasOpenCheckReference } from '../utils/tableOrderFlow';
 import { useCheckoutRequestId } from '../hooks/useCheckoutRequestId';
 import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from '../utils/checkoutOutcome';
 import {
@@ -224,7 +226,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [customerToEdit, setCustomerToEdit] = useState<Customer | null>(null);
 
   // Order flow states
-  const [selectedOrderType, setSelectedOrderType] = useState<'pickup' | 'delivery' | null>(null);
+  const [selectedOrderType, setSelectedOrderType] = useState<'pickup' | 'delivery' | 'dine-in' | null>(null);
+  const [restoredEditContext, setRestoredEditContext] = useState<Record<string, any> | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [selectedAddress, setSelectedAddress] = useState<any>(null);
   const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
@@ -424,12 +427,15 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Fix review 30/09/2026: one checkout id per cart, reused by every press
   // of Pay until the checkout ends, so a slow card terminal is never paid
   // twice.
-  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId } =
+  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId } =
     useCheckoutRequestId();
 
   // Reset all flow states
   const resetFlow = useCallback(() => {
     resetCheckoutRequestId();
+    setRestoredEditContext(null);
+    setSelectedTable(null);
+    setTableNumber('');
     setIsOrderTypeModalOpen(false);
     setIsCustomerSearchModalOpen(false);
     setIsAddCustomerModalOpen(false);
@@ -444,6 +450,48 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setShowZoneAlert(false);
     setOverrideApproved(false);
   }, [resetCheckoutRequestId]);
+
+  const restoreDraftContext = useCallback((context: Record<string, any>) => {
+    if (!['pickup', 'delivery', 'dine-in'].includes(context.orderType)) throw new Error('CHECKOUT_DRAFT_CONTEXT_INVALID');
+    setSelectedOrderType(context.orderType);
+    setSelectedCustomer(context.selectedCustomer || { id: 'pickup-customer', name: '', phone: '', email: '', addresses: [] });
+    setSelectedAddress(context.selectedAddress || null);
+    setSelectedTable(context.selectedTable || null);
+    setTableNumber(context.tableNumber || '');
+    setDeliveryZoneInfo(context.deliveryZoneInfo || null);
+    setRestoredEditContext(context.editMode ? context : null);
+    if (context.checkoutRequestId) restoreCheckoutRequestId(context.checkoutRequestId);
+    setIsMenuModalOpen(true);
+  }, [restoreCheckoutRequestId]);
+
+  useEffect(() => {
+    if (isRetailVertical || !organizationId || !effectiveBranchId || !resolvedIdentityTerminalId) return;
+    let disposed = false;
+    void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
+      if (!disposed && saved && (saved.cartItems.length || saved.phase === 'checkout_pending')) {
+        restoreDraftContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+      }
+    }).catch(() => { /* The modal's durable read gate surfaces failure without replacing the cart. */ });
+    return () => { disposed = true; };
+  }, [organizationId, effectiveBranchId, resolvedIdentityTerminalId, isRetailVertical, restoreDraftContext]);
+
+  const acceptRecoveredDraftOrder = useCallback(async (order: any) => {
+    const response = await bridge.orders.getById(order.id);
+    const saved = (response as any)?.data || response;
+    if (!saved?.id) throw new Error('CHECKOUT_DRAFT_ORDER_UNAVAILABLE');
+    await silentRefresh();
+    toast.success(t('modals.menu.draftRecovered', { defaultValue: 'The original order is saved. No new payment was started.' }));
+  }, [bridge.orders, silentRefresh, t]);
+
+  const completeRecoveredEdit = useCallback(async (data: { orderId: string; items: any[]; client_event_id?: string; expected_version?: number }) => {
+    if (!data.client_event_id || !Number.isSafeInteger(data.expected_version)) throw new Error('Reload the original order before confirming this saved edit.');
+    const result = await bridge.orders.updateItems(data.orderId, data.items, {
+      clientEventId: data.client_event_id, expectedVersion: data.expected_version,
+      tableSessionId: restoredEditContext?.tableSessionId || restoredEditContext?.table_session_id,
+    });
+    if ((result as any)?.success === false) throw new Error((result as any)?.error || 'The saved edit remains pending.');
+    await silentRefresh();
+  }, [bridge.orders, restoredEditContext, silentRefresh]);
 
   const handleStartNewOrder = useCallback(() => {
     resetFlow();
@@ -1232,7 +1280,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Handle New Order action from TableActionModal
   const handleTableNewOrder = useCallback(() => {
     if (selectedTable) {
-      setSelectedOrderType('pickup'); // Table orders use pickup pricing
+      if (tableHasOpenCheckReference(selectedTable)) {
+        toast.error(t('modals.menu.draftExistingTable'));
+        return;
+      }
+      setSelectedOrderType('dine-in');
       setTableNumber(selectedTable.tableNumber.toString());
       const tableCustomer: Customer = {
         id: 'table-customer',
@@ -1659,7 +1711,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return true;
       }
 
-      const clientRequestId = takeCheckoutRequestId();
+      const clientRequestId = takeCheckoutRequestId(orderData.clientRequestId);
       const askBeforeReceiptPrint =
         !isSplitPayment && (Boolean(initialPayment) || isGhostOrder)
           ? await shouldAskPaymentPrint()
@@ -1688,7 +1740,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         tip_amount: tipAmount,
 
         status: 'pending' as const,
-        payment_method: isGhostOrder ? null : (paymentMethod || null),
+        payment_method: isGhostOrder || paymentMethod === 'table' ? null : (paymentMethod || null),
         room_id: isRoomChargePayment ? roomId : null,
         roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
@@ -1727,11 +1779,14 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         // orderNumber is generated by Rust (ORD-DDMMYYYY-NNNNN)
         customerName: selectedCustomer?.name || '',
         customerPhone: selectedCustomer?.phone || '',
-        orderType: selectedOrderType as 'pickup' | 'delivery',
+        orderType: selectedOrderType as 'pickup' | 'delivery' | 'dine-in',
+        order_type: selectedOrderType as 'pickup' | 'delivery' | 'dine-in',
+        ...buildOrderServiceTableMetadata({ orderType: selectedOrderType, tableId: selectedTable?.id,
+          tableNumber, tableSessionId: selectedTable?.tableSessionId, guestCount: selectedTable?.guestCount || 1 }),
         paymentStatus: (
           isSplitPayment
             ? 'pending'
-            : (orderData.paymentData ? 'completed' : 'pending')
+            : (initialPayment ? 'completed' : 'pending')
         ) as 'pending' | 'completed' | 'processing' | 'failed' | 'refunded',
         paymentTransactionId: orderData.paymentData?.transactionId || undefined,
         estimatedTime: 15,
@@ -1776,6 +1831,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         const displayOrderNumber = result.orderNumber || result.orderId || '';
 
         const roomCharge = (result as any).roomCharge;
+        if (isRoomChargePayment && orderData.paymentData) orderData.paymentData.roomChargeApplied = roomCharge?.applied === true;
         if (isRoomChargePayment && roomCharge?.applied === false && result.orderId) {
           await silentRefresh().catch(() => {});
           orderData.paymentData.existingOrderId = result.orderId;
@@ -1850,7 +1906,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             }),
             isGhostOrder,
             orderNumber: result.orderNumber,
-            orderType: selectedOrderType || 'pickup',
+            orderType: selectedOrderType === 'delivery' ? 'delivery' : 'pickup',
             tipAmount,
             tipRecipientRole,
             tipRecipientStaffId,
@@ -1933,7 +1989,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId, selectedTable, tableNumber]);
 
   // Order-type chooser ergonomics aligned with the main OrderDashboard modal (Round 346): modal width + grid
   // scale to the number of visible cards (pickup always present; delivery/tables optional), and each card
@@ -2174,7 +2230,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             onClose={handleMenuModalClose}
             selectedCustomer={selectedCustomer}
             selectedAddress={selectedAddress}
-            orderType={selectedOrderType}
+            orderType={selectedOrderType === 'delivery' ? 'delivery' : 'pickup'}
             deliveryZoneInfo={deliveryZoneInfo}
             onOrderComplete={handleOrderComplete}
             isProcessingOrder={isProcessingOrder}
@@ -2182,6 +2238,14 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           />
         ) : (
           <MenuModal
+            draftContext={{ selectedTable, tableNumber, deliveryZoneInfo, ...restoredEditContext }}
+            onDraftRestore={restoreDraftContext}
+            onRecoveredOrder={acceptRecoveredDraftOrder}
+            editMode={!!restoredEditContext}
+            editOrderId={restoredEditContext?.editOrderId}
+            editSupabaseId={restoredEditContext?.editSupabaseId}
+            editSourceOrderType={restoredEditContext?.editSourceOrderType}
+            onEditComplete={completeRecoveredEdit}
             isOpen={isMenuModalOpen}
             onClose={handleMenuModalClose}
             selectedCustomer={selectedCustomer}

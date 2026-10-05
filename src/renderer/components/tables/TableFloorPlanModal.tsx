@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { X, Map as MapIcon } from 'lucide-react';
 import type { RestaurantTable } from '../../types/tables';
 import { useI18n } from '../../contexts/i18n-context';
@@ -34,8 +34,7 @@ interface TableFloorPlanModalProps {
 /**
  * Full-screen 2D floor plan (founder 30/08): the inline 2D grid rendered the
  * plan 1:1 inside a short panel, so tables were tiny. The modal gives the plan
- * the whole screen (scale-to-fit), its own floor picker, and animated
- * occupied/cleaning states so the states separate at a glance.
+ * the whole screen, with floor filtering and the shared accessible modal shell.
  */
 export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
   isOpen,
@@ -124,7 +123,7 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
       : t('tablesDashboard.floorNumber', { defaultValue: 'Floor {{floor}}', floor });
 
   const chipClass = (active: boolean) =>
-    `whitespace-nowrap rounded-lg px-4 py-2 text-sm font-bold transition-colors ${
+    `whitespace-nowrap min-h-[44px] rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
       active
         ? 'bg-yellow-400 text-black'
         : isDark
@@ -132,30 +131,21 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
           : 'text-slate-700 active:bg-[#fffaf1]'
     }`;
 
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[70] flex flex-col"
-      data-testid="table-floor-plan-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('tablesDashboard.floorPlanAriaLabel', { defaultValue: 'Table floor plan' })}
-    >
-      <div
-        className={`absolute inset-0 ${isDark ? 'bg-black/80' : 'bg-slate-900/45'} backdrop-blur-sm`}
-        onClick={onClose}
-      />
-      <div
+  return <LiquidGlassModal isOpen={isOpen} onClose={onClose} closeMode="request" size="full" blur={false}
+    ariaLabel={t('tablesDashboard.floorPlanAriaLabel', { defaultValue: 'Table floor plan' })}
+    className={`floor-plan-dialog floor-plan-dialog--${isDark ? 'dark' : 'light'}`} contentClassName="floor-plan-dialog-content">
+      <div data-testid="table-floor-plan-modal"
         className={`relative m-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border shadow-2xl sm:m-6 ${
-          isDark ? 'border-white/10 bg-[#0b1220]' : 'border-amber-100/80 bg-[#fffdf8]'
+          isDark ? 'border-[#35383c] bg-[#101113]' : 'border-[#dfe2e6] bg-[#f8f9fa]'
         }`}
       >
         <div
           className={`flex flex-wrap items-center gap-3 border-b px-4 py-3 sm:px-6 ${
-            isDark ? 'border-white/10' : 'border-amber-100/80'
+            isDark ? 'border-white/10' : 'border-[#dfe2e6]'
           }`}
         >
           <span
-            className={`inline-flex items-center gap-2 text-lg font-black ${
+            className={`inline-flex items-center gap-2 text-lg font-semibold ${
               isDark ? 'text-white' : 'text-slate-900'
             }`}
           >
@@ -171,6 +161,7 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
             <button
               type="button"
               onClick={() => setFloorFilter('all')}
+              aria-pressed={effectiveFloor === 'all'}
               className={chipClass(effectiveFloor === 'all')}
             >
               {floorLabel('all')}
@@ -180,6 +171,7 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
                 key={floor}
                 type="button"
                 onClick={() => setFloorFilter(floor)}
+                aria-pressed={effectiveFloor === floor}
                 className={chipClass(effectiveFloor === floor)}
                 data-testid={`floor-plan-modal-floor-${floor}`}
               >
@@ -210,7 +202,6 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
             selectedTableId={selectedTableId}
             onTableSelect={onTableSelect}
             fit
-            animated
             walls={activePlan?.walls ?? []}
             fixtures={activePlan?.fixtures ?? []}
             canvas={planCanvas}
@@ -218,9 +209,7 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
           />
         </div>
       </div>
-    </div>,
-    document.body,
-  );
+    </LiquidGlassModal>;
 };
 
 export default TableFloorPlanModal;

@@ -1,0 +1,12 @@
+.order-context-chip {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 16rem; min-height: 44px;
+  padding: 9px 13px; border: 1px solid #d0d4da; border-radius: 9px;
+  background: #f4f5f6; color: #27272a; font-size: 14px; font-weight: 500;
+  box-shadow: none; backdrop-filter: none;
+}
+.order-context-chip--dark { background: #24272b; color: #f4f4f5; border-color: #464c54; }
+.order-context-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.order-context-chip > svg { flex-shrink: 0; color: currentColor; }
+button.order-context-chip:focus-visible { outline: 2px solid #ca8a04; outline-offset: 3px; }
+button.order-context-chip:active { background: #e4e6e9; }
+button.order-context-chip--dark:active { background: #35383c; }

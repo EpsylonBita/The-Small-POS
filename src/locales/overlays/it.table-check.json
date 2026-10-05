@@ -103,6 +103,7 @@
       "applyDiscountToSelected": "Applica ai selezionati"
     },
     "messages": {
+      "savedCheckReadOnly": "Conto salvato — gli importi potrebbero non essere aggiornati. Riconnettiti per pagare o modificare.",
       "loading": "Caricamento conto tavolo...",
       "noOpenCheck": "Nessun conto aperto trovato per questo tavolo.",
       "noItems": "Non ci sono ancora articoli in questo conto.",
@@ -134,14 +135,18 @@
       "noActiveOrder": "Nessun ordine attivo è collegato a questo tavolo.",
       "paymentAmountRequired": "Inserisci un importo di pagamento maggiore di zero.",
       "paymentFailed": "Pagamento non riuscito",
+      "paymentSavedTableCloseFailed": "Il pagamento è registrato, ma il tavolo non è stato liberato. Riprova a chiudere il conto; non incassare di nuovo il pagamento.",
       "orderItemUpdateFailed": "Aggiornamento articolo ordine non riuscito",
+      "scopedItemEditUnavailable": "Le modifiche di prezzo e sconto qui richiedono l'ordine completo, non pagato e non diviso. I conti pagati richiedono la procedura di regolamento. Gli articoli divisi o trasferiti non possono ancora essere modificati qui.",
       "selectItemAndTargetTable": "Seleziona un articolo e un tavolo di destinazione.",
       "localSessionTransferSyncing": "Questo conto tavolo è ancora in sincronizzazione. Aggiorna dopo la sincronizzazione prima di spostare articoli.",
       "quantityUpTo": "Inserisci una quantità fino a {{quantity}}.",
       "itemTransferFailed": "Trasferimento articolo non riuscito",
       "noBatchPayableItems": "Seleziona almeno un articolo non pagato.",
       "noBatchTransferItems": "Seleziona almeno un articolo non pagato da spostare.",
-      "noBatchSelectedItems": "Seleziona almeno un articolo."
+      "noBatchSelectedItems": "Seleziona almeno un articolo.",
+      "originalCancelApproverRequired": "È in sospeso un tentativo di annullamento. Il membro del personale che lo ha approvato inizialmente deve riprovare dopo la riconnessione. Il tavolo non è stato liberato.",
+      "canonicalCancelSyncRequired": "Riconnettiti e completa la sincronizzazione o risolvi le modifiche in sospeso dell’ordine prima di annullarlo. Il tavolo non è stato liberato."
     }
   },
   "tablesDashboard": {
@@ -184,6 +189,7 @@
     "time": {
       "hoursMinutes": "{{hours}} h {{minutes}} min",
       "minutes": "{{minutes}} min"
-    }
+    },
+    "floorPlanAriaLabel": "Pianta dei tavoli"
   }
 }

@@ -47,7 +47,7 @@ vi.mock('../../../../lib', () => ({
 
 vi.mock('../../../utils/format', () => ({
   formatDate: (value: string) => `on ${value.slice(0, 10)}`,
-  formatCurrency: (amount: number, currency: string) => `${currency} ${amount.toFixed(2)}`,
+  formatCurrency: (amount: number, currency: string | null) => `${currency ?? '—'} ${amount.toFixed(2)}`,
 }));
 
 vi.mock('../../../services/capture-client', async (importOriginal) => {
@@ -88,6 +88,7 @@ function renderQueue(overrides: Record<string, unknown> = {}) {
     onContinueCapture: vi.fn(),
     onCorrect: vi.fn(),
     staffId: 'staff-1',
+    currencyCode: 'EUR',
     onChanged: vi.fn(),
     ...overrides,
   };

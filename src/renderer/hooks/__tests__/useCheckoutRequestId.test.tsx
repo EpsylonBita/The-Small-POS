@@ -16,6 +16,13 @@ describe('useCheckoutRequestId', () => {
     expect(first).toMatch(/\S{8,}/);
   });
 
+  it('restores the exact persisted checkout ID and refuses another identity for that cart', () => {
+    const { result } = renderHook(() => useCheckoutRequestId());
+    result.current.restore('original-request');
+    expect(result.current.take('original-request')).toBe('original-request');
+    expect(() => result.current.take('different-request')).toThrow('CHECKOUT_REQUEST_ID_CHANGED');
+  });
+
   it('starts a new checkout after it ends', () => {
     const { result } = renderHook(() => useCheckoutRequestId());
     const first = result.current.take();

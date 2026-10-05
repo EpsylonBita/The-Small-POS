@@ -256,7 +256,7 @@ const LoyaltyPage: React.FC = () => {
               {t('loyalty.title', 'Loyalty Program')}
             </h1>
             <p className={`mt-1 truncate text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
-              {settings?.points_per_euro} {t('loyalty.pointsPerEuro', 'point per €1')} • {formatMoney(settings?.redemption_rate || 0.01)} {t('loyalty.perPoint', 'per point')}
+              {settings?.points_per_euro} {t('loyalty.pointsPerEuro', { defaultValue: 'point per {{amount}}', amount: formatCurrency(1) })} • {formatMoney(settings?.redemption_rate || 0.01)} {t('loyalty.perPoint', 'per point')}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">

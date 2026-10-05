@@ -125,7 +125,10 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     mocks.snapshot.mockReset().mockResolvedValue({ netPaid: 0, outstandingAmount: 30, cancelRefusal: null });
     mocks.get.mockResolvedValue({ success: true, data: { success: true, session } });
     mocks.patch.mockReset().mockResolvedValue({ success: true, data: { success: true } });
-    mocks.cancelWithApproval.mockReset().mockResolvedValue({ success: true, orderId: 'local-order' });
+    mocks.cancelWithApproval.mockReset().mockResolvedValue({ success: true, orderId: 'local-order', data: { workflow: {
+      affected_session_ids: [sessionId, 'sibling-check'], affected_table_ids: ['T01', 'T02'],
+    } } });
+    mocks.emit.mockClear();
     onClose.mockClear();
   });
 
@@ -158,17 +161,15 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     });
 
     await waitFor(() =>
-      expect(mocks.cancelWithApproval).toHaveBeenCalledWith({
+      expect(mocks.cancelWithApproval).toHaveBeenCalledWith(expect.objectContaining({
         orderId: 'remote-order',
         reason: 'The customer left without ordering',
-      }),
+        tableSessionId: sessionId,
+      })),
     );
-    await waitFor(() =>
-      expect(mocks.patch).toHaveBeenCalledWith(
-        `/api/pos/table-sessions/${sessionId}`,
-        expect.objectContaining({ action: 'close', status: 'cancelled', force: true }),
-      ),
-    );
+    expect(mocks.patch).not.toHaveBeenCalled();
+    expect(mocks.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({ tableId: 'T01', releaseStatus: 'available' }));
+    expect(mocks.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({ tableId: 'T02', releaseStatus: 'available' }));
     expect(onClose).toHaveBeenCalled();
   });
 

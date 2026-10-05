@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "cafeLan": {
+      "title": "Local waiter connection",
+      "internetRequired": "The main terminal needs Internet to commit orders, payments and table changes. A failed connection keeps the original action pending.",
+      "desktopMainOnly": "This desktop can receive waiter requests when configured as a main terminal. Import the code on an Android waiter.",
+      "port": "Port",
+      "listening": "Listening for waiters",
+      "stopped": "Listener stopped",
+      "connected": "Main connected",
+      "pending": "Connection pending; queued actions retained",
+      "refresh": "Refresh",
+      "start": "Start listener",
+      "stop": "Stop listener",
+      "child": "Waiter terminal",
+      "selectChild": "Select a waiter",
+      "noChildren": "No linked waiter terminals are available.",
+      "host": "Main terminal LAN address",
+      "generate": "Generate or rotate code",
+      "revoke": "Revoke pairing",
+      "codeHelp": "Share this code only with the selected waiter. It hides after five minutes.",
+      "code": "Pairing code",
+      "copy": "Copy code",
+      "hide": "Hide code",
+      "failed": "Could not complete the connection action. Check Internet, terminal configuration and the LAN address, then retry.",
+      "rotationHelp": "Generating or revoking a code replaces the existing pairing and clears encrypted pending replies. The waiter must import the new code; original queued actions remain pending. Continue?",
+      "unavailable": "LAN service is not ready on this device.",
+      "import": "Import pairing code",
+      "test": "Test main connection"
+    }
+  }
+}

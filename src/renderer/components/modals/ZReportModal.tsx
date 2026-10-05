@@ -316,7 +316,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const dayOrderDetailCount = dayOrderDetails.length;
 
   const giftClose = useMemo(() => resolveZReportGiftClose(zReport), [zReport]);
-  const formatMoney = (value?: number) => formatCurrency(value ?? 0, giftClose.currency || undefined);
+  const reportCurrency = typeof zReport?.currency === 'string' && /^[A-Z]{3}$/.test(zReport.currency)
+    ? zReport.currency : null;
+  const formatMoney = (value?: number) => formatCurrency(value ?? 0, reportCurrency);
   const formatWindowDateTime = (value?: string | null) => (
     value
       ? `${formatDate(value)} ${formatTime(value)}`
@@ -750,7 +752,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const giftCloseText = (key: GiftCloseTextKey): string =>
     t(`modals.zReport.giftClose.${key}`, { defaultValue: GIFT_CLOSE_LABELS[key] });
   const formatGiftMoney = (cents: number, currency?: string | null) =>
-    formatCurrency(cents / 100, currency || undefined);
+    formatCurrency(cents / 100, currency || null);
   const giftCloseRecoveryMessage = (blocker: ZReportGiftCloseBlocker | null): string => {
     if (!blocker) {
       return t('modals.zReport.giftClose.recovery.unreadable', {
@@ -1457,9 +1459,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     ...(giftCloseDrawer
       ? [
         ...(giftCloseDrawer.ordinaryAdjustmentCents !== 0
-          ? [{ key: 'giftOrdinaryAdjustment', label: giftCloseText('ordinaryAdjustment'), value: formatMoney(giftCloseDrawer.ordinaryAdjustmentCents / 100), tone: strongTextClass }]
+          ? [{ key: 'giftOrdinaryAdjustment', label: giftCloseText('ordinaryAdjustment'), value: formatGiftMoney(giftCloseDrawer.ordinaryAdjustmentCents, giftClose.currency), tone: strongTextClass }]
           : []),
-        { key: 'giftLiabilityCash', label: giftCloseText('giftLiabilityCash'), value: `+${formatMoney(giftCloseDrawer.giftLiabilityCashCents / 100)}`, tone: strongTextClass },
+        { key: 'giftLiabilityCash', label: giftCloseText('giftLiabilityCash'), value: `+${formatGiftMoney(giftCloseDrawer.giftLiabilityCashCents, giftClose.currency)}`, tone: strongTextClass },
         { key: 'giftExpected', label: giftCloseText('expected'), value: formatMoney(expectedCash), tone: strongTextClass },
       ]
       : []),
@@ -1506,6 +1508,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   return (
     <>
     <LiquidGlassModal
+      recoveryAccess
       isOpen={isOpen}
       onClose={onClose}
       title={title}
@@ -1777,7 +1780,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                         {giftCloseDrawer && (
                           <>
                             <div className={`hidden md:block ${softTextClass}`}>+</div>
-                            <div data-z-report-gift-close-term><div className={softTextClass}>{giftCloseText('giftLiabilityCash')}</div><div>{formatMoney(giftCloseDrawer.giftLiabilityCashCents / 100)}</div></div>
+                            <div data-z-report-gift-close-term><div className={softTextClass}>{giftCloseText('giftLiabilityCash')}</div><div>{formatGiftMoney(giftCloseDrawer.giftLiabilityCashCents, giftClose.currency)}</div></div>
                           </>
                         )}
                         <div className={`hidden md:block ${softTextClass}`}>=</div>

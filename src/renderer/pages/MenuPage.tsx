@@ -19,8 +19,9 @@ import { useFeaturedItems } from '../hooks/useFeaturedItems';
 import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
 import { normalizePosOrderItems } from '../../shared/utils/pos-order-items';
 import { Utensils } from 'lucide-react';
-import { getBridge } from '../../lib';
+import { getBridge, onEvent, offEvent } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
+import { getPosMenuImageUrl } from '../utils/menuImages';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -160,7 +161,10 @@ const MenuPage: React.FC = () => {
 
   // Load menu data from Supabase
   useEffect(() => {
+    let generation = 0;
+    let disposed = false;
     const loadMenuData = async () => {
+      const currentGeneration = ++generation;
       try {
         setIsLoadingMenu(true);
         setMenuError(null);
@@ -197,6 +201,7 @@ const MenuPage: React.FC = () => {
           }
         }
 
+        if (disposed || currentGeneration !== generation) return;
         setMenuItems(items);
         const categoryObjects = buildCategoryObjects(categoriesData);
 
@@ -210,32 +215,30 @@ const MenuPage: React.FC = () => {
         setHasLoadedMenu(true);
 
       } catch (error) {
+        if (disposed || currentGeneration !== generation) return;
         console.error('❌ Failed to load menu data:', error);
         // Store error as POSError
         const posError = error as POSError;
         setMenuError(posError);
         toast.error(posError.message || t('menu.messages.loadFailed'));
       } finally {
-        setIsLoadingMenu(false);
+        if (!disposed && currentGeneration === generation) setIsLoadingMenu(false);
       }
     };
 
     loadMenuData();
 
-    // Subscribe to real-time menu updates
-    try {
-      const unsubscribe = menuService.subscribeToMenuUpdates(() => {
-        // Avoid skeleton flash: only do a full load if initial content hasn't loaded yet
-        if (!hasLoadedMenu) {
-          loadMenuData();
-        }
-        // Otherwise, background polling will refresh caches and the grid will re-render without skeleton
-      });
-      return unsubscribe;
-    } catch (error) {
-      console.error('Error setting up real-time subscription:', error);
-      // Continue without real-time updates
-    }
+    // Native menu sync replaces the durable JSON cache before this event.
+    const handleMenuSync = () => {
+      menuService.clearCache();
+      loadMenuData();
+    };
+    onEvent('menu:sync', handleMenuSync);
+    return () => {
+      disposed = true;
+      generation++;
+      offEvent('menu:sync', handleMenuSync);
+    };
   }, []);
   // Resolve branchId from the native backend (TerminalConfigService)
   useEffect(() => {
@@ -309,7 +312,7 @@ const MenuPage: React.FC = () => {
         price: displayPrice || item.price,
         category_id: item.category_id,
         preparationTime: (item as any).preparation_time || 0,
-        image: (item as any).image_url || undefined,
+        image: getPosMenuImageUrl(item) || undefined,
         is_customizable: item.is_customizable,
         hasOverride,
         originalPrice: basePriceForOrder,

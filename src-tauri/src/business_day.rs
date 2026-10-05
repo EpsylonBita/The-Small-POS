@@ -206,11 +206,6 @@ pub(crate) fn current_business_day_report_date_at(
 // αναφορά Ζ". The cfg(test) gate makes the old clock cutoff uncallable from
 // release code while the tests below keep pinning the `+00:00` suffix trap.
 #[cfg(test)]
-pub(crate) fn current_business_day_start_utc(conn: &Connection, now: DateTime<Local>) -> String {
-    business_day_start_utc_at_minutes(now, resolve_business_day_start_minutes(conn))
-}
-
-#[cfg(test)]
 fn business_day_start_utc_at_minutes(now: DateTime<Local>, start_minutes: u32) -> String {
     use chrono::{NaiveDate, TimeZone, Utc};
 

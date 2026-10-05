@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "cafeLan": {
+      "title": "Lokale Kellnerverbindung",
+      "internetRequired": "Das Hauptterminal benötigt Internet für Bestellungen, Zahlungen und Tischänderungen. Bei einem Verbindungsfehler bleibt die ursprüngliche Aktion ausstehend.",
+      "desktopMainOnly": "Dieser Desktop empfängt Kellneranfragen als Hauptterminal. Importieren Sie den Code auf einem Android-Kellnergerät.",
+      "port": "Port",
+      "listening": "Wartet auf Kellnergeräte",
+      "stopped": "Empfang gestoppt",
+      "connected": "Hauptterminal verbunden",
+      "pending": "Verbindung ausstehend; Aktionen bleiben gespeichert",
+      "refresh": "Aktualisieren",
+      "start": "Empfang starten",
+      "stop": "Empfang stoppen",
+      "child": "Kellnerterminal",
+      "selectChild": "Kellner auswählen",
+      "noChildren": "Keine verbundenen Kellnerterminals verfügbar.",
+      "host": "LAN-Adresse des Hauptterminals",
+      "generate": "Code erstellen oder erneuern",
+      "revoke": "Kopplung widerrufen",
+      "codeHelp": "Teilen Sie den Code nur mit dem ausgewählten Kellnergerät. Er wird nach fünf Minuten ausgeblendet.",
+      "code": "Kopplungscode",
+      "copy": "Code kopieren",
+      "hide": "Code ausblenden",
+      "failed": "Verbindung nicht möglich. Prüfen Sie Internet, Terminalkonfiguration und LAN-Adresse und versuchen Sie es erneut.",
+      "rotationHelp": "Ein neuer Code oder Widerruf ersetzt die Kopplung und löscht verschlüsselte ausstehende Antworten. Das Kellnergerät muss den neuen Code importieren; ursprüngliche Aktionen bleiben ausstehend. Fortfahren?",
+      "unavailable": "Der LAN-Dienst ist auf diesem Gerät noch nicht bereit.",
+      "import": "Kopplungscode importieren",
+      "test": "Hauptverbindung testen"
+    }
+  }
+}

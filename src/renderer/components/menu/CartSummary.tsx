@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '../common/LoadingSpinner';
@@ -163,7 +164,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
                     {item.customizations.map((customization, index) => (
                       <span key={index}>
                         {customization.name}
-                        {customization.price > 0 && ` (+€${customization.price.toFixed(2)})`}
+                        {customization.price > 0 && ` (+${formatCurrency(customization.price)})`}
                         {index < item.customizations!.length - 1 && ', '}
                       </span>
                     ))}
@@ -200,7 +201,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
                 </button>
               </div>
               <span className="font-semibold text-gray-900">
-                €{(item.totalPrice || item.price * item.quantity).toFixed(2)}
+                {formatCurrency((item.totalPrice || item.price * item.quantity))}
               </span>
             </div>
           </div>
@@ -211,7 +212,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
       <div className="space-y-2 mb-6">
         <div className="flex justify-between text-sm">
           <span className="text-gray-600">{t('menu.cart.subtotal')}</span>
-          <span className="text-gray-900">€{subtotal.toFixed(2)}</span>
+          <span className="text-gray-900">{formatCurrency(subtotal)}</span>
         </div>
 
         {/* Discount Input */}
@@ -250,25 +251,25 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
           {discountAmount > 0 && isDiscountValid && (
             <div className="flex justify-between text-sm text-green-600">
               <span>{t('menu.cart.discount', { percent: discountValue })}</span>
-              <span>-€{discountAmount.toFixed(2)}</span>
+              <span>-{formatCurrency(discountAmount)}</span>
             </div>
           )}
         </div>
 
         <div className="flex justify-between text-sm">
           <span className="text-gray-600">{t('menu.cart.tax', { percent: taxRatePercentage })}</span>
-          <span className="text-gray-900">€{tax.toFixed(2)}</span>
+          <span className="text-gray-900">{formatCurrency(tax)}</span>
         </div>
         {orderType === 'delivery' && (
           <div className="flex justify-between text-sm">
             <span className="text-gray-600">{t('menu.cart.deliveryFee')}</span>
-            <span className="text-gray-900">€{deliveryFee.toFixed(2)}</span>
+            <span className="text-gray-900">{formatCurrency(deliveryFee)}</span>
           </div>
         )}
         <div className="border-t pt-2">
           <div className="flex justify-between text-lg font-bold">
             <span className="text-gray-900">{t('menu.cart.total')}</span>
-            <span className="text-gray-900">€{total.toFixed(2)}</span>
+            <span className="text-gray-900">{formatCurrency(total)}</span>
           </div>
         </div>
       </div>

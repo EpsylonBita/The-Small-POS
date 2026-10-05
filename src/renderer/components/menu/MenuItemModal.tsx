@@ -7,6 +7,7 @@ import { Ban, Check, MessageSquare, Minus, Plus, Search, ShoppingCart, X } from 
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { renderModalPortal } from '../../utils/render-modal-portal';
+import './menu-item-cart-action.css';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -551,10 +552,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
       <button
         onClick={handleAddToCart}
-        className={`liquid-glass-modal-button w-full py-3 rounded-xl font-bold text-base shadow-lg transition-all duration-200 transform active:scale-98 flex items-center justify-center ${isEditMode
-            ? 'liquid-glass-modal-success'
-            : 'liquid-glass-modal-success shadow-[0_0_24px_rgba(34,197,94,0.24)]'
-          }`}
+        className="menu-item-cart-action"
       >
         {isEditMode ? (
           <span className="inline-flex items-center gap-2">

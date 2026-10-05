@@ -1,10 +1,16 @@
 /**
- * Fixture preset library — placeable decor / architectural glyphs.
+ * Fixture preset library — COPY of admin-dashboard/src/features/floor-plan/fixtures.ts. Keep IDs and glyphs in sync.
  *
- * COPY of admin-dashboard/src/features/floor-plan/fixtures.ts (the canonical
- * source): the POS 2D modal renders the same glyphs the admin editor places,
- * so the floor picture matches everywhere. Keep additions in sync with the
- * admin file.
+ * Each entry describes a piece of decor the user can drop onto the
+ * canvas: a kitchen counter, a bar, a toilet, a plant, a door, a
+ * wardrobe, etc. The `glyph` is a small SVG fragment rendered at the
+ * fixture's position (the canvas wraps it in a `<g transform="...">`
+ * with the placed-instance's translate/rotate).
+ *
+ * Adding a new fixture: append to the `FIXTURE_PRESETS` array. The
+ * `id` is the canonical key persisted on `floor_plans.fixtures[].presetId`.
+ *
+ * @since 2.4.0
  */
 
 import { createElement, Fragment, type ReactNode } from 'react';
@@ -59,6 +65,32 @@ function rectEl(x: number, y: number, w: number, h: number, stroke: string, fill
 // ---------------------------------------------------------------------------
 
 export const FIXTURE_PRESETS: FixturePreset[] = [
+  {
+    id: 'kitchen_pass', nameKey: 'floorPlan.fixtures.kitchenPass', nameFallback: 'Kitchen pass',
+    defaultWidth: 240, defaultHeight: 70, bgColor: '#f3f4f6', strokeColor: '#374151', category: 'kitchen',
+    renderGlyph: (w, h) => e(Fragment, null,
+      lineEl(0, h * .25, w, h * .25, '#374151'),
+      ...[.25, .5, .75].flatMap(x => [lineEl(w*x-12, h*.6, w*x+12, h*.6, '#374151'), lineEl(w*x-10, h*.7, w*x+10, h*.7, '#374151')]),
+    ),
+  },
+  {
+    id: 'entrance', nameKey: 'floorPlan.fixtures.entrance', nameFallback: 'Entrance',
+    defaultWidth: 140, defaultHeight: 80, bgColor: 'transparent', strokeColor: '#374151', category: 'door',
+    renderGlyph: (w, h) => e(Fragment, null,
+      lineEl(0, 0, 0, h, '#374151', 3), lineEl(w, 0, w, h, '#374151', 3),
+      lineEl(0, 0, w*.48, 0, '#374151', 2), lineEl(w, 0, w*.52, 0, '#374151', 2),
+      e('path', { d: `M ${w*.48} 0 Q ${w*.48} ${h*.85} 0 ${h*.85} M ${w*.52} 0 Q ${w*.52} ${h*.85} ${w} ${h*.85}`, fill: 'none', stroke: '#374151', strokeWidth: 1.5 }),
+    ),
+  },
+  {
+    id: 'banquette', nameKey: 'floorPlan.fixtures.banquette', nameFallback: 'Banquette seating',
+    defaultWidth: 220, defaultHeight: 75, bgColor: '#f3f4f6', strokeColor: '#374151', category: 'decor',
+    renderGlyph: (w, h) => e(Fragment, null,
+      rectEl(5, 5, w-10, h*.22, '#374151'), rectEl(5, h*.32, w-10, h*.6, '#374151'),
+      lineEl(w/3, h*.32, w/3, h*.92, '#374151'), lineEl(w*2/3, h*.32, w*2/3, h*.92, '#374151'),
+    ),
+  },
+
   {
     id: 'kitchen_counter',
     nameKey: 'floorPlan.fixtures.kitchenCounter',
@@ -238,7 +270,8 @@ export const FIXTURE_PRESETS: FixturePreset[] = [
 ]
 
 export function getFixturePreset(id: string): FixturePreset | undefined {
-  return FIXTURE_PRESETS.find((p) => p.id === id);
+  const aliases: Record<string, string> = { bar_counter: 'bar', 'bar-counter': 'bar', 'kitchen-pass': 'kitchen_pass', entrance_door: 'entrance' };
+  return FIXTURE_PRESETS.find((p) => p.id === (aliases[id] || id));
 }
 
 export function fixturesByCategory(): Record<FixtureCategory, FixturePreset[]> {

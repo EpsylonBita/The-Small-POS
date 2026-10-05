@@ -14,6 +14,7 @@ import {
   Wrench,
 } from 'lucide-react';
 
+import { TableAttemptRecoveryNotice } from './TableAttemptRecoveryNotice';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { cn } from '../../utils/cn';
 import {
@@ -689,6 +690,7 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
     <>
       {confirmationModal}
       <section className="space-y-4 text-slate-900 dark:text-slate-100">
+        <TableAttemptRecoveryNotice />
         {actionFeedback && <div role="status" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">{actionFeedback}</div>}
         {!primaryIssue ? (
           <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-5 text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-100">

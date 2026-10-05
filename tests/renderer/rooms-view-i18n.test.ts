@@ -255,7 +255,9 @@ test('RoomsView money uses the locale-aware currency helper, not hardcoded "$"',
   // formatDate left the view with the always-empty checkout date (module audit 2026-09-16);
   // the pin is about formatCurrency, not the exact import list.
   assert.match(viewSource, /import \{ formatCurrency(?:, formatDate)? \} from '\.\.\/\.\.\/\.\.\/utils\/format';/);
-  assert.match(viewSource, /const formatMoney = \(amount: number\): string => formatCurrency\(Number\(amount\) \|\| 0\);/);
+  assert.match(viewSource, /const formatMoney = \(amount: number, currency: string \| null = getStoreCurrency\(\)\): string => formatCurrency\(Number\(amount\) \|\| 0, currency\);/);
+  assert.match(viewSource, /formatMoney\(room\.activeFolio\.balanceCents \/ 100, room\.activeFolio\.currency \?\? null\)/);
+  assert.match(viewSource, /formatMoney\(Number\(checkoutPaymentData\.amount \|\| 0\), checkoutPaymentData\.room\.activeFolio\?\.currency \?\? null\)/);
   assert.doesNotMatch(viewSource, /\$\{amount\.toFixed\(2\)\}/);
   // The previously hardcoded "$" rate and check-in total are gone.
   assert.doesNotMatch(viewSource, /\$\{actionRoom\.ratePerNight\}/);

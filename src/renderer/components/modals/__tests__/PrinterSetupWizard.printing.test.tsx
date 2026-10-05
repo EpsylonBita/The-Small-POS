@@ -56,7 +56,8 @@ vi.mock('react-hot-toast', () => ({
   }),
 }))
 
-vi.mock('react-i18next', () => {
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>()
   const t = (key: string, fallbackOrOptions?: string | Record<string, unknown>) => {
       if (typeof fallbackOrOptions === 'string') return fallbackOrOptions
       const fallback = fallbackOrOptions?.defaultValue
@@ -66,7 +67,7 @@ vi.mock('react-i18next', () => {
         fallback,
       )
     }
-  return { useTranslation: () => ({ t }) }
+  return { ...actual, useTranslation: () => ({ t }) }
 })
 
 import PrinterSetupWizard from '../PrinterSetupWizard'

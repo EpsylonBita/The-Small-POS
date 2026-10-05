@@ -689,7 +689,7 @@ describe('table order flow helpers', () => {
 
     for (const options of [WITH_TABLES, WITHOUT_TABLES]) {
       const active = orders.filter((order) => shouldShowInStandardOrderLane(order, options))
-      const completed = orders.filter((order) => shouldShowInCompletedOrderLane(order, options))
+      const completed = orders.filter((order) => shouldShowInCompletedOrderLane(order))
       const cancelled = orders.filter(isCancelled)
 
       // The counter walks the orders once and stops at the first lane that takes
@@ -697,7 +697,7 @@ describe('table order flow helpers', () => {
       const counts = { orders: 0, delivered: 0, canceled: 0 }
       for (const order of orders) {
         if (shouldShowInStandardOrderLane(order, options)) counts.orders++
-        else if (shouldShowInCompletedOrderLane(order, options)) counts.delivered++
+        else if (shouldShowInCompletedOrderLane(order)) counts.delivered++
         else if (isCancelled(order)) counts.canceled++
       }
 
@@ -721,12 +721,8 @@ describe('table order flow helpers', () => {
       ['a', 'b'],
     )
     assert.deepEqual(
-      orders.filter((order) => shouldShowInCompletedOrderLane(order, WITHOUT_TABLES)).map((o) => o.id),
+      orders.filter((order) => shouldShowInCompletedOrderLane(order)).map((o) => o.id),
       ['d', 'e'],
-    )
-    assert.deepEqual(
-      orders.filter((order) => shouldShowInCompletedOrderLane(order, WITH_TABLES)).map((o) => o.id),
-      ['e'],
     )
   })
 
@@ -1083,6 +1079,9 @@ describe('table order flow helpers', () => {
       unpaidBalance: 0,
       balance: null,
       __released: true,
+      __releasedAt: Date.now(),
+      __releasedSessionId: 'session-1',
+      __releasedOrderId: 'order-1',
     }
 
     // A stale read-after-write refetch still shows the table occupied/unpaid:
@@ -1162,6 +1161,7 @@ describe('table order flow helpers', () => {
       unpaidBalance: 0,
       balance: null,
       __released: true,
+      __releasedAt: Date.now(),
     }
 
     // Live bug: after releasing a stale reserved table, the immediate refetch can
@@ -1192,7 +1192,7 @@ describe('table order flow helpers', () => {
       'available',
     )
 
-    // A stale occupied read (the other active prior status) is also kept.
+    // A new occupied check cannot be hidden by a reservation release.
     assert.equal(
       shouldApplyOptimisticTableOverride(
         {
@@ -1204,7 +1204,7 @@ describe('table order flow helpers', () => {
         },
         releaseOverride,
       ),
-      true,
+      false,
     )
 
     // Once the server reflects available, drop the override (no permanent mask).
@@ -1223,6 +1223,14 @@ describe('table order flow helpers', () => {
       ),
       false,
     )
+  })
+
+  it('drops an old release when a new check occupies the same table before a released refetch', () => {
+    const released = { status: 'available', __released: true, __releasedAt: 10_000,
+      __releasedSessionId: 'old-check', __releasedOrderId: 'old-order' };
+    assert.equal(shouldApplyOptimisticTableOverride({ status:'occupied',tableSessionId:'new-check',currentOrderId:'new-order' },released,10_100),false);
+    assert.equal(shouldApplyOptimisticTableOverride({ status:'occupied',tableSessionId:'old-check',currentOrderId:'old-order' },released,10_100),true);
+    assert.equal(shouldApplyOptimisticTableOverride({ status:'occupied',tableSessionId:'old-check',currentOrderId:'old-order' },released,40_001),false);
   })
 
   it('useTables stores a durable release override (not a delete) when a table is released', () => {

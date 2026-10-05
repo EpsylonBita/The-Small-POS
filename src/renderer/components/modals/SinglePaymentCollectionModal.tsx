@@ -394,7 +394,7 @@ export const SinglePaymentCollectionModal: React.FC<
           try {
             const sale = (await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale;
             const original = ordinaryCollectionView(claim.retained)?.original;
-            if (isCurrent() && sale?.recoverable && sale.id && sale.deviceId && sale.currency?.toUpperCase() === 'EUR'
+            if (isCurrent() && sale?.recoverable && sale.id && sale.deviceId && /^[A-Z]{3}$/.test(sale.currency?.toUpperCase() || '')
               && sale.amountCents === Math.round(amountToCollect * 100)
               && original?.method === 'card' && Math.round(original.amount * 100) === sale.amountCents
               && (!original.terminalTransactionId || original.terminalTransactionId === sale.id)) {
@@ -438,7 +438,7 @@ export const SinglePaymentCollectionModal: React.FC<
       const sale = (await bridge.payments.getSettlementSnapshot(orderId)).unresolvedDirectSale;
       if (!isCurrent()) return;
       if (sale && (!sale.recoverable || method !== 'card' || !sale.id || !sale.deviceId
-        || sale.currency?.toUpperCase() !== 'EUR'
+        || !/^[A-Z]{3}$/.test(sale.currency?.toUpperCase() || '')
         || sale.amountCents !== Math.round(amountToCollect * 100))) {
         toast.error(ordinaryRefusalText('DIRECT_SALE_RECONCILIATION_REQUIRED'));
         return;
@@ -702,7 +702,7 @@ export const SinglePaymentCollectionModal: React.FC<
               })}
             </p>
             <p className="liquid-glass-modal-text mt-2 text-base font-semibold">
-              EUR {amountToCollect.toFixed(2)}
+              {formatCurrency(amountToCollect)}
             </p>
           </div>
           <div className="liquid-glass-modal-inset rounded-2xl p-4">
@@ -729,8 +729,8 @@ export const SinglePaymentCollectionModal: React.FC<
             {t('orderDashboard.paymentProgress', {
               defaultValue:
                 'Recorded {{settled}} of {{total}}. The remaining amount will be collected now.',
-              settled: `EUR ${round2(settledAmount).toFixed(2)}`,
-              total: `EUR ${round2(totalAmount).toFixed(2)}`,
+              settled: formatCurrency(round2(settledAmount)),
+              total: formatCurrency(round2(totalAmount)),
             })}
           </div>
         ) : null}

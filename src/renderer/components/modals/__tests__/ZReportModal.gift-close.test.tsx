@@ -88,6 +88,7 @@ const TODAY = new Date().toISOString().slice(0, 10);
 function baseReport(date: string) {
   return {
     date,
+    currency: 'EUR',
     terminalName: 'Main POS',
     shifts: { total: 1, cashier: 1, driver: 0 },
     sales: { totalOrders: 3, totalSales: 500, cashSales: 100, cardSales: 400 },
@@ -224,6 +225,17 @@ afterEach(() => {
 });
 
 describe('ZReportModal gift card close', () => {
+  it('keeps ordinary totals unknown when only the gift section has a proven unit', async () => {
+    serveReports((date) => ({ ...storedGiftReport(date), currency: null }));
+    renderModal();
+    await waitFor(() => expect(printButton()).toBeEnabled());
+    const reviewUnknown = countOutsideGift(formatCurrency(500, null));
+    openMoneyTab();
+    expect(reviewUnknown + countOutsideGift(formatCurrency(500, null))).toBeGreaterThan(0);
+    expect(countOutsideGift(formatCurrency(500, 'EUR'))).toBe(0);
+    expect(within(giftSection() as HTMLElement).getByText(formatCurrency(143.45, 'EUR'))).toBeInTheDocument();
+  });
+
   it('shows a stored gift close from frozen figures, once and outside sales, and prints it by stored id', async () => {
     serveReports((date) => (date === HISTORY_DATE ? storedGiftReport() : baseReport(date)));
     renderModal();
@@ -233,13 +245,13 @@ describe('ZReportModal gift card close', () => {
     await waitFor(() => expect(printButton()).toBeEnabled());
     expect(lastReportDate()).toBe(HISTORY_DATE);
 
-    const giftFlowLine = `+${formatCurrency(20)}`;
-    const reviewExpected = countOutsideGift(formatCurrency(143.45));
+    const giftFlowLine = `+${formatCurrency(20, 'EUR')}`;
+    const reviewExpected = countOutsideGift(formatCurrency(143.45, 'EUR'));
     const reviewGiftLines = screen.queryAllByText(giftFlowLine).length;
-    const reviewSales = screen.queryAllByText(formatCurrency(500)).length;
+    const reviewSales = screen.queryAllByText(formatCurrency(500, 'EUR')).length;
     // Never gift twice in expected (163.45) and never gift inside sales (520).
-    expect(screen.queryAllByText(formatCurrency(163.45))).toHaveLength(0);
-    expect(screen.queryAllByText(formatCurrency(520))).toHaveLength(0);
+    expect(screen.queryAllByText(formatCurrency(163.45, 'EUR'))).toHaveLength(0);
+    expect(screen.queryAllByText(formatCurrency(520, 'EUR'))).toHaveLength(0);
 
     openMoneyTab();
     const gift = giftSection() as HTMLElement;
@@ -250,11 +262,11 @@ describe('ZReportModal gift card close', () => {
       expect(within(gift).getByText(formatCurrency(amount, 'EUR'))).toBeInTheDocument();
     }
     // Headline/flow use the canonical 14345 expected; gift card cash is one flow line; sales stay 500.
-    expect(reviewExpected + countOutsideGift(formatCurrency(143.45))).toBeGreaterThan(0);
+    expect(reviewExpected + countOutsideGift(formatCurrency(143.45, 'EUR'))).toBeGreaterThan(0);
     expect(reviewGiftLines + screen.queryAllByText(giftFlowLine).length).toBe(1);
-    expect(reviewSales + screen.queryAllByText(formatCurrency(500)).length).toBeGreaterThan(0);
-    expect(screen.queryAllByText(formatCurrency(163.45))).toHaveLength(0);
-    expect(screen.queryAllByText(formatCurrency(520))).toHaveLength(0);
+    expect(reviewSales + screen.queryAllByText(formatCurrency(500, 'EUR')).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(formatCurrency(163.45, 'EUR'))).toHaveLength(0);
+    expect(screen.queryAllByText(formatCurrency(520, 'EUR'))).toHaveLength(0);
 
     // Frozen history: a live shift update must not refetch or change the stored figures.
     act(() => emit('shift-updated'));
@@ -298,7 +310,7 @@ describe('ZReportModal gift card close', () => {
     await waitFor(() => expect(submitButton()).toBeEnabled());
 
     expect(printButton()).toBeDisabled();
-    expect(screen.getAllByText(formatCurrency(123.45)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(formatCurrency(123.45, 'EUR')).length).toBeGreaterThan(0);
     expect(screen.queryByText(GIFT_CLOSE_LABELS.giftLiabilityCash)).toBeNull();
     expect(screen.getByRole('button', { name: 'modals.zReport.exportCSV' })).toBeEnabled();
 
@@ -367,6 +379,7 @@ describe('ZReportModal gift card close', () => {
   it('uses the original currency for the aggregate gift cash as well as each original', async () => {
     serveReports((date) => {
       const report = storedGiftReport(date);
+      report.currency = 'USD';
       report.giftFinancialClose.originals[0].currency = 'USD';
       return report;
     });
@@ -405,9 +418,9 @@ describe('ZReportModal TWINT and conditional sections', () => {
     }));
     renderModal(); await waitFor(()=>expect(screen.getByAltText('TWINT')).toBeInTheDocument());
     const split=document.querySelector<HTMLElement>('[data-z-report-revenue-split]')!;
-    expect(within(split).getByText(formatCurrency(25))).toBeInTheDocument();
-    expect(within(split).getByText(formatCurrency(20))).toBeInTheDocument();
-    expect(screen.queryAllByText(formatCurrency(55)).length).toBeGreaterThan(0);
+    expect(within(split).getByText(formatCurrency(25, 'EUR'))).toBeInTheDocument();
+    expect(within(split).getByText(formatCurrency(20, 'EUR'))).toBeInTheDocument();
+    expect(screen.queryAllByText(formatCurrency(55, 'EUR')).length).toBeGreaterThan(0);
     openMoneyTab();expect(screen.queryByText('modals.zReport.expenseLedger')).not.toBeInTheDocument();
     expect(screen.queryByText('modals.zReport.noExpenseDetails')).not.toBeInTheDocument();
   });
@@ -415,6 +428,6 @@ describe('ZReportModal TWINT and conditional sections', () => {
     serveReports(date=>({...baseReport(date),presentation:{twintPluginEnabled:true},sales:{totalOrders:0,totalSales:0,cashSales:0,cardSales:0},daySummary:{total:0}}));
     renderModal();await waitFor(()=>expect(screen.getByAltText('TWINT')).toBeInTheDocument());
     const split=document.querySelector<HTMLElement>('[data-z-report-revenue-split]')!;
-    expect(within(split).getAllByText(formatCurrency(0)).length).toBeGreaterThan(0);
+    expect(within(split).getAllByText(formatCurrency(0, 'EUR')).length).toBeGreaterThan(0);
   });
 });

@@ -1,0 +1,32 @@
+/* The floating checkout summary must cover the scrolling content beneath it. */
+.liquid-glass-modal-shell .staff-checkout-footer-panel {
+  background: #ffffff !important;
+  border: 1px solid #d6d3d1 !important;
+  box-shadow: 0 -4px 24px rgb(15 23 42 / 10%);
+  isolation: isolate;
+}
+
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel {
+  background: #18181b !important;
+  border-color: #3f3f46 !important;
+  box-shadow: 0 -4px 24px rgb(0 0 0 / 28%);
+}
+
+.liquid-glass-modal-shell .staff-checkout-footer-panel .text-yellow-400,
+.liquid-glass-modal-shell .staff-checkout-footer-panel .text-yellow-500,
+.liquid-glass-modal-shell .staff-checkout-footer-panel .text-yellow-300 {
+  color: #854d0e !important;
+}
+
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel .text-yellow-400,
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel .text-yellow-500,
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel .text-yellow-300 {
+  color: #facc15 !important;
+}
+
+.liquid-glass-modal-shell .staff-checkout-footer-panel .text-slate-300 { color: #1c1917 !important; }
+.liquid-glass-modal-shell .staff-checkout-footer-panel .text-emerald-300 { color: #047857 !important; }
+.liquid-glass-modal-shell .staff-checkout-footer-panel .text-red-300 { color: #b91c1c !important; }
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel .text-slate-300 { color: #fafafa !important; }
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel .text-emerald-300 { color: #6ee7b7 !important; }
+.dark .liquid-glass-modal-shell .staff-checkout-footer-panel .text-red-300 { color: #fca5a5 !important; }

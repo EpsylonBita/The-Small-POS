@@ -208,11 +208,11 @@ describe('Orders tab and the tables module', () => {
     expect(screen.getByText(/#00073/)).toBeInTheDocument();
     expect(screen.queryByText(/#00072/)).toBeNull();
 
-    // With the module back, the delivered tab hands its checks to Τραπέζια.
+    // A completed check remains in history when the tables module returns.
     cleanup();
     mocks.hasTablesModule = true;
     renderTab('delivered');
-    expect(screen.queryByText(/#00072/)).toBeNull();
+    expect(screen.getByText(/#00072/)).toBeInTheDocument();
 
     // A cancelled order is never hidden by the tables module either way.
     cleanup();

@@ -1,3 +1,5 @@
+import { canChargeFolio, recordedFolioCurrency } from '../../../utils/folio-currency';
+import { getStoreCurrency } from '../../../utils/store-currency';
 /**
  * RoomsView - POS Room Status Grid (Redesigned)
  * 
@@ -86,7 +88,7 @@ const getRoomGuestName = (room: Room): string | null =>
 
 // Locale-aware money formatting: delegates to the shared POS currency helper so
 // Greek shows "145,00 €" instead of a hardcoded "$145.00".
-const formatMoney = (amount: number): string => formatCurrency(Number(amount) || 0);
+const formatMoney = (amount: number, currency: string | null = getStoreCurrency()): string => formatCurrency(Number(amount) || 0, currency);
 
 // Loose translate signature so the real i18next `t` is assignable without casts.
 type RoomTranslateFn = (key: string, options?: Record<string, unknown>) => unknown;
@@ -376,6 +378,8 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
 
   const handleCheckoutPayment = async () => {
     if (!checkoutPaymentData) return;
+    const currency = recordedFolioCurrency(checkoutPaymentData.room.activeFolio?.currency);
+    if (!currency) { toast.error(t('guestBilling.errors.currencyUnavailable')); return; }
 
     const amount = Number(checkoutPaymentData.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -389,6 +393,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
         {
           amount,
           paymentMethod: checkoutPaymentData.paymentMethod,
+          currency,
           reference: checkoutPaymentData.reference || null,
           notes: checkoutPaymentData.notes || null,
         },
@@ -430,6 +435,9 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
 
   const handleAddFolioCharge = async () => {
     if (!folioChargeData) return;
+    const currency = recordedFolioCurrency(folioChargeData.room.activeFolio?.currency);
+    if (!currency) { toast.error(t('guestBilling.errors.currencyUnavailable')); return; }
+    if (!canChargeFolio(currency, getStoreCurrency())) { toast.error(t('guestBilling.errors.currencyMismatch')); return; }
 
     const amount = Number(folioChargeData.amount);
     const quantity = Number(folioChargeData.quantity || '1');
@@ -451,6 +459,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
         folioChargesEndpoint(folioChargeData.folioId),
         {
           chargeType: folioChargeData.chargeType,
+          currency,
           description: folioChargeData.description.trim(),
           amount,
           quantity,
@@ -683,7 +692,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
                 <div className="flex items-center justify-between mt-2">
                   <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('roomsView.fields.folioBalance', { defaultValue: 'Folio Balance' })}</span>
                   <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    {formatMoney(actionRoom.activeFolio.balanceCents / 100)}
+                    {formatMoney(actionRoom.activeFolio.balanceCents / 100, actionRoom.activeFolio.currency ?? null)}
                   </span>
                 </div>
               )}
@@ -749,7 +758,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               <div className="flex items-center justify-between">
                 <span className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>{t('roomsView.outstandingBalance', { defaultValue: 'Outstanding Balance' })}</span>
                 <span className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  {formatMoney(Number(checkoutPaymentData.amount || 0))}
+                  {formatMoney(Number(checkoutPaymentData.amount || 0), checkoutPaymentData.room.activeFolio?.currency ?? null)}
                 </span>
               </div>
             </div>
@@ -964,7 +973,7 @@ const RoomCard: React.FC<{ room: Room; isDark: boolean; onClick: () => void }> =
       {room.activeFolio && (
         <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <DollarSign className="w-3 h-3 inline mr-1" />
-          {formatMoney(room.activeFolio.balanceCents / 100)}
+          {formatMoney(room.activeFolio.balanceCents / 100, room.activeFolio.currency ?? null)}
         </div>
       )}
     </motion.button>

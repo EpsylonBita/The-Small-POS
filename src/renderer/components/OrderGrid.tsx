@@ -40,8 +40,8 @@ const OrderGrid = memo<OrderGridProps>(({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { orders: storeOrders, filter, isLoading } = useOrderStore();
-  // Visibility only: table checks belong to the Tables tab, which exists only
-  // while the tables module is available. Without it they stay in the lanes.
+  // Live table checks use the Tables tab while its module is available.
+  // Settled checks always remain in completion history.
   const { hasTablesModule } = useAcquiredModules();
   const laneOptions = useMemo(
     () => ({ tablesModuleAvailable: hasTablesModule }),
@@ -97,7 +97,7 @@ const OrderGrid = memo<OrderGridProps>(({
       filtered = filtered.filter(order => shouldShowInStandardOrderLane(order as any, laneOptions));
     } else if (activeTab === 'delivered') {
       // Show delivered orders (include completed)
-      filtered = filtered.filter(order => shouldShowInCompletedOrderLane(order as any, laneOptions));
+      filtered = filtered.filter(order => shouldShowInCompletedOrderLane(order as any));
     } else if (activeTab === 'canceled') {
       // Show cancelled orders
       filtered = filtered.filter(order => isCancelledOrderStatus(order.status));

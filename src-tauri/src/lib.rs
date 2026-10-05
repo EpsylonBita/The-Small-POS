@@ -38,6 +38,7 @@ mod callerid;
 /// Invoice capture (scanner/MFP) subsystem — see
 /// `.claude/specs/invoice-scan-capture/design.md`, surface D-Rust1.
 mod capture;
+mod checkout_drafts;
 mod commands;
 mod core_helpers;
 mod customer_display;
@@ -53,6 +54,7 @@ mod gift_financial_opening;
 mod hardware_manager;
 mod idempotency;
 mod incident_reporting;
+mod lan_transport;
 mod loyalty;
 mod memory_trim;
 mod menu;
@@ -75,6 +77,7 @@ mod repair_attachment_cache;
 mod repair_transport;
 pub(crate) mod repairs;
 mod reset;
+mod satellite_handover;
 mod scale;
 mod scanner;
 mod serial;
@@ -83,6 +86,8 @@ mod startup_recovery;
 mod storage;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
+mod table_attempt_recovery;
+mod table_session_cache;
 mod terminal_helpers;
 mod unsaved_payments;
 mod windows_spooler;
@@ -965,6 +970,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
 
             // Auth state
             app.manage(auth::AuthState::new());
+            app.manage(lan_transport::LanTransportState::default());
             app.manage(UpdaterRuntimeState::default());
             app.manage(ecr::DeviceManager::new());
             app.manage(Arc::clone(&caller_id_manager));
@@ -981,6 +987,12 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             // Cancellation token for graceful shutdown of background tasks
             let cancel_token = tokio_util::sync::CancellationToken::new();
             app.manage(cancel_token.clone());
+            let lan_startup_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = lan_transport::restore_startup(lan_startup_app).await {
+                    warn!(error = %error, "Saved LAN receiver could not start; cloud sync remains available");
+                }
+            });
             {
                 let caller_id_app = app.handle().clone();
                 let caller_id_manager = Arc::clone(&caller_id_manager);
@@ -1304,6 +1316,12 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 return true;
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                checkout_drafts::checkout_draft_get,
+                checkout_drafts::checkout_draft_put,
+                checkout_drafts::checkout_draft_delete,
+                checkout_drafts::checkout_draft_inspect,
+                checkout_drafts::checkout_draft_resume_declined,
+                table_attempt_recovery::table_attempt_recovery_status,
             // App lifecycle
             memory_trim::memory_trim_webview,
             commands::runtime::app_shutdown,
@@ -1380,6 +1398,12 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::orders::orders_preview_edit_settlement,
             commands::orders::orders_apply_edit_settlement,
             commands::orders::orders_apply_table_session_snapshot,
+            commands::orders::orders_get_table_session_snapshot,
+            commands::lan_transport::lan_transport_start,
+            commands::lan_transport::lan_transport_stop,
+            commands::lan_transport::lan_transport_status,
+            commands::lan_transport::lan_transport_pair,
+            commands::lan_transport::lan_transport_revoke,
             commands::orders::order_update_financials,
             commands::orders::order_approve,
             commands::orders::order_decline,

@@ -1,3 +1,4 @@
+import { formatCurrency } from './format';
 /**
  * Promotions Utilities - POS Promotion Validation & Application
  *
@@ -533,7 +534,7 @@ export function formatPromotionDiscount(promotion: POSPromotion): string {
     case 'percentage':
       return `${promotion.discountPercentage}% off`;
     case 'fixed_amount':
-      return `€${promotion.discountValue?.toFixed(2)} off`;
+      return `${formatCurrency(promotion.discountValue ?? 0)} off`;
     case 'bogo':
       const getPercent = promotion.getPercentage ?? 100;
       if (getPercent === 100) {

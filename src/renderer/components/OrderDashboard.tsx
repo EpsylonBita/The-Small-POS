@@ -35,6 +35,7 @@ import type { Customer, CustomerInfo } from "../types/customer";
 import { mergeCustomerInfoModalSave } from "../utils/customerInfoModalMerge";
 import OrderGrid from "./OrderGrid";
 import OrderTabsBar, { type TabId } from "./OrderTabsBar";
+import { TableWorkspaceToolbar, TableWorkspaceCard } from "./tables/TableWorkspace";
 import BulkActionsBar from "./BulkActionsBar";
 import DriverAssignmentModal from "./modals/DriverAssignmentModal";
 import OrderCancellationModal from "./modals/OrderCancellationModal";
@@ -210,6 +211,8 @@ import {
   markPlatformOrdersReady,
 } from "../utils/platformReadyAction";
 import { useCheckoutRequestId } from "../hooks/useCheckoutRequestId";
+import { getCheckoutDraftStore } from "../services/CheckoutDraftStore";
+import { TableAttemptRecoveryNotice } from "./recovery/TableAttemptRecoveryNotice";
 import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from "../utils/checkoutOutcome";
 import {
   notifyMoneySettingsUnavailable,
@@ -903,95 +906,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       [t],
     );
 
-    const tableStatusConfig = useMemo(() => {
-      const light = resolvedTheme === "light";
-      return {
-        available: {
-          label: t("tablesDashboard.tableStatus.available", "Available"),
-          card:
-            light
-              ? "border-emerald-300 bg-emerald-50/90"
-              : "border-emerald-400/35 bg-emerald-500/10",
-          badge:
-            light
-              ? "border-emerald-200 bg-emerald-100 text-emerald-700"
-              : "border-emerald-400/25 bg-emerald-400/10 text-emerald-200",
-          accent: "bg-emerald-500",
-          value: "text-emerald-600 dark:text-emerald-300",
-        },
-        occupied: {
-          label: t("tablesDashboard.tableStatus.occupied", "Occupied"),
-          card:
-            light
-              ? "border-zinc-300 bg-zinc-100/95"
-              : "border-zinc-400/45 bg-zinc-500/10",
-          badge:
-            light
-              ? "border-zinc-300 bg-zinc-200 text-zinc-700"
-              : "border-zinc-500/30 bg-zinc-400/10 text-zinc-200",
-          accent: "bg-zinc-800",
-          value: "text-zinc-700 dark:text-zinc-200",
-        },
-        reserved: {
-          label: t("tablesDashboard.tableStatus.reserved", "Reserved"),
-          card:
-            light
-              ? "border-amber-300 bg-amber-50"
-              : "border-amber-400/40 bg-amber-500/10",
-          badge:
-            light
-              ? "border-amber-200 bg-amber-100 text-amber-700"
-              : "border-amber-400/30 bg-amber-400/10 text-amber-200",
-          accent: "bg-amber-500",
-          value: "text-amber-600 dark:text-amber-300",
-        },
-        cleaning: {
-          label: t("tablesDashboard.tableStatus.cleaning", "Cleaning"),
-          card:
-            light
-              ? "border-slate-300 bg-slate-50"
-              : "border-slate-400/25 bg-white/[0.045]",
-          badge:
-            light
-              ? "border-slate-200 bg-slate-100 text-slate-700"
-              : "border-slate-400/25 bg-slate-400/10 text-slate-200",
-          accent: "bg-slate-500",
-          value: "text-slate-600 dark:text-slate-300",
-        },
-        maintenance: {
-          label: t("tablesDashboard.tableStatus.maintenance", "Maintenance"),
-          card:
-            light
-              ? "border-orange-300 bg-orange-50"
-              : "border-orange-400/35 bg-orange-500/10",
-          badge:
-            light
-              ? "border-orange-200 bg-orange-100 text-orange-700"
-              : "border-orange-400/25 bg-orange-400/10 text-orange-200",
-          accent: "bg-orange-500",
-          value: "text-orange-600 dark:text-orange-300",
-        },
-        unavailable: {
-          label: t("tablesDashboard.tableStatus.unavailable", "Unavailable"),
-          card:
-            light
-              ? "border-slate-300 bg-slate-100"
-              : "border-slate-500/25 bg-slate-800/35",
-          badge:
-            light
-              ? "border-slate-300 bg-slate-200 text-slate-700"
-              : "border-slate-500/25 bg-slate-500/10 text-slate-300",
-          accent: "bg-slate-500",
-          value: "text-slate-600 dark:text-slate-300",
-        },
-      } satisfies Record<TableStatus, {
-        label: string;
-        card: string;
-        badge: string;
-        accent: string;
-        value: string;
-      }>;
-    }, [resolvedTheme, t]);
+    const tableStatusConfig = useMemo(() => ({
+      available: { label: t("tablesDashboard.tableStatus.available", "Available") },
+      occupied: { label: t("tablesDashboard.tableStatus.occupied", "Occupied") },
+      reserved: { label: t("tablesDashboard.tableStatus.reserved", "Reserved") },
+      cleaning: { label: t("tablesDashboard.tableStatus.cleaning", "Cleaning") },
+      maintenance: { label: t("tablesDashboard.tableStatus.maintenance", "Maintenance") },
+      unavailable: { label: t("tablesDashboard.tableStatus.unavailable", "Unavailable") },
+    }), [t]);
 
     const floorScopedTables = useMemo(
       () =>
@@ -1964,9 +1886,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         );
       }
 
-      // Apply tab-specific filters. The tables module decides visibility only:
-      // without it there is no Tables tab, so a table check stays in the lanes
-      // instead of disappearing from the terminal.
+      // Live table checks use the Tables tab while its module is available.
+      // Completion history always includes every fulfillment type.
       const laneOptions = { tablesModuleAvailable: hasTablesModule };
 
       switch (activeTab) {
@@ -1977,7 +1898,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           break;
         case "delivered":
           filtered = filtered.filter((order) =>
-            shouldShowInCompletedOrderLane(order as any, laneOptions),
+            shouldShowInCompletedOrderLane(order as any),
           );
           break;
         case "canceled":
@@ -2004,7 +1925,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return;
         }
 
-        if (shouldShowInCompletedOrderLane(order as any, laneOptions)) {
+        if (shouldShowInCompletedOrderLane(order as any)) {
           counts.delivered++;
           return;
         }
@@ -2028,7 +1949,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         if (tab === "tables" && !hasTablesModule) return;
         if (tab === "rooms" && !hasRoomsModule) return;
         if (tab === "services" && !hasServicesModule) return;
-        if (tab === "delivered" && !hasDeliveryModule) return;
         setActiveTab(tab);
         clearBulkSelection();
         // Ensure global status filter doesn't hide tab contents
@@ -2036,7 +1956,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           setFilter({ status: "all" });
         } catch {}
       },
-      [clearBulkSelection, setFilter, hasTablesModule, hasRoomsModule, hasServicesModule, hasDeliveryModule],
+      [clearBulkSelection, setFilter, hasTablesModule, hasRoomsModule, hasServicesModule],
     );
 
     // If the active vertical tab's module becomes unavailable while selected (e.g. a module is
@@ -2046,12 +1966,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       if (
         (activeTab === "tables" && !hasTablesModule) ||
         (activeTab === "rooms" && !hasRoomsModule) ||
-        (activeTab === "services" && !hasServicesModule) ||
-        (activeTab === "delivered" && !hasDeliveryModule)
+        (activeTab === "services" && !hasServicesModule)
       ) {
         setActiveTab("orders");
       }
-    }, [activeTab, hasTablesModule, hasRoomsModule, hasServicesModule, hasDeliveryModule]);
+    }, [activeTab, hasTablesModule, hasRoomsModule, hasServicesModule]);
 
     // Update tables count when tables data changes
     useEffect(() => {
@@ -2373,6 +2292,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         roomNumber: room.roomNumber,
         guestName,
         activeFolioId,
+        currency: room.activeFolio?.currency ?? null,
       });
       setCustomerInfo({
         name: guestName
@@ -2742,11 +2662,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // secondary button previously advertised "Assign" but a waiter is session-
     // scoped (no session = nothing to assign), so the honest available-table action
     // is to start a reservation. Opens the portalled/blurred ReservationForm.
-    const handleTableReserve = useCallback((table: RestaurantTable) => {
-      setEditingReservation(null);
-      setSelectedTable(table);
-      setShowReservationForm(true);
-    }, []);
 
     const handleTableCheckAddItems = useCallback((table: RestaurantTable, guestCount: number, session: any) => {
       const activeOrderId = session?.active_order_id || table.currentOrderId;
@@ -3719,8 +3634,52 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Fix review 30/09/2026: one checkout id per cart, reused by every press
     // of Pay until the checkout ends, so a slow card terminal is never paid
     // twice.
-    const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId } =
+    const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId } =
       useCheckoutRequestId();
+
+    const [restoredCheckoutContext, setRestoredCheckoutContext] = useState<Record<string, any> | null>(null);
+    const restoreCheckoutContext = useCallback((context: Record<string, any>) => {
+      if (!["pickup", "delivery", "dine-in"].includes(context.orderType)) return;
+      restoreCheckoutRequestId(context.checkoutRequestId);
+      setRestoredCheckoutContext(context);
+      setSelectedOrderType(context.orderType);
+      setOrderType(context.orderType);
+      setExistingCustomer(context.selectedCustomer || null);
+      setCustomerInfo(context.selectedCustomer || null);
+      setSelectedTable(context.selectedTable || null);
+      setTableNumber(context.tableNumber || "");
+      setTableGuestCount(context.tableGuestCount || 1);
+      setDeliveryZoneInfo(context.deliveryZoneInfo || null);
+      setRoomChargeContext(context.roomChargeContext || null);
+      if (context.editMode) {
+        setCurrentEditOrderId(context.editOrderId);
+        setCurrentEditSupabaseId(context.editSupabaseId);
+        setCurrentEditOrderNumber(context.editOrderNumber);
+        setCurrentEditSourceOrderType(context.editSourceOrderType);
+        setEditingOrderType(context.orderType);
+        setShowMenuModal(false);
+        setShowEditMenuModal(true);
+      } else {
+        setShowEditMenuModal(false);
+        setShowMenuModal(true);
+      }
+    }, [restoreCheckoutRequestId]);
+    useEffect(() => {
+      if (!organizationId || !effectiveBranchId || !resolvedTerminalId) return;
+      let mounted = true;
+      void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
+        if (mounted && saved && (saved.cartItems.length || saved.phase === "checkout_pending")) {
+          restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+        }
+      }).catch(() => { /* Menu admission retains and displays a failed native read. */ });
+      return () => { mounted = false; };
+    }, [organizationId, effectiveBranchId, resolvedTerminalId, restoreCheckoutContext]);
+    const acceptRecoveredCheckout = async () => {
+      resetCheckoutRequestId();
+      setRestoredCheckoutContext(null);
+      await silentRefresh();
+      void refetchTables();
+    };
 
     const handleOrderComplete = async (orderData: any): Promise<boolean> => {
       const isSplitPayment = orderData.paymentData?.method === "pending";
@@ -3738,6 +3697,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         });
         if (outcome.resetOrderUiState) {
           resetCheckoutRequestId();
+          setRestoredCheckoutContext(null);
           setShowMenuModal(false);
           setSelectedOrderType(null);
           setExistingCustomer(null);
@@ -4328,7 +4288,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
         // Create order object
         const orderToCreate = {
-          clientRequestId: takeCheckoutRequestId(),
+          clientRequestId: takeCheckoutRequestId(orderData.clientRequestId),
           customer_id: persistedCustomerId,
           customerId: persistedCustomerId,
           customer_name: persistedCustomerName ?? undefined,
@@ -4397,6 +4357,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           resetCheckoutRequestId();
 
           const roomCharge = (result as any).roomCharge;
+        if (isRoomChargePayment && orderData.paymentData) orderData.paymentData.roomChargeApplied = roomCharge?.applied === true;
           if (isRoomChargePayment && roomCharge?.applied === false && result.orderId) {
             await silentRefresh().catch((err) => {
               console.debug("[OrderDashboard] Silent refresh after room-charge fallback failed:", err);
@@ -7360,55 +7321,22 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle menu-based order edit completion
     const handleEditMenuComplete = async (orderData: {
-      orderId: string;
-      items: any[];
-      total: number;
-      orderType?: string;
-      notes?: string;
+      orderId: string; items: any[]; total: number; orderType?: string; notes?: string;
+      client_event_id?: string; expected_version?: number;
     }) => {
-      try {
-        // Item H (fix review 30/09/2026): the edit re-splits the order's tax.
-        // While the store's tax rate cannot be read, the edit is paused with
-        // "Try again" instead of splitting on an assumed 24%.
-        const editTaxRate = resolveCheckoutTaxRate({
-          loaded: terminalSettingsLoaded,
-          getSetting,
-        });
-        if (!editTaxRate.available) {
-          notifyMoneySettingsUnavailable(t, reloadTerminalSettings);
-          return;
-        }
-        const targetOrder = orders.find((order) => order.id === orderData.orderId);
-        const targetOrderType = resolveEditableOrderType({
-          orderType:
-            (orderData.orderType as Order["orderType"]) ||
-            targetOrder?.orderType,
-          order_type:
-            (orderData.orderType as Order["order_type"]) ||
-            targetOrder?.order_type,
-        });
-        const settlementPayload = deriveEditSettlementPayload(
-          targetOrder,
-          normalizeEditOrderItems(orderData.items),
-          targetOrderType,
-          editTaxRate.rate,
-        );
-
-        await applySettlementAwareOrderEdit([
-          {
-            orderId: orderData.orderId,
-            orderNumber: currentEditOrderNumber,
-            items: orderData.items,
-            orderNotes: orderData.notes,
-            financials: settlementPayload.financials,
-            orderUpdates: settlementPayload.orderUpdates,
-          },
-        ]);
-      } catch (error) {
-        console.error("Failed to update order items:", error);
-        const errorMessage = extractOrderDashboardErrorMessage(error);
-        toast.error(errorMessage || t("orderDashboard.orderItemsFailed"));
+      if (!orderData.client_event_id || !Number.isInteger(orderData.expected_version)) {
+        throw new Error("CHECKOUT_DRAFT_EDIT_VERSION_REQUIRED");
       }
+      // The frozen editor identity belongs to the durable native recovery queue.
+      // Paid/shared edits remain fail-closed rather than opening an unjournaled settlement.
+      const target = orders.find(order => order.id === orderData.orderId) as any;
+      const result: any = await bridge.orders.updateItems(orderData.orderId, orderData.items, {
+        clientEventId: orderData.client_event_id, expectedVersion: orderData.expected_version,
+        tableSessionId: target?.table_session_id || target?.tableSessionId,
+      });
+      if (result?.success === false) throw new Error("CHECKOUT_DRAFT_EDIT_NOT_APPLIED");
+      await silentRefresh();
+      void refetchTables();
     };
 
     const handleEditMenuClose = () => {
@@ -7569,6 +7497,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     return (
       <div className={`relative flex h-full min-h-0 flex-col gap-4 overflow-hidden ${className}`}>
+        <TableAttemptRecoveryNotice />
         {/* Order Conflict Banner */}
         {/* Conflict banner intentionally disabled: remote always wins */}
 
@@ -7594,7 +7523,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               // brief forbids a heavy duplicate fetch just for a tab badge.
               services: 0,
             }}
-            showDeliveredTab={hasDeliveryModule}
             showTablesTab={hasTablesModule}
             showRoomsTab={hasRoomsModule}
             showServicesTab={hasServicesModule}
@@ -7621,11 +7549,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           <div
             ref={orderGridRef}
             onWheel={handleTableGridWheel}
-            className={`flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border p-4 shadow-sm transition-colors ${
-              resolvedTheme === "light"
-                ? "border-amber-100/80 bg-[#fffaf1]/90"
-                : "border-white/10 bg-slate-950/45"
-            }`}
+            className="table-workspace"
+            data-theme={resolvedTheme === "light" ? "light" : "dark"}
           >
             {displayTables.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -7647,210 +7572,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               </div>
             ) : (
               <div className="flex h-full min-h-0 flex-col gap-3">
-                <div className="shrink-0 space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="grid w-full grid-cols-3 gap-2 sm:w-auto sm:min-w-[390px]">
-                    <div
-                      className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
-                        resolvedTheme === "light"
-                          ? "border-amber-100/80 bg-[#fffdf8]"
-                          : "border-white/10 bg-white/[0.055]"
-                      }`}
-                    >
-                      <div
-                        className={`text-[11px] font-bold uppercase tracking-wide ${
-                          resolvedTheme === "light"
-                            ? "text-slate-500"
-                            : "text-slate-400"
-                        }`}
-                      >
-                        {t("tablesDashboard.occupied", "Occupied")}
-                      </div>
-                      <div
-                        className={`mt-1 text-xl font-black ${
-                          resolvedTheme === "light"
-                            ? "text-slate-950"
-                            : "text-white"
-                        }`}
-                      >
-                        {tableGridStats.occupied}/{tableGridStats.total}
-                      </div>
-                    </div>
-                    <div
-                      className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
-                        resolvedTheme === "light"
-                          ? "border-amber-100/80 bg-[#fffdf8]"
-                          : "border-white/10 bg-white/[0.055]"
-                      }`}
-                    >
-                      <div
-                        className={`text-[11px] font-bold uppercase tracking-wide ${
-                          resolvedTheme === "light"
-                            ? "text-slate-500"
-                            : "text-slate-400"
-                        }`}
-                      >
-                        {t("tablesDashboard.openDue", "Open due")}
-                      </div>
-                      <div className="mt-1 text-xl font-black text-amber-600 dark:text-amber-300">
-                        {formatCurrency(tableGridStats.due)}
-                      </div>
-                    </div>
-                    <div
-                      className={`rounded-xl border px-4 py-3 backdrop-blur-xl ${
-                        resolvedTheme === "light"
-                          ? "border-amber-100/80 bg-[#fffdf8]"
-                          : "border-white/10 bg-white/[0.055]"
-                      }`}
-                    >
-                      <div
-                        className={`text-[11px] font-bold uppercase tracking-wide ${
-                          resolvedTheme === "light"
-                            ? "text-slate-500"
-                            : "text-slate-400"
-                        }`}
-                      >
-                        {t("tablesDashboard.rate", "Rate")}
-                      </div>
-                      <div
-                        className={`mt-1 text-xl font-black ${
-                          tableGridStats.occupancyRate > 80
-                            ? "text-red-500"
-                            : tableGridStats.occupancyRate > 50
-                              ? "text-amber-500"
-                              : "text-emerald-500"
-                        }`}
-                      >
-                        {tableGridStats.occupancyRate}%
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    <div
-                      className={`inline-flex rounded-xl border p-1 ${
-                        resolvedTheme === "light"
-                          ? "border-amber-100/80 bg-[#fffdf8]"
-                          : "border-white/10 bg-white/[0.06]"
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setTableViewMode("list")}
-                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
-                          tableViewMode === "list"
-                            ? "bg-yellow-400 text-black"
-                            : resolvedTheme === "light"
-                              ? "text-slate-700 active:bg-[#fffaf1]"
-                              : "text-slate-200 active:bg-white/[0.08]"
-                        }`}
-                      >
-                        <LayoutGrid className="h-4 w-4" />
-                        {t("tablesDashboard.viewMode.list", "List")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTableFloorPlanModalOpen(true)}
-                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
-                          tableFloorPlanModalOpen
-                            ? "bg-yellow-400 text-black"
-                            : resolvedTheme === "light"
-                              ? "text-slate-700 active:bg-[#fffaf1]"
-                              : "text-slate-200 active:bg-white/[0.08]"
-                        }`}
-                      >
-                        <MapIcon className="h-4 w-4" />
-                        {t("tablesDashboard.viewMode.floorPlan", "2D")}
-                      </button>
-                    </div>
-                    {(
-                      [
-                        "all",
-                        "available",
-                        "occupied",
-                        "reserved",
-                        "cleaning",
-                      ] as const
-                    ).map((status) => (
-                      <button
-                        key={status}
-                        type="button"
-                        onClick={() => setTableStatusFilter(status)}
-                        className={`rounded-xl px-3 py-2 text-sm font-bold transition-all active:scale-95 ${
-                          tableStatusFilter === status
-                            ? "bg-yellow-400 text-black shadow-lg shadow-yellow-500/20"
-                            : resolvedTheme === "light"
-                              ? "bg-[#fffdf8] text-slate-700 ring-1 ring-amber-100/80 active:bg-[#fff7e8]"
-                              : "bg-white/[0.06] text-slate-200 active:bg-white/[0.1]"
-                        }`}
-                      >
-                        {status === "all"
-                          ? t("tablesDashboard.all", "All")
-                          : tableStatusConfig[status].label}
-                        {status !== "all" ? (
-                          <span className="ml-1 opacity-70">
-                            {status === "available"
-                              ? tableGridStats.available
-                              : status === "occupied"
-                                ? tableGridStats.occupied
-                                : status === "reserved"
-                                  ? tableGridStats.reserved
-                                  : tableGridStats.cleaning}
-                          </span>
-                        ) : null}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div
-                  className={`flex items-center gap-2 overflow-x-auto rounded-xl border p-1 backdrop-blur-xl scrollbar-hide ${
-                    resolvedTheme === "light"
-                      ? "border-amber-100/80 bg-[#fffdf8]"
-                      : "border-white/10 bg-white/[0.055]"
-                  }`}
-                >
-                  <span
-                    className={`ml-2 mr-1 inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-bold tracking-wide ${
-                      resolvedTheme === "light"
-                        ? "text-slate-500"
-                        : "text-slate-400"
-                    }`}
-                  >
-                    <Layers className="h-3.5 w-3.5" />
-                    {t("tablesDashboard.floor", "Floor")}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setTableFloorFilter("all")}
-                    className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
-                      effectiveTableFloorFilter === "all"
-                        ? "bg-yellow-400 text-black"
-                        : resolvedTheme === "light"
-                          ? "text-slate-700 active:bg-[#fffaf1]"
-                          : "text-slate-200 active:bg-white/[0.08]"
-                    }`}
-                  >
-                    {getTableFloorLabel("all")}
-                  </button>
-                  {tableFloorOptions.map((floor) => (
-                    <button
-                      key={floor}
-                      type="button"
-                      onClick={() => setTableFloorFilter(floor)}
-                      className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
-                        effectiveTableFloorFilter === floor
-                          ? "bg-yellow-400 text-black"
-                          : resolvedTheme === "light"
-                            ? "text-slate-700 active:bg-[#fffaf1]"
-                            : "text-slate-200 active:bg-white/[0.08]"
-                      }`}
-                    >
-                      {getTableFloorLabel(floor)}
-                    </button>
-                  ))}
-                </div>
-                </div>
+                <TableWorkspaceToolbar
+                  stats={tableGridStats}
+                  statusLabels={tableStatusConfig}
+                  statusFilter={tableStatusFilter}
+                  onStatusFilter={setTableStatusFilter}
+                  floorFilter={effectiveTableFloorFilter}
+                  floors={tableFloorOptions}
+                  floorLabel={getTableFloorLabel}
+                  onFloorFilter={setTableFloorFilter}
+                  onList={() => setTableViewMode("list")}
+                  onFloorPlan={() => setTableFloorPlanModalOpen(true)}
+                  floorPlanOpen={tableFloorPlanModalOpen}
+                  formatCurrency={formatCurrency}
+                />
 
                 <div
                   data-testid="order-dashboard-table-grid-container"
@@ -7859,7 +7594,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   <div
                     ref={tableGridScrollRef}
                     data-testid="order-dashboard-table-scroll-region"
-                    className="h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll"
+                    className="table-workspace-scroll touch-scroll"
                   >
                   <TableFloorPlanModal
                     isOpen={tableFloorPlanModalOpen}
@@ -7891,7 +7626,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       className="min-h-full"
                     />
                   ) : (
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pb-3">
+                  <div className="table-workspace-grid">
                     {visibleTableCards.map((table) => {
                       const displayStatus = resolveTableDisplayStatus(table);
                       const visual =
@@ -7902,12 +7637,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                       // Reserved tables (no open check) must keep the existing
                       // reservation-management path (edit / no-show / cancel) via
                       // TableActionModal, not the new-reservation shortcut.
-                      const isReservedTable =
-                        !hasOpenCheck && displayStatus === "reserved";
-                      // Pay and reservation management always apply; booking an
-                      // available table needs the Reservations module.
-                      const showTableSecondaryAction =
-                        hasOpenCheck || isReservedTable || hasReservationsModule;
                       // Cleaning/maintenance/unavailable tables are not ready for guests and must
                       // not offer guest order actions, even with no open check after payment.
                       const needsAttention =
@@ -7916,10 +7645,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                           displayStatus === "maintenance" ||
                           displayStatus === "unavailable");
                       const attentionActionLabel =
-                        displayStatus === "cleaning"
-                          ? t("tablesDashboard.markCleaned", "Mark cleaned")
-                          : t("tablesDashboard.backInService", "Back in service");
-                      const attentionStatusLabel =
                         displayStatus === "cleaning"
                           ? t("tablesDashboard.needsCleaning", "Needs cleaning")
                           : t("tablesDashboard.outOfService", "Out of service");
@@ -7941,255 +7666,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         table.guestCount || table.capacity || 0;
 
                       return (
-                        <article
+                        <TableWorkspaceCard
                           key={table.id}
-                          className={`min-h-[180px] rounded-2xl border p-3 backdrop-blur-xl transition-all duration-200 ${visual.card}`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div
-                                className={`inline-flex items-center gap-1.5 text-xs font-bold tracking-wide ${
-                                  resolvedTheme === "light"
-                                    ? "text-slate-500"
-                                    : "text-slate-400"
-                                }`}
-                              >
-                                <Layers className="h-3.5 w-3.5" />
-                                {getTableFloorLabel(getTableFloorValue(table))}
-                              </div>
-                              <div
-                                className={`mt-1 truncate text-2xl font-black ${
-                                  resolvedTheme === "light"
-                                    ? "text-slate-950"
-                                    : "text-white"
-                                }`}
-                              >
-                                {formatTableDisplayNumber(table.tableNumber)}
-                              </div>
-                            </div>
-                            <span
-                              className={`shrink-0 rounded-xl border px-2.5 py-1 text-xs font-black ${visual.badge}`}
-                            >
-                              {visual.label}
-                            </span>
-                          </div>
-
-                          {/* Compact one-line info strip (round 214 v3): the boxed Covers/Waiter tiles
-                              were too tall and let the Greek waiter value wrap; this is a single row of
-                              two chips (covers count + waiter), the waiter chip taking the remaining
-                              width so a value like "Χωρίς ανάθεση" reads on one line without wrapping. */}
-                          <div
-                            className={`mt-2 flex items-center gap-1.5 text-xs ${
-                              resolvedTheme === "light"
-                                ? "text-slate-500"
-                                : "text-slate-400"
-                            }`}
-                          >
-                            <span
-                              className={`inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 font-bold ${
-                                resolvedTheme === "light"
-                                  ? "border-amber-100/80 bg-[#fffdf8]/80 text-slate-700"
-                                  : "border-white/10 bg-black/20 text-slate-200"
-                              }`}
-                            >
-                              <Users className="h-3.5 w-3.5 shrink-0" />
-                              {guestCount}/{table.capacity}
-                            </span>
-                            <span
-                              className={`inline-flex min-w-0 flex-1 items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
-                                resolvedTheme === "light"
-                                  ? "border-amber-100/80 bg-[#fffdf8]/80"
-                                  : "border-white/10 bg-black/20"
-                              } ${
-                                table.currentWaiterName
-                                  ? resolvedTheme === "light"
-                                    ? "text-slate-900"
-                                    : "text-white"
-                                  : "text-slate-400"
-                              }`}
-                            >
-                              <UserCheck className="h-3.5 w-3.5 shrink-0" />
-                              <span className="truncate">{waiterName}</span>
-                            </span>
-                          </div>
-
-                          {hasOpenCheck ? (
-                            <div className="mt-4">
-                              <div className="flex items-end justify-between gap-3">
-                                <div>
-                                  <div
-                                    className={`text-[11px] font-black uppercase tracking-wide ${
-                                      resolvedTheme === "light"
-                                        ? "text-slate-500"
-                                        : "text-slate-400"
-                                    }`}
-                                  >
-                                    {t("tablesDashboard.due", "Due")}
-                                  </div>
-                                  <div
-                                    className={`text-3xl font-black ${
-                                      balance.due > 0
-                                        ? "text-amber-600 dark:text-amber-300"
-                                        : "text-emerald-600 dark:text-emerald-300"
-                                    }`}
-                                  >
-                                    {formatCurrency(balance.due)}
-                                  </div>
-                                </div>
-                                <div
-                                  className={`text-right text-xs font-semibold ${
-                                    resolvedTheme === "light"
-                                      ? "text-slate-500"
-                                      : "text-slate-400"
-                                  }`}
-                                >
-                                  <div>
-                                    {t("tablesDashboard.total", "Total")}{" "}
-                                    {formatCurrency(balance.total)}
-                                  </div>
-                                  <div className="text-emerald-600 dark:text-emerald-300">
-                                    {t("tablesDashboard.paid", "Paid")}{" "}
-                                    {formatCurrency(balance.paid)}
-                                  </div>
-                                </div>
-                              </div>
-                              <div
-                                className={`mt-3 h-2 overflow-hidden rounded-full ${
-                                  resolvedTheme === "light"
-                                    ? "bg-[#fffdf8]/80"
-                                    : "bg-black/30"
-                                }`}
-                              >
-                                <div
-                                  className={`h-full rounded-full transition-all duration-500 ${visual.accent}`}
-                                  style={{ width: `${paidPercent}%` }}
-                                />
-                              </div>
-                            </div>
-                          ) : null}
-                          {/* The duplicate lower status line (Ready for guests / Needs cleaning) was
-                              removed: the top status badge already carries Available/Cleaning/Out-of-
-                              service, and the attention action button below conveys the cleaning CTA. */}
-
-                          {occupiedSinceLabel || table.currentOrderId ? (
-                            <div
-                              className={`mt-2 flex flex-wrap items-center gap-2 text-xs ${
-                                resolvedTheme === "light"
-                                  ? "text-slate-500"
-                                  : "text-slate-400"
-                              }`}
-                            >
-                              {occupiedSinceLabel ? (
-                                <span className="inline-flex items-center gap-1 rounded-lg border border-zinc-400/20 bg-zinc-500/10 px-2 py-1 font-bold text-zinc-700 dark:text-zinc-200">
-                                  <Clock3 className="h-3.5 w-3.5" />
-                                  {occupiedSinceLabel}
-                                </span>
-                              ) : null}
-                              {table.currentOrderId ? (
-                                <span
-                                  className={`inline-flex max-w-full items-center gap-1 rounded-lg border px-2 py-1 font-semibold ${
-                                    resolvedTheme === "light"
-                                      ? "border-amber-100/80 bg-[#fffdf8]/70"
-                                      : "border-white/10 bg-white/[0.04]"
-                                  }`}
-                                >
-                                  <ReceiptText className="h-3.5 w-3.5 shrink-0" />
-                                  <span className="truncate">
-                                    {String(table.currentOrderId).slice(0, 10)}
-                                  </span>
-                                </span>
-                              ) : null}
-                            </div>
-                          ) : null}
-
-                          {needsAttention ? (
-                            <div className="mt-3 space-y-2">
-                              <div
-                                className={`inline-flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-sm font-black ${
-                                  resolvedTheme === "light"
-                                    ? "border-amber-200 bg-amber-50/80 text-amber-800"
-                                    : "border-amber-400/25 bg-amber-400/10 text-amber-200"
-                                }`}
-                              >
-                                <AlertTriangle className="h-4 w-4 shrink-0" />
-                                {attentionStatusLabel}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleTableSelect(table);
-                                }}
-                                className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-600 px-3 py-2 text-sm font-black text-white transition-all active:scale-95 active:bg-amber-500"
-                              >
-                                <AlertTriangle className="h-4 w-4" />
-                                {attentionActionLabel}
-                              </button>
-                            </div>
-                          ) : (
-                            <div className={`mt-2 grid gap-2 ${showTableSecondaryAction ? "grid-cols-2" : "grid-cols-1"}`}>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleTableSelect(table);
-                                }}
-                                className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-black transition-all active:scale-95 ${
-                                  hasOpenCheck
-                                    ? "bg-yellow-400 text-black active:bg-yellow-500"
-                                    : "bg-emerald-600 text-white active:bg-emerald-500"
-                                }`}
-                              >
-                                {hasOpenCheck ? (
-                                  <WalletCards className="h-4 w-4" />
-                                ) : (
-                                  <Plus className="h-4 w-4" />
-                                )}
-                                {hasOpenCheck
-                                  ? t("tablesDashboard.openCheck", "Open check")
-                                  : t("tablesDashboard.newOrder", "New order")}
-                              </button>
-                              {showTableSecondaryAction && (
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  // Open check -> Pay, reserved -> manage existing
-                                  // reservation (both via TableActionModal); available
-                                  // -> start a new reservation directly.
-                                  if (hasOpenCheck || isReservedTable) {
-                                    handleTableSelect(table);
-                                  } else {
-                                    handleTableReserve(table);
-                                  }
-                                }}
-                                className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-black transition-all active:scale-95 ${
-                                  resolvedTheme === "light"
-                                    ? "border-amber-100/80 bg-[#fffdf8]/80 text-slate-700 active:bg-[#fffaf1]"
-                                    : "border-white/10 bg-white/[0.06] text-slate-200 active:bg-white/[0.1]"
-                                }`}
-                              >
-                                {hasOpenCheck ? (
-                                  <Banknote className="h-4 w-4" />
-                                ) : isReservedTable ? (
-                                  <Pencil className="h-4 w-4" />
-                                ) : (
-                                  <CalendarPlus className="h-4 w-4" />
-                                )}
-                                {hasOpenCheck
-                                  ? t("tablesDashboard.pay", "Pay")
-                                  : isReservedTable
-                                    ? t("tableActionModal.editReservation", {
-                                        defaultValue: "Edit Reservation",
-                                      })
-                                    : t("tableActionModal.newReservation", {
-                                        defaultValue: "New Reservation",
-                                      })}
-                              </button>
-                              )}
-                            </div>
-                          )}
-                        </article>
+                          id={table.id}
+                          number={formatTableDisplayNumber(table.tableNumber)}
+                          shape={table.shape}
+                          status={displayStatus}
+                          statusLabel={visual.label}
+                          floor={getTableFloorLabel(getTableFloorValue(table))}
+                          covers={hasOpenCheck ? `${guestCount}/${table.capacity}` : String(table.capacity)}
+                          waiter={waiterName}
+                          hasOpenCheck={hasOpenCheck}
+                          needsAttention={needsAttention}
+                          attentionLabel={attentionActionLabel}
+                          balance={balance}
+                          paidPercent={paidPercent}
+                          occupiedSince={occupiedSinceLabel}
+                          orderId={table.currentOrderId}
+                          formatCurrency={formatCurrency}
+                          onPrimary={() => handleTableSelect(table)}
+                        />
                       );
                     })}
                   </div>
@@ -8894,14 +8390,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         <MenuModal
           key={menuSessionKey}
           isOpen={showMenuModal}
-          onClose={handleMenuModalClose}
-          selectedCustomer={getCustomerForMenu()}
-          selectedAddress={getSelectedAddress()}
+          onClose={() => { setRestoredCheckoutContext(null); handleMenuModalClose(); }}
+          selectedCustomer={restoredCheckoutContext?.selectedCustomer || getCustomerForMenu()}
+          selectedAddress={restoredCheckoutContext?.selectedAddress || getSelectedAddress()}
           orderType={selectedOrderType || "pickup"}
           deliveryZoneInfo={deliveryZoneInfo}
           onRepickDeliveryAddress={handleRepickDeliveryAddress}
           onOrderComplete={handleOrderComplete}
           roomChargeContext={roomChargeContext}
+          draftContext={{ selectedTable, tableNumber, tableGuestCount, deliveryZoneInfo }}
+          onDraftRestore={restoreCheckoutContext}
+          onRecoveredOrder={acceptRecoveredCheckout}
         />
 
         {/* Split Payment Modal — rendered at OrderDashboard level so it
@@ -9216,7 +8715,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         {/* Menu-based Edit Order Modal */}
         <MenuModal
           isOpen={showEditMenuModal}
-          onClose={handleEditMenuClose}
+          onClose={() => { setRestoredCheckoutContext(null); handleEditMenuClose(); }}
           orderType={editingOrderType}
           editMode={true}
           editOrderId={currentEditOrderId}
@@ -9225,6 +8724,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           editSourceOrderType={currentEditSourceOrderType}
           initialCartItems={[]}
           onEditComplete={handleEditMenuComplete}
+          draftContext={{ editOrderNumber: currentEditOrderNumber }}
+          onDraftRestore={restoreCheckoutContext}
+          onRecoveredOrder={acceptRecoveredCheckout}
         />
 
         {/* Receipt Preview Modal */}

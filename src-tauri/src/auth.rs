@@ -169,6 +169,8 @@ struct StaffAuthCacheCurrentShift {
     role: Option<String>,
     #[serde(default, alias = "checkedInAt")]
     checked_in_at: Option<String>,
+    #[serde(default)]
+    currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -438,6 +440,8 @@ fn parse_staff_auth_current_shift(value: &Value) -> Option<StaffAuthCacheCurrent
         terminal_name: value_string_alias(value, &["terminal_name", "terminalName"]),
         role: value_string_alias(value, &["role"]),
         checked_in_at: value_string_alias(value, &["checked_in_at", "checkedInAt"]),
+        currency: value_string_alias(value, &["currency"])
+            .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
     })
 }
 
@@ -741,6 +745,7 @@ fn check_in_busy_elsewhere_failure(current: &StaffAuthCacheCurrentShift) -> Valu
         "busyRole": role,
         "busyShiftId": current.shift_id,
         "busyCheckedInAt": current.checked_in_at,
+        "busyShiftCurrency": current.currency,
     })
 }
 
@@ -1714,6 +1719,16 @@ fn authorize_money_action_at(
             "Active session required",
         ));
     };
+    // Canonical table cancellation needs a real staff identity. An explicit
+    // own-PIN approval remains single-use even while a cashier is on shift.
+    if approval == MoneyApproval::VoidOrders {
+        if let Some(grant) = take_manager_grant_at(auth, &session.session_id, approval, now) {
+            return Ok(MoneyApprover {
+                manager_staff_id: Some(grant.approver_staff_id),
+                via: "manager_pin",
+            });
+        }
+    }
     match current_terminal_has_cash_drawer_role(db) {
         // A cashier or manager is on shift here: the session and a fresh PIN,
         // as before.
@@ -1794,6 +1809,16 @@ fn confirm_privileged_action_at(
                     "Active session required",
                 ));
             };
+            if extract_approval(&payload) == Some(MoneyApproval::VoidOrders) {
+                return confirm_manager_approval_at(
+                    &pin,
+                    MoneyApproval::VoidOrders,
+                    &session,
+                    db,
+                    auth,
+                    now,
+                );
+            }
             match current_terminal_has_cash_drawer_role(db) {
                 Ok(true) => session,
                 Ok(false) => {
@@ -2416,6 +2441,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn privileged_grants_are_scope_isolated() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let auth = AuthState::new();
         login_as_admin(&db_state, &auth);
@@ -2499,6 +2525,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cash_drawer_control_accepts_cashier_shift() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let auth = AuthState::new();
         login_as_staff(&db_state, &auth);
@@ -2523,7 +2550,62 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn explicit_order_cancel_uses_staff_pin_once_even_with_active_cashier() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+        // Exercise the documented local identity fallback without requiring
+        // an OS secret-service daemon in this native behavioral test.
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "terminal_id", "terminal-cashier").unwrap();
+        }
+        insert_active_shift(&db_state, "terminal-cashier", "cashier");
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "branch_id", "branch-1").unwrap();
+        }
+        let manager_id = "11111111-1111-4111-8111-111111111111";
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([{
+                "id":manager_id,"is_active":true,"can_login_pos":true,"has_pin":true,
+                "pin_hash":bcrypt::hash("9876",4).unwrap(),"permissions":["pos.orders.cancel"]
+            }]),
+        );
+        let refused = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin":"1234","scope":"cash_drawer_control","approval":"void_orders"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect_err("terminal shared PIN is not staff cancellation proof");
+        assert_eq!(refused.reason, "Invalid PIN");
+        let approved = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin":"9876","scope":"cash_drawer_control","approval":"void_orders"
+            })),
+            &db_state,
+            &auth,
+        )
+        .unwrap();
+        assert_eq!(approved["approvedBy"], serde_json::json!(manager_id));
+        assert_eq!(
+            authorize_money_action(MoneyApproval::VoidOrders, &db_state, &auth)
+                .unwrap()
+                .manager_staff_id
+                .as_deref(),
+            Some(manager_id)
+        );
+        assert!(authorize_money_action(MoneyApproval::VoidOrders, &db_state, &auth).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn cash_drawer_control_accepts_manager_shift() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let auth = AuthState::new();
         login_as_staff(&db_state, &auth);
@@ -2549,6 +2631,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cash_drawer_control_rejects_non_cashier_shift() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let auth = AuthState::new();
         login_as_staff(&db_state, &auth);

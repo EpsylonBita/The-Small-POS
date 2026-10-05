@@ -1,3 +1,4 @@
+import { formatCurrency } from '../utils/format';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -538,7 +539,6 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-const formatCurrency = (n: number) => `\u20AC${n.toFixed(2)}`;
 
 // Translate backend entity type names (e.g. "order" → "Παραγγελία")
 const ENTITY_TYPE_KEYS: Record<string, string> = {

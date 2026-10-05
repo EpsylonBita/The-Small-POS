@@ -424,6 +424,17 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 continue;
             };
             for (key, raw_value) in values_obj {
+                // Only the authenticated top-level country verdict may replace
+                // monetary aliases. A legacy cached envelope must not overwrite
+                // a previously validated offline snapshot with a manual choice.
+                if (matches!(
+                    normalized_category.as_str(),
+                    "restaurant" | "organization" | "payment" | "terminal" | "general"
+                ) && key == "currency")
+                    || key.starts_with("store_currency_")
+                {
+                    continue;
+                }
                 // Native repair state is keyring-only and renderer-opaque.  Do
                 // this check independently of the server-supplied category so
                 // a malformed settings payload cannot persist a plaintext
@@ -443,6 +454,59 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 db::set_setting(&transaction, category, key, &serialized)?;
                 updated.push(format!("{category}.{key}"));
             }
+        }
+    }
+
+    // Country-derived currency is authoritative, including an explicit unknown.
+    // Nulls normally leave settings untouched; doing that here would retain the
+    // previous store's money unit after a country change or a failed country read.
+    if let Some(available) = resp
+        .get("store_currency_available")
+        .and_then(serde_json::Value::as_bool)
+    {
+        for key in [
+            "store_currency_branch_id",
+            "store_currency_source",
+            "store_currency_reason",
+        ] {
+            let value = resp
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            db::set_setting(&transaction, "restaurant", key, value)?;
+            updated.push(format!("restaurant.{key}"));
+        }
+        let code = resp
+            .get("store_currency")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::fiscal::payload_builder::normalize_currency_code);
+        let available = available && code.is_some();
+        db::set_setting(
+            &transaction,
+            "restaurant",
+            "store_currency_available",
+            if available { "true" } else { "false" },
+        )?;
+        updated.push("restaurant.store_currency_available".to_string());
+        // Override legacy aliases too, so consumers cannot prefer stale org data.
+        for category in [
+            "restaurant",
+            "organization",
+            "payment",
+            "terminal",
+            "general",
+        ] {
+            db::set_setting(
+                &transaction,
+                category,
+                "currency",
+                if available {
+                    code.as_deref().unwrap_or("")
+                } else {
+                    ""
+                },
+            )?;
+            updated.push(format!("{category}.currency"));
         }
     }
 
@@ -704,6 +768,25 @@ pub(crate) fn is_protected_terminal_setting(setting_key: &str) -> bool {
 }
 
 pub(crate) fn is_sensitive_setting_path(category: &str, setting_key: &str) -> bool {
+    if category
+        .trim()
+        .to_ascii_lowercase()
+        .contains("cafe_lan_pair_v1:")
+        || setting_key
+            .trim()
+            .to_ascii_lowercase()
+            .contains("cafe_lan_pair_v1:")
+        || category
+            .trim()
+            .to_ascii_lowercase()
+            .contains("cafe_lan_pairs_v1")
+        || setting_key
+            .trim()
+            .to_ascii_lowercase()
+            .contains("cafe_lan_pairs_v1")
+    {
+        return true;
+    }
     category
         .split('.')
         .chain(setting_key.split('.'))
@@ -1294,6 +1377,59 @@ mod tests {
                 "generic renderer settings surfaces must deny {key}"
             );
         }
+    }
+
+    #[test]
+    fn country_currency_snapshot_replaces_stale_aliases_and_persists_unknown() {
+        let db = test_db();
+        set_terminal_setting(&db, "branch_id", "branch-ch");
+        let response = serde_json::json!({
+            "store_currency_available": true,
+            "store_currency": "CHF",
+            "store_currency_branch_id": "branch-ch",
+            "store_currency_source": "branch_country",
+            "store_currency_reason": null,
+            "settings": {"organization": {"currency": "EUR"}, "restaurant": {"currency": "USD"}}
+        });
+        cache_terminal_settings_snapshot(&db, &response).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                crate::fiscal::payload_builder::resolve_store_currency_code(&conn).as_deref(),
+                Some("CHF")
+            );
+            assert_eq!(
+                db::get_setting(&conn, "organization", "currency").as_deref(),
+                Some("CHF")
+            );
+        }
+        // An ordinary offline/legacy envelope cannot erase a validated same-branch snapshot.
+        cache_terminal_settings_snapshot(&db, &serde_json::json!({})).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                crate::fiscal::payload_builder::resolve_store_currency_code(&conn).as_deref(),
+                Some("CHF")
+            );
+        }
+        let mut unknown = response;
+        unknown["store_currency_available"] = serde_json::json!(false);
+        unknown["store_currency"] = serde_json::Value::Null;
+        unknown["store_currency_reason"] = serde_json::json!("STORE_COUNTRY_UNRESOLVED");
+        cache_terminal_settings_snapshot(&db, &unknown).unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            crate::fiscal::payload_builder::resolve_store_currency_code(&conn),
+            None
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "currency").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "organization", "currency").as_deref(),
+            Some("")
+        );
     }
 
     #[test]

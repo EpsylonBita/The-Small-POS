@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use super::active_cache;
-use super::payload_builder::{resolve_store_currency_code, DEFAULT_FISCAL_CURRENCY};
+use super::payload_builder::resolve_store_currency_code;
 
 /// Currencies a server fiscal adapter accepts from a POS receipt. Adapters
 /// that accept a foreign currency only with exchange-rate metadata (Albania,
@@ -57,9 +57,9 @@ pub fn supported_fiscal_currencies(plugin_id: &str) -> Option<&'static [&'static
 pub struct FiscalCurrencyCheck {
     pub branch_id: String,
     pub plugin_id: String,
-    /// The currency the receipts carry (the store's setting, EUR when none).
+    /// Current operating currency, or UNKNOWN until authoritative configuration.
     pub receipt_currency: String,
-    /// Whether the currency came from a store setting or the EUR fallback.
+    /// Whether a validated, branch-scoped store-country snapshot is available.
     pub currency_configured: bool,
     pub supported_currencies: Vec<String>,
     pub accepted: bool,
@@ -77,7 +77,7 @@ pub fn check_branch_currency(conn: &Connection, branch_id: &str) -> Option<Fisca
     let supported = supported_fiscal_currencies(&plugin_id)?;
     let configured = resolve_store_currency_code(conn);
     let currency_configured = configured.is_some();
-    let receipt_currency = configured.unwrap_or_else(|| DEFAULT_FISCAL_CURRENCY.to_string());
+    let receipt_currency = configured.unwrap_or_else(|| "UNKNOWN".to_string());
     Some(FiscalCurrencyCheck {
         branch_id: branch_id.to_string(),
         accepted: supported.contains(&receipt_currency.as_str()),
@@ -167,10 +167,18 @@ mod tests {
     fn set_currency(conn: &Connection, value: &str) {
         conn.execute(
             "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value)
-             VALUES ('organization', 'currency', ?1)",
+             VALUES ('restaurant', 'currency', ?1)",
             params![value],
         )
         .expect("set currency");
+        for (category, key, value) in [
+            ("terminal", "branch_id", "branch-gr"),
+            ("restaurant", "store_currency_branch_id", "branch-gr"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+        ] {
+            conn.execute("INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1,?2,?3)", params![category,key,value]).unwrap();
+        }
     }
 
     #[test]
@@ -207,12 +215,13 @@ mod tests {
             "not_checked"
         );
 
-        // Active Greek plugin, no currency configured: receipts carry EUR.
+        // Active Greek plugin, unknown currency: explicit warning, no EUR guess.
         active_cache::update_with_plugin("branch-gr", true, Some("fiscalization_gr".into()));
         let euro = check_branch_currency(&conn, "branch-gr").expect("checked");
-        assert!(euro.accepted);
+        assert!(!euro.accepted);
         assert!(!euro.currency_configured);
-        assert_eq!(warn_if_currency_unsupported(&conn, "branch-gr"), None);
+        assert_eq!(euro.receipt_currency, "UNKNOWN");
+        assert!(warn_if_currency_unsupported(&conn, "branch-gr").is_some());
 
         // A store configured in CHF: the Greek adapter would refuse.
         set_currency(&conn, "CHF");

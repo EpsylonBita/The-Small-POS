@@ -142,6 +142,7 @@ const h = vi.hoisted(() => {
 
   const bridge = {
     payments: {
+      listUnsavedPayments: vi.fn(async () => []),
       getSettlementSnapshot: native.getSettlementSnapshot,
       recordPayment: native.recordPayment,
       printReceipt: native.printReceipt,
@@ -194,7 +195,9 @@ const h = vi.hoisted(() => {
     if (key === 'common.actions.close') return 'Close';
     if (typeof fallback === 'string') return fallback;
     const defaultValue = (fallback as { defaultValue?: unknown } | undefined)?.defaultValue;
-    return typeof defaultValue === 'string' ? defaultValue : key;
+    return typeof defaultValue === 'string'
+      ? defaultValue.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => String((fallback as Record<string, unknown>)[name] ?? ''))
+      : key;
   };
 
   const pickupCards = [{ id: 'pickup', enabled: true }];
@@ -208,6 +211,7 @@ const h = vi.hoisted(() => {
     translate,
     hold,
     pickupCards,
+    modules: { hasDeliveryModule: false, hasTablesModule: false },
     identity: { current: { branchId: 'branch-1', organizationId: 'org-1', terminalId: 'term-1' } },
     toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), loading: vi.fn(), dismiss: vi.fn() }),
     getSetting: (_category: string, _key: string, fallback: unknown) => fallback,
@@ -278,8 +282,8 @@ vi.mock('../../hooks/useAcquiredModules', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../hooks/useAcquiredModules')>();
   const value = {
     modules: [],
-    hasDeliveryModule: false,
-    hasTablesModule: false,
+    get hasDeliveryModule() { return h.modules.hasDeliveryModule; },
+    get hasTablesModule() { return h.modules.hasTablesModule; },
     hasRoomsModule: false,
     hasAppointmentsModule: false,
     hasServiceCatalogModule: false,
@@ -366,8 +370,14 @@ vi.mock('../../services/GiftCardsApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/GiftCardsApiService')>();
   return { ...actual, giftCardsApiService: { getStatus: async () => h.giftStatus } };
 });
-vi.mock('../OrderGrid', () => ({ default: none }));
-vi.mock('../OrderTabsBar', () => ({ default: none }));
+// Expose the host's filtered list; retain the real tab bar and its selection.
+vi.mock('../OrderGrid', () => ({
+  default: ({ orders }: { orders: Array<{ id: string }> }) => (
+    <div data-testid="history-orders">
+      {orders.map(order => <div key={order.id} data-testid={`row-${order.id}`}>{order.id}</div>)}
+    </div>
+  ),
+}));
 vi.mock('../BulkActionsBar', () => ({ default: none }));
 vi.mock('../modals/DriverAssignmentModal', () => ({ default: none }));
 vi.mock('../modals/OrderCancellationModal', () => ({ default: none }));
@@ -525,6 +535,7 @@ const expectOnlyTheOriginalImport = () => {
 
 describe('OrderDashboard gift receipt kept across an early Close (mounted host)', () => {
   beforeEach(() => {
+    Object.assign(h.modules, { hasDeliveryModule: false, hasTablesModule: false });
     Object.assign(h.state, {
       orderId: '',
       giftBooked: false,
@@ -728,5 +739,58 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     expect(h.toast.success.mock.calls.length).toBe(successBefore);
     expect(retainedOrdinaryOwner(SCOPE, orderId)).not.toBeNull();
     expect(screen.queryByTestId('split-payment-modal')).toBeNull();
+  });
+});
+
+// Reuse the mounted host's native/store boundary above, avoiding a second copy
+// of the dashboard's large fixture for this history regression.
+describe('OrderDashboard completion history without delivery (mounted host)', () => {
+  beforeEach(() => {
+    Object.assign(h.modules, { hasDeliveryModule: false, hasTablesModule: true });
+    h.state.orders = [
+      { id: 'pickup', status: 'completed', orderType: 'pickup' },
+      { id: 'table', status: 'completed', orderType: 'dine-in', table_id: 'table-1' },
+      { id: 'room', status: 'completed', orderType: 'dine-in', room_number: '101' },
+      { id: 'service', status: 'completed', orderType: 'service' },
+      { id: 'delivery', status: 'delivered', orderType: 'delivery' },
+      { id: 'pending', status: 'pending', orderType: 'pickup' },
+      { id: 'cancelled', status: 'cancelled', orderType: 'pickup' },
+    ].map(order => ({ ...order, orderNumber: order.id, items: [], totalAmount: 5 }));
+  });
+
+  afterEach(() => cleanup());
+
+  const expectHistory = async () => {
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Delivered 5 — Selected' })).toBeInTheDocument());
+    for (const id of ['pickup', 'table', 'room', 'service', 'delivery']) {
+      expect(screen.getByTestId(`row-${id}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByTestId('row-pending')).toBeNull();
+    expect(screen.queryByTestId('row-cancelled')).toBeNull();
+  };
+
+  it('opens all completed fulfillment types without acquiring delivery', async () => {
+    render(<OrderDashboard />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Delivered 5' }));
+    await expectHistory();
+    expect(screen.queryByRole('tab', { name: /Rooms|Services/ })).toBeNull();
+  });
+
+  it('retains the selected history when delivery or tables becomes unavailable', async () => {
+    h.modules.hasDeliveryModule = true;
+    const { rerender } = render(<OrderDashboard />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Delivered 5' }));
+    await expectHistory();
+
+    h.modules.hasDeliveryModule = false;
+    // Mocked contexts have no provider notification; changing a prop lets the
+    // memoized host observe the new module values without remounting.
+    rerender(<OrderDashboard className="delivery-revoked" />);
+    await expectHistory();
+
+    h.modules.hasTablesModule = false;
+    rerender(<OrderDashboard className="tables-revoked" />);
+    await expectHistory();
+    expect(screen.queryByRole('tab', { name: /Tables/ })).toBeNull();
   });
 });

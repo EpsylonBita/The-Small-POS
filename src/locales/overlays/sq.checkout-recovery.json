@@ -1,0 +1,30 @@
+{
+  "modals": {
+    "menu": {
+      "draftReadFailed": "Shporta e ruajtur nuk mund të lexohet. Përfundimi është ndalur dhe shporta e mëparshme është ruajtur.",
+      "draftSaveFailed": "Shporta nuk mund të ruhet. Përfundimi pret derisa ruajtja e qëndrueshme të ketë sukses.",
+      "draftDiscardFailed": "Shporta e ruajtur nuk mund të hiqet. Ajo është mbajtur.",
+      "draftNeedsReconciliation": "Përfundimi fillestar ende kërkon rakordim. Nuk u nis pagesë e re. Përdorni rikuperimin e pagesave ose kërkoni një përgjegjës.",
+      "draftRecoveryUnavailable": "Përfundimi fillestar nuk mund të verifikohet. Shporta e ruajtur mbetet e mbrojtur.",
+      "draftPending": "Përfundimi fillestar është mbajtur. Konfirmoni rezultatin para se të nisni një pagesë tjetër.",
+      "draftLoading": "Duke ngarkuar shportën e ruajtur…",
+      "draftRecover": "Kontrollo përfundimin fillestar",
+      "draftRecovered": "Porosia fillestare u rikthye.",
+      "draftExistingTable": "Kjo tavolinë ka tashmë një faturë të hapur. Hapeni për të shtuar artikuj.",
+      "draftDeclinedResumed": "Pagesa u refuzua. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re.",
+      "draftNotSentResumed": "Nuk u dërgua kërkesë për pagesë. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re.",
+      "draftNotChargedResumed": "Përpjekjet fillestare të pagesës nuk e ngarkuan klientin. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re."
+    }
+  },
+  "checkoutRecovery": {
+    "title": "Veprime tavolinash në pritje të rikuperimit",
+    "guidance": "Kërkesat fillestare mbeten të ruajtura. Nevojiten Internet dhe lejet aktuale. Mos përsëritni një pagesë të pasigurt.",
+    "unavailable": "Gjendja e rikuperimit nuk mund të lexohet. Veprimet në pritje janë mbajtur.",
+    "pending": "Në pritje të rilidhjes",
+    "processing": "Duke rikthyer veprimin fillestar",
+    "approval_required": "Anulimi kërkon miratim të ri nga stafi ose përgjegjësi. Rihapni faturën fillestare.",
+    "auth_required": "Hyni me një seancë të autorizuar të stafit për të vazhduar.",
+    "conflict": "Një terminal tjetër e ndryshoi këtë faturë. Kontrolloni gjendjen aktuale përpara se të vazhdoni.",
+    "refresh": "Rifresko gjendjen"
+  }
+}

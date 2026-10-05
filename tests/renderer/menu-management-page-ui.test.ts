@@ -235,8 +235,10 @@ test('MenuManagementPage renders prices via formatCurrency, with no euro literal
   assert.match(source, /import \{ resolveMenuItemPrice \} from '\.\.\/utils\/order-type-pricing'/);
   assert.match(source, /resolveMenuItemPrice\(item, 'pickup'\)/);
   assert.match(source, /item\.is_customizable \? t\('menu\.item\.from'\) : ''/);
-  assert.match(source, /formatCurrency\(getMenuItemDisplayPrice\(item\), 'EUR', language\)/);
-  assert.match(source, /formatCurrency\(ingredient\.price, 'EUR', language\)/);
+  assert.match(source, /formatCurrency\(getMenuItemDisplayPrice\(item\), undefined, language\)/);
+  assert.match(source, /formatCurrency\(ingredient\.price, undefined, language\)/);
+
+  assert.doesNotMatch(source, /formatCurrency\([^;\n]*['"]EUR['"]/);
 
   // No raw euro glyph (U+20AC), no toFixed currency rendering, no UTF-8-as-cp1252 euro mojibake.
   assert.doesNotMatch(source, /€/);

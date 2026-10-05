@@ -20,9 +20,8 @@ test('TableActionModal offers New Reservation only when the store can book table
   assert.match(tableActionModalSource, /canCreateReservation\?: boolean;/);
   // Defaults to true so a caller that says nothing keeps today's behaviour.
   assert.match(tableActionModalSource, /canCreateReservation = true,/);
-  assert.match(tableActionModalSource, /\{!isReservedTable && canCreateReservation && \(\s*<button\s+onClick=\{handleNewReservation\}/);
-  // The reserved-table management block is not behind the module.
-  assert.match(tableActionModalSource, /\{isReservedTable && \(\s*<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">\s*<button\s+onClick=\{handleEditReservation\}/);
+  assert.match(tableActionModalSource, /canCreateReservation && !isReservedTable && action/);
+  assert.match(tableActionModalSource, /isReservedTable && <>/);
 });
 
 test('both order-taking paths pass the Reservations module to the table action modal', () => {
@@ -39,20 +38,9 @@ test('both order-taking paths pass the Reservations module to the table action m
   );
 });
 
-test('the Tables tab card books an available table only with the Reservations module', () => {
-  assert.match(
-    orderDashboardSource,
-    /const showTableSecondaryAction =\s*hasOpenCheck \|\| isReservedTable \|\| hasReservationsModule;/,
-  );
-  // Without the secondary button the primary one takes the whole row.
-  assert.match(
-    orderDashboardSource,
-    /<div className=\{`mt-2 grid gap-2 \$\{showTableSecondaryAction \? "grid-cols-2" : "grid-cols-1"\}`\}>/,
-  );
-  const gate = orderDashboardSource.indexOf('{showTableSecondaryAction && (');
-  assert.ok(gate > 0, 'the secondary card button must be gated');
-  const reserve = orderDashboardSource.indexOf('handleTableReserve(table);', gate);
-  assert.ok(reserve > gate, 'the reserve shortcut sits inside the gated button');
+test('the compact tile delegates to the controller and its module-gated modal', () => {
+  assert.match(orderDashboardSource, /onPrimary=\{\(\) => handleTableSelect\(table\)\}/);
+  assert.match(orderDashboardSource, /canCreateReservation=\{hasReservationsModule\}/);
 });
 
 test('the Tables page offers Reserve only with the Reservations module', () => {

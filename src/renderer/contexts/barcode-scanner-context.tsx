@@ -8,6 +8,7 @@
 import React, { createContext, useContext, useCallback, useState, useEffect, useRef } from 'react';
 import { useBarcodeScanner, BarcodeScannerState } from '../hooks/useBarcodeScanner';
 import { offEvent, onEvent } from '../../lib';
+import { CashierRecoveryContext, useCashierOperationsLocked } from './cashier-gate-context';
 
 interface BarcodeScannerContextValue {
   /** Current scanner state */
@@ -136,6 +137,10 @@ export function useBarcodeScannerContext(): BarcodeScannerContextValue {
 export function useOnBarcodeScan(callback: (barcode: string) => void, deps: any[] = []): void {
   const { subscribe } = useBarcodeScannerContext();
   const callbackRef = useRef(callback);
+  const locked = useCashierOperationsLocked();
+  const recovery = useContext(CashierRecoveryContext);
+  const allowedRef = useRef(!locked || recovery);
+  allowedRef.current = !locked || recovery;
 
   // Update callback ref when callback changes
   useEffect(() => {
@@ -144,7 +149,7 @@ export function useOnBarcodeScan(callback: (barcode: string) => void, deps: any[
 
   useEffect(() => {
     const wrappedCallback = (barcode: string) => {
-      callbackRef.current(barcode);
+      if (allowedRef.current) callbackRef.current(barcode);
     };
     
     const unsubscribe = subscribe(wrappedCallback);
@@ -153,4 +158,3 @@ export function useOnBarcodeScan(callback: (barcode: string) => void, deps: any[
 }
 
 export default BarcodeScannerContext;
-

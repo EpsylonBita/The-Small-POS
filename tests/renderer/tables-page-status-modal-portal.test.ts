@@ -167,6 +167,6 @@ test('every table release asks first when the order still owes money', () => {
   );
   // The check can cancel an owing order explicitly, with a reason and approval.
   assert.match(check, /secondaryModal === 'cancel-order'/);
-  assert.match(check, /getBridge\(\)\.orders\.cancelWithApproval\(\{ orderId, reason \}\)/);
+  assert.match(check, /action: \(managerPin\) => getBridge\(\)\.orders\.cancelWithApproval\(\{ orderId, reason, tableSessionId, managerPin \}\)/);
   assert.match(check, /scope: 'cash_drawer_control'/);
 });

@@ -19,6 +19,8 @@ import { CaptureNotificationManager } from "./components/CaptureNotificationMana
 import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
 import { IncomingOrderAlertManager } from "./components/notices/IncomingOrderAlertManager";
 import { AppRoutes } from "./AppRoutes";
+import { GlobalCashierGate } from './components/GlobalCashierGate';
+import { CashierRecovery } from './contexts/cashier-gate-context';
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 import { CallerIdCustomerSearchModalHost } from "./components/callerid/CallerIdCustomerSearchModalHost";
 import { DeferredModal } from "./components/ui/DeferredModal";
@@ -47,6 +49,7 @@ import type {
 import { useBlockerRegistration } from "./hooks/useBlockerRegistration";
 import { useFreezeWatchdog } from "./hooks/useFreezeWatchdog";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
+import { useTerminalSettings } from './hooks/useTerminalSettings';
 import { useAppEvents } from "./hooks/useAppEvents";
 import { invalidateFinancialOpening } from "./lib/financial-opening";
 import {
@@ -752,6 +755,8 @@ function getFrameUpdateDetail(
 }
 
 function AppContent() {
+  // Hydrates country-derived formatting and rerenders when the native snapshot changes.
+  useTerminalSettings(true);
   const { t } = useI18n();
   const bridge = getBridge();
   const [user, setUser] = useState<any>(null);
@@ -1631,6 +1636,7 @@ function AppContent() {
 
 
 
+            <GlobalCashierGate onLogout={handleLogout} onOpenSettings={() => openConnectionSettings()}>
             <Suspense fallback={<PageLoading />}>
               {/* The local KDS / Customer Display providers wrap the routes
                   but stay outside their error boundary (AppRoutes): a page
@@ -1650,6 +1656,7 @@ function AppContent() {
               onClose={closeCallerIdCustomerSearch}
             />
 
+            <CashierRecovery>
             <DeferredModal isOpen={showConnectionSettings} onClose={closeConnectionSettings}>
               <ConnectionSettingsModal
                 isOpen={showConnectionSettings}
@@ -1666,6 +1673,7 @@ function AppContent() {
               onOpenConnectionSettings={() => openConnectionSettings()}
               onOpenSnapshots={() => openConnectionSettings('recovery')}
             />
+            </CashierRecovery>
 
             {/* Sync Notification Manager */}
             <SyncNotificationManager
@@ -1704,6 +1712,7 @@ function AppContent() {
                 boundary around this whole tree and unmount it either. Off
                 while logged out and on waiter terminals. */}
             <IncomingOrderAlertManager enabled={Boolean(user)} />
+            </GlobalCashierGate>
 
             <PortaledToaster
               position="top-center"
@@ -1720,7 +1729,7 @@ function AppContent() {
             />
 
             {/* Unified Update Dialog - handles all update states */}
-            {updateDialog}
+            <CashierRecovery>{updateDialog}</CashierRecovery>
           </FullscreenAwareLayout>
         </HashRouter>
       </ThemeProvider>

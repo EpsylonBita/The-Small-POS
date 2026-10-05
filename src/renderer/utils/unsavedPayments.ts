@@ -313,15 +313,17 @@ export function useUnsavedCheckoutPayments(
 export function pendingNotSavedMessage(
   pending: UnsavedChargedPaymentSummary[],
   t: TFunction,
-  formatMoney: (amount: number) => string,
+  formatMoney: (amount: number, currency?: string | null) => string,
 ): string {
   const amountCents = pending.reduce(
     (sum, entry) => sum + Number(entry.amountCents ?? Math.round(Number(entry.amount || 0) * 100)),
     0,
   );
+  const currencies = new Set(pending.map(entry => entry.currency));
+  const currency = currencies.size === 1 ? pending[0]?.currency ?? null : null;
   return (
     formatPaymentNotSavedMessage(
-      { errorCode: 'PAYMENT_NOT_SAVED_PENDING', amountCents, manualReceiptConfirmed:pending.some(isManualTwintRecord) },
+      { errorCode: 'PAYMENT_NOT_SAVED_PENDING', amountCents, currency, manualReceiptConfirmed:pending.some(isManualTwintRecord) },
       t,
       formatMoney,
     ) ?? ''

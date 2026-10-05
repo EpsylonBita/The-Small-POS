@@ -1,0 +1,314 @@
+/* Scoped overrides for the split dialog's controls and the shared glass layer. */
+.split-payment-modal {
+  --split-surface: #ffffff;
+  --split-control: #f5f5f4;
+  --split-border: #d6d3d1;
+  --split-text: #1c1917;
+  --split-muted: #57534e;
+  --split-accent: #facc15;
+  --split-success: #047857;
+}
+
+.dark .split-payment-modal {
+  --split-surface: #18181b;
+  --split-control: #27272a;
+  --split-border: #3f3f46;
+  --split-text: #fafafa;
+  --split-muted: #a1a1aa;
+  --split-success: #6ee7b7;
+}
+
+.split-payment-modal .split-payment-methods {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.split-payment-modal button.split-payment-method,
+.split-payment-modal button.split-payment-secondary {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1px solid var(--split-border) !important;
+  border-radius: 12px;
+  background: var(--split-control) !important;
+  color: var(--split-text) !important;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  text-shadow: none !important;
+  transition: background-color 150ms, border-color 150ms, transform 150ms;
+}
+
+.split-payment-modal button.split-payment-method[aria-pressed='true'] {
+  border-color: var(--split-accent) !important;
+  background: var(--split-accent) !important;
+  color: #18181b !important;
+}
+
+.split-payment-modal button.split-payment-method svg,
+.split-payment-modal button.split-payment-confirm svg {
+  width: 18px;
+  height: 18px;
+  color: inherit !important;
+}
+
+.split-payment-modal button.split-payment-method:disabled,
+.split-payment-modal button.split-payment-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.split-payment-modal button.split-payment-confirm {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 20px;
+  border: 1px solid var(--split-accent) !important;
+  border-radius: 12px;
+  background: var(--split-accent) !important;
+  color: #18181b !important;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  white-space: nowrap;
+  text-shadow: none !important;
+}
+
+.split-payment-modal button.split-payment-confirm:disabled {
+  border-color: var(--split-border) !important;
+  background: var(--split-control) !important;
+  color: var(--split-muted) !important;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.split-payment-modal button:focus-visible,
+.split-payment-modal input:focus-visible {
+  outline: 2px solid var(--split-accent);
+  outline-offset: 3px;
+}
+
+.split-payment-modal .split-payment-person {
+  padding: 12px 16px;
+  border: 1px solid var(--split-border) !important;
+  border-radius: 16px;
+  background: var(--split-surface) !important;
+}
+
+.split-payment-modal .liquid-glass-modal-header {
+  padding: 12px 24px;
+}
+
+.split-payment-modal .split-payment-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.split-payment-modal .split-payment-total p {
+  margin: 0;
+}
+
+.split-payment-modal .split-payment-total p:last-child,
+.split-payment-modal .split-payment-summary .text-emerald-400,
+.split-payment-modal .split-payment-items-grid .text-emerald-400,
+.split-payment-modal .split-payment-items-grid .text-emerald-500 {
+  color: var(--split-success) !important;
+}
+
+.split-payment-modal .split-payment-empty {
+  color: var(--split-muted) !important;
+}
+
+.split-payment-modal .split-payment-quick button {
+  min-height: 40px;
+  border: 1px solid var(--split-border) !important;
+  background: var(--split-control) !important;
+  color: var(--split-text) !important;
+  box-shadow: none !important;
+}
+
+.split-payment-modal .split-payment-details {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.split-payment-modal .split-payment-details > div {
+  flex-basis: 100%;
+}
+
+.split-payment-modal .split-payment-details > .split-payment-payable {
+  flex: 1;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.split-payment-modal .split-payment-money-input,
+.split-payment-modal input[type='number'] {
+  min-height: 44px;
+  border: 1px solid var(--split-border) !important;
+  border-radius: 12px;
+  background: var(--split-control) !important;
+  color: var(--split-text) !important;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  scrollbar-width: none;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.split-payment-modal input[type='number']::-webkit-inner-spin-button,
+.split-payment-modal input[type='number']::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.split-payment-modal input::-webkit-scrollbar {
+  display: none;
+}
+
+.split-payment-modal button.split-payment-assignment {
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--split-border) !important;
+  border-radius: 12px;
+  background: var(--split-control) !important;
+  color: var(--split-text) !important;
+  font-size: 14px;
+}
+
+.split-payment-modal button.split-payment-assignment[aria-expanded='true'] {
+  border-color: var(--split-accent) !important;
+}
+
+.split-payment-modal button.split-payment-assignment span,
+.split-payment-modal button.split-payment-assignment svg,
+.split-payment-modal .split-payment-assignment-menu button {
+  color: var(--split-text) !important;
+}
+
+.split-payment-modal .split-payment-assignment-menu {
+  border: 1px solid var(--split-border) !important;
+  border-radius: 12px;
+  background: var(--split-surface) !important;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.split-payment-modal .split-payment-assignment-menu button {
+  min-height: 44px;
+  padding: 10px 12px;
+  background: transparent !important;
+  font-size: 14px;
+  text-shadow: none !important;
+}
+
+.split-payment-modal .split-payment-assignment-menu button[aria-pressed='true'] {
+  background: var(--split-control) !important;
+  box-shadow: inset 3px 0 var(--split-accent);
+}
+
+.split-payment-modal .split-payment-payable {
+  color: var(--split-success) !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.split-payment-modal .split-payment-card-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--split-border) !important;
+  border-radius: 12px;
+  background: var(--split-control) !important;
+  color: var(--split-text) !important;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.split-payment-modal .split-payment-card-notice svg {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: inherit !important;
+}
+
+.split-payment-modal .split-payment-card-notice p {
+  margin: 0;
+  color: inherit !important;
+}
+
+.split-payment-modal .split-payment-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 12px 24px;
+  border-top: 1px solid var(--split-border) !important;
+}
+
+.split-payment-modal .split-payment-summary {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.split-payment-modal .split-payment-summary > span {
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .split-payment-modal button.split-payment-method:not(:disabled):hover,
+  .split-payment-modal button.split-payment-secondary:not(:disabled):hover {
+    border-color: var(--split-accent) !important;
+  }
+
+  .split-payment-modal button.split-payment-confirm:not(:disabled):hover {
+    filter: brightness(1.05);
+  }
+}
+
+@media (max-width: 640px) {
+  .split-payment-modal .split-payment-amount-row {
+    flex-wrap: wrap;
+  }
+
+  .split-payment-modal .split-payment-amount-row > div:first-child {
+    flex-basis: 100%;
+  }
+
+  .split-payment-modal .split-payment-methods {
+    width: 100%;
+  }
+
+  .split-payment-modal .split-payment-methods > button {
+    flex: 1;
+  }
+
+  .split-payment-modal .split-payment-items-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .split-payment-modal .split-payment-summary {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .split-payment-modal button.split-payment-confirm {
+    width: 100%;
+  }
+}

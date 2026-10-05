@@ -21,11 +21,11 @@ const SHIFT: &str = "shift-remote-status";
 
 fn seed_order(conn: &Connection, order_type: &str) {
     conn.execute(
-        "INSERT INTO orders (
+        "INSERT INTO orders (currency,
              id, supabase_id, order_number, items, order_type, total_amount, total_amount_cents,
              status, payment_status, sync_status, branch_id, staff_shift_id,
              created_at, updated_at
-         ) VALUES (?1, ?2, 'A-0301', '[]', ?3, 13.0, 1300, 'completed', 'pending', 'synced',
+         ) VALUES ('EUR', ?1, ?2, 'A-0301', '[]', ?3, 13.0, 1300, 'completed', 'pending', 'synced',
                    ?4, ?5, '2026-09-30T10:00:00Z', '2026-09-30T10:00:00Z')",
         params![LOCAL_ORDER, REMOTE_ORDER, order_type, BRANCH, SHIFT],
     )
@@ -34,19 +34,17 @@ fn seed_order(conn: &Connection, order_type: &str) {
 
 fn seed_drawer(conn: &Connection, cash_cents: i64) {
     conn.execute(
-        "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, check_in_time,
+        "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, check_in_time,
             opening_cash_amount, opening_cash_amount_cents, status, calculation_version,
-            sync_status, created_at, updated_at)
-         VALUES (?1, 'cashier-remote', 'cashier', ?2, '2026-09-30T08:00:00Z', 50.0, 5000,
+            sync_status, created_at, updated_at) VALUES ('EUR', ?1, 'cashier-remote', 'cashier', ?2, '2026-09-30T08:00:00Z', 50.0, 5000,
                  'active', 2, 'pending', '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z')",
         params![SHIFT, BRANCH],
     )
     .expect("seed the cashier shift");
     conn.execute(
-        "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
+        "INSERT INTO cash_drawer_sessions (currency, id, staff_shift_id, cashier_id, branch_id,
             terminal_id, opening_amount, opening_amount_cents, total_cash_sales,
-            total_cash_sales_cents, opened_at, created_at, updated_at)
-         VALUES ('drawer-remote-status', ?1, 'cashier-remote', ?2, 'terminal-remote-status',
+            total_cash_sales_cents, opened_at, created_at, updated_at) VALUES ('EUR', 'drawer-remote-status', ?1, 'cashier-remote', ?2, 'terminal-remote-status',
                  50.0, 5000, ?3, ?4,
                  '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z', '2026-09-30T08:00:00Z')",
         params![SHIFT, BRANCH, cash_cents as f64 / 100.0, cash_cents],
@@ -182,12 +180,20 @@ fn the_origin_tills_drawer_gives_back_a_payment_voided_on_the_server() {
 fn a_courier_is_not_charged_for_a_payment_voided_on_the_server() {
     let td = TestDb::open();
     let conn = td.state.conn.lock().unwrap();
+    for (category, key, value) in [
+        ("terminal", "branch_id", BRANCH),
+        ("restaurant", "store_currency_branch_id", BRANCH),
+        ("restaurant", "store_currency_available", "true"),
+        ("restaurant", "store_currency_source", "branch_country"),
+        ("restaurant", "currency", "EUR"),
+    ] {
+        crate::db::set_setting(&conn, category, key, value).unwrap();
+    }
     seed_order(&conn, "delivery");
     conn.execute(
-        "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, check_in_time,
+        "INSERT INTO staff_shifts (currency, id, staff_id, role_type, branch_id, check_in_time,
             opening_cash_amount, opening_cash_amount_cents, status, calculation_version,
-            sync_status, created_at, updated_at)
-         VALUES ('shift-courier-remote', 'driver-remote', 'driver', ?1, '2026-09-30T08:30:00Z',
+            sync_status, created_at, updated_at) VALUES ('EUR', 'shift-courier-remote', 'driver-remote', 'driver', ?1, '2026-09-30T08:30:00Z',
                  20.0, 2000, 'active', 2, 'pending', '2026-09-30T08:30:00Z',
                  '2026-09-30T08:30:00Z')",
         params![BRANCH],

@@ -1,3 +1,5 @@
+import { canChargeFolio, commonFolioCurrency, recordedFolioCurrency } from '../../../utils/folio-currency';
+import { getStoreCurrency } from '../../../utils/store-currency';
 import React, { memo, useState, useEffect, useCallback, useId } from 'react';
 import { renderModalPortal } from '../../../utils/render-modal-portal';
 import { useTranslation } from 'react-i18next';
@@ -28,6 +30,7 @@ import { formatCurrency } from '../../../utils/format';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 interface GuestFolio {
+  currency?: string | null;
   id: string;
   guestName: string;
   guestEmail?: string | null;
@@ -280,7 +283,7 @@ const FolioActionModal: React.FC<{
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelClass(isDark)}>
-                {t('guestBilling.fields.amount', { defaultValue: 'Amount' })}{' '}
+                {t('guestBilling.fields.amount', { defaultValue: 'Amount' })} ({folio.currency ?? '—'}){' '}
                 <span className="text-red-500">*</span>
               </label>
               <input
@@ -338,7 +341,7 @@ const FolioActionModal: React.FC<{
           {kind === 'payment' && (
             <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('guestBilling.outstandingBalanceLabel', { defaultValue: 'Outstanding balance' })}:{' '}
-              <span className="font-medium">{formatCurrency(folio.balance)}</span>
+              <span className="font-medium">{formatCurrency(folio.balance, folio.currency ?? null)}</span>
             </p>
           )}
 
@@ -441,7 +444,7 @@ export const GuestBillingView: React.FC = memo(() => {
   }, [fetchFolios]);
 
   const isDark = resolvedTheme === 'dark';
-  const formatMoney = (amount: number) => formatCurrency(amount);
+  const formatMoney = (amount: number, currency: string | null) => formatCurrency(amount, currency);
 
   const moduleRequiredMessage = t('guestBilling.errors.moduleRequired', {
     defaultValue: 'The guest billing module is not active for this organization.',
@@ -461,12 +464,16 @@ export const GuestBillingView: React.FC = memo(() => {
 
   const handleFolioAction = useCallback(
     async (folio: GuestFolio, input: FolioActionSubmit): Promise<string | null> => {
+      const currency = recordedFolioCurrency(folio.currency);
+      if (!currency) return t('guestBilling.errors.currencyUnavailable');
+      if (input.kind === 'charge' && !canChargeFolio(currency, getStoreCurrency())) return t('guestBilling.errors.currencyMismatch');
       const endpoint =
         input.kind === 'charge' ? folioChargesEndpoint(folio.id) : folioPaymentsEndpoint(folio.id);
       const body =
         input.kind === 'charge'
           ? {
               chargeType: input.chargeType,
+              currency,
               description: input.description,
               amount: input.amount,
               quantity: input.quantity,
@@ -475,6 +482,7 @@ export const GuestBillingView: React.FC = memo(() => {
           : {
               amount: input.amount,
               paymentMethod: input.paymentMethod,
+              currency,
               reference: input.reference || null,
               notes: input.notes || null,
             };
@@ -672,7 +680,7 @@ export const GuestBillingView: React.FC = memo(() => {
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('guestBilling.stats.outstandingBalance', { defaultValue: 'Outstanding Balance' })}
             </div>
-            <div className={`text-xl font-bold text-amber-500`}>{formatMoney(stats.activeBalance)}</div>
+            <div className={`text-xl font-bold text-amber-500`}>{formatMoney(stats.activeBalance, commonFolioCurrency(folios.filter(folio => folio.status === 'active')))}</div>
           </motion.div>
           <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -737,7 +745,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   {t('guestBilling.room', { defaultValue: 'Room' })} {folio.roomNumber}
                 </span>
                 <span className={`font-bold ${folio.balance > 0 ? 'text-amber-500' : 'text-green-500'}`}>
-                  {formatMoney(folio.balance)}
+                  {formatMoney(folio.balance, folio.currency ?? null)}
                 </span>
               </div>
             </motion.button>
@@ -799,7 +807,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   {t('guestBilling.totalCharges', { defaultValue: 'Total Charges' })}
                 </span>
                 <span className={isDark ? 'text-white' : 'text-gray-900'}>
-                  {formatMoney(selectedFolio.totalCharges)}
+                  {formatMoney(selectedFolio.totalCharges, selectedFolio.currency ?? null)}
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -807,7 +815,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   {t('guestBilling.totalPayments', { defaultValue: 'Total Payments' })}
                 </span>
                 <span className="text-green-500">
-                  -{formatMoney(selectedFolio.totalPayments)}
+                  -{formatMoney(selectedFolio.totalPayments, selectedFolio.currency ?? null)}
                 </span>
               </div>
             </div>
@@ -838,7 +846,7 @@ export const GuestBillingView: React.FC = memo(() => {
               <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
                 {t('guestBilling.balance', { defaultValue: 'Balance' })}
               </span>
-              <span className="text-xl font-bold text-amber-500">{formatMoney(selectedFolio.balance)}</span>
+              <span className="text-xl font-bold text-amber-500">{formatMoney(selectedFolio.balance, selectedFolio.currency ?? null)}</span>
             </div>
             {selectedFolio.status === 'active' && (
               <>

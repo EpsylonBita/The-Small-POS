@@ -690,6 +690,8 @@ pub struct GiftCloseDrawerLine {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShiftCheckoutDoc {
+    #[serde(default)]
+    pub currency: Option<String>,
     pub shift_id: String,
     pub role_type: String,
     pub staff_name: String,
@@ -811,6 +813,8 @@ pub struct ZReportPlatformEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZReportDoc {
+    #[serde(default)]
+    pub currency: Option<String>,
     pub report_id: String,
     pub report_date: String,
     pub generated_at: String,
@@ -3863,7 +3867,40 @@ fn build_status_banner_html(doc: &OrderReceiptDoc) -> String {
     format!("<div class=\"status-banner {css_class}\"><div>{label}</div>{reason_html}</div>")
 }
 
+/// Checkout amounts belong to the frozen shift, never to a later store setting.
+pub(crate) fn apply_document_currency(document: &ReceiptDocument, cfg: &mut LayoutConfig) {
+    let currency = match document {
+        ReceiptDocument::ShiftCheckout(doc) => doc.currency.as_deref(),
+        ReceiptDocument::ZReport(doc) => doc.currency.as_deref(),
+        _ => return,
+    };
+    cfg.currency_symbol = currency
+        .filter(|currency| {
+            currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_uppercase())
+        })
+        .map(|currency| format!(" {currency}"))
+        .unwrap_or_else(|| " ?".to_string());
+}
+
+fn document_layout<'a>(
+    document: &ReceiptDocument,
+    cfg: &'a LayoutConfig,
+) -> std::borrow::Cow<'a, LayoutConfig> {
+    if matches!(
+        document,
+        ReceiptDocument::ShiftCheckout(_) | ReceiptDocument::ZReport(_)
+    ) {
+        let mut recorded = cfg.clone();
+        apply_document_currency(document, &mut recorded);
+        std::borrow::Cow::Owned(recorded)
+    } else {
+        std::borrow::Cow::Borrowed(cfg)
+    }
+}
+
 pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
+    let recorded_layout = document_layout(document, cfg);
+    let cfg = recorded_layout.as_ref();
     let is_modern = cfg.template == ReceiptTemplate::Modern;
     let lang = cfg.language.as_str();
     let cur = cfg.currency_symbol.as_str();
@@ -4804,6 +4841,11 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(&format_datetime_human(&doc.check_out)),
             );
             if !should_render_minimal_shift_checkout(doc) {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Currency")),
+                    esc(cur.trim())
+                ));
                 if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>{}</span><span>{}</span></div>",
@@ -5093,6 +5135,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 shift_line,
                 terminal_line,
             );
+
+            body.push_str(&format!(
+                "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                esc(receipt_label(lang, "Currency")),
+                esc(cfg.currency_symbol.trim())
+            ));
 
             // Sales
             body.push_str(&format!(
@@ -8867,6 +8915,11 @@ fn render_classic_non_customer_raster_exact_ttf(
                 preset.meta_style,
             );
             if !should_render_minimal_shift_checkout(doc) {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Currency")),
+                    cur.trim(),
+                    preset.meta_style,
+                );
                 if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
                     canvas.draw_pair(
                         &format!("{}:", receipt_label(lang, "Terminal")),
@@ -9205,6 +9258,11 @@ fn render_classic_non_customer_raster_exact_ttf(
             let sections = z_report_sections(doc);
             let visible_staff = z_report_visible_staff(doc);
             canvas.draw_reverse_banner(receipt_label(lang, "Z REPORT"));
+            canvas.draw_pair(
+                receipt_label(lang, "Currency"),
+                cfg.currency_symbol.trim(),
+                preset.meta_style,
+            );
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Date")),
                 &doc.report_date,
@@ -9648,6 +9706,8 @@ pub fn render_classic_raster_exact_preview_data_url(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
 ) -> Result<(String, Vec<RenderWarning>), String> {
+    let recorded_layout = document_layout(document, cfg);
+    let cfg = recorded_layout.as_ref();
     let body = match document {
         ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
             match render_classic_customer_raster_exact_ttf(document, cfg) {
@@ -10383,6 +10443,8 @@ fn emit_platform_slip_escpos(
 }
 
 pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRender {
+    let recorded_layout = document_layout(document, cfg);
+    let cfg = recorded_layout.as_ref();
     let doc_target = escpos_document_target(document);
     let style = escpos_style(cfg, doc_target);
     let classic_customer_layout = !style.modern && doc_target.is_customer_receipt();
@@ -11539,6 +11601,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 width,
             );
             if !should_render_minimal_shift_checkout(doc) {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Currency"),
+                    cfg.currency_symbol.trim(),
+                    width,
+                );
                 if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
                     emit_pair(
                         &mut builder,
@@ -11882,6 +11950,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .lf()
                 .bold(false)
                 .left();
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Currency"),
+                cfg.currency_symbol.trim(),
+                width,
+            );
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Date"),
@@ -13978,6 +14052,37 @@ mod tests {
             0,
             "GS v 0 should not be used for Star printers"
         );
+    }
+
+    #[test]
+    fn checkout_currency_is_original_in_html_and_escpos_and_unknown_never_defaults() {
+        let cfg = LayoutConfig {
+            currency_symbol: " USD".to_string(),
+            template: ReceiptTemplate::Modern,
+            ..LayoutConfig::default()
+        };
+        for currency in [Some("CHF".to_string()), None] {
+            let doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+                currency: currency.clone(),
+                role_type: "cashier".to_string(),
+                staff_name: "Maria".to_string(),
+                opening_amount: 10.0,
+                expected_amount: Some(10.0),
+                closing_amount: Some(10.0),
+                ..ShiftCheckoutDoc::default()
+            });
+            let expected = if currency.is_some() { "CHF" } else { "?" };
+            let html = render_html(&doc, &cfg);
+            assert!(html.contains(expected));
+            assert!(!html.contains("USD"));
+            assert!(!html.contains("EUR"));
+            let rendered = render_escpos(&doc, &cfg);
+            let text = String::from_utf8_lossy(&rendered.bytes);
+            assert!(text.contains(expected));
+            assert!(!text.contains("USD"));
+            let recorded = document_layout(&doc, &cfg);
+            assert_eq!(recorded.currency_symbol.trim(), expected);
+        }
     }
 
     #[test]
@@ -16402,6 +16507,12 @@ mod tests {
         gift_close: Option<GiftCloseDrawerLine>,
     ) -> ReceiptDocument {
         ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            currency: Some(
+                gift_close
+                    .as_ref()
+                    .map(|line| line.currency.clone())
+                    .unwrap_or_else(|| "EUR".to_string()),
+            ),
             shift_id: "SHIFT-GIFT".to_string(),
             role_type: role_type.to_string(),
             staff_name: "Maria Gift".to_string(),
@@ -16427,6 +16538,7 @@ mod tests {
     /// 20.00 gift liability cash and a 0.50 ordinary adjustment = 605.50.
     fn sample_gift_z_report(with_gift: bool) -> ZReportDoc {
         let mut doc = ZReportDoc {
+            currency: Some("EUR".to_string()),
             report_id: "ZR-GIFT".to_string(),
             report_date: "2026-09-30".to_string(),
             generated_at: "2026-09-30T23:59:00Z".to_string(),
@@ -16950,10 +17062,19 @@ mod tests {
             render_html(&ordinary_z, &cfg),
         ] {
             assert!(rendered.contains("Expected In Drawer"));
-            for key in GIFT_CLOSE_PRINT_KEYS {
+            // Currency is now part of every financial document's original
+            // identity; the remaining labels belong only to gift closes.
+            for key in GIFT_CLOSE_PRINT_KEYS
+                .into_iter()
+                .filter(|key| *key != "Currency")
+            {
                 assert!(!rendered.contains(key), "ordinary receipt shows {key:?}");
             }
-            assert!(!rendered.contains("EUR"));
+            assert!(rendered.contains("Currency"));
+            assert!(
+                rendered.contains("EUR"),
+                "ordinary financial receipt shows its original unit"
+            );
         }
     }
 }

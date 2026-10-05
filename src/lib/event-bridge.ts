@@ -41,6 +41,7 @@ const EVENT_MAP: Record<string, string> = {
 
   // --- Order events ---
   'order_realtime_update': 'order-realtime-update',
+  'table_attempt_recovery': 'table_attempt_recovery',
   'order_status_updated': 'order-status-updated',
   'order_created': 'order-created',
   'order_deleted': 'order-deleted',

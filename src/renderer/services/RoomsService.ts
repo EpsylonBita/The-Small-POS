@@ -24,6 +24,7 @@ export const getRoomEffectiveStatus = (
 export type RoomType = 'standard' | 'deluxe' | 'suite' | 'penthouse' | 'accessible';
 
 export interface RoomActiveFolio {
+  currency?: string | null;
   id: string;
   guestName: string | null;
   checkInDate: string | null;
@@ -81,6 +82,7 @@ interface RoomFromAPI {
   notes: string | null;
   effective_status?: RoomStatus | null;
   active_folio?: {
+    currency?: string | null;
     id?: string | null;
     guest_name?: string | null;
     check_in_date?: string | null;
@@ -101,6 +103,7 @@ function transformActiveFolio(data: RoomFromAPI['active_folio']): RoomActiveFoli
 
   return {
     id: data.id,
+    currency: typeof data.currency === 'string' && /^[A-Z]{3}$/.test(data.currency) ? data.currency : null,
     guestName: data.guest_name || null,
     checkInDate: data.check_in_date || null,
     balance: Number.isFinite(balance) ? balance : 0,

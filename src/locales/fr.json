@@ -4076,8 +4076,8 @@
     "editSettlementDelta": {
       "collectTitle": "Paiement supplémentaire",
       "refundTitle": "Remboursement",
-      "collectBody": "Encaisser €{{amount}} supplémentaires — choisissez la méthode.",
-      "refundBody": "Rendre €{{amount}} au client — choisissez la méthode.",
+      "collectBody": "Encaisser {{amount}} supplémentaires — choisissez la méthode.",
+      "refundBody": "Rendre {{amount}} au client — choisissez la méthode.",
       "collectAmountLabel": "Supplément à encaisser",
       "refundAmountLabel": "Montant du remboursement",
       "payWithCash": "Payer en espèces",
@@ -4392,8 +4392,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Prix par type de commande",
-      "pickupPrice": "Prix retrait (€)",
-      "deliveryPrice": "Prix livraison (€)",
+      "pickupPrice": "Prix retrait",
+      "deliveryPrice": "Prix livraison",
       "pricingHelp": "Définissez des prix différents pour le retrait et la livraison.",
       "savePricing": "Enregistrer les prix",
       "title": "Définir les prix"
@@ -4415,7 +4415,7 @@
       "unavailable": "Indisponible",
       "noStaffSelected": "Veuillez sélectionner un membre du personnel",
       "shiftStarted": "Service démarré",
-      "drawerContinuityWarning": "Écart de caisse : fermée avec {{previous}} € mais ouverte avec {{opening}} €. Recomptez la caisse avant de continuer.",
+      "drawerContinuityWarning": "Écart de caisse : fermée avec {{previous}} mais ouverte avec {{opening}}. Recomptez la caisse avant de continuer.",
       "shiftEnded": "Service terminé",
       "failedToLoad": "Échec du chargement de la liste du personnel. Veuillez réessayer.",
       "shiftSummary": "Résumé du service",
@@ -4590,7 +4590,7 @@
       "ordersCountValue": "{{count}} commandes",
       "paymentHistory": "Historique des paiements",
       "paymentHistoryToday": "Paiements du jour",
-      "todayTotal": "Total du jour : {{amount}} €",
+      "todayTotal": "Total du jour : {{amount}}",
       "paymentRecorded": "Paiement enregistré",
       "paymentFailed": "Impossible d'enregistrer le paiement",
       "selectStaffPlaceholder": "-- Sélectionner un employé --",
@@ -4723,9 +4723,9 @@
       "driverStartingCashHelper": "Facultatif : saisissez l'argent remis au livreur par le caissier actif avant le début des livraisons.",
       "serverStartingCashTitle": "Saisissez le fonds de départ du serveur",
       "serverStartingCashHelper": "Facultatif : saisissez l'argent remis au serveur par le caissier actif avant le début du service.",
-      "skipCash": "Ignorer (€0)",
+      "skipCash": "Ignorer (0)",
       "startShift": "Démarrer le service",
-      "noCashierWarning": "Aucun caissier actif n'est disponible. Vous pouvez continuer uniquement avec €0.",
+      "noCashierWarning": "Aucun caissier actif n'est disponible. Vous pouvez continuer uniquement avec 0.",
       "activeSince": "Actif depuis {{time}}",
       "pinNotConfigured": "Aucun PIN POS n'est configuré pour ce membre du personnel. Définissez-le d'abord dans l'Admin.",
       "posLoginDisabled": "Ce membre du personnel n'est pas autorisé à se connecter au POS.",
@@ -4763,8 +4763,11 @@
         "expectedCash": "Espèces attendues",
         "countedLabel": "Espèces reçues de {{name}}",
         "closing": "Clôture…",
-        "confirm": "Clôturer le service & recevoir les espèces"
-      }
+        "confirm": "Clôturer le service & recevoir les espèces",
+        "pending": "La remise est enregistrée sur cette caisse et attend confirmation. Elle sera réessayée automatiquement ; ne saisissez pas les espèces une seconde fois.",
+        "retry": "Réessayer la remise enregistrée"
+      },
+      "currencySettlementRequired": "Régularisez et fermez les services du personnel dans leur devise d’origine avant de fermer ce service de caisse."
     },
     "zReport": {
       "title": "Rapport Z - {{date}}",
@@ -5692,8 +5695,8 @@
       "editSettlementReducedRequired": "Cette modification réduit une commande payée et exige un remboursement enregistré",
       "editSettlementTitle": "Remboursement de la modification",
       "enterAmountFirst": "Saisissez un montant de remboursement pour choisir comment ce paiement a été remboursé.",
-      "netPaidAfterRefunds": "Payé après les remboursements précédents : €{{amount}}",
-      "originalVsNext": "Le total de la commande est passé de €{{from}} à €{{to}}",
+      "netPaidAfterRefunds": "Payé après les remboursements précédents : {{amount}}",
+      "originalVsNext": "Le total de la commande est passé de {{from}} à {{to}}",
       "requiredAmount": "Remboursement requis",
       "selectAllocation": "Répartissez le remboursement sur au moins un paiement",
       "useRemaining": "Utiliser le restant"
@@ -6134,7 +6137,9 @@
     "loadingAddress": "Chargement de l'adresse...",
     "customer": "Client",
     "paymentPending": "EN ATTENTE",
-    "paymentPendingA11y": "Paiement en attente"
+    "paymentPendingA11y": "Paiement en attente",
+    "platformPayment": "PAIEMENT PLATEFORME",
+    "platformPaymentA11y": "Paiement réglé par la plateforme ; le magasin ne l’encaisse pas"
   },
   "incomingOrderAlert": {
     "title": "Nouvelle commande {{platform}}",
@@ -6244,6 +6249,8 @@
     "tableNumber": "Table {{number}}",
     "capacity": "Capacité",
     "seats": "{{count}} places",
+    "seats_one": "{{count}} place",
+    "seats_other": "{{count}} places",
     "section": "Section",
     "floor": "Étage",
     "status": {
@@ -7678,7 +7685,7 @@
     "title": "Programme de fidélité",
     "programInactive": "Programme de fidélité inactif",
     "programInactiveDesc": "Le programme de fidélité est actuellement désactivé. Activez-le depuis le tableau de bord d'administration.",
-    "pointsPerEuro": "point par 1 €",
+    "pointsPerEuro": "point par {{amount}}",
     "perPoint": "par point",
     "members": "Membres",
     "totalPoints": "Total des points",
@@ -9588,7 +9595,11 @@
     },
     "errors": {
       "moduleRequired": "La facturation client n'est pas activée pour ce terminal.",
-      "actionFailed": "Échec de la mise à jour du folio."
+      "actionFailed": "Échec de la mise à jour du folio.",
+      "currencyUnavailable": "La devise d’origine du compte client est indisponible. Vérifiez le compte avant d’enregistrer un montant.",
+      "currencyMismatch": "Ce compte utilise une devise différente de celle de l’établissement. Aucune nouvelle charge ne peut être ajoutée.",
+      "shiftCurrency": "La devise du service de caisse est différente ou inconnue. Fermez ce service et ouvrez-en un nouveau avant de nouvelles commandes ou paiements.",
+      "storeCurrency": "La devise du magasin est indisponible ou a changé. Actualisez les paramètres du terminal avant de nouvelles commandes ou paiements."
     },
     "error": {
       "title": "Échec du chargement des folios clients"
@@ -9597,7 +9608,8 @@
       "amount": "Saisissez un montant supérieur à zéro.",
       "quantity": "La quantité doit être supérieure à zéro.",
       "description": "La description est obligatoire."
-    }
+    },
+    "roomChargePending": "Commande enregistrée. L’imputation à la chambre attend la confirmation du serveur ; ne l’encaissez pas à nouveau."
   },
   "filters": {
     "all": "Tous"
@@ -9832,7 +9844,7 @@
       "revenue": "Chiffre d'affaires",
       "status": "Statut du kiosque",
       "title": "Gestion du kiosque",
-      "todayOrders": "Commandes du jour",
+      "todayOrders": "Commandes de la journée d’activité",
       "toggleError": "Échec de la mise à jour du statut du kiosque"
     },
     "launchPurchase": {
@@ -9902,5 +9914,12 @@
     "unsavedReturnedAction": "Argent rendu au client",
     "unsavedSaving": "Enregistrement...",
     "unsavedResolving": "Enregistrement..."
+  },
+  "cashierGate": {
+    "title": "Service de caisse requis",
+    "body": "Les opérations normales du POS sont verrouillées. Un caissier ou responsable doit commencer son service sur cette caisse pour ouvrir la journée.",
+    "waiterBody": "La caisse principale est fermée. Un caissier ou responsable doit commencer son service sur la caisse principale associée à cet appareil. Vous pourrez ensuite commencer votre propre service et continuer.",
+    "checking": "Vérification du service de caisse…",
+    "recheck": "Vérifier à nouveau"
   }
 }

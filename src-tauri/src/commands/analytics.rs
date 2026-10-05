@@ -2078,6 +2078,15 @@ mod dto_tests {
         )
         .expect("configure driver earning test database");
         crate::db::run_migrations_for_test(&conn);
+        for (category, key, value) in [
+            ("terminal", "branch_id", "branch-analytics"),
+            ("restaurant", "store_currency_branch_id", "branch-analytics"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            crate::db::set_setting(&conn, category, key, value).unwrap();
+        }
         conn
     }
 
@@ -2088,10 +2097,10 @@ mod dto_tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                  id, staff_id, branch_id, terminal_id, role_type, check_in_time,
-                 status, sync_status, created_at, updated_at
+                 status, sync_status, created_at, updated_at, currency
              ) VALUES (
                  'shift-analytics-driver', 'driver-analytics', 'branch-analytics',
-                 'terminal-analytics', 'driver', ?1, 'active', 'pending', ?1, ?1
+                 'terminal-analytics', 'driver', ?1, 'active', 'pending', ?1, ?1, 'EUR'
              )",
             rusqlite::params![now],
         )
@@ -2101,11 +2110,11 @@ mod dto_tests {
                  id, items, total_amount, total_amount_cents, status, order_type,
                  branch_id, terminal_id, payment_status, sync_status,
                  delivery_fee, delivery_fee_cents, tip_amount, tip_amount_cents,
-                 created_at, updated_at
+                 created_at, updated_at, currency
              ) VALUES (
                  'order-analytics-driver', '[]', 24.0, 2400, 'ready', 'delivery',
                  'branch-analytics', 'terminal-analytics', 'paid', 'synced',
-                 2.0, 200, 1.0, 100, ?1, ?1
+                 2.0, 200, 1.0, 100, ?1, ?1, 'EUR'
              )",
             rusqlite::params![now],
         )
@@ -2158,6 +2167,7 @@ mod dto_tests {
             serde_json::from_str(&data).expect("parse canonical courier earning payload");
         assert_eq!(payload["id"], earning_id);
         assert_eq!(payload["driver_id"], "driver-analytics");
+        assert_eq!(payload["currency"], "EUR");
         assert_eq!(payload["staff_shift_id"], "shift-analytics-driver");
         assert_eq!(payload["cash_collected_cents"], 2400);
         assert_eq!(payload["card_amount_cents"], 0);
@@ -2174,10 +2184,10 @@ mod dto_tests {
         conn.execute(
             "INSERT INTO staff_shifts (
                  id, staff_id, branch_id, terminal_id, role_type, check_in_time,
-                 status, sync_status, created_at, updated_at
+                 status, sync_status, created_at, updated_at, currency
              ) VALUES (
                  'shift-analytics-rollback', 'driver-analytics-rollback', 'branch-analytics',
-                 'terminal-analytics', 'driver', ?1, 'active', 'pending', ?1, ?1
+                 'terminal-analytics', 'driver', ?1, 'active', 'pending', ?1, ?1, 'EUR'
              )",
             rusqlite::params![now],
         )
@@ -2186,10 +2196,10 @@ mod dto_tests {
             "INSERT INTO orders (
                  id, items, total_amount, total_amount_cents, status, order_type,
                  branch_id, terminal_id, payment_status, sync_status,
-                 created_at, updated_at
+                 created_at, updated_at, currency
              ) VALUES (
                  'order-analytics-rollback', '[]', 12.0, 1200, 'ready', 'delivery',
-                 'branch-analytics', 'terminal-analytics', 'paid', 'synced', ?1, ?1
+                 'branch-analytics', 'terminal-analytics', 'paid', 'synced', ?1, ?1, 'EUR'
              )",
             rusqlite::params![now],
         )

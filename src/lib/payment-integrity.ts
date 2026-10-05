@@ -177,9 +177,9 @@ function normalizeReasonAmounts(
  * Last-resort money formatting for callers with no renderer formatter to hand.
  * Components pass `formatCurrency`, which follows the operator's locale.
  */
-function defaultFormatMoney(amount: number): string {
+function defaultFormatMoney(amount: number, currency?: string | null): string {
   const safe = Number.isFinite(amount) ? amount : 0;
-  return `\u20AC${safe.toFixed(2)}`;
+  return `${safe.toFixed(2)} ${currency || "—"}`;
 }
 
 /**
@@ -234,7 +234,7 @@ function normalizeReviewPayment(value: unknown): ReviewPaymentSummary | undefine
     method: firstString(record, ["method", "paymentMethod"]) ?? "pending",
     amount,
     amountCents: amountCents ?? Math.round(amount * 100),
-    currency: firstString(record, ["currency"]) ?? "EUR",
+    currency: firstString(record, ["currency"]) ?? "",
     takenAt: firstString(record, ["takenAt", "taken_at"]) ?? "",
     reason: firstString(record, ["reason"]) ?? "already_paid",
     ...(detectedAt ? { detectedAt } : {}),
@@ -260,7 +260,7 @@ function normalizeUnsavedPayment(value: unknown): UnsavedPaymentSummary | undefi
     method: firstString(record, ["method", "paymentMethod"]) ?? "card",
     amount,
     amountCents: amountCents ?? Math.round(amount * 100),
-    currency: firstString(record, ["currency"]) ?? "EUR",
+    currency: firstString(record, ["currency"]) ?? "",
     capturedAt: firstString(record, ["capturedAt", "captured_at"]) ?? "",
     kind: firstString(record, ["kind"]) ?? "single",
     attempts: firstNumber(record, ["attempts"]) ?? 0,
@@ -657,25 +657,26 @@ export function formatPaymentIntegrityError(
 export function formatSetAsidePaymentMessage(
   value: unknown,
   t: TFunction,
-  formatMoney: (amount: number) => string = defaultFormatMoney,
+  formatMoney: (amount: number, currency?: string | null) => string = defaultFormatMoney,
 ): string | null {
   for (const candidate of collectCandidateRecords(value)) {
     if (firstString(candidate, ["errorCode", "error_code"]) !== PAYMENT_SET_ASIDE_ERROR_CODE) {
       continue;
     }
+    const currency = firstString(candidate, ["currency"]) ?? firstString(asRecord(candidate.reviewPayment) || {}, ["currency"]) ?? null;
     const amount = firstNumber(candidate, ["amount"]) ?? 0;
     const due = firstNumber(candidate, ["amountDue", "amount_due"]) ?? 0;
     const reason = firstString(candidate, ["reason"]);
     if (reason === "exceeds_amount_due") {
       return t("payment.setAside.exceedsMessage", {
-        amount: formatMoney(amount),
-        due: formatMoney(due),
+        amount: formatMoney(amount, currency),
+        due: formatMoney(due, currency),
         defaultValue:
           "Only {{due}} was still due on this order. The {{amount}} just taken is recorded for a manager to give back and is not counted. Collect only what is due.",
       });
     }
     return t("payment.setAside.message", {
-      amount: formatMoney(amount),
+      amount: formatMoney(amount, currency),
       defaultValue:
         "This order was already paid. The {{amount}} just taken is recorded for a manager to give back and is not counted. Do not charge it again.",
     });
@@ -692,7 +693,7 @@ export function formatSetAsidePaymentMessage(
 export function formatPaymentNotSavedMessage(
   value: unknown,
   t: TFunction,
-  formatMoney: (amount: number) => string = defaultFormatMoney,
+  formatMoney: (amount: number, currency?: string | null) => string = defaultFormatMoney,
 ): string | null {
   for (const candidate of collectCandidateRecords(value)) {
     const code = firstString(candidate, ["errorCode", "error_code"]);
@@ -703,18 +704,19 @@ export function formatPaymentNotSavedMessage(
       if (candidate.manualReceiptConfirmed === false && candidate.method === 'twint') return t('twintPayment.receiptReconcile');
       return t('twintPayment.receiptRecovery', 'A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.');
     }
+    const currency = firstString(candidate, ["currency"]) ?? firstString(asRecord(candidate.unsavedPayment) || {}, ["currency"]) ?? null;
     const cents = firstNumber(candidate, ["amountCents", "amount_cents"]);
     const amount =
       cents !== undefined ? cents / 100 : (firstNumber(candidate, ["amount"]) ?? 0);
     if (code === PAYMENT_NOT_SAVED_PENDING_ERROR_CODE) {
       return t("payment.notSaved.pendingMessage", {
-        amount: formatMoney(amount),
+        amount: formatMoney(amount, currency),
         defaultValue:
           "A card payment of {{amount}} on this order was charged but is not saved on this till yet. Save it again before taking another payment. Do NOT charge again.",
       });
     }
     return t("payment.notSaved.message", {
-      amount: formatMoney(amount),
+      amount: formatMoney(amount, currency),
       defaultValue:
         "The card was charged {{amount}}. The payment could not be saved on this till yet. Do NOT charge again: save the payment again.",
     });

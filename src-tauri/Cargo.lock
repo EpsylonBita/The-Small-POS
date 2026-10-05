@@ -4680,7 +4680,7 @@ dependencies = [
 
 [[package]]
 name = "the-small-pos"
-version = "1.4.121"
+version = "1.4.122"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

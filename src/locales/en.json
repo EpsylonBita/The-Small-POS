@@ -4090,8 +4090,8 @@
     "editSettlementDelta": {
       "collectTitle": "Extra Payment",
       "refundTitle": "Refund",
-      "collectBody": "Collect an additional €{{amount}} — choose the method used.",
-      "refundBody": "Return €{{amount}} to the customer — choose the method used.",
+      "collectBody": "Collect an additional {{amount}} — choose the method used.",
+      "refundBody": "Return {{amount}} to the customer — choose the method used.",
       "collectAmountLabel": "Extra to collect",
       "refundAmountLabel": "Refund amount",
       "payWithCash": "Pay with Cash",
@@ -4392,8 +4392,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Order Type Pricing",
-      "pickupPrice": "Pickup price (€)",
-      "deliveryPrice": "Delivery price (€)",
+      "pickupPrice": "Pickup price",
+      "deliveryPrice": "Delivery price",
       "pricingHelp": "Set different prices for pickup and delivery orders.",
       "savePricing": "Save pricing",
       "title": "Set Pricing"
@@ -4419,7 +4419,7 @@
       "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first.",
       "noStaffSelected": "Please select a staff member",
       "shiftStarted": "Shift started successfully",
-      "drawerContinuityWarning": "Drawer mismatch: it last closed with {{previous}} € but you opened with {{opening}} €. Recount the drawer before continuing.",
+      "drawerContinuityWarning": "Drawer mismatch: it last closed with {{previous}} but you opened with {{opening}}. Recount the drawer before continuing.",
       "shiftEnded": "Shift ended successfully",
       "failedToLoad": "Failed to load staff list. Please try again.",
       "shiftSummary": "Shift Summary",
@@ -4523,8 +4523,8 @@
       },
       "invalidStartingAmount": "Please enter a valid starting amount (0 or greater)",
       "zeroCashConfirmTitle": "Confirm Zero Opening Cash",
-      "zeroCashConfirmMessage": "You are starting your shift with $0 in the cash drawer. Are you sure you want to continue?",
-      "confirmZeroCash": "Yes, Start with $0",
+      "zeroCashConfirmMessage": "You are starting your shift with 0 in the cash drawer. Are you sure you want to continue?",
+      "confirmZeroCash": "Yes, Start with 0",
       "electronRequired": "This feature requires the desktop POS app. Open this terminal in the installed desktop runtime.",
       "recordExpenseFailed": "Failed to record expense",
       "cashReconciliation": "Cash Reconciliation",
@@ -4594,7 +4594,7 @@
       "ordersCountValue": "{{count}} orders",
       "paymentHistory": "Payment History",
       "paymentHistoryToday": "Today's Payments",
-      "todayTotal": "Today's Total: €{{amount}}",
+      "todayTotal": "Today's Total: {{amount}}",
       "paymentRecorded": "Payment recorded successfully",
       "paymentFailed": "Failed to record payment",
       "selectStaffPlaceholder": "-- Select Staff --",
@@ -4727,15 +4727,15 @@
       "driverStartingCashHelper": "Optional: enter any cash taken from the active cashier before deliveries begin.",
       "serverStartingCashTitle": "Enter server starting cash",
       "serverStartingCashHelper": "Optional: enter any cash taken from the active cashier before table service begins.",
-      "skipCash": "Skip (€0)",
+      "skipCash": "Skip (0)",
       "startShift": "Start shift",
-      "noCashierWarning": "No active cashier is available. You can only continue with €0.",
+      "noCashierWarning": "No active cashier is available. You can only continue with 0.",
       "activeSince": "Active since {{time}}",
       "cashierCashHelper": "Enter the amount in the cash drawer",
       "driverCashHelper": "Optional: amount taken from the cash drawer. Enter 0 to skip.",
       "startingCashOptional": "Starting Cash (Optional)",
       "confirmZeroTitle": "Confirm Zero Closing Cash",
-      "confirmZeroMessage": "Are you sure you want to close the shift with €0.00 closing cash?",
+      "confirmZeroMessage": "Are you sure you want to close the shift with 0.00 closing cash?",
       "cashToHandToCashier": "Cash To Hand To Cashier",
       "cashReturnHelper": "Hand this cash to the cashier. Tips are recorded separately.",
       "cashActuallyHandedOver": "Cash Actually Handed Over",
@@ -4763,8 +4763,11 @@
         "expectedCash": "Expected cash",
         "countedLabel": "Cash received from {{name}}",
         "closing": "Closing…",
-        "confirm": "Close shift & receive cash"
-      }
+        "confirm": "Close shift & receive cash",
+        "pending": "The handover is saved on this register and awaits confirmation. It will retry automatically; do not record the cash again.",
+        "retry": "Retry saved handover"
+      },
+      "currencySettlementRequired": "Settle and close the staff shifts in their original currency before closing this cashier shift."
     },
     "zReport": {
       "title": "Z Report - {{date}}",
@@ -5692,8 +5695,8 @@
       "editSettlementReducedRequired": "This edit reduces a paid order and requires a recorded refund",
       "editSettlementTitle": "Settle Edit Refund",
       "enterAmountFirst": "Enter a refund amount to choose how this payment was settled.",
-      "netPaidAfterRefunds": "Paid after previous refunds: €{{amount}}",
-      "originalVsNext": "Order total changed from €{{from}} to €{{to}}",
+      "netPaidAfterRefunds": "Paid after previous refunds: {{amount}}",
+      "originalVsNext": "Order total changed from {{from}} to {{to}}",
       "requiredAmount": "Required refund",
       "selectAllocation": "Allocate the refund to at least one payment",
       "useRemaining": "Use Remaining"
@@ -6134,7 +6137,9 @@
     "loadingAddress": "Loading address...",
     "customer": "Customer",
     "paymentPending": "PAY PENDING",
-    "paymentPendingA11y": "Payment pending"
+    "paymentPendingA11y": "Payment pending",
+    "platformPayment": "PLATFORM PAYMENT",
+    "platformPaymentA11y": "Payment settled by platform; the store does not collect"
   },
   "incomingOrderAlert": {
     "title": "New {{platform}} order",
@@ -6244,6 +6249,8 @@
     "tableNumber": "Table {{number}}",
     "capacity": "Capacity",
     "seats": "{{count}} seats",
+    "seats_one": "{{count}} seat",
+    "seats_other": "{{count}} seats",
     "section": "Section",
     "floor": "Floor",
     "status": {
@@ -7678,7 +7685,7 @@
     "title": "Loyalty Program",
     "programInactive": "Loyalty Program Inactive",
     "programInactiveDesc": "The loyalty program is currently disabled. Enable it from the admin dashboard.",
-    "pointsPerEuro": "point per €1",
+    "pointsPerEuro": "point per {{amount}}",
     "perPoint": "per point",
     "members": "Members",
     "totalPoints": "Total Points",
@@ -9588,7 +9595,11 @@
     },
     "errors": {
       "moduleRequired": "Guest billing is not enabled for this terminal.",
-      "actionFailed": "Failed to update the folio."
+      "actionFailed": "Failed to update the folio.",
+      "currencyUnavailable": "The original folio currency is unavailable. Review the folio before recording money.",
+      "currencyMismatch": "This folio uses a different currency from the store. New charges cannot be added.",
+      "shiftCurrency": "The cashier shift uses another or unknown currency. Close that shift and open a new shift before taking new orders or payments.",
+      "storeCurrency": "Store currency is unavailable or has changed. Refresh the terminal settings before taking new orders or payments."
     },
     "error": {
       "title": "Failed to load guest folios"
@@ -9597,7 +9608,8 @@
       "amount": "Enter an amount greater than zero.",
       "quantity": "Quantity must be greater than zero.",
       "description": "Description is required."
-    }
+    },
+    "roomChargePending": "Order saved. The room charge is waiting for server confirmation; do not collect it again."
   },
   "filters": {
     "all": "All"
@@ -9832,7 +9844,7 @@
       "revenue": "Revenue",
       "status": "Kiosk Status",
       "title": "Kiosk Management",
-      "todayOrders": "Today's Orders",
+      "todayOrders": "Business-day orders",
       "toggleError": "Failed to update kiosk status"
     },
     "launchPurchase": {
@@ -9902,5 +9914,12 @@
     "unsavedReturnedAction": "Money given back to the customer",
     "unsavedSaving": "Saving...",
     "unsavedResolving": "Recording..."
+  },
+  "cashierGate": {
+    "title": "Cashier shift required",
+    "body": "Normal POS operations are locked. A cashier or manager must check in on this register to open the day.",
+    "waiterBody": "The main register is closed. A cashier or manager must check in on this device’s parent register. You can then check in your own staff shift and continue.",
+    "checking": "Checking the cashier shift…",
+    "recheck": "Check again"
   }
 }

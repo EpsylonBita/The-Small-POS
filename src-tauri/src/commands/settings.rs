@@ -2734,6 +2734,7 @@ pub async fn settings_factory_reset(
         &db,
         &auth_state,
     )?;
+    crate::lan_transport::prepare_reset(&app).await?;
     run_process_reset_with_recovery(
         &db,
         crate::recovery::RecoveryPointKind::PreFactoryReset,
@@ -2919,7 +2920,13 @@ pub async fn settings_clear_connection(
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<Value, auth::GuardedCommandError> {
-    settings_clear_connection_checked(&db, &auth_state)?;
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
+    crate::lan_transport::prepare_reset(&app).await?;
+    clear_terminal_connection_lifecycle(&db)?;
     app.emit(
         "terminal_disabled",
         serde_json::json!({ "reason": "connection_cleared" }),
@@ -3708,6 +3715,10 @@ mod dto_tests {
             ("terminal", crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1),
             ("legacy", crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1),
             ("diagnostics", crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1),
+            ("terminal", "cafe_lan_pair_v1:waiter-a"),
+            ("diagnostics", "Cafe_LAN_PAIR_V1:waiter-a"),
+            ("terminal", "cafe_lan_pairs_v1"),
+            ("diagnostics", "Cafe_LAN_Pairs_V1"),
         ] {
             assert_eq!(
                 super::validate_generic_setting_update(category, key),
@@ -4356,6 +4367,7 @@ mod dto_tests {
         std::thread::scope(|scope| {
             let state = &database.state;
             let worker = scope.spawn(move || {
+                let _keyring = crate::tests::fake_keyring::install_empty();
                 let transition = crate::repairs::arm_process_reset()
                     .expect("worker owns canonical transition mutex");
                 transition_ready_tx
@@ -5074,6 +5086,7 @@ mod dto_tests {
     #[test]
     #[serial_test::serial]
     fn durable_terminal_rebind_marker_is_read_only_and_fail_closed() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let database = crate::tests::harness::TestDb::open();
 
@@ -7325,6 +7338,7 @@ mod dto_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn incoming_connection_string_conflict_fails_before_validation_http_or_journal() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let database = crate::tests::harness::TestDb::open();
         let connection = serde_json::json!({
             "key": "candidate-key",

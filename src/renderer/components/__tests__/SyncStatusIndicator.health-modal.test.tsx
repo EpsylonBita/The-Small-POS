@@ -417,6 +417,7 @@ describe('SyncStatusIndicator Health Status modal contract', () => {
 
   it('exports only redacted diagnostics from the operator Health Status dialog', async () => {
     renderHealthModal()
+    await screen.findByText(i18n.t('sync.healthModal.states.healthy.title'))
 
     fireEvent.click(
       await screen.findByRole('button', {

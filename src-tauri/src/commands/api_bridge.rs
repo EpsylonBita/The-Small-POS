@@ -632,22 +632,17 @@ pub fn api_list_cached_paths(
 }
 
 #[tauri::command]
-pub async fn sync_test_parent_connection(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    crate::hydrate_terminal_credentials_from_local_settings(&db);
-    let admin_url = storage::get_credential("admin_dashboard_url")
-        .ok_or("Terminal not configured: missing admin URL")?;
-    let raw_api_key = Zeroizing::new(
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
-    );
-    let api_key = Zeroizing::new(
-        api::extract_api_key_from_connection_string(&raw_api_key)
-            .unwrap_or_else(|| (*raw_api_key).clone()),
-    );
-
-    let result = api::test_connectivity(&admin_url, &api_key).await;
-    serde_json::to_value(&result).map_err(|e| e.to_string())
+pub async fn sync_test_parent_connection() -> Result<serde_json::Value, String> {
+    // A cloud health response cannot authenticate a direct parent connection.
+    // Keep the compatibility command explicit until both main apps have a
+    // real authenticated LAN receiver and a durable delivery acknowledgement.
+    Ok(serde_json::json!({
+        "success": false,
+        "isParentReachable": false,
+        "code": "LAN_TRANSPORT_UNAVAILABLE",
+        "transport": "direct_cloud",
+        "error": "Direct LAN order transport is unavailable; orders use the cloud sync queue",
+    }))
 }
 
 #[cfg(test)]
@@ -661,6 +656,17 @@ mod dto_tests {
     const OLD_TERMINAL: &str = "33333333-3333-4333-8333-333333333333";
     const NEW_ORG: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const NEW_BRANCH: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    #[tokio::test]
+    async fn parent_connection_test_refuses_to_use_cloud_health_as_parent_proof() {
+        let result = sync_test_parent_connection()
+            .await
+            .expect("transport status");
+        assert_eq!(result["success"], false);
+        assert_eq!(result["isParentReachable"], false);
+        assert_eq!(result["code"], "LAN_TRANSPORT_UNAVAILABLE");
+        assert_eq!(result["transport"], "direct_cloud");
+    }
 
     #[test]
     fn customer_messaging_bridge_accepts_only_fixed_routes_and_uuid_session() {

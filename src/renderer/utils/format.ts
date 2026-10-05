@@ -2,6 +2,7 @@
 // Keep this light and framework-agnostic
 
 import i18n from '../../lib/i18n'
+import { getStoreCurrency } from './store-currency'
 
 const resolveLocale = (locale?: string): string => {
   const fallback = typeof navigator !== 'undefined' ? navigator.language : 'en-US'
@@ -14,10 +15,12 @@ const resolveLocale = (locale?: string): string => {
   return candidate
 }
 
-export function formatCurrency(amount: number, currency: string = 'EUR', locale?: string): string {
+export function formatCurrency(amount: number, currency: string | null = getStoreCurrency(), locale?: string): string {
   const resolvedLocale = resolveLocale(locale)
   const raw = Number.isFinite(amount) ? amount : 0
   const safe = Object.is(raw, -0) ? 0 : raw
+  // An unresolved store has no money unit to display; never invent EUR from locale.
+  if (!currency) return `${formatNumber(safe, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, locale)} —`
   try {
     return new Intl.NumberFormat(resolvedLocale, {
       style: 'currency',

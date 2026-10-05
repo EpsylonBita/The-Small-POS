@@ -28,10 +28,9 @@ const PREPAID_EFOOD: &str = r#"{"food_delivery":{"prepaid":true,"payment_method"
 fn seed_order(conn: &Connection, id: &str, label: &str, platform: Option<(&str, &str, &str)>) {
     let (plugin, external_id, metadata) = platform.unwrap_or(("", "", ""));
     conn.execute(
-        "INSERT INTO orders (id, order_number, supabase_id, items, total_amount, total_amount_cents,
+        "INSERT INTO orders (currency, id, order_number, supabase_id, items, total_amount, total_amount_cents,
              status, order_type, payment_status, sync_status, plugin, external_plugin_order_id,
-             ghost_metadata, created_at, updated_at)
-         VALUES (?1, ?1, ?2, '[]', 12.0, 1200, 'pending', 'delivery', ?3, 'synced',
+             ghost_metadata, created_at, updated_at) VALUES ('EUR', ?1, ?1, ?2, '[]', 12.0, 1200, 'pending', 'delivery', ?3, 'synced',
                  NULLIF(?4, ''), NULLIF(?5, ''), NULLIF(?6, ''),
                  '2026-10-01T10:00:00Z', '2026-10-01T10:00:00Z')",
         params![id, format!("remote-{id}"), label, plugin, external_id, metadata],
@@ -49,10 +48,9 @@ fn seed_row(
 ) {
     let (transaction_ref, idempotency_key, metadata) = marks;
     conn.execute(
-        "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+        "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents, status,
              transaction_ref, idempotency_key, metadata, payment_origin, remote_payment_id,
-             sync_status, sync_state, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 12.0, 1200, 'completed', ?4, ?5, ?6, 'sync_reconstructed', ?7,
+             sync_status, sync_state, created_at, updated_at) VALUES ('EUR', ?1, ?2, ?3, 12.0, 1200, 'completed', ?4, ?5, ?6, 'sync_reconstructed', ?7,
                  'synced', 'applied', '2026-10-01T10:00:05Z', '2026-10-01T10:00:05Z')",
         params![
             id,
@@ -269,9 +267,8 @@ fn seed_platform_held_set_aside(conn: &Connection, order_id: &str) {
         )),
     );
     conn.execute(
-        "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
-             sync_status, sync_state, created_at, updated_at)
-         VALUES (?1, ?2, 'card', 12.0, 1200, 'completed', 'pending', 'pending',
+        "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents, status,
+             sync_status, sync_state, created_at, updated_at) VALUES ('EUR', ?1, ?2, 'card', 12.0, 1200, 'completed', 'pending', 'pending',
                  '2026-10-01T10:05:00Z', '2026-10-01T10:05:00Z')",
         params![format!("pay-{order_id}"), order_id],
     )
@@ -297,6 +294,17 @@ fn r4_a_platform_held_set_aside_makes_the_money_the_platforms() {
     let td = TestDb::open();
     let conn = td.state.conn.lock().unwrap();
     seed_platform_held_set_aside(&conn, "ord-r4-held");
+    for (category, key, value) in [
+        ("terminal", "branch_id", "branch-r4"),
+        ("restaurant", "store_currency_branch_id", "branch-r4"),
+        ("restaurant", "store_currency_available", "true"),
+        ("restaurant", "store_currency_source", "branch_country"),
+        ("restaurant", "currency", "EUR"),
+    ] {
+        crate::db::set_setting(&conn, category, key, value).unwrap();
+    }
+    conn.execute("UPDATE orders SET branch_id='branch-r4',staff_shift_id='cashier-r4' WHERE id='ord-r4-held'", []).unwrap();
+    conn.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('cashier-r4','staff-r4','branch-r4','cashier','now','active','EUR','now','now')", []).unwrap();
     assert_eq!(
         cancel_refusal_code(&conn, "ord-r4-held").unwrap(),
         None,
@@ -327,6 +335,7 @@ fn r4_a_platform_held_set_aside_makes_the_money_the_platforms() {
         "method": "other",
         "amount": 12.0,
         "transactionRef": "platform_settlement:online:remote-ord-r4-held",
+        "currency": "EUR",
         "paymentOrigin": "sync_reconstructed",
     }))
     .unwrap();

@@ -1,0 +1,30 @@
+{
+  "modals": {
+    "menu": {
+      "draftReadFailed": "Le panier enregistré ne peut pas être lu. La validation est suspendue et le panier précédent est conservé.",
+      "draftSaveFailed": "Le panier ne peut pas être enregistré. La validation attend un enregistrement durable réussi.",
+      "draftDiscardFailed": "Le panier enregistré ne peut pas être supprimé. Il est conservé.",
+      "draftNeedsReconciliation": "La validation initiale doit encore être rapprochée. Aucun nouveau paiement n’a été lancé. Utilisez la récupération des paiements ou demandez un responsable.",
+      "draftRecoveryUnavailable": "La validation initiale ne peut pas être vérifiée. Son panier enregistré reste protégé.",
+      "draftPending": "La validation initiale est conservée. Confirmez son résultat avant de lancer un autre paiement.",
+      "draftLoading": "Chargement du panier enregistré…",
+      "draftRecover": "Vérifier la validation initiale",
+      "draftRecovered": "La commande initiale a été restaurée.",
+      "draftExistingTable": "Cette table a déjà une addition ouverte. Ouvrez-la pour ajouter des articles.",
+      "draftDeclinedResumed": "Le paiement a été refusé. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé.",
+      "draftNotSentResumed": "Aucune demande de paiement n’a été envoyée. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé.",
+      "draftNotChargedResumed": "Les tentatives de paiement initiales n’ont pas débité le client. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé."
+    }
+  },
+  "checkoutRecovery": {
+    "title": "Opérations de table en attente de récupération",
+    "guidance": "Les demandes initiales restent enregistrées. Internet et les autorisations actuelles sont nécessaires. Ne répétez pas un paiement incertain.",
+    "unavailable": "Le statut de récupération ne peut pas être lu. Les opérations en attente sont conservées.",
+    "pending": "En attente de reconnexion",
+    "processing": "Récupération de l’opération initiale",
+    "approval_required": "L’annulation nécessite une nouvelle autorisation du personnel ou du responsable. Rouvrez l’addition initiale.",
+    "auth_required": "Connectez-vous avec une session autorisée pour continuer.",
+    "conflict": "Un autre terminal a modifié cette addition. Vérifiez son état actuel avant de continuer.",
+    "refresh": "Actualiser le statut"
+  }
+}

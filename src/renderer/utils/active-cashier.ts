@@ -41,8 +41,16 @@ function unwrapData<T>(value: unknown): T | null {
 function isActiveCashierShift(
   shift: StaffShift | null | undefined,
   terminalId: string | null,
+  branchId?: string | null,
 ): shift is StaffShift {
-  if (!shift || shift.status !== 'active' || shift.role_type !== 'cashier') {
+  if (
+    !shift ||
+    shift.status !== 'active' ||
+    (shift.role_type !== 'cashier' && shift.role_type !== 'manager')
+  ) {
+    return false;
+  }
+  if (branchId && normalizeContextValue(shift.branch_id) !== branchId) {
     return false;
   }
   if (!terminalId) {
@@ -66,6 +74,7 @@ export async function resolveActiveCashierShift({
   }
 
   let strictLookupFailed = false;
+  let hasAuthoritativeLookup = false;
 
   if (normalizedBranchId) {
     try {
@@ -75,7 +84,8 @@ export async function resolveActiveCashierShift({
           normalizedTerminalId,
         ),
       );
-      if (isActiveCashierShift(strictShift, normalizedTerminalId)) {
+      hasAuthoritativeLookup = true;
+      if (isActiveCashierShift(strictShift, normalizedTerminalId, normalizedBranchId)) {
         return strictShift;
       }
       strictLookupFailed = true;
@@ -89,6 +99,7 @@ export async function resolveActiveCashierShift({
     const looseShift = unwrapData<StaffShift>(
       await bridge.shifts.getActiveCashierByTerminalLoose(normalizedTerminalId),
     );
+    hasAuthoritativeLookup = true;
     if (isActiveCashierShift(looseShift, normalizedTerminalId)) {
       if (strictLookupFailed) {
         console.info(`[${logContext}] Recovered active cashier via terminal-only fallback`, {
@@ -104,7 +115,12 @@ export async function resolveActiveCashierShift({
     console.warn(`[${logContext}] Active cashier loose lookup failed:`, error);
   }
 
-  if (isActiveCashierShift(activeShift, normalizedTerminalId)) {
+  // A successful local read can confirm the day is closed. Only an outage
+  // across every applicable lookup permits cached state to open the day.
+  if (
+    !hasAuthoritativeLookup &&
+    isActiveCashierShift(activeShift, normalizedTerminalId, normalizedBranchId)
+  ) {
     if (strictLookupFailed) {
       console.info(`[${logContext}] Recovered active cashier from cached shift`, {
         branchId: normalizedBranchId,

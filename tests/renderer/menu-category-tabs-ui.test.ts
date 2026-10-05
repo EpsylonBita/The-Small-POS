@@ -11,6 +11,8 @@ const itemModalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'm
 const cartPath = path.join(projectRoot, 'src', 'renderer', 'components', 'menu', 'MenuCart.tsx');
 const menuPagePath = path.join(projectRoot, 'src', 'renderer', 'pages', 'MenuPage.tsx');
 const menuModalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'MenuModal.tsx');
+const contextChipPath = path.join(projectRoot, 'src', 'renderer', 'components', 'menu', 'OrderContextChip.tsx');
+const contextChipCssPath = path.join(projectRoot, 'src', 'renderer', 'components', 'menu', 'order-context-chip.css');
 const enLocalePath = path.join(projectRoot, 'src', 'locales', 'en.json');
 
 test('MenuCategoryTabs only renders flavor filters backed by real category items', () => {
@@ -164,6 +166,8 @@ test('menu modal keeps search below the wrapping title and cards expose hold pre
   const cardSource = readFileSync(itemCardPath, 'utf8');
   const gridSource = readFileSync(itemGridPath, 'utf8');
   const modalSource = readFileSync(menuModalPath, 'utf8');
+  const chipSource = readFileSync(contextChipPath, 'utf8');
+  const chipCss = readFileSync(contextChipCssPath, 'utf8');
 
   // Long edit titles wrap and search has a full-width second row.
   assert.match(modalSource, /liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0/);
@@ -171,9 +175,15 @@ test('menu modal keeps search below the wrapping title and cards expose hold pre
   assert.match(modalSource, /ref=\{menuSearchRef\}/);
   assert.match(modalSource, /relative min-w-0 col-span-2 row-start-2/);
   assert.match(modalSource, /focus:border-yellow-400\/70 focus:outline-none focus:ring-1 focus:ring-yellow-400/);
-  // Round 251: the selected-customer pill + icon are now green semantic (was blue); blue guards below.
-  assert.match(modalSource, /border border-green-500\/40 bg-transparent px-3 py-1\.5 text-sm text-white/);
-  assert.match(modalSource, /<User className="w-3\.5 h-3\.5 text-green-300 flex-shrink-0" \/>/);
+  // Both customer states use the reviewed neutral chip; the editable one retains its action.
+  assert.match(modalSource, /<OrderContextChip onClick=\{\(\) => setShowCustomerPopover\(true\)\}>/);
+  assert.match(chipSource, /<User size=\{15\} aria-hidden="true" \/>/);
+  assert.match(chipSource, /<button type="button" className=\{className\} onClick=\{onClick\}>/);
+  assert.match(chipCss, /min-height:\s*44px/);
+  assert.match(chipCss, /background:\s*#f4f5f6;\s*color:\s*#27272a/);
+  assert.match(chipCss, /\.order-context-chip--dark\s*\{[^}]*background:\s*#24272b;\s*color:\s*#f4f4f5/);
+  assert.match(chipCss, /\.order-context-chip > svg\s*\{[^}]*color:\s*currentColor/);
+  assert.doesNotMatch(chipCss, /backdrop-filter:\s*blur|rgba\(/);
   assert.doesNotMatch(modalSource, /bg-blue-500\/20 text-blue-300 border border-blue-500\/30/);
   assert.doesNotMatch(modalSource, /focus:ring-blue-400/);
   assert.doesNotMatch(modalSource, /\/\* Search bar \*\//);

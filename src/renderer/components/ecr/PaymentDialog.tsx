@@ -42,7 +42,7 @@ interface Props {
 export const PaymentDialog: React.FC<Props> = ({
   isOpen,
   amount,
-  currency = 'EUR',
+  currency,
   onClose,
   onComplete,
   onCancel,

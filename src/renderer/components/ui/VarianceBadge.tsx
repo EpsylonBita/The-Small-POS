@@ -5,6 +5,7 @@ import { formatCurrency } from '../../utils/format';
 
 interface VarianceBadgeProps {
     variance: number;
+    currency?: string | null;
     size?: 'sm' | 'md' | 'lg';
     className?: string;
     showIcon?: boolean;
@@ -14,7 +15,8 @@ export const VarianceBadge: React.FC<VarianceBadgeProps> = ({
     variance,
     size = 'md',
     className = '',
-    showIcon = true
+    showIcon = true,
+    currency
 }) => {
     const { t } = useTranslation();
 
@@ -40,7 +42,7 @@ export const VarianceBadge: React.FC<VarianceBadgeProps> = ({
         negative: 'bg-red-500/20 text-red-700 dark:text-red-300 border-red-500/50 animate-pulse' // #b91c1c / #fca5a5
     };
 
-    const formattedAmount = `${variance < 0 ? '-' : (variance > 0 ? '+' : '')}${formatCurrency(Math.abs(variance))}`;
+    const formattedAmount = `${variance < 0 ? '-' : (variance > 0 ? '+' : '')}${formatCurrency(Math.abs(variance), currency)}`;
 
     const statusLabel = isBalanced
         ? t('modals.staffShift.varianceBalanced')

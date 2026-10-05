@@ -31,6 +31,7 @@ const h = vi.hoisted(() => {
 
   const state = {
     orderId: '',
+    checkoutDraft: null as any,
     serial: 0,
     orderTotal: 12.5,
     giftBooked: false,
@@ -307,10 +308,11 @@ vi.mock('../ui/FloatingActionButton', () => ({
     <button type="button" data-testid="new-order" onClick={onClick} disabled={disabled}>new order</button>
   ),
 }));
+vi.mock('../../services/CheckoutDraftStore', () => ({ getCheckoutDraftStore: async () => ({ load: async () => h.state.checkoutDraft }) }));
 vi.mock('../modals/MenuModal', () => ({
-  MenuModal: ({ isOpen, onOrderComplete }: { isOpen: boolean; onOrderComplete: (data: unknown) => Promise<boolean> }) => (
+  MenuModal: ({ isOpen, onOrderComplete, orderType, draftContext }: any) => (
     isOpen
-      ? <button type="button" data-testid="menu-complete" onClick={() => { void onOrderComplete(h.orderData()); }}>complete order</button>
+      ? <button type="button" data-testid="menu-complete" data-order-type={orderType} data-table-id={draftContext?.selectedTable?.id} onClick={() => { void onOrderComplete(h.state.checkoutDraft ? { ...h.orderData(), clientRequestId: h.state.checkoutDraft.checkoutRequestId, paymentData: { method: 'table', status: 'pending', amount: 0 } } : h.orderData()); }}>complete order</button>
       : null
   ),
 }));
@@ -415,6 +417,7 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
   beforeEach(() => {
     Object.assign(h.state, {
       orderId: '',
+      checkoutDraft: null,
       giftBooked: false,
       importPending: false,
       imports: 0,
@@ -616,5 +619,26 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
     expect(h.toast.success.mock.calls.length).toBe(successBefore);
     expect(retainedOrdinaryOwner(SCOPE, orderId)).not.toBeNull();
     expect(screen.queryByTestId('split-payment-modal')).toBeNull();
+  });
+});
+
+
+describe('OrderFlow table draft restart contract', () => {
+  afterEach(() => { cleanup(); h.state.checkoutDraft = null; });
+  it('restores table UUID/session/context and creates the same original dine-in order without a payment claim', async () => {
+    h.state.orderId = 'restored-table-order';
+    h.state.checkoutDraft = { phase: 'editing', checkoutRequestId: 'original-table-checkout', cartItems: h.orderData().items,
+      context: { orderType: 'dine-in', selectedTable: { id: 'table-uuid', tableNumber: '8', tableSessionId: 'check-uuid' },
+        tableNumber: '8', selectedCustomer: { id: 'table-customer', name: 'Table 8', phone: '', addresses: [] } } };
+    h.identity.current = { branchId: 'branch-1', organizationId: 'org-1', terminalId: 'term-1' };
+    render(<OrderFlow />);
+    const complete = await screen.findByTestId('menu-complete');
+    expect(complete).toHaveAttribute('data-order-type', 'dine-in');
+    expect(complete).toHaveAttribute('data-table-id', 'table-uuid');
+    fireEvent.click(complete);
+    await waitFor(() => expect(h.store.createOrder).toHaveBeenCalled());
+    expect(h.store.createOrder.mock.calls.at(-1)?.[0]).toMatchObject({ clientRequestId: 'original-table-checkout',
+      orderType: 'dine-in', order_type: 'dine-in', table_id: 'table-uuid', table_session_id: 'check-uuid',
+      payment_method: null, paymentStatus: 'pending' });
   });
 });

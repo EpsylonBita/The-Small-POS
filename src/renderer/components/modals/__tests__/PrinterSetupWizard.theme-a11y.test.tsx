@@ -35,13 +35,14 @@ vi.mock('react-hot-toast', () => ({
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
 }))
 
-vi.mock('react-i18next', () => {
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>()
   const t = (key: string, fallbackOrOptions?: string | Record<string, unknown>) => {
     if (typeof fallbackOrOptions === 'string') return fallbackOrOptions
     const fallback = fallbackOrOptions?.defaultValue
     return typeof fallback === 'string' ? fallback : key
   }
-  return { useTranslation: () => ({ t }) }
+  return { ...actual, useTranslation: () => ({ t }) }
 })
 
 import PrinterSetupWizard from '../PrinterSetupWizard'

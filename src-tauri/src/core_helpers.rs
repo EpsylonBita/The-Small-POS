@@ -330,6 +330,35 @@ fn clear_generic_operational_data_in_transaction(
         ",
         )
         .map_err(|e| format!("clear operational data: {e}"))?;
+    // These tables are created lazily, so older terminals may not have them.
+    // Their snapshots and pending mutation identities belong to the wiped
+    // orders and must disappear in the same transaction.
+    for table in [
+        "table_session_snapshots_v1",
+        "table_cancel_attempts_v1",
+        "order_item_edit_attempts_v1",
+        "table_order_history_v1",
+        "table_attempt_recovery_v1",
+        "table_attempt_recovery_audit_v1",
+        "sync_retry_schedule_audit_v1",
+    ] {
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("inspect table operational cache: {error}"))?;
+        if exists {
+            transaction
+                .execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|error| format!("clear table operational cache: {error}"))?;
+        }
+    }
+    let drafts_exist:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkout_drafts_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    if drafts_exist {
+        transaction.execute("UPDATE checkout_drafts_v1 SET draft_json=NULL,generation=generation+1,updated_at=?1",[chrono::Utc::now().to_rfc3339()]).map_err(|error|error.to_string())?;
+    }
     db::set_setting(
         transaction,
         "sync",
@@ -670,6 +699,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn clear_operational_data_removes_parity_and_recovery_rows_after_snapshot() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let database = crate::tests::harness::TestDb::open();
         let db = &database.state;
@@ -704,6 +734,19 @@ mod tests {
                 [],
             )
             .expect("seed recovery log");
+            for table in [
+                "table_session_snapshots_v1",
+                "table_cancel_attempts_v1",
+                "order_item_edit_attempts_v1",
+                "table_order_history_v1",
+                "table_attempt_recovery_v1",
+                "table_attempt_recovery_audit_v1",
+                "sync_retry_schedule_audit_v1",
+            ] {
+                conn.execute_batch(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY); INSERT INTO {table}(id) VALUES ('old-table-order');"))
+                    .expect("seed lazy table workflow cache");
+            }
+            conn.execute_batch("CREATE TABLE checkout_drafts_v1(organization_id TEXT,branch_id TEXT,terminal_id TEXT,generation INTEGER,draft_json TEXT,updated_at TEXT); INSERT INTO checkout_drafts_v1 VALUES('org','branch','terminal',0,'{}','now');").expect("seed draft reset fence");
         }
 
         clear_operational_data_inner(db).expect("clear operational data");
@@ -714,6 +757,13 @@ mod tests {
             "conflict_audit_log",
             "recovery_action_log",
             "sync_queue",
+            "table_session_snapshots_v1",
+            "table_cancel_attempts_v1",
+            "order_item_edit_attempts_v1",
+            "table_order_history_v1",
+            "table_attempt_recovery_v1",
+            "table_attempt_recovery_audit_v1",
+            "sync_retry_schedule_audit_v1",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -722,6 +772,14 @@ mod tests {
                 .expect("count table");
             assert_eq!(count, 0, "{table} should be empty");
         }
+        let tombstone: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT generation,draft_json FROM checkout_drafts_v1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(tombstone, (1, None));
         drop(conn);
         let points = crate::recovery::list_recovery_points(db)
             .expect("clean operational clear should create a recovery point");
@@ -735,6 +793,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn recovery_detector_failure_blocks_operational_clear_before_any_purge() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let database = crate::tests::harness::TestDb::open();
         let state = &database.state;

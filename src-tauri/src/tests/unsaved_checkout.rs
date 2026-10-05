@@ -21,6 +21,13 @@ const PAYMENT_KEY: &str = "terminal-card:fiscal-txn-checkout-1";
 
 fn seed_terminal(conn: &rusqlite::Connection) {
     crate::db::set_setting(conn, "terminal", "__ignore_keyring", "1").unwrap();
+    crate::db::set_setting(
+        conn,
+        "terminal",
+        "organization_id",
+        "11111111-2222-4333-8444-999999999999",
+    )
+    .unwrap();
     crate::db::set_setting(conn, "terminal", "terminal_id", TERMINAL_ID).unwrap();
     crate::db::set_setting(conn, "terminal", "branch_id", BRANCH_ID).unwrap();
 }

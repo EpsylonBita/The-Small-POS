@@ -1,0 +1,30 @@
+{
+  "modals": {
+    "menu": {
+      "draftReadFailed": "Il carrello salvato non può essere letto. La conferma è sospesa e il carrello precedente viene conservato.",
+      "draftSaveFailed": "Il carrello non può essere salvato. La conferma attende un salvataggio permanente riuscito.",
+      "draftDiscardFailed": "Il carrello salvato non può essere scartato. Viene conservato.",
+      "draftNeedsReconciliation": "La conferma originale richiede ancora una riconciliazione. Non è stato avviato un nuovo pagamento. Usa il recupero dei pagamenti o chiedi a un responsabile.",
+      "draftRecoveryUnavailable": "La conferma originale non può essere verificata. Il carrello salvato resta protetto.",
+      "draftPending": "La conferma originale viene conservata. Verifica il risultato prima di avviare un altro pagamento.",
+      "draftLoading": "Caricamento del carrello salvato…",
+      "draftRecover": "Verifica la conferma originale",
+      "draftRecovered": "L’ordine originale è stato ripristinato.",
+      "draftExistingTable": "Questo tavolo ha già un conto aperto. Aprilo per aggiungere articoli.",
+      "draftDeclinedResumed": "Il pagamento è stato rifiutato. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento.",
+      "draftNotSentResumed": "Non è stata inviata alcuna richiesta di pagamento. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento.",
+      "draftNotChargedResumed": "I tentativi di pagamento originali non hanno addebitato il cliente. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento."
+    }
+  },
+  "checkoutRecovery": {
+    "title": "Operazioni dei tavoli in attesa di recupero",
+    "guidance": "Le richieste originali restano salvate. Servono Internet e autorizzazioni attuali. Non ripetere un pagamento incerto.",
+    "unavailable": "Lo stato di recupero non può essere letto. Le operazioni in sospeso vengono conservate.",
+    "pending": "In attesa di riconnessione",
+    "processing": "Ripristino dell’operazione originale",
+    "approval_required": "L’annullamento richiede una nuova approvazione del personale o del responsabile. Riapri il conto originale.",
+    "auth_required": "Accedi con una sessione autorizzata per continuare.",
+    "conflict": "Un altro terminale ha modificato questo conto. Controlla lo stato attuale prima di continuare.",
+    "refresh": "Aggiorna stato"
+  }
+}

@@ -67,3 +67,20 @@ it('manual refresh settles loading and supersedes an earlier startup response', 
   await act(async () => resolveOld({ terminal: { branch_id: 'obsolete' } }));
   expect(result.current.getSetting('terminal', 'branch_id')).toBe('branch-a');
 });
+
+it('publishes fresh country currency and clears an explicit unavailable update', async () => {
+  const { getStoreCurrency } = await import('../../utils/store-currency');
+  const authority = (currency: string, available: boolean) => ({
+    terminal: { branch_id: 'branch-a' },
+    restaurant: { currency, store_currency_available: available, store_currency_source: 'branch_country', store_currency_branch_id: 'branch-a' },
+  });
+  mocks.getSettings.mockResolvedValueOnce(authority('CHF', true));
+  renderHook(() => useTerminalSettings(true));
+  await waitFor(() => expect(getStoreCurrency()).toBe('CHF'));
+  mocks.getSettings.mockResolvedValueOnce(authority('GBP', true));
+  act(() => mocks.handlers.get('terminal-settings-updated')?.({ updated: ['restaurant.currency'] }));
+  await waitFor(() => expect(getStoreCurrency()).toBe('GBP'));
+  mocks.getSettings.mockResolvedValueOnce(authority('', false));
+  act(() => mocks.handlers.get('terminal-settings-updated')?.({ updated: ['restaurant.store_currency_available'] }));
+  await waitFor(() => expect(getStoreCurrency()).toBeNull());
+});

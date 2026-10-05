@@ -385,11 +385,6 @@ impl ValidatedRepairSession {
             .binary_search_by(|candidate| candidate.as_str().cmp(permission))
             .is_ok()
     }
-
-    #[cfg(test)]
-    pub(crate) fn offline_expires_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.offline_expires_at
-    }
 }
 
 fn canonical_uuid(value: &str) -> Option<String> {

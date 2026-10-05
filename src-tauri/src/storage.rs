@@ -66,6 +66,7 @@ pub const CALLERID_ACTIVATION_CACHE_BANK_B_KEYS: [&str; 8] = [
 /// amount to live credentials. The OS keyring keeps the blob out of the
 /// JavaScript heap except for the moment it is fetched over the IPC.
 const KEY_POS_SESSION: &str = "pos_session";
+const KEY_LAN_PAIRS_V1: &str = "cafe_lan_pairs_v1";
 
 /// All credential keys managed by this module.
 const ALL_KEYS: &[&str] = &[
@@ -77,6 +78,7 @@ const ALL_KEYS: &[&str] = &[
     KEY_REPAIR_ENTITLEMENT_V1,
     KEY_REPAIR_ACTOR_ATTESTATION_V1,
     KEY_REPAIR_SCOPE_TRANSITION_JOURNAL_V1,
+    KEY_LAN_PAIRS_V1,
     KEY_ADMIN_URL,
     KEY_TERMINAL_ID,
     KEY_API_KEY,
@@ -123,6 +125,146 @@ fn is_native_repair_actor_key(key: &str) -> bool {
         .eq_ignore_ascii_case(KEY_REPAIR_ACTOR_ATTESTATION_V1)
 }
 
+fn is_lan_pair_private_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase();
+    normalized == KEY_LAN_PAIRS_V1 || normalized.starts_with("cafe_lan_pair_v1:")
+}
+
+fn lan_pair_store_mutex() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
+
+fn validate_lan_pair_key(key: &str) -> Result<(), String> {
+    if !key.starts_with("cafe_lan_pair_v1:")
+        || key.len() <= "cafe_lan_pair_v1:".len()
+        || key.len() > 280
+        || key.chars().any(char::is_control)
+    {
+        return Err("LAN_PAIR_CREDENTIAL_INVALID".into());
+    }
+    Ok(())
+}
+
+fn validate_lan_pair_record(key: &str, record: &Value) -> Result<(), String> {
+    validate_lan_pair_key(key)?;
+    let fields = record.as_object().ok_or("LAN_PAIR_CREDENTIAL_INVALID")?;
+    let expected = [
+        "organization_id",
+        "branch_id",
+        "parent_terminal_id",
+        "source_terminal_id",
+        "secret_hex",
+    ];
+    if fields.len() != expected.len() || expected.iter().any(|field| !fields.contains_key(*field)) {
+        return Err("LAN_PAIR_CREDENTIAL_INVALID".to_string());
+    }
+    for field in &expected[..4] {
+        let id = record[*field]
+            .as_str()
+            .ok_or("LAN_PAIR_CREDENTIAL_INVALID")?;
+        if id.is_empty() || id.len() > 255 || id.chars().any(char::is_control) {
+            return Err("LAN_PAIR_CREDENTIAL_INVALID".to_string());
+        }
+    }
+    for field in ["organization_id", "branch_id"] {
+        uuid::Uuid::parse_str(record[field].as_str().unwrap())
+            .map_err(|_| "LAN_PAIR_CREDENTIAL_INVALID")?;
+    }
+    let source = record["source_terminal_id"].as_str().unwrap();
+    if key != format!("cafe_lan_pair_v1:{source}") || key.len() > 280 {
+        return Err("LAN_PAIR_CREDENTIAL_INVALID".to_string());
+    }
+    let secret = record["secret_hex"]
+        .as_str()
+        .ok_or("LAN_PAIR_CREDENTIAL_INVALID")?;
+    if secret.len() != 64 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("LAN_PAIR_CREDENTIAL_INVALID".to_string());
+    }
+    Ok(())
+}
+
+fn read_lan_pair_store() -> Result<serde_json::Map<String, Value>, String> {
+    let Some(encoded) = get_credential_strict(KEY_LAN_PAIRS_V1)? else {
+        return Ok(serde_json::Map::new());
+    };
+    if encoded.len() > 2048 {
+        return Err("LAN_PAIR_STORE_INVALID".into());
+    }
+    let value: Value = serde_json::from_str(&encoded).map_err(|_| "LAN_PAIR_STORE_INVALID")?;
+    let pairs = value.as_object().ok_or("LAN_PAIR_STORE_INVALID")?;
+    if pairs.len() > 2 {
+        return Err("LAN_PAIR_STORE_INVALID".into());
+    }
+    for (key, record) in pairs {
+        validate_lan_pair_record(key, record).map_err(|_| "LAN_PAIR_STORE_INVALID")?;
+    }
+    Ok(pairs.clone())
+}
+
+fn write_lan_pair_store(pairs: &serde_json::Map<String, Value>) -> Result<(), String> {
+    if pairs.is_empty() {
+        delete_credential_uncoordinated(KEY_LAN_PAIRS_V1)?;
+        if get_credential_strict(KEY_LAN_PAIRS_V1)?.is_some() {
+            return Err("LAN_PAIR_STORE_VERIFY_FAILED".into());
+        }
+        return Ok(());
+    }
+    if pairs.len() > 2 {
+        return Err("LAN_PAIR_CAPACITY_EXCEEDED".into());
+    }
+    let encoded =
+        Zeroizing::new(serde_json::to_string(pairs).map_err(|_| "LAN_PAIR_STORE_INVALID")?);
+    // One managed credential also fits Windows' credential blob bound and
+    // ensures reset can remove every pair without an unreliable key index.
+    if encoded.len() > 2048 {
+        return Err("LAN_PAIR_CAPACITY_EXCEEDED".into());
+    }
+    set_credential_uncoordinated(KEY_LAN_PAIRS_V1, &encoded)?;
+    if get_credential_strict(KEY_LAN_PAIRS_V1)?
+        .as_deref()
+        .map(String::as_str)
+        != Some(encoded.as_str())
+    {
+        return Err("LAN_PAIR_STORE_VERIFY_FAILED".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn get_lan_pair_record(key: &str) -> Result<Option<Zeroizing<String>>, String> {
+    validate_lan_pair_key(key)?;
+    read_lan_pair_store()?
+        .get(key)
+        .map(|record| {
+            serde_json::to_string(record)
+                .map(Zeroizing::new)
+                .map_err(|_| "LAN_PAIR_STORE_INVALID".into())
+        })
+        .transpose()
+}
+
+pub(crate) fn set_lan_pair_record(key: &str, record_json: &str) -> Result<(), String> {
+    let record: Value =
+        serde_json::from_str(record_json).map_err(|_| "LAN_PAIR_CREDENTIAL_INVALID")?;
+    validate_lan_pair_record(key, &record)?;
+    let _guard = lan_pair_store_mutex()
+        .lock()
+        .map_err(|_| "LAN_PAIR_STORE_UNAVAILABLE")?;
+    let mut pairs = read_lan_pair_store()?;
+    pairs.insert(key.to_string(), record);
+    write_lan_pair_store(&pairs)
+}
+
+pub(crate) fn delete_lan_pair_credential(key: &str) -> Result<(), String> {
+    validate_lan_pair_key(key)?;
+    let _guard = lan_pair_store_mutex()
+        .lock()
+        .map_err(|_| "LAN_PAIR_STORE_UNAVAILABLE")?;
+    let mut pairs = read_lan_pair_store()?;
+    pairs.remove(key);
+    write_lan_pair_store(&pairs)
+}
+
 // ---------------------------------------------------------------------------
 // Low-level helpers
 // ---------------------------------------------------------------------------
@@ -136,6 +278,9 @@ fn is_native_repair_actor_key(key: &str) -> bool {
 /// a fake see the existing real-OS-keyring behaviour (namespaced to
 /// `the-small-pos-test`).
 pub fn get_credential(key: &str) -> Option<String> {
+    if is_lan_pair_private_key(key) {
+        return None;
+    }
     match get_credential_strict(key) {
         Ok(value) => value.map(|value| value.to_string()),
         Err(error) => {
@@ -168,6 +313,9 @@ pub(crate) fn get_credential_strict(key: &str) -> Result<Option<Zeroizing<String
 /// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`
 /// (see [`get_credential`] for the rationale).
 pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
+    if is_lan_pair_private_key(key) {
+        return Err("LAN_PAIR_NATIVE_ONLY".to_string());
+    }
     if is_terminal_binding_key(key) {
         return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
     }
@@ -265,6 +413,9 @@ fn set_credential_uncoordinated(key: &str, value: &str) -> Result<(), String> {
 ///
 /// Honours an installed `tests::fake_keyring` under `#[cfg(test)]`.
 pub fn delete_credential(key: &str) -> Result<(), String> {
+    if is_lan_pair_private_key(key) {
+        return Err("LAN_PAIR_NATIVE_ONLY".to_string());
+    }
     if is_terminal_binding_key(key) {
         return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
     }
@@ -582,5 +733,94 @@ pub fn settings_get(key: Option<&str>) -> Value {
             None => Value::Null,
         },
         None => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod lan_pair_credential_tests {
+    use super::*;
+
+    fn record(child: &str) -> String {
+        serde_json::json!({
+            "organization_id":"00000000-0000-4000-8000-000000000001",
+            "branch_id":"00000000-0000-4000-8000-000000000002",
+            "parent_terminal_id":"main-a",
+            "source_terminal_id":child,
+            "secret_hex":"ab".repeat(32)
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn lan_pair_secrets_are_native_only() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let key = "cafe_lan_pair_v1:waiter-a";
+        let secret = record("waiter-a");
+        set_lan_pair_record(key, &secret).unwrap();
+        assert_eq!(
+            get_lan_pair_record(key)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some(secret.as_str())
+        );
+        // No unindexed per-child credential remains after pairing.
+        assert!(get_credential_strict(key).unwrap().is_none());
+        for private in [key, KEY_LAN_PAIRS_V1] {
+            assert!(get_credential(private).is_none());
+            assert!(get_setting(Some("terminal"), Some(private)).is_null());
+            assert!(settings_get(Some(private)).is_null());
+            assert_eq!(
+                set_credential(private, &secret),
+                Err("LAN_PAIR_NATIVE_ONLY".to_string())
+            );
+            assert_eq!(
+                delete_credential(private),
+                Err("LAN_PAIR_NATIVE_ONLY".to_string())
+            );
+        }
+        delete_lan_pair_credential(key).unwrap();
+        assert!(get_lan_pair_record(key).unwrap().is_none());
+        assert!(get_credential_strict(KEY_LAN_PAIRS_V1).unwrap().is_none());
+        assert!(set_lan_pair_record("api_key", &secret).is_err());
+    }
+
+    #[test]
+    fn pair_capacity_rotation_revocation_and_reset_are_durable() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        for child in ["waiter-a", "waiter-b"] {
+            set_lan_pair_record(&format!("cafe_lan_pair_v1:{child}"), &record(child)).unwrap();
+        }
+        assert_eq!(
+            set_lan_pair_record("cafe_lan_pair_v1:waiter-c", &record("waiter-c")),
+            Err("LAN_PAIR_CAPACITY_EXCEEDED".into())
+        );
+        let rotated = record("waiter-a").replace(&"ab".repeat(32), &"cd".repeat(32));
+        set_lan_pair_record("cafe_lan_pair_v1:waiter-a", &rotated).unwrap();
+        assert_eq!(
+            get_lan_pair_record("cafe_lan_pair_v1:waiter-a")
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some(rotated.as_str())
+        );
+        delete_lan_pair_credential("cafe_lan_pair_v1:waiter-a").unwrap();
+        assert!(get_lan_pair_record("cafe_lan_pair_v1:waiter-b")
+            .unwrap()
+            .is_some());
+        crate::reset::factory_reset_with_authorized_owner_for_test().unwrap();
+        assert!(get_lan_pair_record("cafe_lan_pair_v1:waiter-b")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn corrupt_pair_map_cannot_rotate_but_reset_still_removes_it() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        set_credential_uncoordinated(KEY_LAN_PAIRS_V1, "corrupt").unwrap();
+        assert!(get_lan_pair_record("cafe_lan_pair_v1:waiter-a").is_err());
+        assert!(set_lan_pair_record("cafe_lan_pair_v1:waiter-a", &record("waiter-a")).is_err());
+        crate::reset::factory_reset_with_authorized_owner_for_test().unwrap();
+        assert!(get_credential_strict(KEY_LAN_PAIRS_V1).unwrap().is_none());
     }
 }

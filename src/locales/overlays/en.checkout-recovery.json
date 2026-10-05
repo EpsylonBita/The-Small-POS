@@ -1,0 +1,30 @@
+{
+  "modals": {
+    "menu": {
+      "draftReadFailed": "The saved cart could not be read. Checkout is paused; the previous cart has been retained.",
+      "draftSaveFailed": "The cart could not be saved. Checkout is paused until its durable save succeeds.",
+      "draftDiscardFailed": "The saved cart could not be discarded. It has been retained.",
+      "draftNeedsReconciliation": "The original checkout still needs reconciliation. No new payment was started. Use payment recovery or ask a manager.",
+      "draftRecoveryUnavailable": "The original checkout could not be verified. Its saved cart remains protected.",
+      "draftPending": "The original checkout is retained. Confirm its result before starting another payment.",
+      "draftLoading": "Loading the saved cart…",
+      "draftRecover": "Check original checkout",
+      "draftRecovered": "The original order has been restored.",
+      "draftExistingTable": "This table already has an active check. Open that check to add items.",
+      "draftDeclinedResumed": "The payment was declined. Your cart is restored; no new payment was started.",
+      "draftNotSentResumed": "No payment was sent. Your cart is restored; no new payment was started.",
+      "draftNotChargedResumed": "The original payment attempts did not charge the customer. Your cart is restored; no new payment was started."
+    }
+  },
+  "checkoutRecovery": {
+    "title": "Table operations awaiting recovery",
+    "guidance": "Original requests remain saved. Internet and current permissions are required. Do not repeat an uncertain payment.",
+    "unavailable": "Recovery status could not be read. Pending operations have been retained.",
+    "pending": "Waiting to reconnect",
+    "processing": "Restoring the original operation",
+    "approval_required": "Cancellation needs fresh staff or manager approval; reopen the original check.",
+    "auth_required": "Sign in with an authorized staff session to resume.",
+    "conflict": "Another terminal changed this check. Review its current state before continuing.",
+    "refresh": "Refresh status"
+  }
+}

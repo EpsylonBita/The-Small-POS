@@ -592,6 +592,10 @@ pub async fn payment_record(
             return Ok(outstanding_idempotency_error_response(error_code));
         }
     }
+    {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        payments::prepare_local_payment_currency(&conn, &mut payload)?;
+    }
     let requested_input = payments::build_payment_record_input(&payload)?;
     let terminal_approved = payment_payload_has_terminal_approval(&payload);
     if requested_input.method == "twint" {
@@ -786,6 +790,12 @@ pub async fn payment_record(
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             if let Some(payment) = payload.as_object_mut() {
+                if let Some(currency) = transaction
+                    .get("currency")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    payment.insert("currency".to_string(), serde_json::json!(currency));
+                }
                 if let Some(transaction_id) = transaction
                     .get("transactionId")
                     .and_then(|value| value.as_str())
@@ -1401,9 +1411,16 @@ mod dto_tests {
         ] {
             db::set_setting(&conn, "terminal", key, value).unwrap();
         }
-        db::set_setting(&conn, "organization", "currency", "CHF").unwrap();
-        conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now')",[]).unwrap();
-        conn.execute("INSERT INTO orders(id,branch_id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at) VALUES ('manual-order','manual-branch','[]',12,1200,'completed','takeaway','pending','pending','now','now')",[]).unwrap();
+        for (key, value) in [
+            ("currency", "CHF"),
+            ("store_currency_available", "true"),
+            ("store_currency_source", "branch_country"),
+            ("store_currency_branch_id", "manual-branch"),
+        ] {
+            db::set_setting(&conn, "restaurant", key, value).unwrap();
+        }
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at,currency) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now','CHF')",[]).unwrap();
+        conn.execute("INSERT INTO orders(id,branch_id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,created_at,updated_at,currency) VALUES ('manual-order','manual-branch','[]',12,1200,'completed','takeaway','pending','pending','now','now','CHF')",[]).unwrap();
         let generation = payments::settlement_generation_token(
             &payments::load_order_settlement_snapshot(&conn, "manual-order")
                 .unwrap()

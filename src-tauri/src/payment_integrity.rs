@@ -42,6 +42,7 @@ pub struct UnsettledPaymentBlocker {
     #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
     pub total_amount: Cents,
     #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
+    /// Completed merchandise principal, excluding each receipt's own tip.
     pub settled_amount: Cents,
     pub payment_status: String,
     pub payment_method: String,
@@ -178,18 +179,18 @@ struct RawBlockerRow {
     order_id: String,
     order_number: String,
     total_amount: Cents,
+    /// Gross receipt money, retained for duplicate/tender evidence.
+    gross_settled_amount: Cents,
+    /// Merchandise principal on completed receipts, excluding each own tip.
     settled_amount: Cents,
     payment_status: String,
     payment_method: String,
     completed_payment_count: i64,
     invalid_completed_method_count: i64,
-    /// Tips recorded on completed rows. Part of the overpayment ceiling: a
-    /// payment may legitimately carry the tip inside its amount.
-    tip_total: Cents,
-    /// Completed settled amount NET of refund adjustments. Only this figure
-    /// may be tested for overpayment — the gross sum double-counts a
-    /// refund-then-recollect cycle and would cry wolf on every corrected order.
+    /// Gross received money NET of effective refunds, retained as evidence.
     net_settled_amount: Cents,
+    /// Retained principal, netting each receipt's own refunds and tips.
+    net_principal_amount: Cents,
     /// Completed rows sharing one non-empty `transaction_ref`. One real
     /// transaction cannot settle twice, so >0 is an unambiguous replay.
     duplicate_transaction_ref_groups: i64,
@@ -524,11 +525,9 @@ fn with_reason_variant(
 /// wrong tender. Returns the most serious one, or `None` when the ledger's
 /// shape is sound (it may still be short — that is the caller's job).
 fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
-    // Ceiling for "how much may this order legitimately hold": its own total
-    // plus any tip recorded on the completed rows. Matches the server-side
-    // `validateCanonicalPaymentAmountForOrder` ceiling (orderTotal + tip), so
-    // a payment that the API accepted can never fail here.
-    let ceiling = row.total_amount + row.tip_total;
+    // Each receipt's own tip belongs only to that receipt. A refunded tip
+    // cannot enlarge the principal another receipt may collect.
+    let ceiling = row.total_amount;
 
     // 1. One real transaction settled twice. `transaction_ref` identifies a
     //    single card authorisation / platform settlement, so two completed
@@ -541,7 +540,7 @@ fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBloc
             "duplicate_payment",
             format!(
                 "The same transaction is recorded more than once ({} recorded against an order of {}).",
-                format_money(row.settled_amount),
+                format_money(row.gross_settled_amount),
                 format_money(row.total_amount)
             ),
             "Void the duplicate payment row, keeping one payment per real transaction.".to_string(),
@@ -553,8 +552,8 @@ fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBloc
     //    too ambiguous to raise on their own — two guests really can pay 5.00
     //    each in cash — but when the order is ALSO over its ceiling they name
     //    the likely cause, so the operator knows what to void.
-    if row.net_settled_amount > ceiling {
-        let overpaid = row.net_settled_amount - ceiling;
+    if row.net_principal_amount > ceiling {
+        let overpaid = row.net_principal_amount - ceiling;
         let suggested_fix = if row.duplicate_amount_groups > 0 {
             "Void the repeated payment row — two completed payments share the same method and amount."
                 .to_string()
@@ -566,16 +565,17 @@ fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBloc
                 row,
                 "overpaid_order",
                 format!(
-                    "Payments exceed the order by {}: {} recorded against an order of {}.",
+                    "Payments exceed the order by {}: {} of principal recorded against an order of {}.",
                     format_money(overpaid),
-                    format_money(row.net_settled_amount),
+                    format_money(row.net_principal_amount),
                     format_money(ceiling)
                 ),
                 suggested_fix,
             ),
             [
                 ("overpaidAmount", overpaid),
-                ("netSettledAmount", row.net_settled_amount),
+                ("netSettledAmount", row.net_principal_amount),
+                ("grossNetSettledAmount", row.net_settled_amount),
                 ("ceilingAmount", ceiling),
             ],
         ));
@@ -862,16 +862,16 @@ fn order_blocker_row_select() -> String {
               -- R1: `payments::platform_settlement_row_sql`).
               AND NOT $PLATFORM_SETTLEMENT_OP
         ), 0),
-        -- 8: tips on completed rows. Part of the overpayment ceiling.
+        -- 8: retained legacy column position for completed tips.
         COALESCE((
             SELECT SUM(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0))
             FROM order_payments op
             WHERE op.order_id = o.id
               AND $COUNTED_OP
         ), 0),
-        -- 9: completed money NET of refund adjustments. Only this may be
-        -- tested for overpayment; the gross sum at column 3 double-counts a
-        -- refund-then-recollect cycle. A gift card row nets the larger of its
+        -- 9: completed gross money NET of refund adjustments, retained as
+        -- evidence. Overpayment uses principal at column 19 instead.
+        -- A gift card row nets the larger of its
         -- refunds and its proven return floor, never both.
         COALESCE((
             SELECT SUM(
@@ -984,7 +984,32 @@ fn order_blocker_row_select() -> String {
                   AND json_extract(ph.metadata, '$.duplicate_review.reason') = 'platform_held'
             ) THEN 1
             ELSE 0
-        END"
+        END,
+        -- 18: completed merchandise principal. Ordinary refunds keep the
+        -- historical coverage policy; each receipt's own tip covers none.
+        COALESCE((
+            SELECT SUM(MAX(
+                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                - MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0),
+                0
+            )) FROM order_payments op
+            WHERE op.order_id = o.id AND $COUNTED_OP
+        ), 0),
+        -- 19: retained principal per receipt for overpayment. A gift row
+        -- nets max(refunds, proven return floor), retaining its proof checks.
+        COALESCE((
+            SELECT SUM(MAX(
+                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                - MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)
+                - MAX(COALESCE((
+                    SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                    FROM payment_adjustments pa
+                    WHERE pa.payment_id = op.id AND pa.adjustment_type = 'refund'
+                ), 0), $GIFT_RETURN_FLOOR),
+                0
+            )) FROM order_payments op
+            WHERE op.order_id = o.id AND $COUNTED_OP
+        ), 0)"
         .replace(
             "$EXTERNAL_PLATFORM_PREDICATE",
             &crate::platforms::external_marketplace_sql_predicate("o.plugin"),
@@ -1006,20 +1031,21 @@ fn order_blocker_row_select() -> String {
         )
 }
 
-/// Reads the 18 columns of [`order_blocker_row_select`] into a [`RawBlockerRow`].
+/// Reads the 20 columns of [`order_blocker_row_select`] into a [`RawBlockerRow`].
 fn read_blocker_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawBlockerRow> {
     Ok(RawBlockerRow {
         order_id: row.get(0)?,
         order_number: row.get(1)?,
         // W4b: cols 2 and 3 select INTEGER cents columns.
         total_amount: Cents::new(row.get::<_, i64>(2)?),
-        settled_amount: Cents::new(row.get::<_, i64>(3)?),
+        gross_settled_amount: Cents::new(row.get::<_, i64>(3)?),
+        settled_amount: Cents::new(row.get::<_, i64>(18)?),
         payment_status: row.get(4)?,
         payment_method: row.get(5)?,
         completed_payment_count: row.get(6)?,
         invalid_completed_method_count: row.get(7)?,
-        tip_total: Cents::new(row.get::<_, i64>(8)?),
         net_settled_amount: Cents::new(row.get::<_, i64>(9)?),
+        net_principal_amount: Cents::new(row.get::<_, i64>(19)?),
         duplicate_transaction_ref_groups: row.get(10)?,
         duplicate_amount_groups: row.get(11)?,
         expected_platform_settlement: ExpectedPlatformSettlement::from_sql(row.get::<_, i64>(12)?),
@@ -1855,6 +1881,46 @@ mod tests {
             .map(|blocker| blocker.reason_code.clone())
     }
 
+    #[test]
+    fn payment_principal_tip_z_blocks_tip_heavy_paid_claim_until_topup() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "tip-z", 1200, "paid", None, None);
+        seed_payment(&conn, "tip-z-first", "tip-z", "cash", 1400, None);
+        conn.execute(
+            "UPDATE order_payments SET tip_amount=8,tip_amount_cents=800 WHERE id='tip-z-first'",
+            [],
+        )
+        .unwrap();
+        let blockers = load_order_payment_blockers(&conn, "tip-z").unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "partial_cash_payment");
+        assert_eq!(blockers[0].difference_cents, 600);
+        assert_eq!(blockers[0].settled_amount, Cents::new(600));
+        assert!(blockers[0].reason_text.contains("6.00"));
+        seed_payment(&conn, "tip-z-topup", "tip-z", "cash", 600, None);
+        assert_eq!(order_reason(&conn, "tip-z"), None);
+    }
+
+    #[test]
+    fn payment_principal_tip_refunded_tip_does_not_hide_later_overpayment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "tip-overpay", 1000, "paid", None, None);
+        seed_payment(&conn, "tip-returned", "tip-overpay", "cash", 1200, None);
+        conn.execute(
+            "UPDATE order_payments SET tip_amount=2,tip_amount_cents=200 WHERE id='tip-returned'",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,created_at,updated_at) VALUES ('tip-full-return','tip-returned','tip-overpay','refund',12,1200,'tip test refund','now','now')",[]).unwrap();
+        seed_payment(&conn, "tip-new", "tip-overpay", "card", 1200, None);
+        let blockers = load_order_payment_blockers(&conn, "tip-overpay").unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "overpaid_order");
+        assert_eq!(blockers[0].reason_amounts["overpaidAmount"], 200);
+    }
+
     /// Founder's rule, 30/09/2026: no order is registered as paid without a
     /// payment record. The Z refuses every order that claims money its
     /// completed rows do not cover, and lets through only money that is not
@@ -2228,6 +2294,15 @@ mod tests {
     fn voiding_the_drawer_row_and_settling_leaves_the_order_clean() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
+        for (category, key, value) in [
+            ("terminal", "branch_id", "branch-1"),
+            ("restaurant", "store_currency_branch_id", "branch-1"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            crate::db::set_setting(&conn, category, key, value).unwrap();
+        }
         seed_order(
             &conn,
             "ord-efood-live",

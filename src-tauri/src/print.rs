@@ -4084,6 +4084,29 @@ fn build_item_note_text(item: &Value) -> Option<String> {
     }
 }
 
+/// Completed receipts retain their original currency across later country
+/// changes. Missing/mixed historical units stay visibly unresolved, not guessed.
+pub(crate) fn apply_order_currency_to_layout(
+    db: &DbState,
+    order_id: &str,
+    layout: &mut LayoutConfig,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    layout.currency_symbol =
+        match crate::fiscal::payload_builder::resolve_order_document_currency(&conn, order_id) {
+            Ok(currency) => format!(" {currency}"),
+            Err(error)
+                if error == "PAYMENT_CURRENCY_UNAVAILABLE"
+                    || error == "PAYMENT_CURRENCY_MIXED"
+                    || error == "PAYMENT_CURRENCY_MISMATCH" =>
+            {
+                " ?".to_string()
+            }
+            Err(error) => return Err(error),
+        };
+    Ok(())
+}
+
 pub fn resolve_layout_config(
     db: &DbState,
     profile: &Value,
@@ -4144,18 +4167,8 @@ pub fn resolve_layout_config(
         .or_else(|| setting_text(&conn, "terminal", "store_address"));
     let store_phone = setting_text(&conn, "restaurant", "phone")
         .or_else(|| setting_text(&conn, "terminal", "store_phone"));
-    let currency_symbol = setting_text(&conn, "receipt", "currency_symbol")
-        .or_else(|| setting_text(&conn, "organization", "currency_symbol"))
-        .or_else(|| {
-            // Default currency symbol based on language when not explicitly set
-            let lang = setting_text(&conn, "general", "language").unwrap_or_default();
-            match lang.as_str() {
-                "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" | "sq" => {
-                    Some(" \u{20AC}".to_string())
-                }
-                _ => None,
-            }
-        })
+    let currency_symbol = crate::fiscal::payload_builder::resolve_store_currency_code(&conn)
+        .map(|currency| format!(" {currency}"))
         .unwrap_or_default();
     let vat_number = setting_text(&conn, "organization", "vat_number")
         .or_else(|| setting_text(&conn, "restaurant", "vat_number"));
@@ -6450,6 +6463,10 @@ fn build_shift_checkout_doc(
     };
 
     let mut doc = Ok(ShiftCheckoutDoc {
+        currency: summary
+            .get("currency")
+            .and_then(Value::as_str)
+            .and_then(crate::fiscal::payload_builder::normalize_currency_code),
         shift_id: shift_id.to_string(),
         role_type: resolved_role_type,
         staff_name: shift
@@ -7052,6 +7069,8 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         .unwrap_or_default();
 
     ZReportDoc {
+        currency: text_from_paths(payload, &["/currency"])
+            .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
         gift_liability_cash_cents: 0,
         gift_ordinary_adjustment_cents: 0,
         gift_close_lines: Vec::new(),
@@ -7312,6 +7331,8 @@ fn build_z_report_doc_with_conn(
         number_from_paths(&rj, &["/tips/total", "/tipsTotal"]).unwrap_or(tips_total);
 
     Ok(ZReportDoc {
+        currency: text_from_paths(&rj, &["/currency"])
+            .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
         gift_liability_cash_cents: 0,
         gift_ordinary_adjustment_cents: 0,
         gift_close_lines: Vec::new(),
@@ -7952,6 +7973,8 @@ fn gift_cents_amount(cents: i64) -> f64 {
     cents as f64 / 100.0
 }
 
+/// Test convenience wrapper; production keeps the document and gift binding together.
+#[cfg(test)]
 fn build_document_for_job(
     db: &DbState,
     entity_type: &str,
@@ -8029,6 +8052,11 @@ fn build_document_and_gift_binding_for_job(
                         })
                         .map(|name| serde_json::json!({ "terminalName": name }));
                     let mut doc = build_shift_checkout_doc(db, entity_id, terminal_only.as_ref())?;
+                    // The gift close proves its own drawer unit; it cannot
+                    // assign a currency to unrelated historical sales rows.
+                    doc.currency = doc
+                        .currency
+                        .filter(|currency| currency == &original.currency);
                     doc.expected_amount = Some(gift_cents_amount(original.expected_cents));
                     doc.closing_amount = Some(gift_cents_amount(original.counted_cents));
                     doc.variance_amount = Some(gift_cents_amount(original.variance_cents));
@@ -8353,7 +8381,8 @@ pub fn generate_receipt_file(
     let document = ReceiptDocument::OrderReceipt(build_order_receipt_doc(db, order_id)?);
     let profile = printers::resolve_printer_profile_for_role(db, None, Some("receipt"))?
         .unwrap_or_else(|| serde_json::json!({}));
-    let layout = resolve_layout_config(db, &profile, "order_receipt")?;
+    let mut layout = resolve_layout_config(db, &profile, "order_receipt")?;
+    apply_order_currency_to_layout(db, order_id, &mut layout)?;
     let html = receipt_renderer::render_html(&document, &layout);
     let path_str = write_print_html_file(data_dir, "receipt", order_id, &html)?;
     info!(order_id = %order_id, "Receipt file generated");
@@ -8998,7 +9027,11 @@ fn render_managed_payload(
     ),
     String,
 > {
-    let layout = resolve_layout_config(db, profile, entity_type)?;
+    let mut layout = resolve_layout_config(db, profile, entity_type)?;
+    if let ReceiptDocument::OrderReceipt(receipt) = document {
+        apply_order_currency_to_layout(db, &receipt.order_id, &mut layout)?;
+    }
+    receipt_renderer::apply_document_currency(document, &mut layout);
     let mut rendered = receipt_renderer::render_escpos(document, &layout);
     let embed_logo_in_body = rendered.body_mode == receipt_renderer::EscPosBodyMode::RasterExact
         && is_receipt_like_entity_type(entity_type);
@@ -14592,7 +14625,8 @@ mod tests {
         assert_eq!(envelope["show_qr_code"], true);
         assert_eq!(envelope["qr_configured"], true);
         assert_eq!(envelope["copy_label"], "DUPLICATE");
-        assert_eq!(envelope["currency_symbol"], "EUR");
+        // A custom label cannot invent the original unit of this legacy order.
+        assert_eq!(envelope["currency_symbol"], " ?");
         assert_eq!(envelope["cut_paper"], false);
     }
 
@@ -16966,6 +17000,37 @@ mod tests {
         .expect("insert shift checkout fixture");
     }
 
+    fn seed_print_store_currency(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        for (category, key, value) in [
+            ("terminal", "branch_id", "branch-1"),
+            ("restaurant", "store_currency_branch_id", "branch-1"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            db::set_setting(&conn, category, key, value).unwrap();
+        }
+    }
+
+    #[test]
+    fn unpaid_order_print_keeps_original_currency_after_country_changes() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "unpaid-original", "ORIGINAL-CHF", 12.5);
+            conn.execute(
+                "UPDATE orders SET currency='CHF' WHERE id='unpaid-original'",
+                [],
+            )
+            .unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
+        }
+        let mut layout = LayoutConfig::default();
+        apply_order_currency_to_layout(&db, "unpaid-original", &mut layout).unwrap();
+        assert_eq!(layout.currency_symbol.trim(), "CHF");
+    }
+
     fn insert_active_cashier_fixture(conn: &Connection, shift_id: &str, drawer_id: &str) {
         // W4e Step 0: dual-populate (200.0/0.0 → 20000/0).
         conn.execute(
@@ -16973,11 +17038,11 @@ mod tests {
                 id, staff_id, staff_name, role_type, branch_id, terminal_id,
                 check_in_time, opening_cash_amount, opening_cash_amount_cents,
                 status, calculation_version,
-                sync_status, created_at, updated_at
+                sync_status, created_at, updated_at, currency
              ) VALUES (
                 ?1, 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
                 '2026-03-18T08:00:00Z', 200.0, 20000, 'active', 2,
-                'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', 'EUR'
              )",
             params![shift_id],
         )
@@ -16987,10 +17052,10 @@ mod tests {
                 id, staff_shift_id, cashier_id, branch_id, terminal_id,
                 opening_amount, opening_amount_cents,
                 driver_cash_given, driver_cash_given_cents,
-                opened_at, created_at, updated_at
+                opened_at, created_at, updated_at, currency
              ) VALUES (
                 ?1, ?2, 'cashier-1', 'branch-1', 'term-1',
-                200.0, 20000, 0.0, 0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                200.0, 20000, 0.0, 0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', 'EUR'
              )",
             params![drawer_id, shift_id],
         )
@@ -17688,6 +17753,67 @@ mod tests {
     }
 
     #[test]
+    fn z_report_currency_print_uses_frozen_report_and_keeps_legacy_unknown() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
+        }
+        for (currency, expected) in [(Some("CHF"), "CHF"), (None, "?")] {
+            let payload = serde_json::json!({
+                "currency": currency,
+                "date": "2026-10-01",
+                "sales": {"totalSales": 42.50, "cashSales": 42.50, "totalOrders": 1}
+            });
+            let doc = build_z_report_doc_from_payload(&db, &payload, "original-z");
+            assert_eq!(doc.currency.as_deref(), currency);
+            let document = ReceiptDocument::ZReport(doc);
+            let mut layout =
+                resolve_layout_config(&db, &serde_json::json!({}), "z_report").unwrap();
+            receipt_renderer::apply_document_currency(&document, &mut layout);
+            assert_eq!(layout.currency_symbol.trim(), expected);
+            let html = receipt_renderer::render_html(&document, &layout);
+            assert!(html.contains(expected));
+            assert!(!html.contains("USD"));
+        }
+    }
+
+    #[test]
+    fn checkout_currency_closed_shift_survives_store_country_change_and_legacy_stays_unknown() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_shift_checkout_fixture(&conn, "closed-chf", "terminal-1");
+            insert_shift_checkout_fixture(&conn, "legacy-unit", "terminal-1");
+            conn.execute(
+                "UPDATE staff_shifts SET currency='CHF' WHERE id='closed-chf'",
+                [],
+            )
+            .unwrap();
+            for (category, key, value) in [
+                ("terminal", "branch_id", "branch-1"),
+                ("restaurant", "store_currency_branch_id", "branch-1"),
+                ("restaurant", "store_currency_available", "true"),
+                ("restaurant", "store_currency_source", "branch_country"),
+                ("restaurant", "currency", "USD"),
+            ] {
+                db::set_setting(&conn, category, key, value).unwrap();
+            }
+        }
+        for (id, expected) in [("closed-chf", Some("CHF")), ("legacy-unit", None)] {
+            let doc = build_shift_checkout_doc(&db, id, None).unwrap();
+            assert_eq!(doc.currency.as_deref(), expected);
+            let document = ReceiptDocument::ShiftCheckout(doc);
+            let mut layout =
+                resolve_layout_config(&db, &serde_json::json!({}), "shift_checkout").unwrap();
+            receipt_renderer::apply_document_currency(&document, &mut layout);
+            assert_eq!(layout.currency_symbol.trim(), expected.unwrap_or("?"));
+            let html = receipt_renderer::render_html(&document, &layout);
+            assert!(!html.contains("USD"));
+        }
+    }
+
+    #[test]
     fn test_build_document_for_job_shift_checkout_uses_display_terminal_name() {
         let db = test_db();
         {
@@ -17811,6 +17937,7 @@ mod tests {
     fn test_build_document_for_job_cashier_shift_checkout_includes_transferred_staff_returns() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_print_store_currency(&db);
 
         let cashier_one = crate::shifts::open_shift(
             &db,
@@ -18048,6 +18175,7 @@ mod tests {
     ) {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_print_store_currency(&db);
         {
             let conn = db.conn.lock().unwrap();
             insert_active_cashier_fixture(&conn, "cashier-shift-1", "drawer-shift-1");
@@ -18105,6 +18233,7 @@ mod tests {
     {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_print_store_currency(&db);
         {
             let conn = db.conn.lock().unwrap();
             insert_active_cashier_fixture(
@@ -18173,6 +18302,7 @@ mod tests {
     ) {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
+        seed_print_store_currency(&db);
         {
             let conn = db.conn.lock().unwrap();
             insert_active_cashier_fixture(&conn, "cashier-shift-1", "drawer-shift-1");
@@ -18943,11 +19073,21 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_layout_config_classic_receipt_normalizes_unsupported_euro_symbol() {
+    fn test_receipt_currency_uses_store_country_not_language_or_manual_symbol() {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
             db::set_setting(&conn, "general", "language", "el").unwrap();
+            for (category, key, value) in [
+                ("terminal", "branch_id", "branch-ch"),
+                ("restaurant", "store_currency_branch_id", "branch-ch"),
+                ("restaurant", "store_currency_available", "true"),
+                ("restaurant", "store_currency_source", "branch_country"),
+                ("restaurant", "currency", "CHF"),
+                ("receipt", "currency_symbol", " EUR"),
+            ] {
+                db::set_setting(&conn, category, key, value).unwrap();
+            }
         }
 
         let profile = serde_json::json!({
@@ -18960,7 +19100,7 @@ mod tests {
         let layout =
             resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
 
-        assert_eq!(layout.currency_symbol, " EUR");
+        assert_eq!(layout.currency_symbol, " CHF");
     }
 
     #[test]

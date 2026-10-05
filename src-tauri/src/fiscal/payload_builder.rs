@@ -156,12 +156,9 @@ pub fn build_fiscal_receipt_input(
 
     let issued_at = normalize_issued_at(&header.issued_at);
     let business_day_iso = extract_business_day(&issued_at);
-    // The store's configured currency (29/09/2026: a Swiss store's receipts
-    // were labelled EUR). EUR only when nothing valid is configured. A
-    // fiscally active plugin that cannot accept it is logged as a clear
-    // warning; the receipt is still built and queued (the server decides).
-    let currency =
-        resolve_store_currency_code(conn).unwrap_or_else(|| DEFAULT_FISCAL_CURRENCY.to_string());
+    // A new unpaid order has its own immutable unit. Once a ledger exists it
+    // must agree; current settings cannot relabel either historical source.
+    let currency = resolve_order_document_currency(conn, order_id)?;
     let _ = super::currency::warn_if_currency_unsupported(conn, branch_id);
     let sequence_number =
         super::sequence_counter::next_sequence(conn, branch_id, &business_day_iso)?;
@@ -422,41 +419,82 @@ fn map_to_cis_payment_code(method: Option<&str>) -> &'static str {
     }
 }
 
-/// Currency of a fiscal receipt when the store has none configured.
-pub(crate) const DEFAULT_FISCAL_CURRENCY: &str = "EUR";
+/// Normalize an explicit persisted or authoritative ISO money unit.
+pub(crate) fn normalize_currency_code(raw: &str) -> Option<String> {
+    let code = raw.trim().trim_matches('"').trim().to_ascii_uppercase();
+    (code.len() == 3 && code.chars().all(|ch| ch.is_ascii_uppercase())).then_some(code)
+}
 
-/// Settings the store's currency is read from, in the order the Android POS
-/// reads them (`resolveStoreCurrencyCode`): organization, payment,
-/// restaurant, terminal.
-const CURRENCY_SETTING_CANDIDATES: [(&str, &str); 4] = [
-    ("organization", "currency"),
-    ("payment", "currency"),
-    ("restaurant", "currency"),
-    ("terminal", "currency"),
-];
-
-/// The store's configured ISO 4217 currency code (upper case), or `None`.
-///
-/// Deliberately NOT inferred from the country: a country setting can be
-/// wrong (Le Petit Paris, a Swiss store, was configured as "United States"),
-/// and a guessed currency would end up in fiscal documents. A value that is
-/// not three letters (`€`, `EURO`) is ignored. A missing `local_settings`
-/// table (older fixtures) reads as nothing configured.
+/// Only the server's country-derived, branch-scoped snapshot authorizes new
+/// operating amounts. A validated same-branch snapshot remains usable offline.
 pub(crate) fn resolve_store_currency_code(conn: &Connection) -> Option<String> {
-    CURRENCY_SETTING_CANDIDATES
-        .iter()
-        .find_map(|(category, key)| {
-            let raw: String = conn
-                .query_row(
-                    "SELECT setting_value FROM local_settings
-                     WHERE setting_category = ?1 AND setting_key = ?2",
-                    params![category, key],
-                    |row| row.get(0),
-                )
-                .ok()?;
-            let code = raw.trim().trim_matches('"').trim().to_ascii_uppercase();
-            (code.len() == 3 && code.chars().all(|ch| ch.is_ascii_uppercase())).then_some(code)
-        })
+    let setting = |category: &str, key: &str| crate::db::get_setting(conn, category, key);
+    if setting("restaurant", "store_currency_available").as_deref() != Some("true")
+        || setting("restaurant", "store_currency_source").as_deref() != Some("branch_country")
+    {
+        return None;
+    }
+    let branch = setting("terminal", "branch_id")?;
+    let currency_branch = setting("restaurant", "store_currency_branch_id")?;
+    if branch.trim().is_empty() || branch.trim() != currency_branch.trim() {
+        return None;
+    }
+    normalize_currency_code(&setting("restaurant", "currency")?)
+}
+
+/// Fiscal creation may precede tender, but both recorded sources must agree
+/// once money exists. Missing or mixed ledger evidence never falls back.
+pub(crate) fn resolve_order_document_currency(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<String, String> {
+    let ledger = resolve_order_payment_currency(conn, order_id)?;
+    let order = conn
+        .query_row(
+            "SELECT currency FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|error| format!("read fiscal order currency: {error}"))?
+        .as_deref()
+        .and_then(normalize_currency_code);
+    if order
+        .as_ref()
+        .zip(ledger.as_ref())
+        .is_some_and(|(order, ledger)| order != ledger)
+    {
+        return Err("PAYMENT_CURRENCY_MISMATCH".to_string());
+    }
+    ledger
+        .or(order)
+        .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string())
+}
+
+/// Receipt rebuilds and remaining collections use the original ledger's unit.
+/// A missing or mixed currency is an error, never permission to use today's unit.
+pub(crate) fn resolve_order_payment_currency(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Option<String>, String> {
+    let mut statement = conn
+        .prepare("SELECT currency FROM order_payments WHERE order_id = ?1 AND status IN ('completed', 'partially_refunded', 'refunded', 'voided')")
+        .map_err(|error| format!("read payment currency: {error}"))?;
+    let rows = statement
+        .query_map(params![order_id], |row| row.get::<_, Option<String>>(0))
+        .map_err(|error| format!("read payment currency: {error}"))?;
+    let mut currency: Option<String> = None;
+    for row in rows {
+        let code = row
+            .map_err(|error| error.to_string())?
+            .as_deref()
+            .and_then(normalize_currency_code)
+            .ok_or_else(|| "PAYMENT_CURRENCY_UNAVAILABLE".to_string())?;
+        if currency.as_ref().is_some_and(|previous| previous != &code) {
+            return Err("PAYMENT_CURRENCY_MIXED".to_string());
+        }
+        currency = Some(code);
+    }
+    Ok(currency)
 }
 
 /// Look up the operator OIB (per-cashier Croatian taxpayer ID) for the
@@ -510,6 +548,47 @@ fn extract_business_day(issued_at: &str) -> String {
 mod audit_1_tests {
     use super::*;
 
+    #[test]
+    fn fiscal_document_currency_preserves_unpaid_order_snapshot_and_reconciles_ledger() {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,status,created_at,updated_at,currency) VALUES('currency-unpaid','[]',10,'pending','now','now','CHF')", []).unwrap();
+        crate::db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
+        assert_eq!(
+            resolve_order_document_currency(&conn, "currency-unpaid").unwrap(),
+            "CHF"
+        );
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,status,created_at,updated_at,currency) VALUES('currency-first','currency-unpaid','cash',10,'completed','now','now','CHF')", []).unwrap();
+        assert_eq!(
+            resolve_order_document_currency(&conn, "currency-unpaid").unwrap(),
+            "CHF"
+        );
+        // A conflicting ledger must not be relabeled with either original or current settings.
+        conn.execute(
+            "UPDATE order_payments SET currency='EUR' WHERE id='currency-first'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_order_document_currency(&conn, "currency-unpaid").unwrap_err(),
+            "PAYMENT_CURRENCY_MISMATCH"
+        );
+        conn.execute(
+            "UPDATE order_payments SET currency='' WHERE id='currency-first'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_order_document_currency(&conn, "currency-unpaid").unwrap_err(),
+            "PAYMENT_CURRENCY_UNAVAILABLE"
+        );
+        conn.execute("INSERT INTO orders(id,items,total_amount,status,created_at,updated_at) VALUES('currency-legacy','[]',10,'pending','now','now')", []).unwrap();
+        assert_eq!(
+            resolve_order_document_currency(&conn, "currency-legacy").unwrap_err(),
+            "PAYMENT_CURRENCY_UNAVAILABLE"
+        );
+    }
+
     fn make_test_db() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory");
         // Audit round 4 P0 fix (2026-05-25): NO `payment_method` column —
@@ -527,6 +606,7 @@ mod audit_1_tests {
             CREATE TABLE orders (
                 id TEXT PRIMARY KEY,
                 organization_id TEXT,
+                currency TEXT,
                 receipt_number TEXT,
                 items TEXT NOT NULL DEFAULT '[]',
                 total_amount REAL NOT NULL DEFAULT 0,
@@ -544,6 +624,7 @@ mod audit_1_tests {
                 method TEXT NOT NULL,
                 amount REAL NOT NULL,
                 amount_cents INTEGER,
+                currency TEXT DEFAULT 'EUR',
                 tip_amount_cents INTEGER,
                 status TEXT NOT NULL DEFAULT 'completed',
                 transaction_ref TEXT,
@@ -615,44 +696,80 @@ mod audit_1_tests {
         .expect("set local setting");
     }
 
-    /// 29/09/2026: the payload hard-coded EUR although Le Petit Paris trades
-    /// in CHF. The receipt carries the store's configured currency.
     #[test]
-    fn the_receipt_carries_the_stores_configured_currency() {
+    fn a_receipt_rebuild_preserves_payment_currency_after_store_country_changes() {
         let conn = make_test_db();
         seed_simple_order(&conn);
-        set_setting(&conn, "organization", "currency", "chf");
+        conn.execute("UPDATE order_payments SET currency = 'CHF'", [])
+            .unwrap();
+        set_setting(&conn, "restaurant", "currency", "EUR");
         let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
         assert_eq!(payload["totals"]["currency"], "CHF");
     }
 
     #[test]
-    fn the_currency_follows_the_android_setting_order_and_eur_is_only_the_fallback() {
+    fn a_fully_refunded_payment_keeps_its_original_currency() {
         let conn = make_test_db();
         seed_simple_order(&conn);
-
-        // Nothing configured: EUR.
-        assert_eq!(resolve_store_currency_code(&conn), None);
+        conn.execute(
+            "UPDATE order_payments SET currency = 'CHF', status = 'refunded'",
+            [],
+        )
+        .unwrap();
+        set_setting(&conn, "restaurant", "currency", "EUR");
+        assert_eq!(
+            resolve_order_payment_currency(&conn, "ord-1")
+                .unwrap()
+                .as_deref(),
+            Some("CHF")
+        );
         let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
-        assert_eq!(payload["totals"]["currency"], "EUR");
+        assert_eq!(payload["totals"]["currency"], "CHF");
+    }
 
-        // A country is never turned into a currency (the Swiss store was
-        // configured as "United States").
-        set_setting(&conn, "organization", "country", "United States");
-        assert_eq!(resolve_store_currency_code(&conn), None);
+    #[test]
+    fn unresolved_or_mixed_payment_currency_never_uses_current_country() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute("UPDATE order_payments SET currency = NULL", [])
+            .unwrap();
+        assert!(build_fiscal_receipt_input(&conn, "ord-1", "branch-1")
+            .unwrap_err()
+            .contains("PAYMENT_CURRENCY_UNAVAILABLE"));
+        conn.execute("UPDATE order_payments SET currency = 'CHF'", [])
+            .unwrap();
+        conn.execute("INSERT INTO order_payments (id,order_id,method,amount,currency,status,created_at) VALUES ('p2','ord-1','cash',1,'EUR','completed','2026-10-04')", []).unwrap();
+        assert!(build_fiscal_receipt_input(&conn, "ord-1", "branch-1")
+            .unwrap_err()
+            .contains("PAYMENT_CURRENCY_MIXED"));
+    }
 
-        // Not an ISO code: ignored.
-        set_setting(&conn, "organization", "currency", "€");
-        set_setting(&conn, "terminal", "currency", "EURO");
-        assert_eq!(resolve_store_currency_code(&conn), None);
-
-        // organization -> payment -> restaurant -> terminal.
-        set_setting(&conn, "terminal", "currency", "ALL");
-        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("ALL"));
-        set_setting(&conn, "payment", "currency", "\"chf\"");
-        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("CHF"));
+    #[test]
+    fn operating_currency_requires_validated_matching_branch_authority() {
+        let conn = make_test_db();
         set_setting(&conn, "organization", "currency", "EUR");
-        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("EUR"));
+        set_setting(&conn, "restaurant", "currency", "CHF");
+        assert_eq!(resolve_store_currency_code(&conn), None);
+        set_setting(&conn, "restaurant", "store_currency_available", "true");
+        set_setting(
+            &conn,
+            "restaurant",
+            "store_currency_source",
+            "branch_country",
+        );
+        set_setting(
+            &conn,
+            "restaurant",
+            "store_currency_branch_id",
+            "swiss-branch",
+        );
+        set_setting(&conn, "terminal", "branch_id", "swiss-branch");
+        assert_eq!(resolve_store_currency_code(&conn).as_deref(), Some("CHF"));
+        set_setting(&conn, "terminal", "branch_id", "other-branch");
+        assert_eq!(resolve_store_currency_code(&conn), None);
+        set_setting(&conn, "terminal", "branch_id", "swiss-branch");
+        set_setting(&conn, "restaurant", "store_currency_available", "false");
+        assert_eq!(resolve_store_currency_code(&conn), None);
     }
 
     #[test]
@@ -1201,7 +1318,7 @@ mod audit_1_tests {
     }
 
     #[test]
-    fn audit_1_orders_with_no_payments_still_returns_payload() {
+    fn an_unpaid_order_has_no_persisted_fiscal_currency() {
         let conn = make_test_db();
         conn.execute(
             "INSERT INTO orders (id, items, total_amount, created_at)
@@ -1209,14 +1326,10 @@ mod audit_1_tests {
             [],
         )
         .unwrap();
-        // No order_payments row.
-        let payload = build_fiscal_receipt_input(&conn, "ord-unpaid", "branch-1").unwrap();
-
-        // Uses the header total_amount for grossCents — the
-        // validator will still reject (empty payments array), but the
-        // builder's job is to assemble the payload, not gate on it.
-        assert_eq!(payload["totals"]["grossCents"], 500);
-        assert_eq!(payload["payments"].as_array().unwrap().len(), 0);
+        // A historical order without money-unit evidence cannot be labelled
+        // with today's country currency during a later rebuild.
+        let error = build_fiscal_receipt_input(&conn, "ord-unpaid", "branch-1").unwrap_err();
+        assert_eq!(error, "PAYMENT_CURRENCY_UNAVAILABLE");
     }
 
     #[test]

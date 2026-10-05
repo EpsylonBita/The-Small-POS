@@ -1,3 +1,5 @@
+import { formatCurrency } from '../utils/format';
+import { getStoreCurrency } from '../utils/store-currency';
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { DeliveryValidationComponent } from '../components/delivery/DeliveryValidationComponent';
@@ -66,7 +68,7 @@ export function DeliveryValidationTestPage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-white/90 mb-2">
-                Order Amount (EUR)
+                Order Amount ({getStoreCurrency() ?? '—'})
               </label>
               <input
                 type="number"
@@ -182,8 +184,8 @@ export function DeliveryValidationTestPage() {
                   <div className="mt-1 p-3 bg-white/5 rounded-2xl">
                     <div className="grid grid-cols-2 gap-4 text-sm text-white/90">
                       <div>Name: {validationResult.zone.name}</div>
-                      <div>Fee: {validationResult.zone.deliveryFee} EUR</div>
-                      <div>Minimum Order: {validationResult.zone.minimumOrderAmount} EUR</div>
+                      <div>Fee: {formatCurrency(validationResult.zone.deliveryFee)}</div>
+                      <div>Minimum Order: {formatCurrency(validationResult.zone.minimumOrderAmount)}</div>
                       <div>
                         Est. Time: {validationResult.zone.estimatedTime.min}-{validationResult.zone.estimatedTime.max} min
                       </div>
@@ -198,11 +200,11 @@ export function DeliveryValidationTestPage() {
                   <span className="text-white/70">Order Validation:</span>
                   <div className="mt-1 p-3 bg-white/5 rounded-2xl">
                     <div className="grid grid-cols-2 gap-4 text-sm text-white/90">
-                      <div>Order Amount: {validationResult.validation.orderAmount} EUR</div>
-                      <div>Estimated Total: {validationResult.validation.estimatedTotal} EUR</div>
+                      <div>Order Amount: {formatCurrency(validationResult.validation.orderAmount)}</div>
+                      <div>Estimated Total: {formatCurrency(validationResult.validation.estimatedTotal)}</div>
                       <div>Meets Minimum: {validationResult.validation.meetsMinimumOrder ? 'Yes' : 'No'}</div>
                       {validationResult.validation.shortfall > 0 && (
-                        <div>Shortfall: {validationResult.validation.shortfall} EUR</div>
+                        <div>Shortfall: {formatCurrency(validationResult.validation.shortfall)}</div>
                       )}
                     </div>
                   </div>

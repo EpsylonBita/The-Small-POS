@@ -47,7 +47,7 @@ vi.mock('../../../contexts/i18n-context', () => {
 
 vi.mock('../../../contexts/shift-context', () => {
   const shiftValue = {
-    staff: { branchId: 'branch-1' },
+    staff: { branchId: 'branch-1', organizationId: 'org-1', terminalId: 'terminal-1' },
     activeShift: null,
     isShiftActive: false,
     refreshActiveShift: vi.fn(async () => undefined),
@@ -101,8 +101,8 @@ vi.mock('../../../services/MenuService', () => ({
 }));
 
 vi.mock('../../../services/terminal-credentials', () => ({
-  getCachedTerminalCredentials: vi.fn(() => ({ branchId: 'branch-1' })),
-  refreshTerminalCredentialCache: vi.fn(async () => ({ branchId: 'branch-1' })),
+  getCachedTerminalCredentials: vi.fn(() => ({ branchId: 'branch-1', organizationId: 'org-1', terminalId: 'terminal-1' })),
+  refreshTerminalCredentialCache: vi.fn(async () => ({ branchId: 'branch-1', organizationId: 'org-1', terminalId: 'terminal-1' })),
 }));
 
 vi.mock('../../../utils/api-helpers', () => ({
@@ -115,8 +115,16 @@ vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
   validateCatalogOffers: vi.fn(async () => null),
 }));
 
+const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0 }));
+beforeEach(() => { draftStorage.draft = null; draftStorage.generation = 0; });
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
+    invoke: vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_inspect') return { success: true, outcome: 'not_found', canCollect: false };
+      if (command === 'checkout_draft_put') { draftStorage.draft = input.draft; draftStorage.generation++; }
+      if (command === 'checkout_draft_delete') { draftStorage.draft = null; draftStorage.generation++; }
+      return { success: true, scope: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' }, generation: draftStorage.generation, draft: draftStorage.draft };
+    }),
     settings: { get: vi.fn(async () => null) },
     orders: { getById: vi.fn(async () => null) },
     loyalty: {

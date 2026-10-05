@@ -176,6 +176,68 @@ fn compute_next_retry_delay_ms(retry_delay_ms: i64, module_type: &str) -> i64 {
 /// Maximum number of retry attempts before marking an item as permanently failed.
 pub const MAX_RETRY_ATTEMPTS: i64 = 10;
 
+fn is_safe_transient_retry(code: &str, module: &str) -> bool {
+    module != "repairs"
+        && matches!(
+            code,
+            "NETWORK_ERROR"
+                | "HTTP_408_CLIENT_ERROR"
+                | "HTTP_429_CLIENT_ERROR"
+                | "HTTP_502_SERVER_ERROR"
+                | "HTTP_503_SERVER_ERROR"
+                | "HTTP_504_SERVER_ERROR"
+        )
+}
+
+fn audit_transient_schedule(conn: &Connection, id: &str, outcome: &str) -> Result<(), String> {
+    let before:String=conn.query_row("SELECT json_object('status',status,'attempts',attempts,'last_attempt',last_attempt,'retry_delay_ms',retry_delay_ms,'next_retry_at',next_retry_at,'claim_generation',claim_generation) FROM parity_sync_queue WHERE id=?1",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS sync_retry_schedule_audit_v1(id INTEGER PRIMARY KEY AUTOINCREMENT,queue_id TEXT NOT NULL,organization_id TEXT NOT NULL,before_json TEXT NOT NULL,outcome TEXT NOT NULL,created_at TEXT NOT NULL);").map_err(|e|e.to_string())?;
+    conn.execute("INSERT INTO sync_retry_schedule_audit_v1(queue_id,organization_id,before_json,outcome,created_at)
+        SELECT id,organization_id,?2,?3,?4 FROM parity_sync_queue WHERE id=?1",params![id,before,outcome,Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+    conn.execute("DELETE FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 AND id NOT IN (SELECT id FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 ORDER BY id DESC LIMIT 32)",[id]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+fn resume_exhausted_transport_items(conn: &Connection) -> Result<(), String> {
+    let Some(organization) =
+        runtime_credential(conn, "organization_id").filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    retry_transaction(conn, |conn| {
+        let owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+        let mut statement=conn.prepare(&format!("SELECT id,attempts,error_message,module_type,retry_delay_ms FROM parity_sync_queue WHERE status='failed' AND organization_id=?2 AND attempts>=?1 AND error_message IN ('NETWORK_ERROR','HTTP_408_CLIENT_ERROR','HTTP_429_CLIENT_ERROR','HTTP_502_SERVER_ERROR','HTTP_503_SERVER_ERROR','HTTP_504_SERVER_ERROR') AND {owner} LIMIT 100")).map_err(|e|e.to_string())?;
+        let rows = statement
+            .query_map(params![MAX_RETRY_ATTEMPTS, organization], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(statement);
+        for (id, _attempts, code, module, delay) in rows {
+            if !is_safe_transient_retry(&code, &module) {
+                continue;
+            }
+            let next = Utc::now()
+                + ChronoDuration::milliseconds(compute_next_retry_delay_ms(
+                    delay.max(30_000),
+                    &module,
+                ));
+            audit_transient_schedule(conn, &id, "transport_retry_resumed")?;
+            conn.execute("UPDATE parity_sync_queue SET status='pending',next_retry_at=?1 WHERE id=?2 AND status='failed'",params![next.to_rfc3339(),id]).map_err(|e|e.to_string())?;
+            reconcile_payment_queue_mirrors(conn, Some(&id))?;
+        }
+        Ok(())
+    })
+}
+
 /// Wave 4: maximum number of times an item may be returned to `pending`
 /// via `mark_deferred` (e.g. "waiting for parent order sync") before we
 /// escalate to `conflict` status. Without a cap, a genuinely-stuck
@@ -2493,7 +2555,7 @@ fn load_local_order_insert_fallback(
             ghost_metadata,
             table_id,
             table_session_id,
-            guest_count
+            guest_count, currency
          FROM orders
          WHERE id = ?1
          LIMIT 1",
@@ -2744,6 +2806,12 @@ fn load_local_order_insert_fallback(
                 &mut object,
                 "ghost_source",
                 row.get::<_, Option<String>>("ghost_source")?,
+            );
+
+            insert_string(
+                &mut object,
+                "currency",
+                row.get::<_, Option<String>>("currency")?,
             );
 
             if let Some(items_json) = row.get::<_, Option<String>>("items")? {
@@ -3019,9 +3087,29 @@ fn build_order_insert_body(
         .map(|value| value.clamp(1, 99));
     let ghost_metadata = json_field_from_sources(&sources, &["ghost_metadata", "ghostMetadata"])
         .and_then(|value| match value {
-            Value::Object(_) => Some(value),
+            Value::Object(_) => Some(sync::order_metadata_for_sync(value)),
             _ => None,
         });
+    let payment_status = if ghost_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/room_charge/currency"))
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        "pending".to_string()
+    } else {
+        payment_status
+    };
+    let payment_method_json = if ghost_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/room_charge/currency"))
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        Value::String("room_charge".to_string())
+    } else {
+        payment_method_json
+    };
     let order_number = string_field_from_sources(&sources, &["order_number", "orderNumber"]);
     let local_order_number = register_order_number_for_sync([
         string_field_from_sources(&sources, &["display_order_number", "displayOrderNumber"])
@@ -3151,11 +3239,17 @@ fn build_order_insert_body(
             .or_else(|| string_field_from_sources(&sources, &["special_instructions", "specialInstructions"])),
         "is_ghost": bool_field_from_sources(&sources, &["is_ghost", "isGhost"]).unwrap_or(false),
         "ghost_source": string_field_from_sources(&sources, &["ghost_source", "ghostSource"]),
+        "currency": local_order.as_ref().map(|order| order.get("currency").cloned().unwrap_or(Value::Null))
+            .unwrap_or_else(|| string_field_from_sources(&sources, &["currency"])
+                .or_else(|| ghost_metadata.as_ref().and_then(|meta| meta.pointer("/room_charge/currency")).and_then(Value::as_str).map(str::to_string))
+                .map(Value::String).unwrap_or(Value::Null)),
+        "room_id": string_field_from_sources(&sources, &["room_id", "roomId"])
+            .or_else(|| ghost_metadata.as_ref().and_then(|meta| meta.pointer("/room_charge/room_id")).and_then(Value::as_str).map(str::to_string)),
         "ghost_metadata": ghost_metadata,
     });
 
     if let Value::Object(object) = &mut body {
-        for optional_key in ["fiscal_receipt_number", "local_order_number"] {
+        for optional_key in ["fiscal_receipt_number", "local_order_number", "currency"] {
             if object.get(optional_key).is_some_and(Value::is_null) {
                 object.remove(optional_key);
             }
@@ -6924,9 +7018,10 @@ fn mark_failure_in_transaction(
         },
     )?;
 
-    let new_attempts = attempts + 1;
+    let new_attempts = attempts.saturating_add(1);
+    let transient = is_safe_transient_retry(error_message, &module_type);
 
-    if new_attempts >= MAX_RETRY_ATTEMPTS {
+    if new_attempts >= MAX_RETRY_ATTEMPTS && !transient {
         // Max retries exhausted -- mark as permanently failed.
         // Wave 10 H8 sub-follow-up: the guard predicate
         // `claim_generation = ?N` mirrors the `mark_success` shape.
@@ -7011,6 +7106,9 @@ fn mark_failure_in_transaction(
                    AND claim_generation = ?7
                    AND {live_owner}"
         );
+        if transient {
+            audit_transient_schedule(conn, item_id, "transport_retry_scheduled")?;
+        }
         let rows_affected = conn
             .execute(
                 &retry_sql,
@@ -10797,6 +10895,9 @@ fn apply_success(
                     ],
                 )
                 .map_err(|e| format!("sync_queue apply_success order insert: {e}"))?;
+                if let Some(response) = response {
+                    sync::persist_room_charge_response(conn, &item.record_id, response)?;
+                }
                 sync::promote_payments_for_order(conn, item.record_id.as_str());
             } else {
                 conn.execute(
@@ -11769,6 +11870,7 @@ where
                 }
             }
             reconcile_payment_queue_mirrors(&db, None)?;
+            resume_exhausted_transport_items(&db)?;
             let _ = cleanup_superseded_synced_order_status_updates(&db)?;
             if visibility == QueueProcessVisibility::InternalAll {
                 let mut remaining_requeue_budget = MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE;
@@ -12218,7 +12320,19 @@ where
                         .and_then(|body| body.get("success"))
                         .and_then(Value::as_bool)
                         == Some(true);
-                if is_success && address_acknowledged {
+                let room_charge_acknowledged = item.table_name != "orders"
+                    || item.operation != "INSERT"
+                    || string_field(
+                        &serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null),
+                        &["payment_method", "paymentMethod"],
+                    )
+                    .as_deref()
+                        != Some("room_charge")
+                    || response_json
+                        .as_ref()
+                        .and_then(sync::room_charge_response_applied)
+                        .is_some();
+                if is_success && address_acknowledged && room_charge_acknowledged {
                     // Success -- remove from queue
                     let applied = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -12516,6 +12630,32 @@ where
                             "Parity sync hit admin rate limiting; pausing the batch"
                         );
                         break;
+                    }
+                } else if status == 408 {
+                    let failure = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_failure_in_transaction(
+                                db,
+                                &item.id,
+                                "HTTP_408_CLIENT_ERROR",
+                                item.claim_generation,
+                            )
+                        })?
+                    };
+                    if failure.is_some_and(|f| f.applied) {
+                        failed += 1;
+                        telemetry.record_error(
+                            &item,
+                            "pending",
+                            "HTTP_408_CLIENT_ERROR",
+                            Some(status),
+                        );
+                        errors.push(safe_sync_error(
+                            &item,
+                            "HTTP_408_CLIENT_ERROR",
+                            Some(status),
+                        ));
                     }
                 } else if (400..500).contains(&status) {
                     // Client error (not retriable)
@@ -13227,6 +13367,23 @@ mod tests {
             normalize_payment_method_for_update(Some("gift_card")),
             Some("gift_card".to_string())
         );
+    }
+
+    #[test]
+    fn folio_currency_outbox_requires_original_and_never_uses_current_settings() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let payload = json!({"branch_id":"00000000-0000-0000-0000-000000000001", "items":[{"name":"Coffee","quantity":1,"unit_price":3}],"total_amount":3,"payment_method":"room_charge","room_id":"room-1","currency":"CHF","ghost_metadata":{"room_charge":{"currency":"CHF","room_id":"room-1"}}});
+        let body = build_order_insert_body(&conn, "new-folio-order", &payload).unwrap();
+        assert_eq!(body["currency"], "CHF");
+        assert_eq!(body["room_id"], "room-1");
+        let mut legacy = payload.clone();
+        legacy.as_object_mut().unwrap().remove("currency");
+        legacy.as_object_mut().unwrap().remove("ghost_metadata");
+        assert!(build_order_insert_body(&conn, "legacy-order", &legacy)
+            .unwrap()
+            .get("currency")
+            .is_none());
     }
 
     fn seed_terminal_context(conn: &Connection) {
@@ -15613,6 +15770,50 @@ mod tests {
     }
 
     #[test]
+    fn operating_currency_outbox_replays_original_and_preserves_legacy_absence() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        for currency in [Some("CHF"), None] {
+            let mut payload =
+                json!({"shiftId":"currency-shift","branchId":TEST_BRANCH_ID,"roleType":"cashier"});
+            if let Some(code) = currency {
+                payload["currency"] = json!(code);
+            }
+            let item = queue_item("staff_shifts", "INSERT", "currency-shift", payload.clone());
+            let RequestPreparation::Ready(spec) =
+                prepare_shift_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+            else {
+                panic!("expected ready")
+            };
+            let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                body["events"][0]["data"]
+                    .get("currency")
+                    .and_then(Value::as_str),
+                currency
+            );
+            let item = queue_item(
+                "shift_expenses",
+                "INSERT",
+                "currency-expense",
+                payload.clone(),
+            );
+            let RequestPreparation::Ready(spec) =
+                prepare_financial_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+            else {
+                panic!("expected ready")
+            };
+            let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                body["items"][0]["payload"]
+                    .get("currency")
+                    .and_then(Value::as_str),
+                currency
+            );
+        }
+    }
+
+    #[test]
     fn prepare_shift_request_wraps_staff_shift_payload_for_admin_sync_endpoint() {
         let conn = test_connection();
         seed_terminal_context(&conn);
@@ -15888,6 +16089,153 @@ mod tests {
         conn.execute("UPDATE parity_sync_queue SET status = 'pending', attempts = 0, error_message = NULL WHERE id = ?1", [&queue_id]).unwrap();
         reconcile_payment_queue_mirrors(&conn, Some(&queue_id)).unwrap();
         assert_eq!(read(), ("pending".to_string(), 0, None, None));
+    }
+
+    #[test]
+    fn crash_retry_transient_outage_beyond_ten_preserves_original_payment_and_event() {
+        let conn = test_connection();
+        let id = seed_workflow_table_payment(&conn);
+        let original: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        for code in [
+            "NETWORK_ERROR",
+            "HTTP_503_SERVER_ERROR",
+            "HTTP_504_SERVER_ERROR",
+        ] {
+            conn.execute("UPDATE parity_sync_queue SET status='processing',attempts=10,claim_generation=7 WHERE id=?1",[&id]).unwrap();
+            let outcome = mark_failure(&conn, &id, code, 7).unwrap();
+            assert!(outcome.applied);
+            assert!(!outcome.transitioned_to_dead_letter);
+            let row: (String, i64, String, Option<String>) = conn
+                .query_row(
+                    "SELECT status,attempts,data,next_retry_at FROM parity_sync_queue WHERE id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(row.0, "pending");
+            assert_eq!(row.1, 11);
+            assert_eq!(row.2, original);
+            assert!(row.3.is_some());
+        }
+        conn.execute("UPDATE parity_sync_queue SET status='processing',attempts=10,claim_generation=7 WHERE id=?1",[&id]).unwrap();
+        assert!(
+            mark_failure(&conn, &id, "HTTP_500_SERVER_ERROR", 7)
+                .unwrap()
+                .transitioned_to_dead_letter
+        );
+    }
+
+    #[test]
+    fn crash_retry_prior_exhausted_transport_survives_restart_and_keeps_scope_and_cooldown() {
+        let disk = crate::tests::harness::TestDb::open();
+        let id;
+        let original;
+        {
+            let conn = disk.state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "__ignore_keyring", "1").unwrap();
+            db::set_setting(&conn, "terminal", "organization_id", "org-1").unwrap();
+            id = seed_workflow_table_payment(&conn);
+            original = conn
+                .query_row(
+                    "SELECT data FROM parity_sync_queue WHERE id=?1",
+                    [&id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap();
+            conn.execute("UPDATE parity_sync_queue SET status='failed',attempts=10,error_message='NETWORK_ERROR',next_retry_at=NULL WHERE id=?1",[&id]).unwrap();
+            let other = enqueue_test_item(
+                &conn,
+                "customers",
+                "UPDATE",
+                "other-org",
+                json!({"id":"other-org"}),
+            );
+            conn.execute("UPDATE parity_sync_queue SET organization_id='other-org',status='failed',attempts=10,error_message='NETWORK_ERROR' WHERE id=?1",[other]).unwrap();
+            let permanent = enqueue_test_item(
+                &conn,
+                "customers",
+                "UPDATE",
+                "permanent",
+                json!({"id":"permanent"}),
+            );
+            conn.execute("UPDATE parity_sync_queue SET status='failed',attempts=10,error_message='HTTP_500_SERVER_ERROR' WHERE id=?1",[permanent]).unwrap();
+        }
+        let disk = disk.restart();
+        {
+            let conn = disk.state.conn.lock().unwrap();
+            resume_exhausted_transport_items(&conn).unwrap();
+            let row: (String, i64, String, String) = conn
+                .query_row(
+                    "SELECT status,attempts,data,next_retry_at FROM parity_sync_queue WHERE id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (row.0.as_str(), row.1, row.2.as_str()),
+                ("pending", 10, original.as_str())
+            );
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&row.3)
+                    .unwrap()
+                    .timestamp()
+                    > Utc::now().timestamp() + 59
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE status='failed'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                2
+            );
+            let audit: String = conn
+                .query_row(
+                    "SELECT before_json FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&audit).unwrap()["status"],
+                json!("failed")
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT sync_state FROM order_payments WHERE id='workflow-payment'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "pending"
+            );
+        }
+        let disk = disk.restart();
+        let conn = disk.state.conn.lock().unwrap();
+        let before: String = conn
+            .query_row(
+                "SELECT next_retry_at FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        resume_exhausted_transport_items(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT next_retry_at FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            before
+        );
     }
 
     #[tokio::test]

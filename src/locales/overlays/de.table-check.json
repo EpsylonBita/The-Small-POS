@@ -103,6 +103,7 @@
       "applyDiscountToSelected": "Auf Auswahl anwenden"
     },
     "messages": {
+      "savedCheckReadOnly": "Gespeicherte Rechnung — Beträge können veraltet sein. Für Zahlung oder Änderungen erneut verbinden.",
       "loading": "Tischrechnung wird geladen...",
       "noOpenCheck": "Für diesen Tisch wurde keine offene Rechnung gefunden.",
       "noItems": "Auf dieser Rechnung sind noch keine Artikel.",
@@ -134,14 +135,18 @@
       "noActiveOrder": "Mit diesem Tisch ist keine aktive Bestellung verknüpft.",
       "paymentAmountRequired": "Geben Sie einen Zahlungsbetrag größer als null ein.",
       "paymentFailed": "Zahlung fehlgeschlagen",
+      "paymentSavedTableCloseFailed": "Die Zahlung wurde erfasst, aber der Tisch konnte nicht freigegeben werden. Versuchen Sie erneut, die Rechnung zu schließen; kassieren Sie die Zahlung nicht erneut.",
       "orderItemUpdateFailed": "Bestellartikel konnte nicht aktualisiert werden",
+      "scopedItemEditUnavailable": "Preis- und Rabattänderungen erfordern hier die vollständige, unbezahlte und ungeteilte Bestellung. Bezahlte Rechnungen müssen über den Abrechnungsablauf geändert werden. Geteilte oder übertragene Artikel können hier noch nicht geändert werden.",
       "selectItemAndTargetTable": "Wählen Sie einen Artikel und einen Zieltisch aus.",
       "localSessionTransferSyncing": "Diese Tischrechnung wird noch synchronisiert. Aktualisieren Sie nach der Synchronisierung, bevor Sie Artikel verschieben.",
       "quantityUpTo": "Geben Sie eine Menge bis {{quantity}} ein.",
       "itemTransferFailed": "Artikelumbuchung fehlgeschlagen",
       "noBatchPayableItems": "Wählen Sie mindestens einen unbezahlten Artikel aus.",
       "noBatchTransferItems": "Wählen Sie mindestens einen unbezahlten Artikel zum Verschieben aus.",
-      "noBatchSelectedItems": "Wählen Sie mindestens einen Artikel aus."
+      "noBatchSelectedItems": "Wählen Sie mindestens einen Artikel aus.",
+      "originalCancelApproverRequired": "Ein Stornierungsversuch ist noch offen. Nach der erneuten Verbindung muss die ursprünglich genehmigende Person den Vorgang wiederholen. Der Tisch wurde nicht freigegeben.",
+      "canonicalCancelSyncRequired": "Stellen Sie die Verbindung wieder her und schließen Sie die Synchronisierung ab oder klären Sie offene Änderungen dieser Bestellung vor der Stornierung. Der Tisch wurde nicht freigegeben."
     }
   },
   "tablesDashboard": {
@@ -184,6 +189,7 @@
     "time": {
       "hoursMinutes": "{{hours}} Std. {{minutes}} Min.",
       "minutes": "{{minutes}} Min."
-    }
+    },
+    "floorPlanAriaLabel": "Tischplan"
   }
 }

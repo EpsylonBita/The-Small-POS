@@ -68,7 +68,7 @@ test('the native titlebar owns visible space and top shell actions stay below it
   assert.doesNotMatch(mainLayoutSource, /fixed top-28 right-24 sm:right-28/);
   assert.doesNotMatch(appSource, /fixed top-28 left-\[9\.5rem\]/);
   assert.equal(
-    (modalPrimitivesSource.match(/ReactDOM\.createPortal\(modalContent, document\.body\)/g) || []).length,
+    (modalPrimitivesSource.match(/ReactDOM\.createPortal\([^\n]*, document\.body\)/g) || []).length,
     2,
     'shared modal portals must remain body children for background inert isolation',
   );
@@ -263,7 +263,7 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.ok(unauthenticatedBranch, 'unauthenticated branch should be present');
   assert.doesNotMatch(unauthenticatedBranch, /ConnectionSettingsModal/);
   assert.doesNotMatch(unauthenticatedBranch, /showConnectionSettings/);
-  assert.match(source, /\{updateDialog\}\s*<\/FullscreenAwareLayout>/);
+  assert.match(source, /<CashierRecovery>\{updateDialog\}<\/CashierRecovery>\s*<\/FullscreenAwareLayout>/);
 });
 
 test('app shell loading and shift blockers use palette-safe tap feedback', () => {

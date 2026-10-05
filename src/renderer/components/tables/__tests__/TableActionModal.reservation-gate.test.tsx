@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import type { RestaurantTable, TableStatus } from '../../../types/tables';
 
@@ -46,6 +46,29 @@ const renderModal = (status: TableStatus, extra: { canCreateReservation?: boolea
 
 // Booking a table needs the Reservations module, as on the Android POS.
 describe('TableActionModal New Reservation and the Reservations module', () => {
+  it('returns keyboard focus after a parent removes the dialog', async () => {
+    const opener = document.createElement('button');
+    document.body.appendChild(opener); opener.focus();
+    const mounted = render(<TableActionModal isOpen table={table('available')} onNewOrder={vi.fn()} onNewReservation={vi.fn()} onSetAvailable={vi.fn()} onClose={vi.fn()} />);
+    await waitFor(() => expect(document.activeElement?.closest('[role="dialog"]')).toBeTruthy());
+    mounted.unmount();
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+    opener.remove();
+  });
+  it.each(['cleaning', 'maintenance', 'unavailable'] as const)('blocks new orders until %s is resolved', status => {
+    const handlers = renderModal(status);
+    const order = screen.getByRole('button', { name: 'tableActionModal.newOrder' });
+    expect(order).toBeDisabled(); fireEvent.click(order); expect(handlers.onNewOrder).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText(status === 'cleaning' ? 'tableActionModal.markCleaned' : status === 'maintenance' ? 'tableActionModal.markBackInService' : 'tableActionModal.markAvailable'));
+    expect(handlers.onSetAvailable).toHaveBeenCalledOnce(); expect(handlers.onClose).not.toHaveBeenCalled();
+  });
+  it('normalizes covers and preserves the numeric order callback', () => {
+    const handlers = renderModal('available');
+    fireEvent.change(screen.getByRole('textbox', { name: 'tableActionModal.covers' }), { target: { value: '3' } });
+    fireEvent.click(screen.getByText('tableActionModal.newOrder'));
+    expect(handlers.onNewOrder).toHaveBeenCalledWith(3);
+    expect(handlers.onClose).not.toHaveBeenCalled();
+  });
   it('offers New Reservation for an available table when the store can book', () => {
     const handlers = renderModal('available', { canCreateReservation: true });
 

@@ -298,16 +298,16 @@ test('StaffShiftModal renders role-selection chips as wrapperless text labels', 
   );
 });
 
-test('StaffShiftModal renders cash-entry euro icon without a wrapper', () => {
+test('StaffShiftModal renders cash-entry currency-neutral icon without a wrapper', () => {
   const modal = source(staffShiftModalPath);
 
   assert.match(
     modal,
-    /<Euro\s+className=\{`h-14 w-14 shrink-0 \$\{selectedRolePresentation\.iconColor\}`\}\s+strokeWidth=\{3\}\s+\/>/,
+    /<Banknote\s+className=\{`h-14 w-14 shrink-0 \$\{selectedRolePresentation\.iconColor\}`\}\s+strokeWidth=\{3\}\s+\/>/,
   );
   assert.doesNotMatch(
     modal,
-    /className=\{`flex h-16 w-16 shrink-0 items-center justify-center rounded-\[20px\] border \$\{selectedRolePresentation\.iconSurface\}`\}[\s\S]*<Euro className=\{`h-8 w-8 \$\{selectedRolePresentation\.iconColor\}`\} \/>/,
+    /className=\{`flex h-16 w-16 shrink-0 items-center justify-center rounded-\[20px\] border \$\{selectedRolePresentation\.iconSurface\}`\}[\s\S]*<Banknote className=\{`h-8 w-8 \$\{selectedRolePresentation\.iconColor\}`\} \/>/,
   );
 });
 

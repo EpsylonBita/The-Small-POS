@@ -9,6 +9,7 @@ import { AlertTriangle, Layers, LayoutGrid, Utensils, X } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import type { MenuCombo } from '@shared/types/combo';
 import { resolveMenuItemPrice } from '../../utils/order-type-pricing';
+import { getPosMenuImageUrl } from '../../utils/menuImages';
 import {
   buildFeaturedMenuNavigationShortcuts,
   rankFeaturedMenuItems,
@@ -498,7 +499,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                 price: displayPrice,
                 category: item.category_id,
                 preparationTime: item.preparation_time || item.preparationTime || 0,
-                image: item.image_url || '',
+                image: getPosMenuImageUrl(item) || '',
                 is_customizable: item.is_customizable,
                 ingredients: item.ingredients || null,
                 customizations: item.customizations,

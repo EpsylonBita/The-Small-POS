@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "cafeLan": {
+      "title": "Connexion locale des serveurs",
+      "internetRequired": "Le terminal principal a besoin d’Internet pour valider commandes, paiements et changements de tables. En cas d’échec, l’action initiale reste en attente.",
+      "desktopMainOnly": "Cet ordinateur reçoit les demandes en tant que terminal principal. Importez le code sur un terminal serveur Android.",
+      "port": "Port",
+      "listening": "À l’écoute des serveurs",
+      "stopped": "Écoute arrêtée",
+      "connected": "Terminal principal connecté",
+      "pending": "Connexion en attente ; actions conservées",
+      "refresh": "Actualiser",
+      "start": "Démarrer l’écoute",
+      "stop": "Arrêter l’écoute",
+      "child": "Terminal serveur",
+      "selectChild": "Choisir un serveur",
+      "noChildren": "Aucun terminal serveur associé disponible.",
+      "host": "Adresse LAN du terminal principal",
+      "generate": "Créer ou renouveler le code",
+      "revoke": "Révoquer l’association",
+      "codeHelp": "Partagez ce code uniquement avec le serveur choisi. Il sera masqué après cinq minutes.",
+      "code": "Code d’association",
+      "copy": "Copier le code",
+      "hide": "Masquer le code",
+      "failed": "Connexion impossible. Vérifiez Internet, la configuration du terminal et l’adresse LAN, puis réessayez.",
+      "rotationHelp": "Créer ou révoquer un code remplace l’association et supprime les réponses chiffrées en attente. Le serveur doit importer le nouveau code ; les actions initiales restent en attente. Continuer ?",
+      "unavailable": "Le service LAN n’est pas prêt sur cet appareil.",
+      "import": "Importer le code d’association",
+      "test": "Tester la connexion principale"
+    }
+  }
+}

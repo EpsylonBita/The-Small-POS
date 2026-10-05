@@ -7228,7 +7228,14 @@ mod dto_tests {
         let bluetooth = bluetooth_scan_response(bluetooth_snapshot);
         assert_eq!(bluetooth["success"], true);
         assert_eq!(bluetooth["type"], "bluetooth");
-        assert_eq!(bluetooth["message"], "Discovered 1 Bluetooth device(s)");
+        assert_eq!(
+            bluetooth["message"],
+            if cfg!(target_os = "windows") {
+                "Discovered 1 Bluetooth device(s)"
+            } else {
+                "Bluetooth native scan is currently supported on Windows only"
+            }
+        );
         assert_eq!(bluetooth["printers"][0]["name"], "Star Bluetooth");
 
         let combined_snapshot = BlockingDiscoverySnapshot {

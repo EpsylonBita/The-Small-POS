@@ -339,7 +339,7 @@ export const CaptureQueuePanel: React.FC<CaptureQueuePanelProps> = ({
   );
 
   const money = useCallback(
-    (amount: number): string => formatCurrency(amount, currencyCode || 'EUR', i18n.language),
+    (amount: number): string => formatCurrency(amount, currencyCode || null, i18n.language),
     [currencyCode, i18n.language],
   );
 

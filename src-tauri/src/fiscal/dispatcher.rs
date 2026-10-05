@@ -326,9 +326,9 @@ mod tests {
         conn.execute(
             "INSERT INTO orders (id, supabase_id, organization_id, items, subtotal, subtotal_cents,
                                  total_amount, total_amount_cents, status, payment_status,
-                                 sync_status, branch_id, created_at, updated_at)
+                                 sync_status, branch_id, created_at, updated_at, currency)
              VALUES (?1, ?2, 'org-1', '[]', 10.0, 1000, 10.0, 1000, 'completed', 'paid',
-                     'synced', ?3, '2026-09-29T11:05:13Z', '2026-09-29T11:05:13Z')",
+                     'synced', ?3, '2026-09-29T11:05:13Z', '2026-09-29T11:05:13Z', 'EUR')",
             params![order_id, format!("remote-{order_id}"), branch_id],
         )
         .expect("seed order");

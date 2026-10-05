@@ -153,6 +153,11 @@ export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
   status?: number;
 }
 
+export interface OrderApprovalResult extends IpcResult {
+  /** Native approval persisted the server-acknowledged paid room-charge snapshot. */
+  roomChargeConfirmed?: boolean;
+}
+
 /**
  * Frozen Task 9C renderer command for the online-only repair branch transfer.
  * Tenant scope and authorization are intentionally absent: native code derives
@@ -1272,6 +1277,10 @@ export interface CancelOrderWithApprovalParams {
   orderId: string;
   /** Why the order is cancelled: required, kept on the order and in the audit entry. */
   reason: string;
+  tableSessionId?: string;
+  clientEventId?: string;
+  /** Transient approval input; never persist or include in a sync queue. */
+  managerPin?: string;
 }
 
 export interface ResolvePaymentBlockerParams {
@@ -1298,6 +1307,7 @@ export interface UpdatePaymentMethodResult {
 
 export interface EditSettlementCompletedPayment {
   id: string;
+  currency?: string | null;
   method: "cash" | "card" | "other" | string;
   amount: number;
   createdAt: string;
@@ -1763,7 +1773,7 @@ export interface PlatformBridge {
       status: string,
       extra?: { cancellationReason?: string; cancelledAt?: string } | string,
     ): Promise<IpcResult>;
-    updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
+    updateItems(orderId: string, items: OrderItem[], context?: { expectedVersion?: number; tableSessionId?: string; clientEventId?: string }): Promise<IpcResult>;
     previewEditSettlement(payload: {
       orderId: string;
       items: OrderItem[];
@@ -1791,7 +1801,7 @@ export interface PlatformBridge {
     saveForRetry(order: any): Promise<IpcResult>;
     getRetryQueue(): Promise<any[]>;
     processRetryQueue(): Promise<IpcResult>;
-    approve(orderId: string, estimatedTime?: number): Promise<IpcResult>;
+    approve(orderId: string, estimatedTime?: number): Promise<OrderApprovalResult>;
     decline(orderId: string, reason: string): Promise<IpcResult>;
     assignDriver(
       orderId: string,
@@ -2083,6 +2093,8 @@ export interface PlatformBridge {
       satelliteShiftId: string;
       openingCash: number;
       countedCash: number;
+      currency: string;
+      closedBy?: string | null;
     }): Promise<any>;
     printCheckout(params: ShiftPrintCheckoutParams): Promise<IpcResult>;
     getActive(staffId: string): Promise<any>;
@@ -3503,8 +3515,10 @@ export class TauriBridge implements PlatformBridge {
           })
         : this.inv("order:update-status", id, s);
     },
-    updateItems: (id: string, items: OrderItem[]) =>
-      this.inv("order:update-items", id, items),
+    updateItems: (id: string, items: OrderItem[], context?: { expectedVersion?: number; tableSessionId?: string; clientEventId?: string }) =>
+      context
+        ? this.inv("order:update-items", { orderId: id, items, ...context })
+        : this.inv("order:update-items", id, items),
     previewEditSettlement: (payload: {
       orderId: string;
       items: OrderItem[];
@@ -3825,6 +3839,7 @@ export class TauriBridge implements PlatformBridge {
         success: boolean;
         already_closed?: boolean;
         figures?: {
+          currency: string | null;
           total_orders_count: number;
           total_sales_amount: number;
           total_cash_sales: number;
@@ -3833,6 +3848,7 @@ export class TauriBridge implements PlatformBridge {
           expected_cash_amount: number;
         };
         handover?: {
+          currency: string | null;
           opening_cash_amount: number;
           counted_cash: number;
           expected_cash_amount: number;
@@ -3854,6 +3870,8 @@ export class TauriBridge implements PlatformBridge {
       satelliteShiftId: string;
       openingCash: number;
       countedCash: number;
+      currency: string;
+      closedBy?: string | null;
     }) => this.inv("shift:record-satellite-handover", p),
     printCheckout: (p: ShiftPrintCheckoutParams) =>
       this.inv("shift:print-checkout", p),

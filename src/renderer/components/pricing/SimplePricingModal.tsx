@@ -1,3 +1,4 @@
+import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Save, ShoppingBag, Truck } from 'lucide-react';
@@ -72,7 +73,7 @@ const SimplePricingModal: React.FC<SimplePricingModalProps> = ({
                 className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text"
               >
                 <ShoppingBag className="h-4 w-4 text-yellow-400" aria-hidden="true" />
-                {t('modals.simplePricing.pickupPrice')}
+                {t('modals.simplePricing.pickupPrice')} ({getStoreCurrency() ?? '—'})
               </label>
               <input
                 type="number"
@@ -92,7 +93,7 @@ const SimplePricingModal: React.FC<SimplePricingModalProps> = ({
                 className="flex items-center gap-2 text-sm font-semibold liquid-glass-modal-text"
               >
                 <Truck className="h-4 w-4 text-emerald-500 dark:text-emerald-300" aria-hidden="true" />
-                {t('modals.simplePricing.deliveryPrice')}
+                {t('modals.simplePricing.deliveryPrice')} ({getStoreCurrency() ?? '—'})
               </label>
               <input
                 type="number"

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => {
         redeemForOrder: vi.fn(),
       },
       payments: {
+        listUnsavedPayments: vi.fn(async () => ({ payments: [] })),
         getOrderPayments: vi.fn(async () => []),
         getPaidItems: vi.fn(async () => []),
         getSettlementSnapshot: vi.fn(),
@@ -52,12 +53,13 @@ vi.mock('../../../contexts/i18n-context', () => ({
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
+  const t = (key: string, fallback?: string | { defaultValue?: string }) => (
+    typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key
+  );
   return {
     ...actual,
     useTranslation: () => ({
-      t: (key: string, fallback?: string | { defaultValue?: string }) => (
-        typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key
-      ),
+      t,
     }),
   };
 });
@@ -111,6 +113,44 @@ describe('split batch proof through the real ordinary controller', () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it.each([true, false])('formats cent entry and books the numeric values without charging a missing terminal (discounts=%s)', async (allowDiscounts) => {
+    mocks.bridge.ecr.getDefaultTerminal.mockResolvedValue({ device: null });
+    mocks.recordPayment.mockResolvedValue({ success: true, paymentId: 'ui-money-payment', paymentPersisted: true });
+    render(<SplitPaymentModal isOpen onClose={vi.fn()} orderId="ui-currency-order" orderTotal={20}
+      items={[{ name: 'Coffee', quantity: 1, totalPrice: 20 }]} onSplitComplete={vi.fn()} allowDiscounts={allowDiscounts} />);
+    await tick();
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    const first = screen.getByRole('textbox', { name: 'Person 1' });
+    fireEvent.change(first, { target: { value: '1050' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Person 2' }), { target: { value: '950' } });
+    expect(first).toHaveValue('10,50');
+    fireEvent.change(first, { target: { value: '-100' } });
+    expect(first).toHaveValue('10,50');
+    const firstGroup = screen.getByRole('group', { name: 'Person 1' });
+    fireEvent.click(firstGroup.querySelectorAll('button')[1]);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('manual card payment on confirm'));
+    expect(mocks.bridge.ecr.processPayment).not.toHaveBeenCalled();
+    expect(mocks.recordPayment).not.toHaveBeenCalled();
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(mocks.recordPayment).toHaveBeenCalledTimes(2));
+    expect(mocks.recordPayment).toHaveBeenNthCalledWith(1, expect.objectContaining({ method: 'card', amount: 10.5, paymentOrigin: 'manual' }));
+    expect(mocks.recordPayment).toHaveBeenNthCalledWith(2, expect.objectContaining({ method: 'cash', amount: 9.5 }));
+  });
+
+  it('clears the portion notice when returning to cash', async () => {
+    mocks.bridge.ecr.getDefaultTerminal.mockResolvedValue({ device: null });
+    render(<SplitPaymentModal isOpen onClose={vi.fn()} orderId="ui-cash-order" orderTotal={20}
+      items={[{ name: 'Coffee', quantity: 1, totalPrice: 20 }]} onSplitComplete={vi.fn()} />);
+    await tick();
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    const firstGroup = screen.getByRole('group', { name: 'Person 1' });
+    fireEvent.click(firstGroup.querySelectorAll('button')[1]);
+    await screen.findByRole('status');
+    fireEvent.click(screen.getByRole('group', { name: 'Person 1' }).querySelectorAll('button')[0]);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(mocks.bridge.ecr.processPayment).not.toHaveBeenCalled();
   });
 
   it('keeps a batch whose second reply was lost held; the first booked row never releases it', async () => {

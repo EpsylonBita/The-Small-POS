@@ -12,6 +12,7 @@ export type { ZReportIntegrity };
  * (`platform_online` / `platform_cod`).
  */
 export interface ZReportDayOrder {
+  currency?: string | null;
   id: string;
   orderNumber: string;
   orderType: string;
@@ -81,6 +82,7 @@ export interface TopItemData {
 }
 
 export interface StaffPerformance {
+  currency?: string | null;
   staffId: string;
   name: string;
   role?: string;
@@ -200,6 +202,8 @@ export interface ZReportGiftCloseReadiness {
 }
 
 export interface ZReportData {
+  /** Immutable aggregate unit; missing or mixed historical evidence stays null. */
+  currency?: string | null;
   date: string; // ISO date (yyyy-mm-dd)
   shiftId?: string;
   terminalId?: string;

@@ -214,15 +214,15 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 const normalizeCurrencyCode = (value: unknown): string => {
-  if (typeof value !== 'string') return 'EUR';
+  if (typeof value !== 'string') return '';
   const currency = value.trim().toUpperCase();
-  if (!/^[A-Z]{3}$/.test(currency)) return 'EUR';
+  if (!/^[A-Z]{3}$/.test(currency)) return '';
 
   try {
     new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(0);
     return currency;
   } catch {
-    return 'EUR';
+    return '';
   }
 };
 
@@ -397,7 +397,7 @@ const SuppliersPage: React.FC = () => {
   const [importDraft, setImportDraft] = useState<SupplierImportDraft | null>(null);
   const [fileNotice, setFileNotice] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
-  const [currencyCode, setCurrencyCode] = useState('EUR');
+  const [currencyCode, setCurrencyCode] = useState('');
   const [supplierSummaryId, setSupplierSummaryId] = useState<string | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');

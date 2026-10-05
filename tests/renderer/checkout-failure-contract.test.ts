@@ -101,8 +101,9 @@ test('a card charged at checkout and not saved ends the checkout, never as a suc
 
 // Item H (30/09/2026, the same decision as Android): a read error of the
 // store's tax rate is not "missing". Checkout pauses with a message and "Try
-// again"; nothing is priced or its tax split on an assumed 24%.
-test('checkout pauses while the store tax rate cannot be read, never on an assumed 24%', () => {
+// again"; nothing is priced or its tax split on an assumed 24%. The canonical
+// editor delegates tax to the server and applies its complete financial snapshot.
+test('new checkout requires readable tax settings and canonical edits preserve server fiscal totals', () => {
   for (const segments of [
     ['components', 'OrderFlow.tsx'],
     ['pages', 'NewOrderPage.tsx'],
@@ -134,10 +135,32 @@ test('checkout pauses while the store tax rate cannot be read, never on an assum
     'const handleEditMenuComplete = async',
     'const handleEditMenuClose',
   );
-  assert.match(
-    edit,
-    /resolveCheckoutTaxRate\([\s\S]*?if \(!editTaxRate\.available\) \{\s*notifyMoneySettingsUnavailable\(t, reloadTerminalSettings\);\s*return;/,
-  );
+  assert.doesNotMatch(edit, /resolveCheckoutTaxRate|tax_amount\s*:|tax_rate\s*:/,
+    'the canonical editor must not calculate or send an assumed client tax');
+  assert.match(edit, /await bridge\.orders\.updateItems\(orderData\.orderId, orderData\.items,/);
+  assert.match(edit, /clientEventId: orderData\.client_event_id, expectedVersion: orderData\.expected_version/);
+  assert.match(edit, /if \(result\?\.success === false\) throw new Error/,
+    'unconfirmed canonical edits must retain the frozen draft');
+
+  const api = readFileSync(path.join(process.cwd(), '..', 'admin-dashboard', 'src', 'services', 'pos', 'pos-orders-api-service.ts'), 'utf8');
+  assert.match(api, /const branchComplianceSettings = await this\.getBranchComplianceSettings\(terminal\.branch_id\)\s+const computed = this\.computeOrderTotals\(/);
+  for (const [field, result] of [
+    ['subtotal', 'computedSubtotal'], ['tax_amount', 'taxAmount'],
+    ['discount_amount', 'discountAmount'], ['total_amount', 'computedTotal'],
+    ['fiscal_totals', 'fiscalTotals'], ['fiscal_line_snapshot', 'fiscalLineSnapshot'],
+  ]) {
+    assert.ok(api.includes(`updateData.${field} = computed.${result}`), `${field} is server-calculated`);
+  }
+  assert.match(api, /rpc\('edit_pos_order_atomic',[\s\S]*?p_header: encryptedUpdateData, p_items: replacementItems/);
+
+  const native = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'commands', 'orders.rs'), 'utf8');
+  const remoteEdit = sliceBetween(native, 'if let Some(request) = remote_edit_request {', '\n    let actual_order_id = {');
+  assert.match(remoteEdit, /confirm_foreground_item\([\s\S]*?\.await\?;[\s\S]*?return Ok\(/,
+    'success requires the full canonical financial mirror, rather than a local total-only update');
+  const recovery = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'table_attempt_recovery.rs'), 'utf8');
+  const apply = sliceBetween(recovery, 'fn apply_foreground_item_snapshot(', 'pub(crate) async fn confirm_foreground_item(');
+  assert.match(apply, /apply_lan_canonical_response\(&tx,[\s\S]*?foreground_applied\(&tx,[\s\S]*?tx\.commit\(\)/,
+    'the full snapshot and the applied receipt must commit together');
 });
 
 test('OrderDashboard.handleOrderComplete resolves an explicit boolean and success-gates the UI reset', () => {
@@ -395,14 +418,16 @@ test('OrderDashboard never emits a second toast when a payment-integrity blocker
 // ends, and a checkout without an answer keeps the cart instead of failing.
 test('every checkout surface pays the same cart with the same checkout id', () => {
   const surfaces: Array<[string, string]> = [
-    ['components/OrderFlow.tsx', 'const clientRequestId = takeCheckoutRequestId();'],
-    ['pages/NewOrderPage.tsx', 'const clientRequestId = takeCheckoutRequestId();'],
-    ['components/OrderDashboard.tsx', 'clientRequestId: takeCheckoutRequestId(),'],
+    ['components/OrderFlow.tsx', 'const clientRequestId = takeCheckoutRequestId(orderData.clientRequestId);'],
+    ['pages/NewOrderPage.tsx', 'const clientRequestId = takeCheckoutRequestId(orderData.clientRequestId);'],
+    ['components/OrderDashboard.tsx', 'clientRequestId: takeCheckoutRequestId(orderData.clientRequestId),'],
   ];
   for (const [file, take] of surfaces) {
     const source = rendererSource(...file.split('/'));
     assert.ok(source.includes('useCheckoutRequestId()'), `${file} holds one checkout id per cart`);
     assert.ok(source.includes(take), `${file} reuses the checkout id on every press`);
+    assert.ok(source.includes('restoreCheckoutRequestId(context.checkoutRequestId)'),
+      `${file} restores the original request id before a recovered checkout`);
     assert.doesNotMatch(
       source,
       /const clientRequestId =\s*globalThis\.crypto\?\.randomUUID/,
@@ -418,6 +443,12 @@ test('every checkout surface pays the same cart with the same checkout id', () =
       `${file} starts a new checkout id once the order exists`,
     );
   }
+
+  const requestId = rendererSource('hooks', 'useCheckoutRequestId.ts');
+  assert.match(requestId, /if \(idRef\.current && idRef\.current !== persistedId\) throw new Error\('CHECKOUT_REQUEST_ID_CHANGED'\)/,
+    'restored intent must not replace the active cart identity');
+  assert.match(requestId, /idRef\.current = persistedId;/,
+    'a restored checkout reuses its durable original id');
 
   const store = rendererSource('hooks', 'useOrderStore.ts');
   assert.match(store, /const CHECKOUT_WITH_PAYMENT_TIMEOUT_MS = 180_000;/);

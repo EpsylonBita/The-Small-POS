@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ImageOff } from 'lucide-react';
 
 export type OptimizedImgProps = React.ImgHTMLAttributes<HTMLImageElement> & {
@@ -19,7 +19,9 @@ export const OptimizedImg: React.FC<OptimizedImgProps> = ({
   fallbackSrc,
   ...rest
 }) => {
-  const [failed, setFailed] = useState(false);
+  const [failedFor, setFailedFor] = useState<{ src: typeof src } | null>(null);
+  useEffect(() => setFailedFor(null), [src, fallbackSrc]);
+  const failed = failedFor !== null && failedFor.src === src;
 
   const effectiveSrc = !failed ? src : fallbackSrc;
 
@@ -38,15 +40,15 @@ export const OptimizedImg: React.FC<OptimizedImgProps> = ({
 
   return (
     <img
+      key={typeof effectiveSrc === 'string' ? effectiveSrc : undefined}
       src={effectiveSrc}
       alt={alt}
       className={className}
       style={style}
       loading={loading as any}
       decoding={decoding as any}
-      onError={(e) => { setFailed(true); onError?.(e as any); }}
+      onError={(e) => { setFailedFor({ src }); onError?.(e as any); }}
       {...rest}
     />
   );
 };
-

@@ -1490,46 +1490,67 @@ pub(crate) fn clear_old_orders_before(
     .map_err(|e| e.to_string())
 }
 
+fn cloud_inter_terminal_status(
+    terminal_type: &str,
+    parent_terminal_id: Option<&str>,
+    configured: bool,
+    cloud_reachable: bool,
+    latency_ms: Option<u64>,
+) -> serde_json::Value {
+    // Parent UUID is business ownership. Neither cloud health nor a configured
+    // LAN host proves an authenticated connection to that parent terminal.
+    let parent_info = parent_terminal_id
+        .map(|id| serde_json::json!({ "terminalId": id, "terminal_id": id, "name": id }));
+    let routing_mode = match (configured, terminal_type) {
+        (true, "main") => "main",
+        (true, "mobile_waiter") => "direct_cloud",
+        _ => "unknown",
+    };
+    serde_json::json!({
+        "parentInfo": parent_info,
+        "isParentReachable": false,
+        "isCloudReachable": cloud_reachable,
+        "lanTransportAvailable": false,
+        "transport": "direct_cloud",
+        "routingMode": routing_mode,
+        "latencyMs": latency_ms,
+    })
+}
+
 #[tauri::command]
 pub async fn sync_get_inter_terminal_status(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     crate::hydrate_terminal_credentials_from_local_settings(&db);
-
+    let (terminal_type, parent_terminal_id) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        (
+            db::get_setting(&conn, "terminal", "terminal_type")
+                .unwrap_or_else(|| "main".to_string()),
+            db::get_setting(&conn, "terminal", "parent_terminal_id")
+                .filter(|id| !id.trim().is_empty()),
+        )
+    };
     let admin_url = storage::get_credential("admin_dashboard_url");
     let api_key = load_zeroized_pos_api_key_optional();
-    let terminal_id = storage::get_credential("terminal_id");
-
-    let Some(admin_url_val) = admin_url else {
-        return Ok(serde_json::json!({
-            "parentInfo": serde_json::Value::Null,
-            "isParentReachable": false,
-            "routingMode": "unknown",
-        }));
-    };
-    let Some(api_key_val) = api_key else {
-        return Ok(serde_json::json!({
-            "parentInfo": serde_json::Value::Null,
-            "isParentReachable": false,
-            "routingMode": "unknown",
-        }));
+    let (Some(admin_url), Some(api_key)) = (admin_url, api_key) else {
+        return Ok(cloud_inter_terminal_status(
+            &terminal_type,
+            parent_terminal_id.as_deref(),
+            false,
+            false,
+            None,
+        ));
     };
 
-    let connectivity = api::test_connectivity(&admin_url_val, &api_key_val).await;
-    let normalized_admin_url = api::normalize_admin_url(&admin_url_val);
-    let parent_info = serde_json::json!({
-        "adminUrl": normalized_admin_url.clone(),
-        "host": normalized_admin_url,
-        "name": terminal_id.clone().unwrap_or_else(|| "Main POS".to_string()),
-        "terminalId": terminal_id,
-    });
-
-    Ok(serde_json::json!({
-        "parentInfo": parent_info,
-        "isParentReachable": connectivity.success,
-        "routingMode": if connectivity.success { "via_parent" } else { "direct_cloud" },
-        "latencyMs": connectivity.latency_ms,
-    }))
+    let connectivity = api::test_connectivity(&admin_url, &api_key).await;
+    Ok(cloud_inter_terminal_status(
+        &terminal_type,
+        parent_terminal_id.as_deref(),
+        true,
+        connectivity.success,
+        connectivity.latency_ms,
+    ))
 }
 
 #[tauri::command]
@@ -1729,6 +1750,41 @@ mod dto_tests {
     use super::*;
     use crate::db;
     use rusqlite::params;
+
+    #[test]
+    fn inter_terminal_status_keeps_cloud_connectivity_separate_from_parent_ownership() {
+        for cloud_reachable in [false, true] {
+            let status = cloud_inter_terminal_status(
+                "mobile_waiter",
+                Some("parent-uuid"),
+                true,
+                cloud_reachable,
+                Some(15),
+            );
+            assert_eq!(status["routingMode"], "direct_cloud");
+            assert_eq!(status["isParentReachable"], false);
+            assert_eq!(status["isCloudReachable"], cloud_reachable);
+            assert_eq!(status["lanTransportAvailable"], false);
+            assert_eq!(status["parentInfo"]["terminalId"], "parent-uuid");
+            assert!(status["parentInfo"].get("host").is_none());
+            assert!(status["parentInfo"].get("adminUrl").is_none());
+        }
+    }
+
+    #[test]
+    fn inter_terminal_status_preserves_main_role_and_incomplete_configuration() {
+        let main = cloud_inter_terminal_status("main", None, true, true, None);
+        assert_eq!(main["routingMode"], "main");
+        assert_eq!(main["isParentReachable"], false);
+        assert!(main["parentInfo"].is_null());
+
+        let unconfigured =
+            cloud_inter_terminal_status("mobile_waiter", Some("parent-uuid"), false, false, None);
+        assert_eq!(unconfigured["routingMode"], "unknown");
+        assert_eq!(unconfigured["isParentReachable"], false);
+        assert_eq!(unconfigured["isCloudReachable"], false);
+        assert_eq!(unconfigured["parentInfo"]["terminalId"], "parent-uuid");
+    }
 
     fn seed_deleted_order_cleanup_fixture(
         conn: &rusqlite::Connection,

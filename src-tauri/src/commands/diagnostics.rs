@@ -322,6 +322,7 @@ pub async fn database_get_stats(db: tauri::State<'_, db::DbState>) -> Result<Val
 
 #[tauri::command]
 pub async fn database_reset(
+    app: tauri::AppHandle,
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, crate::auth::AuthState>,
 ) -> Result<Value, crate::auth::GuardedCommandError> {
@@ -333,6 +334,7 @@ pub async fn database_reset(
         &db,
         &auth_state,
     )?;
+    crate::lan_transport::prepare_reset(&app).await?;
     database_reset_inner(&db).map_err(Into::into)
 }
 
@@ -362,6 +364,7 @@ where
 
 #[tauri::command]
 pub async fn database_clear_operational_data(
+    app: tauri::AppHandle,
     db: tauri::State<'_, db::DbState>,
     auth_state: tauri::State<'_, crate::auth::AuthState>,
 ) -> Result<Value, crate::auth::GuardedCommandError> {
@@ -371,6 +374,7 @@ pub async fn database_clear_operational_data(
         &db,
         &auth_state,
     )?;
+    crate::lan_transport::prepare_reset(&app).await?;
     database_clear_operational_data_inner(&db).map_err(Into::into)
 }
 

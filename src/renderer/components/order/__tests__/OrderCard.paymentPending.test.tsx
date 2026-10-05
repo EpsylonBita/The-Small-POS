@@ -42,6 +42,7 @@ vi.mock('../OrderStatusControls', () => ({
 }));
 
 import OrderCard from '../OrderCard';
+import { resolvePlatformPaymentPresentation } from '../../../../../../shared/platforms/payment-presentation';
 
 function makeOrder(overrides: Record<string, unknown> = {}) {
   return {
@@ -96,5 +97,81 @@ describe('OrderCard payment state', () => {
 
     renderCard(makeOrder({ payment_status: 'pending', total_amount_cents: 0 }));
     expect(screen.queryByTestId('order-card-payment-pending')).toBeNull();
+  });
+});
+
+describe('OrderCard platform payment ownership', () => {
+  const platformOrder = (food_delivery: unknown, overrides: Record<string, unknown> = {}) =>
+    makeOrder({
+      plugin: 'efood', payment_status: 'paid', payment_method: 'other',
+      ghost_metadata: { food_delivery }, ...overrides,
+    });
+
+  it.each([
+    { prepaid: false, payment_method: 'cash', delivery_provider: 'platform_delivery' },
+    { prepaid: true, payment_method: 'online', delivery_provider: 'platform_delivery' },
+    { payment_method: 'unknown', delivery_provider: 'platform_delivery' },
+    { delivery_provider: 'platform_delivery' },
+    { prepaid: true, payment_method: 'cash', delivery_provider: 'platform_delivery' },
+  ])('shows the same platform-settled indicator regardless of customer tender: %j', disposition => {
+    const order = platformOrder(disposition);
+    renderCard(order);
+    expect(screen.getByTestId('order-card-platform-payment').textContent).toBe('PLATFORM PAYMENT');
+    expect(screen.getByRole('img', { name: 'Payment settled by platform; the store does not collect' })).toBeTruthy();
+    expect(screen.queryByRole('img', { name: 'Card' })).toBeNull();
+    expect(screen.queryByRole('img', { name: 'Cash' })).toBeNull();
+    expect(order.payment_method).toBe('other');
+    expect(order.payment_status).toBe('paid');
+  });
+
+  it('keeps store-driver prepaid money platform-settled', () => {
+    renderCard(platformOrder({ prepaid: true, payment_method: 'online', delivery_provider: 'vendor_delivery' }));
+    expect(screen.getByTestId('order-card-platform-payment').textContent).toBe('PLATFORM PAYMENT');
+  });
+
+  it('accepts normalized source and JSON per-order ownership from local sync', () => {
+    renderCard(platformOrder(null, {
+      plugin: ' E-Food ',
+      ghost_metadata: JSON.stringify({ food_delivery: { delivery_provider: ' Platform_Delivery ' } }),
+    }));
+    expect(screen.getByTestId('order-card-platform-payment').textContent).toBe('PLATFORM PAYMENT');
+  });
+
+  it.each([
+    null, [], {},
+    { prepaid: true, payment_method: 'online' },
+    { prepaid: true, payment_method: 'online', delivery_provider: 'unknown' },
+    { delivery_provider: true },
+    { payment_method: 'cash', delivery_provider: 'vendor_delivery', prepaid: false },
+    { prepaid: true, payment_method: 'cash', delivery_provider: 'vendor_delivery' },
+    { prepaid: false, payment_method: 'online', delivery_provider: 'vendor_delivery' },
+    { prepaid: 'true', payment_method: 'online', delivery_provider: 'vendor_delivery' },
+  ])('keeps missing ownership or store-collected other unknown: %j', disposition => {
+    renderCard(platformOrder(disposition));
+    expect(screen.queryByTestId('order-card-platform-payment')).toBeNull();
+    expect(screen.queryByRole('img', { name: 'Cash' })).toBeNull();
+    expect(screen.queryByRole('img', { name: 'Card' })).toBeNull();
+  });
+
+  it('keeps pending ledger status ahead of any settlement badge', () => {
+    renderCard(platformOrder({ delivery_provider: 'platform_delivery' }, { payment_status: 'pending' }));
+    expect(screen.getByTestId('order-card-payment-pending').textContent).toBe('PAY PENDING');
+    expect(screen.queryByTestId('order-card-platform-payment')).toBeNull();
+  });
+
+  it.each([
+    ['cash', 'Cash'], ['card', 'Card'], ['split', 'Split Payment'], ['twint', 'TWINT'],
+  ])('preserves canonical %s for store collection', (method, label) => {
+    renderCard(platformOrder({ payment_method: method, delivery_provider: 'vendor_delivery' }, { payment_method: method }));
+    expect(screen.queryByTestId('order-card-platform-payment')).toBeNull();
+    expect(screen.getByRole('img', { name: label })).toBeTruthy();
+  });
+
+  it.each(['pos', 'unknown_marketplace', 'stripe', null])('does not trust ownership for source %s', plugin => {
+    expect(resolvePlatformPaymentPresentation(platformOrder({ delivery_provider: 'platform_delivery' }, { plugin }))).toBeNull();
+  });
+
+  it.each(['not-json', '[]', 'null'])('keeps malformed or missing metadata unknown: %s', ghost_metadata => {
+    expect(resolvePlatformPaymentPresentation(platformOrder(null, { ghost_metadata }))).toBeNull();
   });
 });

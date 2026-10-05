@@ -4090,8 +4090,8 @@
     "editSettlementDelta": {
       "collectTitle": "Pagesë shtesë",
       "refundTitle": "Rimbursim",
-      "collectBody": "Arkëto edhe €{{amount}} — zgjidh mënyrën e përdorur.",
-      "refundBody": "Ktheji klientit €{{amount}} — zgjidh mënyrën e përdorur.",
+      "collectBody": "Arkëto edhe {{amount}} — zgjidh mënyrën e përdorur.",
+      "refundBody": "Ktheji klientit {{amount}} — zgjidh mënyrën e përdorur.",
       "collectAmountLabel": "Shtesë për arkëtim",
       "refundAmountLabel": "Shuma e rimbursimit",
       "payWithCash": "Paguaj me kesh",
@@ -4392,8 +4392,8 @@
     },
     "simplePricing": {
       "orderTypePricing": "Çmimet sipas llojit të porosisë",
-      "pickupPrice": "Çmimi me vete (€)",
-      "deliveryPrice": "Çmimi me dërgesë (€)",
+      "pickupPrice": "Çmimi me vete",
+      "deliveryPrice": "Çmimi me dërgesë",
       "pricingHelp": "Vendos çmime të ndryshme për porositë me vete dhe me dërgesë.",
       "savePricing": "Ruaj çmimet",
       "title": "Vendos çmimet"
@@ -4419,7 +4419,7 @@
       "staffAuthUnavailable": "Të dhënat e autentikimit të stafit ende s'janë offline. Hape së pari listën e stafit kur je online.",
       "noStaffSelected": "Zgjidh një punonjës",
       "shiftStarted": "Turni filloi",
-      "drawerContinuityWarning": "Arka s'përputhet: herën e fundit u mbyll me {{previous}} €, por ti e hape me {{opening}} €. Numëroje përsëri arkën para se të vazhdosh.",
+      "drawerContinuityWarning": "Arka s'përputhet: herën e fundit u mbyll me {{previous}}, por ti e hape me {{opening}}. Numëroje përsëri arkën para se të vazhdosh.",
       "shiftEnded": "Turni u mbyll",
       "failedToLoad": "Lista e stafit nuk u ngarkua. Provo përsëri.",
       "shiftSummary": "Përmbledhja e turnit",
@@ -4594,7 +4594,7 @@
       "ordersCountValue": "{{count}} porosi",
       "paymentHistory": "Historiku i pagesave",
       "paymentHistoryToday": "Pagesat e sotme",
-      "todayTotal": "Totali i sotëm: €{{amount}}",
+      "todayTotal": "Totali i sotëm: {{amount}}",
       "paymentRecorded": "Pagesa u regjistrua",
       "paymentFailed": "Pagesa nuk u regjistrua",
       "selectStaffPlaceholder": "-- Zgjidh punonjësin --",
@@ -4727,9 +4727,9 @@
       "driverStartingCashHelper": "Opsionale: shkruaj keshin e marrë nga arkëtari aktiv para se të nisin dërgesat.",
       "serverStartingCashTitle": "Shkruaj keshin fillestar të kamarierit",
       "serverStartingCashHelper": "Opsionale: shkruaj keshin e marrë nga arkëtari aktiv para se të nisë shërbimi në tavolina.",
-      "skipCash": "Kapërce (€0)",
+      "skipCash": "Kapërce (0)",
       "startShift": "Nis turnin",
-      "noCashierWarning": "S'ka arkëtar aktiv. Mund të vazhdosh vetëm me €0.",
+      "noCashierWarning": "S'ka arkëtar aktiv. Mund të vazhdosh vetëm me 0.",
       "activeSince": "Në turn që nga {{time}}",
       "cashierCashHelper": "Shkruaj shumën në arkë",
       "driverCashHelper": "Opsionale: shumë nga arka. Shkruaj 0 për ta kapërcyer.",
@@ -4763,8 +4763,11 @@
         "expectedCash": "Keshi i pritshëm",
         "countedLabel": "Kesh i marrë nga {{name}}",
         "closing": "Duke mbyllur…",
-        "confirm": "Mbyll turnin dhe merr keshin"
-      }
+        "confirm": "Mbyll turnin dhe merr keshin",
+        "pending": "Dorëzimi është ruajtur në këtë arkë dhe pret konfirmim. Do të provohet përsëri automatikisht; mos i regjistroni paratë sërish.",
+        "retry": "Riprovo dorëzimin e ruajtur"
+      },
+      "currencySettlementRequired": "Likuidoni dhe mbyllni turnet e stafit në monedhën e tyre origjinale para se të mbyllni këtë turn të arkës."
     },
     "zReport": {
       "title": "Raporti Z - {{date}}",
@@ -5692,8 +5695,8 @@
       "editSettlementReducedRequired": "Ky ndryshim e ul një porosi të paguar dhe kërkon një rimbursim të regjistruar",
       "editSettlementTitle": "Rimbursimi i ndryshimit",
       "enterAmountFirst": "Shkruaj një shumë rimbursimi për të zgjedhur si u kthye kjo pagesë.",
-      "netPaidAfterRefunds": "Paguar pas rimbursimeve të mëparshme: €{{amount}}",
-      "originalVsNext": "Totali i porosisë ndryshoi nga €{{from}} në €{{to}}",
+      "netPaidAfterRefunds": "Paguar pas rimbursimeve të mëparshme: {{amount}}",
+      "originalVsNext": "Totali i porosisë ndryshoi nga {{from}} në {{to}}",
       "requiredAmount": "Rimbursimi i kërkuar",
       "selectAllocation": "Ndaje rimbursimin të paktën në një pagesë",
       "useRemaining": "Përdor mbetjen"
@@ -6134,7 +6137,9 @@
     "loadingAddress": "Duke ngarkuar adresën...",
     "customer": "Klienti",
     "paymentPending": "PAGESË NË PRITJE",
-    "paymentPendingA11y": "Pagesë në pritje"
+    "paymentPendingA11y": "Pagesë në pritje",
+    "platformPayment": "PAGESË PLATFORME",
+    "platformPaymentA11y": "Pagesë e shlyer nga platforma; dyqani nuk arkëton"
   },
   "incomingOrderAlert": {
     "title": "Porosi e re nga {{platform}}",
@@ -6244,6 +6249,8 @@
     "tableNumber": "Tavolina {{number}}",
     "capacity": "Kapaciteti",
     "seats": "{{count}} vende",
+    "seats_one": "{{count}} vend",
+    "seats_other": "{{count}} vende",
     "section": "Zona",
     "floor": "Kati",
     "status": {
@@ -7678,7 +7685,7 @@
     "title": "Programi i besnikërisë",
     "programInactive": "Programi i besnikërisë joaktiv",
     "programInactiveDesc": "Programi i besnikërisë është i çaktivizuar tani. Aktivizoje nga paneli i adminit.",
-    "pointsPerEuro": "pikë për çdo €1",
+    "pointsPerEuro": "pikë për çdo {{amount}}",
     "perPoint": "për pikë",
     "members": "Anëtarë",
     "totalPoints": "Pikë gjithsej",
@@ -9588,7 +9595,11 @@
     },
     "errors": {
       "moduleRequired": "Faturimi i mysafirëve s'është aktivizuar për këtë terminal.",
-      "actionFailed": "Llogaria nuk u përditësua."
+      "actionFailed": "Llogaria nuk u përditësua.",
+      "currencyUnavailable": "Monedha fillestare e llogarisë së mysafirit nuk është e disponueshme. Kontrollo llogarinë para se të regjistrosh para.",
+      "currencyMismatch": "Kjo llogari përdor monedhë tjetër nga dyqani. Nuk mund të shtosh tarifa të reja.",
+      "shiftCurrency": "Monedha e turnit të arkës është ndryshe ose e panjohur. Mbyllni këtë turn dhe hapni një të ri para porosive ose pagesave të reja.",
+      "storeCurrency": "Monedha e dyqanit mungon ose ka ndryshuar. Rifreskoni cilësimet e terminalit para porosive ose pagesave të reja."
     },
     "error": {
       "title": "Llogaritë e mysafirëve nuk u ngarkuan"
@@ -9597,7 +9608,8 @@
       "amount": "Shkruaj një shumë më të madhe se zero.",
       "quantity": "Sasia duhet të jetë më e madhe se zero.",
       "description": "Përshkrimi duhet plotësuar."
-    }
+    },
+    "roomChargePending": "Porosia u ruajt. Tarifa e dhomës pret konfirmimin e serverit; mos e arkëto përsëri."
   },
   "filters": {
     "all": "Të gjitha"
@@ -9832,7 +9844,7 @@
       "revenue": "Xhiro",
       "status": "Statusi i kioskut",
       "title": "Menaxhimi i kioskut",
-      "todayOrders": "Porositë e sotme",
+      "todayOrders": "Porositë e ditës së punës",
       "toggleError": "Statusi i kioskut nuk u përditësua"
     },
     "launchPurchase": {
@@ -9902,5 +9914,12 @@
     "unsavedReturnedAction": "Paratë iu kthyen klientit",
     "unsavedSaving": "Po ruhet...",
     "unsavedResolving": "Po regjistrohet..."
+  },
+  "cashierGate": {
+    "title": "Kërkohet turni i arkëtarit",
+    "body": "Veprimet normale të POS janë bllokuar. Një arkëtar ose menaxher duhet të fillojë turnin në këtë arkë për të hapur ditën.",
+    "waiterBody": "Arka kryesore është e mbyllur. Një arkëtar ose menaxher duhet të fillojë turnin në arkën kryesore të lidhur me këtë pajisje. Pastaj mund të filloni turnin tuaj dhe të vazhdoni.",
+    "checking": "Po kontrollohet turni i arkëtarit…",
+    "recheck": "Kontrollo përsëri"
   }
 }

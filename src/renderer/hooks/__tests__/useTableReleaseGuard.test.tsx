@@ -13,9 +13,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mock = vi.hoisted(() => ({
   getSettlementSnapshot: vi.fn(),
   cancelWithApproval: vi.fn(),
+  emit: vi.fn(),
 }));
 
 vi.mock('../../../lib', () => ({
+  emitCompatEvent: mock.emit,
   getBridge: () => ({
     payments: { getSettlementSnapshot: mock.getSettlementSnapshot },
     orders: { cancelWithApproval: mock.cancelWithApproval },
@@ -47,7 +49,19 @@ vi.mock('../../components/ui/pos-glass-components', () => ({
     ) : null,
 }));
 
-import { refuseOwingCancelUpFront, useTableReleaseGuard } from '../useTableReleaseGuard';
+import { owingCancelFailureMessage, refuseOwingCancelUpFront, useTableReleaseGuard } from '../useTableReleaseGuard';
+
+it('explains why a cancellation retry needs its original approving staff member', () => {
+  const message = owingCancelFailureMessage(new Error('ORIGINAL_CANCEL_APPROVER_REQUIRED'), (_key, options) => options?.defaultValue);
+  expect(message).toContain('original approving staff member');
+  expect(message).toContain('table was not released');
+});
+it('explains that offline canonical cancellation requires reconnecting and syncing', () => {
+  const message = owingCancelFailureMessage(new Error('TABLE_CANCEL_SYNC_REQUIRED'), (_key, options) => options?.defaultValue);
+  expect(message).toContain('Reconnect');
+  expect(message).toContain('table was not released');
+});
+
 import type { RestaurantTable } from '../../types/tables';
 
 const table = {
@@ -64,6 +78,7 @@ const table = {
   createdAt: '2026-09-30T10:00:00Z',
   updatedAt: '2026-09-30T10:00:00Z',
   currentOrderId: 'order-table-5',
+  tableSessionId: '11111111-1111-4111-8111-111111111111',
 } as RestaurantTable;
 
 const release = vi.fn(async () => true);
@@ -90,6 +105,7 @@ function Harness() {
 beforeEach(() => {
   mock.getSettlementSnapshot.mockReset();
   mock.cancelWithApproval.mockReset();
+  mock.emit.mockClear();
   release.mockClear();
   onCollect.mockClear();
   runWithPrivilegedConfirmation.mockClear();
@@ -153,7 +169,9 @@ describe('releasing a table whose order owes money', () => {
 
   it('cancel needs a reason and the approval, then releases the table', async () => {
     mock.getSettlementSnapshot.mockResolvedValue({ outstandingAmount: 13 });
-    mock.cancelWithApproval.mockResolvedValue({ success: true, orderId: 'order-table-5' });
+    mock.cancelWithApproval.mockResolvedValue({ success: true, orderId: 'order-table-5', data: { workflow: {
+      affected_table_ids: ['table-5', 'table-6'], affected_session_ids: [table.tableSessionId],
+    } } });
     render(<Harness />);
     await clickRelease();
 
@@ -169,14 +187,16 @@ describe('releasing a table whose order owes money', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Cancel the order' }));
     });
 
-    await waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mock.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({tableId:'table-6'})));
+    expect(release).not.toHaveBeenCalled();
     expect(runWithPrivilegedConfirmation).toHaveBeenCalledWith(
       expect.objectContaining({ scope: 'cash_drawer_control' }),
     );
-    expect(mock.cancelWithApproval).toHaveBeenCalledWith({
+    expect(mock.cancelWithApproval).toHaveBeenCalledWith(expect.objectContaining({
       orderId: 'order-table-5',
       reason: 'The customer left without ordering',
-    });
+      tableSessionId: table.tableSessionId,
+    }));
   });
 
   it('a refused approval releases nothing', async () => {

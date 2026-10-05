@@ -5,6 +5,7 @@ import type { RecoveryIssue } from '../../../lib';
 
 const { bridge, queue, toast } = vi.hoisted(() => ({
   bridge: {
+    invoke: vi.fn(),
     diagnostics: { getSystemHealth: vi.fn(), export: vi.fn() },
     sync: { getFailedFinancialItems: vi.fn(), validateFinancialIntegrity: vi.fn() },
     recovery: { listActionLog: vi.fn(), executeAction: vi.fn(), recordActionLog: vi.fn(), createPreActionSnapshot: vi.fn() },
@@ -12,7 +13,7 @@ const { bridge, queue, toast } = vi.hoisted(() => ({
   queue: { listItems: vi.fn() },
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
 }));
-vi.mock('../../../lib', () => ({ getBridge: () => bridge }));
+vi.mock('../../../lib', () => ({ getBridge: () => bridge, onEvent: vi.fn(), offEvent: vi.fn() }));
 vi.mock('../../services/SyncQueueBridge', () => ({ getSyncQueueBridge: () => queue }));
 vi.mock('react-hot-toast', () => ({ default: toast }));
 // The modal formats blocker money through `renderer/utils/format`, which
@@ -42,6 +43,10 @@ const deferred = <T,>() => { let resolve!: (value: T) => void; let reject!: (rea
 
 beforeEach(() => {
   vi.clearAllMocks();
+  bridge.invoke.mockImplementation(async (command: string) => {
+    if (command === 'table_attempt_recovery_status') return { success: true, attempts: [] };
+    throw new Error(`Unexpected bridge command: ${command}`);
+  });
   bridge.diagnostics.getSystemHealth.mockResolvedValue(health);
   bridge.sync.getFailedFinancialItems.mockResolvedValue([]);
   bridge.sync.validateFinancialIntegrity.mockResolvedValue({ valid:true, issues:[] });

@@ -13,10 +13,11 @@
 //!   * `print.rs::is_food_delivery_plugin` kept a hand-written `matches!`,
 //!   * `renderer/utils/plugin-icons.tsx` kept a third allowlist.
 //!
-//! Every accounting surface now calls [`classify_order_platform`] (Rust) or
-//! `classifyOrderPlatform` (`shared/platforms/order-platforms.ts`). The two
-//! implementations are kept in lockstep by
-//! `tests/renderer/platform-classification-parity.test.ts`.
+//! Rust accounting uses the SQL helpers below; TypeScript uses
+//! `classifyOrderPlatform` (`shared/platforms/order-platforms.ts`). Both use
+//! the same closed lists and aliases. The test-only Rust classifier checks
+//! the SQL predicates against that classification contract in this module's
+//! tests.
 //!
 //! ## Classification contract
 //!
@@ -79,6 +80,7 @@ pub(crate) const EXTERNAL_DELIVERY_PLATFORMS: &[&str] = &[
 /// Stay/table marketplaces. External money, but never a food-delivery slip.
 pub(crate) const EXTERNAL_BOOKING_PLATFORMS: &[&str] = &["booking", "tripadvisor", "airbnb"];
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OrderPlatformClass {
     /// No plugin recorded — a plain store order.
@@ -92,19 +94,8 @@ pub(crate) enum OrderPlatformClass {
     Unknown,
 }
 
-impl OrderPlatformClass {
-    /// Wire/report name, used by the Z's `integrity.unclassifiedPlatforms`.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            OrderPlatformClass::None => "none",
-            OrderPlatformClass::Internal => "internal",
-            OrderPlatformClass::ExternalMarketplace => "external_marketplace",
-            OrderPlatformClass::Unknown => "unknown",
-        }
-    }
-}
-
 /// Every marketplace slug we can name. CLOSED on purpose.
+#[cfg(test)]
 fn is_known_marketplace_slug(slug: &str) -> bool {
     EXTERNAL_DELIVERY_PLATFORMS.contains(&slug) || EXTERNAL_BOOKING_PLATFORMS.contains(&slug)
 }
@@ -172,7 +163,8 @@ pub(crate) fn normalize_platform_slug(value: &str) -> Option<String> {
     Some(folded)
 }
 
-/// The one classification every accounting surface must call.
+/// Reference classification used to check the accounting SQL predicates.
+#[cfg(test)]
 pub(crate) fn classify_order_platform(value: &str) -> OrderPlatformClass {
     match normalize_platform_slug(value) {
         None => OrderPlatformClass::None,
@@ -189,12 +181,14 @@ pub(crate) fn classify_order_platform(value: &str) -> OrderPlatformClass {
 /// True only for money that reaches us through a marketplace we can NAME.
 /// `pos` / `kiosk` / `web` / `android-ios` are false by construction — that is
 /// the whole point of this module — and so is any slug we do not recognise.
+#[cfg(test)]
 pub(crate) fn is_external_marketplace(value: &str) -> bool {
     classify_order_platform(value) == OrderPlatformClass::ExternalMarketplace
 }
 
 /// A source that is recorded but that we cannot name. Reported, never counted
 /// as a platform.
+#[cfg(test)]
 pub(crate) fn is_unknown_platform(value: &str) -> bool {
     classify_order_platform(value) == OrderPlatformClass::Unknown
 }
@@ -211,6 +205,7 @@ pub(crate) fn is_external_delivery_platform(value: &str) -> bool {
 /// Closed check: is this a platform we can name (logo, brand colour)?
 /// Identical to [`is_external_marketplace`] today; kept as its own name
 /// because presentation and accounting are different questions.
+#[cfg(test)]
 pub(crate) fn is_known_external_platform(value: &str) -> bool {
     is_external_marketplace(value)
 }
@@ -219,7 +214,7 @@ pub(crate) fn is_known_external_platform(value: &str) -> bool {
 /// the predicates below. SQLite has no regex, so this covers the two folds
 /// that actually occur in the column — case and the `-`/space/`.` separators
 /// — which is enough to recognize every internal spelling we have ever
-/// written. Unknown spellings fall through to "external", the safe side.
+/// written. Unrecognised slugs remain unknown and are reported separately.
 fn normalized_plugin_sql_expr(plugin_expr: &str) -> String {
     format!(
         "REPLACE(REPLACE(REPLACE(LOWER(TRIM(COALESCE({plugin_expr}, ''))), '-', '_'), ' ', '_'), '.', '_')"

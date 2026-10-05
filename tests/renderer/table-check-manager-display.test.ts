@@ -269,8 +269,8 @@ test('TableDestinationPicker preserves raw table ids for writes/matching (displa
   // The action handlers still send the raw selected id and stay disabled until set.
   assert.match(modalSource, /target_table_id: targetTableId/);
   assert.match(modalSource, /table_ids: \[mergeTableId\]/);
-  assert.match(modalSource, /disabled=\{isSaving \|\| !targetTableId\}/);
-  assert.match(modalSource, /disabled=\{isSaving \|\| !mergeTableId\}/);
+  assert.match(modalSource, /disabled=\{isSaving \|\| isSavedSession \|\| !targetTableId\}/);
+  assert.match(modalSource, /disabled=\{isSaving \|\| isSavedSession \|\| !mergeTableId\}/);
 });
 
 test('Move and Merge openers clear any stale destination before opening (no carry-over)', () => {

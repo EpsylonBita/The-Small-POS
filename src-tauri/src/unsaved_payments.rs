@@ -502,12 +502,19 @@ fn validate_manual_twint_entry(db: &DbState, entry: &UnsavedChargedPayment) -> R
         .get("metadata")
         .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let retained_original = load(&conn, &entry.idempotency_key)?.is_some_and(|original| {
+        original.request == entry.request
+            && original.manual_scope == entry.manual_scope
+            && original.currency == entry.currency
+            && original.amount_cents == entry.amount_cents
+    });
     if entry.currency.as_deref() != Some("CHF")
         || entry.amount_cents <= 0
         || entry.transaction_ref.is_some()
         || entry.terminal_device_id.is_some()
-        || crate::fiscal::payload_builder::resolve_store_currency_code(&conn).as_deref()
-            != Some("CHF")
+        || (!retained_original
+            && crate::fiscal::payload_builder::resolve_store_currency_code(&conn).as_deref()
+                != Some("CHF"))
         || str_field(payment, &["idempotencyKey", "idempotency_key"]).as_deref()
             != Some(entry.idempotency_key.as_str())
         || metadata.as_object().is_none_or(|fields| fields.len() != 4)
@@ -833,7 +840,7 @@ pub(crate) fn summary_json(entry: &UnsavedChargedPayment) -> Value {
         "method": entry.method,
         "amount": Cents::new(entry.amount_cents).to_f64_dp2(),
         "amountCents": entry.amount_cents,
-        "currency": entry.currency.clone().unwrap_or_else(|| "EUR".to_string()),
+        "currency": entry.currency,
         "transactionRef": entry.transaction_ref,
         "kind": entry.kind,
         "manualScope": entry.manual_scope,
@@ -878,6 +885,7 @@ pub(crate) fn not_saved_response(entry: &UnsavedChargedPayment, extra: Option<&V
         "method": entry.method,
         "amount": Cents::new(entry.amount_cents).to_f64_dp2(),
         "amountCents": entry.amount_cents,
+        "currency": entry.currency,
         "unsavedPayment": summary_json(entry),
         "error": message,
         "message": message,
@@ -1488,6 +1496,7 @@ mod tests {
             "orderId": order_id,
             "method": "card",
             "amount": amount,
+            "currency": "EUR",
             "transactionRef": reference,
             "paymentOrigin": "terminal",
             "terminalApproved": true,

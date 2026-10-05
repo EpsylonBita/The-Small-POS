@@ -35,6 +35,34 @@ const orderDashboardSource = () =>
     'utf8',
   );
 
+const tableWorkspaceSource = () =>
+  readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'TableWorkspace.tsx'),
+    'utf8',
+  );
+
+const tableWorkspaceStyles = () =>
+  readFileSync(
+    path.join(process.cwd(), 'src', 'renderer', 'components', 'tables', 'table-workspace.css'),
+    'utf8',
+  );
+
+const cssDeclarations = (source: string, selector: string): string => {
+  const declarations = Array.from(source.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g))
+    .filter(([, selectors]) => selectors.split(',').some((value) => value.trim() === selector))
+    .map(([, , body]) => body);
+  assert.ok(declarations.length > 0, `missing CSS selector: ${selector}`);
+  return declarations.join('\n');
+};
+
+const tableWorkspaceCardSource = () => {
+  const source = tableWorkspaceSource();
+  const start = source.indexOf('export const TableWorkspaceCard');
+  const end = source.indexOf("TableWorkspaceCard.displayName", start);
+  assert.ok(start >= 0 && end > start, 'the extracted compact table card must exist');
+  return source.slice(start, end);
+};
+
 const orderFlowSource = () =>
   readFileSync(
     path.join(process.cwd(), 'src', 'renderer', 'components', 'OrderFlow.tsx'),
@@ -841,10 +869,12 @@ test('OrderDashboard keeps table controls fixed while only the table grid scroll
   const dashboardSource = orderDashboardSource();
   const foodSource = foodDashboardSource();
   const standaloneSource = tablesDashboardSource();
+  const workspaceSource = tableWorkspaceSource();
+  const workspaceCss = tableWorkspaceStyles();
 
   assert.match(
     dashboardSource,
-    /className=\{`flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border p-4/,
+    /className="table-workspace"/,
     'tables tab should be a bounded flex shell, not a page-height content stack',
   );
   assert.match(
@@ -854,7 +884,7 @@ test('OrderDashboard keeps table controls fixed while only the table grid scroll
   );
   assert.match(
     dashboardSource,
-    /<div className="shrink-0 space-y-2">/,
+    /<TableWorkspaceToolbar[\s\S]*?\/\>\s*<div\s+data-testid="order-dashboard-table-grid-container"/,
     'table filters should live in a non-scrolling header region',
   );
   assert.match(
@@ -862,6 +892,14 @@ test('OrderDashboard keeps table controls fixed while only the table grid scroll
     /<div className="flex h-full min-h-0 flex-col gap-3">/,
     'embedded table dashboard should use fixed controls plus a bounded flex scroll body',
   );
+  const shellCss = cssDeclarations(workspaceCss, '.table-workspace');
+  assert.match(shellCss, /display:\s*flex/);
+  assert.match(shellCss, /flex-direction:\s*column/);
+  assert.match(shellCss, /height:\s*100%/);
+  assert.match(shellCss, /min-height:\s*0/);
+  assert.match(shellCss, /overflow:\s*hidden/);
+  assert.match(workspaceSource, /className="table-workspace-controls"/);
+  assert.match(cssDeclarations(workspaceCss, '.table-workspace-controls'), /flex-shrink:\s*0/);
   assert.match(
     standaloneSource,
     /<div className="mb-4 shrink-0 space-y-3">/,
@@ -909,13 +947,12 @@ test('OrderDashboard keeps table controls fixed while only the table grid scroll
       ),
       'the table cards should live in the bounded grid row below the fixed controls',
     );
-    assert.match(
-      source,
-      new RegExp(
-        `data-testid="${testIdPrefix}-table-grid-container"[\\s\\S]*ref=\\{tableGridScrollRef\\}[\\s\\S]*data-testid="${testIdPrefix}-table-scroll-region"[\\s\\S]*className="h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll"`,
-      ),
-      'the grid container should expose one full-size scroll surface with room around the floating action button',
-    );
+    const scrollClass = testIdPrefix === 'order-dashboard'
+      ? 'table-workspace-scroll touch-scroll'
+      : 'h-full min-h-0 overflow-y-auto overflow-x-hidden pb-28 pr-24 scrollbar-hide touch-scroll';
+    assert.match(source, new RegExp(
+      `data-testid="${testIdPrefix}-table-grid-container"[\\s\\S]*ref=\\{tableGridScrollRef\\}[\\s\\S]*data-testid="${testIdPrefix}-table-scroll-region"[\\s\\S]*className="${scrollClass}"`,
+    ), 'the grid container should expose one full-size scroll surface with room around the floating action button');
     assert.doesNotMatch(
       source,
       /h-\[calc\(100dvh-30rem\)\]/,
@@ -939,6 +976,15 @@ test('OrderDashboard keeps table controls fixed while only the table grid scroll
       'list cards should not force the table grid to a full-height minimum inside the scroll region',
     );
   }
+  const scrollCss = cssDeclarations(workspaceCss, '.table-workspace-scroll');
+  assert.match(scrollCss, /height:\s*100%/);
+  assert.match(scrollCss, /min-height:\s*0/);
+  assert.match(scrollCss, /overflow-y:\s*auto/);
+  assert.match(scrollCss, /overflow-x:\s*hidden/);
+  assert.match(scrollCss, /padding:\s*0 2px 100px/);
+  assert.match(scrollCss, /scrollbar-width:\s*none/);
+  assert.doesNotMatch(scrollCss, /flex:\s*1/);
+  assert.match(cssDeclarations(workspaceCss, '.table-workspace-scroll::-webkit-scrollbar'), /display:\s*none/);
 });
 
 test('main layout does not wrap order and table dashboards in a page scroll root', () => {
@@ -978,17 +1024,25 @@ test('table dashboards expose list and 2D floor-plan modes', () => {
   const dashboardSource = orderDashboardSource();
   const standaloneSource = tablesDashboardSource();
 
-  for (const source of [dashboardSource, standaloneSource]) {
+  for (const [source, controls] of [
+    [dashboardSource, tableWorkspaceSource()],
+    [standaloneSource, standaloneSource],
+  ]) {
     assert.match(source, /TableFloorPlanView/);
     assert.match(source, /tableViewMode/);
-    assert.match(source, /tablesDashboard\.viewMode\.list/);
-    assert.match(source, /tablesDashboard\.viewMode\.floorPlan/);
+    assert.match(controls, /tablesDashboard\.viewMode\.list/);
+    assert.match(controls, /tablesDashboard\.viewMode\.floorPlan/);
     assert.match(
       source,
       /useState<[^>]*['"]list['"][^>]*['"]floorplan['"][^>]*>\(\s*['"]list['"]\s*,?\s*\)/,
       'table dashboards should open in List mode, not the 2D floor plan',
     );
   }
+  assert.match(dashboardSource, /onList=\{\(\) => setTableViewMode\("list"\)\}/);
+  assert.match(dashboardSource, /onFloorPlan=\{\(\) => setTableFloorPlanModalOpen\(true\)\}/);
+  assert.match(dashboardSource, /<TableFloorPlanModal\s+isOpen=\{tableFloorPlanModalOpen\}/);
+  assert.match(tableWorkspaceSource(), /aria-pressed=\{!floorPlanOpen\} onClick=\{onList\}/);
+  assert.match(tableWorkspaceSource(), /aria-pressed=\{floorPlanOpen\} onClick=\{onFloorPlan\}/);
 
   // Round 204: the visible toggle labels come from the table-check overlay locale files, which
   // previously lacked the viewMode keys -- so the toggle showed the English fallback "List" even in
@@ -1041,8 +1095,6 @@ test('table floor labels keep localized case (no forced uppercase); stats/status
   };
 
   const floorSurfaces: ReadonlyArray<{ source: string; token: string; label: string }> = [
-    { source: dashboardSource, token: 't("tablesDashboard.floor", "Floor")', label: 'OrderDashboard floor filter prefix' },
-    { source: dashboardSource, token: 'getTableFloorLabel(getTableFloorValue(table))', label: 'OrderDashboard per-table floor label' },
     { source: standaloneSource, token: "t('tablesDashboard.floor', { defaultValue: 'Floor' })", label: 'TablesDashboard floor filter prefix' },
     { source: standaloneSource, token: 'floorLabel(getFloorValue(table))', label: 'TablesDashboard per-table floor label' },
     { source: standaloneSource, token: 'floorLabel(getFloorValue(selectedTable))', label: 'TablesDashboard selected-table floor label' },
@@ -1055,11 +1107,23 @@ test('table floor labels keep localized case (no forced uppercase); stats/status
     assert.match(cls, /tracking-wide/, `${label} should keep its tracking-wide treatment`);
   }
 
-  // The floor buttons were already natural-case and must stay that way (not regress to uppercase).
-  assert.match(dashboardSource, /\{getTableFloorLabel\("all"\)\}/);
+  // The embedded workspace forwards localized floor labels to its extracted controls and cards.
+  const workspaceSource = tableWorkspaceSource();
+  const workspaceCss = tableWorkspaceStyles();
+  assert.match(dashboardSource, /floorLabel=\{getTableFloorLabel\}/);
+  assert.match(dashboardSource, /floor=\{getTableFloorLabel\(getTableFloorValue\(table\)\)\}/);
+  assert.match(workspaceSource, /\{\['all', \.\.\.floors\]\.map\(floor =>/);
+  assert.match(workspaceSource, /onClick=\{\(\) => onFloorFilter\(floor\)\}>\{floorLabel\(floor\)\}/);
+  assert.match(workspaceSource, /className="table-workspace-floor">\{floor\}<\/span>/);
+  for (const selector of ['.table-workspace', '.table-workspace button', '.table-workspace-floors', '.table-workspace-floors button', '.table-workspace-floor']) {
+    assert.doesNotMatch(cssDeclarations(workspaceCss, selector), /text-transform:\s*uppercase/, `${selector} must preserve localized case`);
+  }
+  assert.doesNotMatch(workspaceSource, /floorLabel\(floor\)\.toUpperCase\(\)|\{floor\.toUpperCase\(\)\}/);
 
-  // Stats/status labels may still use uppercase -- the change is scoped to floor labels, not global.
-  assert.match(dashboardSource, /uppercase/);
+  // The standalone stats retain their separate uppercase treatment; the extracted workspace
+  // uses a compact natural-case summary instead of requiring uppercase anywhere on the page.
+  assert.match(workspaceSource, /className="table-workspace-summary"/);
+  assert.match(cssDeclarations(workspaceCss, '.table-workspace-summary dt'), /font-size:\s*12px/);
   assert.match(standaloneSource, /uppercase/);
 });
 
@@ -1242,14 +1306,15 @@ test('TableActionModal turns cleaning tables into cleaned-only order flow', () =
   );
   assert.match(
     source,
-    /disabled=\{blocksGuestActions\}/,
+    /action\(t\('tableActionModal\.newOrder'[\s\S]*?handleNewOrder, newOrderDescription, blocksGuestActions,/,
     'cleaning tables should not allow the new-order action',
   );
   assert.match(
     source,
-    /aria-disabled=\{blocksGuestActions\}/,
+    /<button type="button"[^>]*onClick=\{onClick\} disabled=\{disabled\} aria-disabled=\{disabled\}/,
     'the disabled new-order state should be exposed to assistive tech',
   );
+  assert.match(source, /const handleNewOrder = \(\) => \{ if \(!blocksGuestActions\) onNewOrder\(guestCount\); \};/);
   assert.match(
     source,
     /handleSetAvailable/,
@@ -1295,14 +1360,16 @@ test('TableActionModal treats maintenance tables as out of service', () => {
   );
   assert.match(
     source,
-    /disabled=\{blocksGuestActions\}/,
+    /action\(t\('tableActionModal\.newOrder'[\s\S]*?handleNewOrder, newOrderDescription, blocksGuestActions,/,
     'maintenance tables should not allow the new-order action',
   );
   assert.match(
     source,
-    /disabled=\{isMaintenanceTable \|\| isUnavailableTable\}/,
+    /action\(t\('tableActionModal\.newReservation'[\s\S]*?handleNewReservation,[\s\S]*?\}\), isMaintenanceTable \|\| isUnavailableTable\)/,
     'maintenance tables should not allow reservation creation',
   );
+  assert.match(source, /disabled=\{disabled\} aria-disabled=\{disabled\}/);
+  assert.match(source, /const handleNewReservation = \(\) => \{ if \(!isMaintenanceTable && !isUnavailableTable\) onNewReservation\(\); \};/);
   assert.match(
     source,
     /tableActionModal\.markBackInService/,
@@ -1351,9 +1418,10 @@ test('TableActionModal exposes management actions for reserved tables', () => {
   );
   assert.match(
     source,
-    /\{!isReservedTable && canCreateReservation && \(/,
+    /\{canCreateReservation && !isReservedTable && action\(t\('tableActionModal\.newReservation'/,
     'reserved tables should not show the create-new-reservation action',
   );
+  assert.match(source, /\{isReservedTable && <>[\s\S]*?handleEditReservation,[\s\S]*?!onEditReservation\)[\s\S]*?handleNoShowReservation,[\s\S]*?!onNoShowReservation\)[\s\S]*?handleCancelReservation,[\s\S]*?!onCancelReservation/);
   assert.match(
     dashboardSource,
     /const handleTableEditReservation = useCallback\(async \(\) => \{[\s\S]*getTodayReservationForTable\(selectedTable\.id\)[\s\S]*setEditingReservation\(reservation\)[\s\S]*setShowReservationForm\(true\)/,
@@ -1600,135 +1668,57 @@ test('OrderDashboard (+) opens a lone option directly, through the same handlers
   assert.equal(source.match(/new CustomEvent\('pos:navigate-view', \{\s*detail: \{ view: 'repairs', repairIntent/g)?.length, 1);
 });
 
-// Round 211 → 214 (live QA): the waiter value used to clip as "Χωρίς αν…" in a half-width boxed tile.
-// Round 214 v3 re-laid the metadata as a compact one-line two-chip strip where the WAITER chip takes
-// the remaining row width (flex-1 min-w-0), so a value like "Χωρίς ανάθεση" reads on one line without
-// wrapping into a tall tile (truncating only if pathologically long). No tall boxed tile remains.
-test('OrderDashboard table-card waiter value reads on one line via a width-taking chip, no tall tile', () => {
+// The extracted tile keeps actual check metadata readable without the old half-width boxed tiles.
+test('OrderDashboard compact table cards preserve waiter and covers in width-taking metadata rows', () => {
   const source = orderDashboardSource();
-
-  // The waiter chip takes the remaining row width; its value lives in a truncating span (one line).
-  assert.match(
-    source,
-    /inline-flex min-w-0 flex-1 items-center gap-1 rounded-lg border px-2 py-1 font-semibold[\s\S]*?<span className="truncate">\{waiterName\}<\/span>/,
-  );
-  // The old boxed waiter tile (wrapping value / half-width grid tile) is gone.
-  assert.doesNotMatch(source, /mt-1 break-words leading-tight font-black/);
-  assert.doesNotMatch(source, /mt-1 truncate font-black/);
-  assert.doesNotMatch(source, /min-w-0 rounded-xl border px-3 py-1\.5/);
-
-  // The covers + waiter values are preserved as compact chips with their Users / UserCheck icons.
-  assert.match(source, /<Users className="h-3\.5 w-3\.5 shrink-0" \/>\s*\{guestCount\}\/\{table\.capacity\}/);
-  assert.match(source, /<UserCheck className="h-3\.5 w-3\.5 shrink-0" \/>\s*<span className="truncate">\{waiterName\}<\/span>/);
+  const card = tableWorkspaceCardSource();
+  const css = tableWorkspaceStyles();
+  assert.match(source, /waiter=\{waiterName\}/);
+  assert.match(source, /covers=\{hasOpenCheck \? `\$\{guestCount\}\/\$\{table\.capacity\}` : String\(table\.capacity\)\}/);
+  assert.match(card, /<UserCheck aria-hidden="true" \/>\{waiter\}/);
+  assert.match(card, /<Users aria-hidden="true" \/>\{hasOpenCheck \? covers : t\('tables\.seats'/);
+  const metadata = cssDeclarations(css, '.table-workspace-check-meta');
+  assert.match(metadata, /font-size:\s*11px/);
+  assert.match(metadata, /overflow-wrap:\s*anywhere/);
+  const row = cssDeclarations(css, '.table-workspace-check-meta > span');
+  assert.match(row, /min-width:\s*0/);
+  assert.match(row, /width:\s*100%/);
+  assert.doesNotMatch(row, /border:|padding:|min-height:/);
 });
 
-// Round 212 (a11y / touch hierarchy, live QA): the mounted Dashboard list-mode table card wrapper was
-// a giant role="button" that also contained inner action buttons (New order, New reservation, Mark
-// cleaned, Pay/Edit) -- the accessibility tree read each card as a button-with-nested-buttons, which is
-// invalid and bad for touch clarity. The wrapper must be a non-interactive semantic <article>: no
-// role="button", tabIndex, outer onClick/onKeyDown, cursor-pointer, or focus ring. Inner action
-// buttons + handlers are unchanged.
-test('OrderDashboard list-mode table card is a non-interactive <article>, not a nested role="button"', () => {
-  const source = orderDashboardSource();
-
-  // The card wrapper is a semantic, non-interactive <article> carrying the card visual classes (minus
-  // cursor-pointer, the focus ring, AND the press feedback -- a passive container must not animate).
-  assert.match(
-    source,
-    /<article\s+key=\{table\.id\}\s+className=\{`min-h-\[180px\] rounded-2xl border p-3 backdrop-blur-xl transition-all duration-200 \$\{visual\.card\}`\}\s*>/,
-  );
-
-  // Slice the card wrapper region and prove it is not an interactive container.
-  const idx = source.indexOf('min-h-[180px] rounded-2xl border p-3 backdrop-blur-xl');
-  assert.notEqual(idx, -1, 'table card wrapper must exist');
-  const open = source.lastIndexOf('<article', idx);
-  const close = source.indexOf('</article>', idx);
-  assert.notEqual(open, -1, 'card <article> opening must exist');
-  assert.notEqual(close, -1, 'card </article> close must exist');
-  const card = source.slice(open, close + '</article>'.length);
-
-  // No role=button / focusable / pointer / focus-ring / keyboard-activation on the wrapper.
-  assert.doesNotMatch(card, /role="button"/);
-  assert.doesNotMatch(card, /tabIndex=\{0\}/);
-  assert.doesNotMatch(card, /cursor-pointer/);
-  assert.doesNotMatch(card, /focus:ring-yellow-400\/45/);
-  assert.doesNotMatch(card, /onKeyDown=/);
-  // The passive wrapper has no press/tap feedback; only the inner action buttons animate
-  // (active:scale-95). The wrapper's old active:scale-[0.99] is gone.
-  const wrapperOpenTag = card.slice(0, card.indexOf('>') + 1);
-  assert.doesNotMatch(wrapperOpenTag, /active:scale/);
-  assert.doesNotMatch(card, /active:scale-\[0\.99\]/);
-  assert.match(card, /active:scale-95/);
-
-  // Inner visible action buttons + their handlers are preserved (attention / new-or-open order via
-  // handleTableSelect; reserve/pay/edit via handleTableReserve or handleTableSelect as branched).
-  assert.ok(
-    (card.match(/handleTableSelect\(table\)/g) || []).length >= 2,
-    'inner action buttons still call handleTableSelect',
-  );
-  assert.match(card, /handleTableReserve\(table\)/);
+// The original defect was nested interactive targets. The reviewed tile now has one native button;
+// its context-aware action modal owns the order/reservation/cleaning actions.
+test('OrderDashboard list-mode table card has one named selection button and no nested interactive targets', () => {
+  const card = tableWorkspaceCardSource();
+  assert.match(card, /return <button type="button" className="table-workspace-card"/);
+  assert.match(card, /aria-label=\{number \+ ' · ' \+ statusLabel/);
+  assert.match(card, /onClick=\{onPrimary\}/);
+  assert.equal((card.match(/<button\b/g) ?? []).length, 1);
+  assert.equal((card.match(/<\/button>/g) ?? []).length, 1);
+  const descendants = card.slice(card.indexOf('<TableShapeIcon'));
+  assert.doesNotMatch(descendants, /<(?:button|input|select|textarea|a)\b|role="button"|tabIndex=/);
+  assert.match(orderDashboardSource(), /<TableWorkspaceCard[\s\S]*?onPrimary=\{\(\) => handleTableSelect\(table\)\}/);
+  assert.match(cssDeclarations(tableWorkspaceStyles(), '.table-workspace button:focus-visible'), /outline:\s*2px solid var\(--table-yellow\)/);
 });
 
-// Round 214 (live QA, third pass): the mounted Dashboard list-mode table card was clipped at 1282x802
-// because it was structurally too tall. It is re-laid genuinely short: the boxed Covers/Waiter tiles
-// become a compact one-line two-chip strip, the duplicate lower status line is removed (the top badge
-// already carries the status), the number is smaller, and the wrapper min-height/padding are reduced --
-// so the first row's action buttons are fully visible without scrolling. The wrapper stays the passive
-// <article> and the real action buttons keep their handlers + active:scale-95.
-test('OrderDashboard list-mode table card is genuinely short: chip strip, no boxed tiles, no duplicate status line', () => {
-  const source = orderDashboardSource();
-
-  // Slice the card wrapper region (article -> matching close).
-  const idx = source.indexOf('min-h-[180px] rounded-2xl border p-3 backdrop-blur-xl');
-  assert.notEqual(idx, -1, 'compact table card wrapper must exist');
-  const open = source.lastIndexOf('<article', idx);
-  const close = source.indexOf('</article>', idx);
-  assert.notEqual(open, -1, 'card <article> opening must exist');
-  assert.notEqual(close, -1, 'card </article> close must exist');
-  const card = source.slice(open, close + '</article>'.length);
-
-  // The card is genuinely shorter (round 214 follow-up): smaller min-height + padding so the first row
-  // fits at 1280x800 without the action area being clipped. The old 230px/p-4 sizing is gone.
-  assert.match(card, /min-h-\[180px\] rounded-2xl border p-3 backdrop-blur-xl/);
-  assert.doesNotMatch(card, /min-h-\[230px\]/);
-
-  // The bulky status PANEL and the duplicate lower status LINE are both gone -- the top status badge
-  // already carries Available/Cleaning/Out-of-service, so the card no longer restates it below.
-  assert.doesNotMatch(card, /mt-4 rounded-xl border px-3 py-3/);
-  assert.doesNotMatch(card, /text-sm font-black text-amber-700 dark:text-amber-300/);
-  assert.doesNotMatch(card, /text-sm font-black text-emerald-700 dark:text-emerald-300/);
-
-  // The boxed Covers/Waiter metadata tiles are replaced by a compact one-line two-chip info strip
-  // (covers chip fixed, waiter chip taking the remaining width). The old boxed tiles are gone.
-  assert.match(card, /mt-2 flex items-center gap-1\.5 text-xs/);
-  assert.match(card, /inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 font-bold/);
-  assert.match(card, /inline-flex min-w-0 flex-1 items-center gap-1 rounded-lg border px-2 py-1 font-semibold/);
-  assert.doesNotMatch(card, /rounded-xl border px-3 py-1\.5/);
-
-  // Tightened density: table number text-2xl (not the bulkier 3xl/4xl), and the occupied-only chips
-  // row is conditional so available/clean cards don't reserve its band.
-  assert.match(card, /mt-1 truncate text-2xl font-black/);
-  assert.doesNotMatch(card, /mt-1 truncate text-3xl font-black/);
-  assert.doesNotMatch(card, /mt-1 truncate text-4xl font-black/);
-  assert.match(card, /\{occupiedSinceLabel \|\| table\.currentOrderId \? \(/);
-
-  // The wrapper stays the passive <article> (Round 212): no role=button / wrapper press feedback.
-  const wrapperOpenTag = card.slice(0, card.indexOf('>') + 1);
-  assert.match(wrapperOpenTag, /^<article\b/);
-  assert.doesNotMatch(card, /role="button"/);
-  assert.doesNotMatch(wrapperOpenTag, /active:scale/);
-
-  // The real inner action buttons remain centered, keep active:scale-95, and keep their handlers.
-  assert.match(card, /justify-center gap-1\.5 rounded-xl[\s\S]*?active:scale-95/);
-  assert.ok(
-    (card.match(/active:scale-95/g) || []).length >= 2,
-    'inner action buttons keep their active:scale-95 press feedback',
-  );
-  assert.ok(
-    (card.match(/handleTableSelect\(table\)/g) || []).length >= 2,
-    'inner action buttons still call handleTableSelect',
-  );
-  assert.match(card, /handleTableReserve\(table\)/);
+test('OrderDashboard list-mode table cards keep compact opaque tiles and conditional check metadata', () => {
+  const card = tableWorkspaceCardSource();
+  const css = tableWorkspaceStyles();
+  const tile = cssDeclarations(css, '.table-workspace button.table-workspace-card');
+  assert.match(tile, /min-height:\s*180px/);
+  assert.match(tile, /padding:\s*14px/);
+  assert.match(tile, /background:\s*var\(--table-surface\)/);
+  assert.doesNotMatch(tile, /backdrop-filter:|rgba\(|min-height:\s*230px/);
+  assert.match(cssDeclarations(css, '.table-workspace'), /--table-surface:\s*#ffffff/);
+  assert.match(cssDeclarations(css, ".table-workspace[data-theme='dark']"), /--table-surface:\s*#1b1d20/);
+  assert.match(cssDeclarations(css, '.table-workspace-number'), /font-size:\s*16px/);
+  assert.equal((card.match(/\{statusLabel\}/g) ?? []).length, 1, 'only one visible status line');
+  assert.match(card, /\{hasOpenCheck && <span className="table-workspace-check">/);
+  assert.match(card, /\{occupiedSince && <span><Clock3/);
+  assert.match(card, /\{orderId && <span><ReceiptText/);
+  assert.match(card, /role="progressbar" aria-label=\{t\('tablesDashboard\.paid', 'Paid'\)\} aria-valuenow=\{paidPercent\}/);
+  assert.match(cssDeclarations(css, '.table-workspace-grid'), /grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(cssDeclarations(css, '.table-workspace-grid'), /align-items:\s*start/);
 });
 
 test('stale reserved-table actions self-heal instead of dead-ending on reservationNotFound', () => {
@@ -2662,19 +2652,19 @@ test('Round 239: vertical tab CONTENT branches require their module, not just th
 test('Round 239: tab changes ignore unavailable modules and reset to orders when a module vanishes', () => {
   const source = orderDashboardSource();
 
-  // handleTabChange refuses module tabs whose module is not acquired (incl. Delivered/Delivery).
+  // Only vertical workspaces require their acquired modules; history is always available.
   assert.match(
     source,
-    /const handleTabChange = useCallback\(\s*\(tab: TabId\) => \{[\s\S]*?if \(tab === "tables" && !hasTablesModule\) return;[\s\S]*?if \(tab === "rooms" && !hasRoomsModule\) return;[\s\S]*?if \(tab === "services" && !hasServicesModule\) return;[\s\S]*?if \(tab === "delivered" && !hasDeliveryModule\) return;/,
+    /const handleTabChange = useCallback\(\s*\(tab: TabId\) => \{[\s\S]*?if \(tab === "tables" && !hasTablesModule\) return;[\s\S]*?if \(tab === "rooms" && !hasRoomsModule\) return;[\s\S]*?if \(tab === "services" && !hasServicesModule\) return;/,
   );
   // The callback deps include the module flags so the guard stays current.
-  assert.match(source, /\[clearBulkSelection, setFilter, hasTablesModule, hasRoomsModule, hasServicesModule, hasDeliveryModule\]/);
+  assert.match(source, /\[clearBulkSelection, setFilter, hasTablesModule, hasRoomsModule, hasServicesModule\]/);
 
   // A reset effect falls back to the always-available Orders tab if the active vertical's module
-  // (tables/rooms/services OR delivered) becomes unavailable mid-session.
+  // (tables/rooms/services) becomes unavailable mid-session.
   assert.match(
     source,
-    /if \(\s*\(activeTab === "tables" && !hasTablesModule\) \|\|\s*\(activeTab === "rooms" && !hasRoomsModule\) \|\|\s*\(activeTab === "services" && !hasServicesModule\) \|\|\s*\(activeTab === "delivered" && !hasDeliveryModule\)\s*\) \{\s*setActiveTab\("orders"\);/,
+    /if \(\s*\(activeTab === "tables" && !hasTablesModule\) \|\|\s*\(activeTab === "rooms" && !hasRoomsModule\) \|\|\s*\(activeTab === "services" && !hasServicesModule\)\s*\) \{\s*setActiveTab\("orders"\);/,
   );
 });
 
@@ -3081,16 +3071,16 @@ test('a fresh New Order remounts MenuModal and clears the previous customer draf
 // as a table check used to leave the Orders tab and appear nowhere at all. The
 // dashboard now passes the module through to the lane predicates, and its tab
 // counters call the very same predicates as the lists they label.
-test('the dashboard lanes and their counters share one table-module gate', () => {
+test('dashboard lists and counters share their lane predicates, with tables gating only active orders', () => {
   const source = orderDashboardSource();
 
   // One options object, built from the module context's own flag.
   assert.match(source, /const laneOptions = \{ tablesModuleAvailable: hasTablesModule \};/);
   assert.equal(source.match(/tablesModuleAvailable:/g)?.length, 1);
 
-  // Both lists take it.
+  // The active list takes the module flag; completed history takes every order type.
   assert.match(source, /shouldShowInStandardOrderLane\(order as any, laneOptions\)/);
-  assert.match(source, /shouldShowInCompletedOrderLane\(order as any, laneOptions\)/);
+  assert.match(source, /shouldShowInCompletedOrderLane\(order as any\)/);
 
   // Both counters call the same two predicates, not a second copy of the rule.
   const countStart = source.indexOf('baseOrders.forEach((order) => {');
@@ -3099,7 +3089,7 @@ test('the dashboard lanes and their counters share one table-module gate', () =>
   const counter = source.slice(countStart, countEnd);
   assert.match(counter, /counts\.orders\+\+/);
   assert.match(counter, /shouldShowInStandardOrderLane\(order as any, laneOptions\)/);
-  assert.match(counter, /shouldShowInCompletedOrderLane\(order as any, laneOptions\)/);
+  assert.match(counter, /shouldShowInCompletedOrderLane\(order as any\)/);
   assert.doesNotMatch(counter, /isTableServiceOrder|order\.status === "delivered"/);
 
   // Acquiring or losing the module re-runs the effect, so no restart is needed.

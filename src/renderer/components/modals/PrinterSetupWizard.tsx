@@ -1,3 +1,4 @@
+import { formatCurrency } from '../../utils/format';
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
@@ -1559,7 +1560,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
         >
           <div style={{ fontWeight: 700 }}>ΠΑΡΑΓΓΕΛΙΑ #0019</div>
           <div>1 x Βάφλα .......... 9,20</div>
-          <div style={{ fontWeight: 700 }}>ΣΥΝΟΛΟ ........ 17,70 €</div>
+          <div style={{ fontWeight: 700 }}>ΣΥΝΟΛΟ ........ {formatCurrency(17.7)}</div>
         </div>
       </div>
 

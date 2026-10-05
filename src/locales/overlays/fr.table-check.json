@@ -103,6 +103,7 @@
       "applyDiscountToSelected": "Appliquer à la sélection"
     },
     "messages": {
+      "savedCheckReadOnly": "Addition enregistrée — les montants peuvent être anciens. Reconnectez-vous pour payer ou modifier.",
       "loading": "Chargement de l'addition...",
       "noOpenCheck": "Aucune addition ouverte trouvée pour cette table.",
       "noItems": "Aucun article sur cette addition pour le moment.",
@@ -134,14 +135,18 @@
       "noActiveOrder": "Aucune commande active n'est liée à cette table.",
       "paymentAmountRequired": "Saisissez un montant de paiement supérieur à zéro.",
       "paymentFailed": "Paiement échoué",
+      "paymentSavedTableCloseFailed": "Le paiement est enregistré, mais la table n'a pas pu être libérée. Réessayez de fermer l'addition ; n'encaissez pas à nouveau le paiement.",
       "orderItemUpdateFailed": "Échec de la mise à jour de l'article de commande",
+      "scopedItemEditUnavailable": "Les changements de prix et de remise nécessitent ici la commande complète, non payée et non divisée. Les additions payées doivent passer par le processus de règlement. Les articles divisés ou transférés ne peuvent pas encore être modifiés ici.",
       "selectItemAndTargetTable": "Sélectionnez un article et une table cible.",
       "localSessionTransferSyncing": "Cette addition est encore en cours de synchronisation. Actualisez après la synchronisation avant de déplacer des articles.",
       "quantityUpTo": "Saisissez une quantité jusqu'à {{quantity}}.",
       "itemTransferFailed": "Échec du transfert de l'article",
       "noBatchPayableItems": "Sélectionnez au moins un article impayé.",
       "noBatchTransferItems": "Sélectionnez au moins un article impayé à déplacer.",
-      "noBatchSelectedItems": "Sélectionnez au moins un article."
+      "noBatchSelectedItems": "Sélectionnez au moins un article.",
+      "originalCancelApproverRequired": "Une tentative d’annulation est en attente. Le membre du personnel qui l’a approuvée initialement doit réessayer après la reconnexion. La table n’a pas été libérée.",
+      "canonicalCancelSyncRequired": "Reconnectez-vous et terminez la synchronisation ou résolvez les modifications en attente de cette commande avant de l’annuler. La table n’a pas été libérée."
     }
   },
   "tablesDashboard": {
@@ -184,6 +189,7 @@
     "time": {
       "hoursMinutes": "{{hours}} h {{minutes}} min",
       "minutes": "{{minutes}} min"
-    }
+    },
+    "floorPlanAriaLabel": "Plan des tables"
   }
 }

@@ -18,6 +18,7 @@ pub mod gift_card_funding;
 pub mod gift_card_returns;
 pub mod gift_cards;
 pub mod hardware;
+pub mod lan_transport;
 pub mod loyalty;
 pub mod menu;
 pub mod modules;

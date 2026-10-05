@@ -75,9 +75,9 @@ fn seed_order_with_local_cash(conn: &rusqlite::Connection) {
         "INSERT INTO orders (
              id, order_number, supabase_id, items, total_amount, total_amount_cents,
              status, payment_status, sync_status, branch_id, terminal_id,
-             created_at, updated_at
+             created_at, updated_at, currency
          ) VALUES (?1, 'A-0042', ?2, '[]', 13.0, 1300, 'completed', 'paid', 'synced', ?3, ?4,
-                   '2026-09-30T10:00:00Z', '2026-09-30T10:06:00Z')",
+                   '2026-09-30T10:00:00Z', '2026-09-30T10:06:00Z', 'EUR')",
         params![LOCAL_ORDER_ID, REMOTE_ORDER_ID, BRANCH_ID, TERMINAL_ID],
     )
     .expect("seed order");
@@ -503,9 +503,9 @@ fn seed_order_paid_by_other_money(conn: &rusqlite::Connection, paid_cents: i64) 
     conn.execute(
         "INSERT INTO orders (
              id, order_number, supabase_id, items, total_amount, total_amount_cents,
-             status, payment_status, sync_status, created_at, updated_at
+             status, payment_status, sync_status, created_at, updated_at, currency
          ) VALUES (?1, 'A-0043', ?2, '[]', 13.0, 1300, 'completed', 'paid', 'synced',
-                   '2026-09-30T11:00:00Z', '2026-09-30T11:00:00Z')",
+                   '2026-09-30T11:00:00Z', '2026-09-30T11:00:00Z', 'EUR')",
         params![LOCAL_ORDER_ID, REMOTE_ORDER_ID],
     )
     .expect("seed order");
@@ -536,6 +536,7 @@ fn approved_card(transaction_ref: &str) -> Value {
         "paymentOrigin": "terminal",
         "terminalApproved": true,
         "terminalDeviceId": "eft-1",
+        "currency": "EUR",
     })
 }
 
@@ -543,6 +544,7 @@ fn approved_card(transaction_ref: &str) -> Value {
 /// approved card must not be refused into thin air.
 #[test]
 fn an_approved_card_that_finds_the_order_covered_is_recorded_set_aside() {
+    let _keyring = fake_keyring::install_empty();
     let td = TestDb::open();
     {
         let conn = td.state.conn.lock().unwrap();
@@ -590,6 +592,7 @@ fn an_approved_card_that_finds_the_order_covered_is_recorded_set_aside() {
 
 #[test]
 fn an_approved_card_worth_more_than_is_still_due_is_set_aside_whole() {
+    let _keyring = fake_keyring::install_empty();
     let td = TestDb::open();
     {
         let conn = td.state.conn.lock().unwrap();

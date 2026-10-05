@@ -1,3 +1,4 @@
+import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Gift, Award, Star, Minus, Plus } from 'lucide-react';
@@ -7,13 +8,13 @@ import { formatCurrency } from '../../utils/format';
 interface LoyaltyRedeemModalProps {
   isOpen: boolean;
   onClose: () => void;
-  /** Called when redemption succeeds, with the discount value in EUR */
+  /** Called when redemption succeeds, with the discount value in the store currency */
   onRedeem: (discountValue: number, pointsRedeemed: number) => void;
   customerId: string;
   customerName?: string;
   pointsBalance: number;
   tier?: string;
-  /** EUR value per point (e.g. 0.01 = 1 point = €0.01) */
+  /** Store currency value per point */
   redemptionRate: number;
   /** Minimum points required to redeem */
   minRedemptionPoints: number;
@@ -256,7 +257,7 @@ export function LoyaltyRedeemModal({
             {t('loyalty.amountToRedeem', 'Discount amount')}
           </label>
           <div className="liquid-glass-modal-input flex items-center px-3 py-2">
-            <span className="mr-2 font-semibold opacity-70">€</span>
+            <span className="mr-2 font-semibold opacity-70">{getStoreCurrency() ?? '—'}</span>
             <input
               type="text"
               inputMode="decimal"

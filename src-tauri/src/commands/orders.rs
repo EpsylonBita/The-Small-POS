@@ -14,7 +14,7 @@ use crate::{
     resolve_order_id, storage, sync, value_f64, value_i64, value_str, write_local_json,
 };
 
-/// Apply only authoritative table/check identity after a server move or merge.
+/// Apply authoritative table/check identity and persist its scoped server ledger.
 #[tauri::command]
 pub fn orders_apply_table_session_snapshot(
     arg0: Option<Value>,
@@ -24,12 +24,30 @@ pub fn orders_apply_table_session_snapshot(
     let payload = arg0.ok_or("Missing table session snapshot")?;
     let result = {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
-        crate::sync_queue::apply_table_session_snapshot(&conn, &payload)?
+        let result = crate::sync_queue::apply_table_session_snapshot(&conn, &payload)?;
+        if let Some(session) = payload.get("session") {
+            // Missing proof prevents offline use; it must not discard an online
+            // response or replace it with a reconstructed parent-order check.
+            if let Err(error) = crate::table_session_cache::save(&conn, session) {
+                tracing::warn!(error = %error, "Scoped table check could not be cached");
+            }
+        }
+        result
     };
     if result.get("applied").and_then(Value::as_bool) == Some(true) {
         let _ = app.emit("order_realtime_update", &result);
     }
     Ok(result)
+}
+
+#[tauri::command]
+pub fn orders_get_table_session_snapshot(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let request = arg0.ok_or("Missing table cache request")?;
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    crate::table_session_cache::load(&conn, &request)
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +92,12 @@ struct OrderUpdateItemsRawPayload {
         alias = "special_instructions"
     )]
     order_notes: Option<serde_json::Value>,
+    #[serde(default, alias = "expected_version")]
+    expected_version: Option<i64>,
+    #[serde(default, alias = "table_session_id")]
+    table_session_id: Option<String>,
+    #[serde(default, alias = "client_event_id")]
+    client_event_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -81,6 +105,9 @@ struct OrderUpdateItemsPayload {
     order_id: String,
     items: Vec<serde_json::Value>,
     order_notes: Option<String>,
+    expected_version: Option<i64>,
+    table_session_id: Option<String>,
+    client_event_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -414,7 +441,7 @@ fn attach_kiosk_payment_method_to_metadata(
 
     if let Some(method) = payment_method
         .map(str::trim)
-        .filter(|method| matches!(*method, "cash" | "card"))
+        .filter(|method| matches!(*method, "cash" | "card" | "room_charge"))
     {
         if let Some(kiosk) = metadata.get_mut("kiosk").and_then(Value::as_object_mut) {
             kiosk.insert(
@@ -449,8 +476,32 @@ fn ensure_order_status_transition_allowed(
     order_id: &str,
     next_status: &str,
 ) -> Result<String, String> {
+    ensure_order_status_transition_with_room_confirmation(conn, order_id, next_status, false)
+}
+
+fn ensure_order_status_transition_with_room_confirmation(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    next_status: &str,
+    room_charge_confirmed: bool,
+) -> Result<String, String> {
     let previous_status = load_canonical_order_status(conn, order_id)?;
     let next_status = normalize_status_for_storage(next_status);
+
+    if previous_status == "pending"
+        && !room_charge_confirmed
+        && matches!(
+            next_status.as_str(),
+            "confirmed" | "preparing" | "ready" | "out_for_delivery" | "delivered" | "completed"
+        )
+    {
+        if order_requests_room_charge(conn, order_id)? {
+            return Err(
+                "ROOM_CHARGE_UNAVAILABLE: use online approval to confirm the room bill first"
+                    .into(),
+            );
+        }
+    }
 
     if can_transition_locally(&previous_status, &next_status) {
         Ok(previous_status)
@@ -599,6 +650,78 @@ fn ensure_renderer_order_is_not_repair_settlement(
     Ok(())
 }
 
+fn order_has_current_table_binding(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    conn.query_row("SELECT NULLIF(TRIM(COALESCE(table_id,'')),'') IS NOT NULL OR NULLIF(TRIM(COALESCE(table_session_id,'')),'') IS NOT NULL OR (order_type IN ('dine-in','dine_in') AND NULLIF(TRIM(COALESCE(table_number,'')),'') IS NOT NULL) FROM orders WHERE id=?1",
+        [order_id],|row|row.get(0)).map_err(|error|format!("Read canonical table binding before mutation: {error}"))
+}
+
+fn ensure_generic_table_cancellation_allowed(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<(), String> {
+    if order_has_current_table_binding(conn, order_id)? {
+        return Err("TABLE_ORDER_CANONICAL_CANCEL_REQUIRED: Open Tables and cancel the bound check with staff approval. The order and table were not changed.".into());
+    }
+    Ok(())
+}
+
+fn ensure_table_history_delete_allowed(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<(), String> {
+    let refusal="TABLE_ORDER_HISTORY_DELETE_REFUSED: Table order history must be retained. Open Tables to cancel or settle the check; the order was not deleted.";
+    if order_has_current_table_binding(conn, order_id)? {
+        return Err(refusal.into());
+    }
+    let (remote,organization,branch,owner):(Option<String>,Option<String>,Option<String>,Option<String>)=conn.query_row("SELECT supabase_id,organization_id,branch_id,owner_terminal_id FROM orders WHERE id=?1",[order_id],
+        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).map_err(|error|error.to_string())?;
+    if crate::table_session_cache::has_order_history(
+        conn,
+        order_id,
+        remote.as_deref(),
+        organization.as_deref(),
+        branch.as_deref(),
+        owner.as_deref(),
+    )? {
+        return Err(refusal.into());
+    }
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='table_session_snapshots_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    if !exists {
+        return Ok(());
+    }
+    let mut statement=conn.prepare("SELECT snapshot_json FROM table_session_snapshots_v1 WHERE (?1 IS NULL OR organization_id=?1) AND (?2 IS NULL OR branch_id=?2)").map_err(|error|error.to_string())?;
+    let snapshots = statement
+        .query_map(rusqlite::params![organization, branch], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let matches =
+        |id: Option<&str>| id.is_some_and(|id| id == order_id || remote.as_deref() == Some(id));
+    for raw in snapshots {
+        let snapshot: Value = serde_json::from_str(&raw.map_err(|error| error.to_string())?)
+            .map_err(|_| {
+                "Table history is unreadable; reconnect and restore it before deleting an order"
+            })?;
+        if matches(snapshot.get("active_order_id").and_then(Value::as_str))
+            || matches(snapshot.pointer("/order/id").and_then(Value::as_str))
+            || snapshot
+                .get("items")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| matches(item.get("order_id").and_then(Value::as_str)))
+                })
+        {
+            return Err(refusal.into());
+        }
+    }
+    Ok(())
+}
+
 fn resolve_renderer_deletable_order_id(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -618,7 +741,10 @@ fn resolve_renderer_deletable_order_id(
         Some((_, context)) if context == "repair_settlement" => {
             Err(REPAIR_SETTLEMENT_ROUTE_REQUIRED.to_string())
         }
-        Some((id, _)) => Ok(Some(id)),
+        Some((id, _)) => {
+            ensure_table_history_delete_allowed(conn, &id)?;
+            Ok(Some(id))
+        }
         None => Ok(None),
     }
 }
@@ -1401,6 +1527,274 @@ async fn confirm_box_decision_before_mutation(
     Ok((confirmation, Some(body)))
 }
 
+fn room_charge_approval_acknowledged(answer: &Value, remote_id: &str) -> bool {
+    let order = answer
+        .get("data")
+        .or_else(|| answer.get("order"))
+        .unwrap_or(&Value::Null);
+    answer.get("success").and_then(Value::as_bool) == Some(true)
+        && order.get("id").and_then(Value::as_str) == Some(remote_id)
+        && matches!(
+            order.get("status").and_then(Value::as_str),
+            Some("confirmed" | "preparing" | "ready" | "completed")
+        )
+        && order.get("payment_method").and_then(Value::as_str) == Some("room_charge")
+        && matches!(
+            order.get("payment_status").and_then(Value::as_str),
+            Some("paid" | "completed")
+        )
+}
+
+#[derive(Debug, PartialEq)]
+struct RoomChargeApprovalSnapshot {
+    local_id: String,
+    remote_id: String,
+    total_cents: i64,
+    items: Value,
+    discount_cents: i64,
+    tip_cents: i64,
+    order_type: String,
+}
+
+struct RoomChargeApprovalConfirmation {
+    snapshot: RoomChargeApprovalSnapshot,
+    status: String,
+}
+
+fn kiosk_metadata_requests_room_charge(raw: &str) -> bool {
+    let metadata: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    metadata
+        .pointer("/kiosk/paymentMethod")
+        .or_else(|| metadata.pointer("/kiosk/payment_method"))
+        .and_then(Value::as_str)
+        .is_some_and(|method| method.trim().eq_ignore_ascii_case("room_charge"))
+}
+
+fn order_requests_room_charge(conn: &rusqlite::Connection, local_id: &str) -> Result<bool, String> {
+    // v55 removed orders.payment_method: pending kiosk intent is metadata,
+    // while actual settlement is derived from the ledger/folio marker.
+    let metadata: String = conn
+        .query_row(
+            "SELECT COALESCE(ghost_metadata, '') FROM orders WHERE id = ?1",
+            rusqlite::params![local_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read room approval intent: {e}"))?;
+    Ok(kiosk_metadata_requests_room_charge(&metadata))
+}
+
+/// Read under the SQLite mutex both before HTTP and immediately before writing
+/// its acknowledgement. Unsynced edits cannot be charged from the server's old copy.
+fn capture_room_charge_approval_snapshot(
+    conn: &rusqlite::Connection,
+    local_id: &str,
+) -> Result<RoomChargeApprovalSnapshot, String> {
+    let (
+        remote_id,
+        metadata,
+        sync_status,
+        total,
+        total_cents,
+        items,
+        discount_cents,
+        tip_cents,
+        order_type,
+        payment_status,
+    ): (
+        String,
+        String,
+        String,
+        f64,
+        Option<i64>,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT COALESCE(supabase_id, ''), COALESCE(ghost_metadata, ''), sync_status,
+                total_amount, total_amount_cents, items,
+                COALESCE(discount_amount_cents, 0), COALESCE(tip_amount_cents, 0),
+                COALESCE(order_type, ''), COALESCE(payment_status, 'pending')
+                FROM orders WHERE id = ?1",
+            rusqlite::params![local_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("ROOM_CHARGE_UNAVAILABLE: read approval snapshot: {e}"))?;
+    let queued: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM parity_sync_queue
+                       WHERE table_name = 'orders' AND record_id = ?1
+                         AND COALESCE(module_type, '') <> 'repairs'
+                         AND status IN ('pending', 'processing', 'failed', 'conflict'))
+             OR EXISTS(SELECT 1 FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1
+                       AND status IN ('pending', 'in_progress', 'queued_remote', 'deferred', 'failed'))",
+        rusqlite::params![local_id], |row| row.get(0),
+    ).map_err(|e| format!("ROOM_CHARGE_UNAVAILABLE: verify local changes: {e}"))?;
+    if !kiosk_metadata_requests_room_charge(&metadata)
+        || sync_status != "synced"
+        || queued
+        || matches!(payment_status.as_str(), "refunded" | "partially_refunded")
+    {
+        return Err(
+            "ROOM_CHARGE_UNAVAILABLE: synchronize local changes and refresh before approval".into(),
+        );
+    }
+    let remote_id = remote_id.trim().to_string();
+    if uuid::Uuid::parse_str(&remote_id).is_err() || !total.is_finite() || total < 0.0 {
+        return Err("ROOM_CHARGE_UNAVAILABLE: refresh the order before approval".into());
+    }
+    let total_cents = total_cents.unwrap_or_else(|| Cents::round_half_up(total).as_i64());
+    if total_cents < 0 || total_cents != Cents::round_half_up(total).as_i64() {
+        return Err("ROOM_CHARGE_UNAVAILABLE: refresh the order total before approval".into());
+    }
+    let items = serde_json::from_str::<Value>(&items)
+        .map_err(|_| "ROOM_CHARGE_UNAVAILABLE: refresh the order items before approval")?;
+    if !items.is_array() {
+        return Err("ROOM_CHARGE_UNAVAILABLE: refresh the order items before approval".into());
+    }
+    Ok(RoomChargeApprovalSnapshot {
+        local_id: local_id.to_string(),
+        remote_id,
+        total_cents,
+        items,
+        discount_cents,
+        tip_cents,
+        order_type,
+    })
+}
+
+fn acknowledged_room_charge_status(
+    answer: &Value,
+    snapshot: &RoomChargeApprovalSnapshot,
+) -> Result<String, String> {
+    let order = answer
+        .get("data")
+        .or_else(|| answer.get("order"))
+        .unwrap_or(&Value::Null);
+    let total = order.get("total_amount").and_then(|value| {
+        value.as_f64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|raw| raw.trim().parse::<f64>().ok())
+        })
+    });
+    if !room_charge_approval_acknowledged(answer, &snapshot.remote_id)
+        || !total.is_some_and(|amount| {
+            amount.is_finite()
+                && amount >= 0.0
+                && Cents::round_half_up(amount).as_i64() == snapshot.total_cents
+        })
+    {
+        return Err("ROOM_CHARGE_UNAVAILABLE: the room bill or total was not confirmed; refresh before approval".into());
+    }
+    Ok(order
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string())
+}
+
+fn recheck_room_charge_approval(
+    conn: &rusqlite::Connection,
+    local_id: &str,
+    confirmation: &RoomChargeApprovalConfirmation,
+) -> Result<String, String> {
+    let current = capture_room_charge_approval_snapshot(conn, local_id)?;
+    if current != confirmation.snapshot {
+        return Err(
+            "ROOM_CHARGE_UNAVAILABLE: the order changed during approval; refresh before continuing"
+                .into(),
+        );
+    }
+    let current_status = load_canonical_order_status(conn, local_id)?;
+    if !matches!(
+        current_status.as_str(),
+        "pending"
+            | "confirmed"
+            | "preparing"
+            | "ready"
+            | "out_for_delivery"
+            | "delivered"
+            | "completed"
+    ) {
+        return Err("ROOM_CHARGE_UNAVAILABLE: the order status changed during approval; refresh before continuing".into());
+    }
+    if can_transition_locally(&current_status, &confirmation.status) {
+        return Ok(confirmation.status.clone());
+    }
+    if can_transition_locally(&confirmation.status, &current_status) {
+        // Realtime backflow may have advanced the same paid order while HTTP waited.
+        return Ok(current_status);
+    }
+    Err("ROOM_CHARGE_UNAVAILABLE: conflicting order status; refresh before continuing".into())
+}
+
+/// A room folio lives on the server. An offline status change cannot accept its charge.
+/// Keep the local order pending until approval and billing are acknowledged together.
+async fn confirm_room_charge_before_approval(
+    db: &db::DbState,
+    order_id_raw: &str,
+    estimate: Option<i64>,
+) -> Result<Option<RoomChargeApprovalConfirmation>, String> {
+    let snapshot = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (local_id, _) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+        if !order_requests_room_charge(&conn, &local_id)? {
+            return Ok(None);
+        }
+        // Validate the transition before the remote request; no local write occurs here.
+        ensure_order_status_transition_with_room_confirmation(&conn, &local_id, "confirmed", true)?;
+        capture_room_charge_approval_snapshot(&conn, &local_id)?
+    };
+    let context = resolve_immediate_order_status_sync_context(db)
+        .ok_or("ROOM_CHARGE_UNAVAILABLE: an online authenticated terminal is required")?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|_| "ROOM_CHARGE_UNAVAILABLE: could not verify the room bill")?;
+    let response = client
+        .patch(format!(
+            "{}/api/pos/orders",
+            crate::api::normalize_admin_url(&context.admin_url)
+        ))
+        .header("x-pos-api-key", &context.api_key)
+        .header("x-terminal-id", &context.terminal_id)
+        .json(&build_order_status_patch_body(
+            &snapshot.remote_id,
+            "confirmed",
+            estimate,
+            None,
+            None,
+        ))
+        .send()
+        .await
+        .map_err(|_| "ROOM_CHARGE_UNAVAILABLE: approval is unconfirmed; reconnect and retry")?;
+    let status = response.status();
+    let answer: Value = response
+        .json()
+        .await
+        .map_err(|_| "ROOM_CHARGE_UNAVAILABLE: approval is unconfirmed; refresh and retry")?;
+    if !status.is_success() {
+        return Err("ROOM_CHARGE_UNAVAILABLE: the room bill was not confirmed; refresh or choose another payment method".into());
+    }
+    let status = acknowledged_room_charge_status(&answer, &snapshot)?;
+    Ok(Some(RoomChargeApprovalConfirmation { snapshot, status }))
+}
+
 pub(crate) fn should_print_box_acceptance_backflow(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -1674,6 +2068,9 @@ fn parse_order_update_items_payload(
         order_id,
         items: raw.items,
         order_notes,
+        expected_version: raw.expected_version,
+        table_session_id: raw.table_session_id,
+        client_event_id: raw.client_event_id,
     })
 }
 
@@ -1941,6 +2338,13 @@ fn merge_existing_order_item_customizations(
     let current_items: Vec<serde_json::Value> =
         serde_json::from_str(&current_items_json).unwrap_or_default();
 
+    merge_order_item_customizations(&current_items, incoming_items)
+}
+
+fn merge_order_item_customizations(
+    current_items: &[Value],
+    incoming_items: &[Value],
+) -> Result<Vec<Value>, String> {
     let mut used_existing = vec![false; current_items.len()];
     let mut merged = Vec::with_capacity(incoming_items.len());
 
@@ -2222,23 +2626,6 @@ fn update_order_items_in_connection(
     Ok(())
 }
 
-fn net_paid_amount_from_edit_payment(payment: &serde_json::Value) -> f64 {
-    payment
-        .get("remainingRefundable")
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or_else(|| {
-            let gross = payment
-                .get("amount")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0);
-            let refunded = payment
-                .get("refundedAmount")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0);
-            (gross - refunded).max(0.0)
-        })
-}
-
 fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Result<f64, String> {
     payments::load_net_paid_for_order(conn, order_id)
 }
@@ -2417,7 +2804,7 @@ struct OrderPaymentSnapshot {
     /// Derived from completed payment rows; `None` when the local ledger has
     /// none, so no tender is ever invented.
     derived_method: Option<String>,
-    /// Net money in the local ledger (completed payments minus refunds).
+    /// Merchandise principal in the local ledger, net of each tip and refund.
     ledger_paid: f64,
     /// `ledger_paid` plus the coverage the prior status proved.
     effective_paid: f64,
@@ -2462,7 +2849,7 @@ fn refresh_order_payment_snapshot_with_coverage(
         )
         .map_err(|e| format!("load order total for snapshot: {e}"))?;
 
-    let ledger_paid = load_net_paid_for_order(conn, order_id)?;
+    let ledger_paid = payments::load_principal_paid_for_order(conn, order_id)?;
     let effective_paid = ledger_paid + coverage.missing_amount();
     // A comp (an order whose total is zero) that was settled stays settled.
     // With no money to count the arithmetic reads `pending`, so every edit of
@@ -2673,7 +3060,8 @@ fn ledger_restore_target_before_payment_decision(
         }
         None => return Ok(None),
     };
-    let ledger_cents = Cents::round_half_even(load_net_paid_for_order(conn, order_id)?).as_i64();
+    let ledger_cents =
+        Cents::round_half_even(payments::load_principal_paid_for_order(conn, order_id)?).as_i64();
     Ok((ledger_cents < required_cents).then_some(remote_order_id))
 }
 
@@ -3090,7 +3478,8 @@ pub(crate) fn list_completed_payments_for_edit(
                     FROM payment_adjustments pa
                     WHERE pa.payment_id = op.id
                       AND pa.adjustment_type = 'refund'
-                ), 0)
+                ), 0),
+                op.currency
              FROM order_payments op
              WHERE op.order_id = ?1
                AND op.status = 'completed'
@@ -3108,13 +3497,22 @@ pub(crate) fn list_completed_payments_for_edit(
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|e| format!("query edit settlement payments: {e}"))?;
 
     let mut payments = Vec::new();
-    for (id, method, amount_cents, created_at, transaction_ref, staff_shift_id, adjusted_cents) in
-        rows.filter_map(Result::ok)
+    for (
+        id,
+        method,
+        amount_cents,
+        created_at,
+        transaction_ref,
+        staff_shift_id,
+        adjusted_cents,
+        currency,
+    ) in rows.filter_map(Result::ok)
     {
         // A gift row's proven return floor counts once, as in the settlement
         // snapshot; other rows keep their refund adjustments.
@@ -3133,6 +3531,7 @@ pub(crate) fn list_completed_payments_for_edit(
             "id": id,
             "method": method,
             "amount": amount,
+            "currency": currency,
             "createdAt": created_at,
             "transactionRef": transaction_ref,
             "staffShiftId": staff_shift_id,
@@ -3402,6 +3801,9 @@ pub(crate) fn apply_order_status_locally(
     // collected. Cancelling it would take back what the drawer counted for
     // it while its payment stays recorded. Refused before anything is
     // written.
+    if status == "cancelled" {
+        ensure_generic_table_cancellation_allowed(&conn, &actual_order_id)?;
+    }
     if status == "cancelled" && previous_status != "cancelled" {
         ensure_no_money_taken_before_cancel(&conn, &actual_order_id)?;
     }
@@ -3852,6 +4254,155 @@ pub async fn order_convert_pickup_to_delivery(
     }))
 }
 
+fn ensure_full_order_item_replacement_safe(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    expected_version: Option<i64>,
+    requested_session: Option<&str>,
+) -> Result<(), String> {
+    if room_charge_is_unconfirmed(conn, order_id)? {
+        return Err("FOLIO_CHARGE_RECONCILIATION_REQUIRED: synchronize the room charge before changing its items.".to_string());
+    }
+    let balance = payments::load_order_payment_balance_snapshot(conn, order_id)?;
+    let (payment_status,remote_id,session_id,table_id,items_json,version):(String,Option<String>,Option<String>,Option<String>,String,i64)=conn.query_row(
+        "SELECT COALESCE(payment_status,'pending'),NULLIF(TRIM(supabase_id),''),NULLIF(TRIM(table_session_id),''),
+        NULLIF(TRIM(table_id),''),COALESCE(items,'[]'),COALESCE(remote_version,version,1) FROM orders WHERE id=?1",
+        rusqlite::params![order_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)))
+        .map_err(|error|format!("Read order edit scope: {error}"))?;
+    if balance.net_paid > 0.005
+        || balance.completed_payment_count > 0
+        || matches!(
+            payment_status.trim().to_ascii_lowercase().as_str(),
+            "paid" | "completed" | "partial" | "partially_paid"
+        )
+    {
+        return Err("Paid order item changes require the settlement/refund workflow.".into());
+    }
+    if remote_id.is_some() && expected_version.filter(|v| *v >= 1).is_none() {
+        return Err(
+            "Refresh the order before editing; its original server version is required.".into(),
+        );
+    }
+    if let Some(expected) = expected_version {
+        if expected != version {
+            return Err("Order changed since editing began. Refresh before saving.".into());
+        }
+    }
+    if table_id.is_none() && session_id.is_none() {
+        return Ok(());
+    }
+    // The only reconstructible local scope is a new, unsynced, unsplit order.
+    if remote_id.is_none()
+        && session_id
+            .as_deref()
+            .map_or(true, |id| id.starts_with("local-table-session:"))
+    {
+        return Ok(());
+    }
+    let session_id = requested_session
+        .ok_or("An exact table check is required before replacing table order items.")?;
+    let remote_id = remote_id.ok_or("Sync the table order before changing a server check.")?;
+    let table_id =
+        table_id.ok_or("Table order ownership is unavailable; refresh before editing.")?;
+    let cached = crate::table_session_cache::load(
+        conn,
+        &serde_json::json!({"sessionId":session_id,"orderId":remote_id,"tableId":table_id}),
+    )?;
+    let session = &cached["session"];
+    if session.pointer("/order/version").and_then(Value::as_i64) != expected_version {
+        return Err("Saved table check version changed. Refresh before editing.".into());
+    }
+    ensure_snapshot_has_complete_unpaid_order(session, &items_json, &remote_id)
+}
+
+fn ensure_snapshot_has_complete_unpaid_order(
+    session: &Value,
+    canonical_items_json: &str,
+    remote_id: &str,
+) -> Result<(), String> {
+    let blocked =
+        "Split, transferred, merged or paid checks require the canonical order-edit workflow.";
+    let money_or_quantity = |value: Option<&Value>| {
+        value
+            .and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_str()?.parse::<f64>().ok())
+            })
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or(blocked)
+    };
+    if money_or_quantity(session.pointer("/balance/paid_total"))? > 0.005
+        || session
+            .pointer("/metadata/created_by_transfer_from_session_id")
+            .is_some()
+        || session
+            .pointer("/metadata/merged_session_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| !ids.is_empty())
+    {
+        return Err(blocked.into());
+    }
+    let allocations = session
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or(blocked)?;
+    for allocation in allocations {
+        if money_or_quantity(allocation.get("paid_quantity"))? > 0.0005
+            || matches!(
+                allocation.get("status").and_then(Value::as_str),
+                Some("transferred" | "voided")
+            )
+            || allocation
+                .get("order_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != remote_id)
+            || allocation
+                .pointer("/metadata/transferred_from_session_id")
+                .is_some()
+            || allocation
+                .pointer("/metadata/transferred_to_session_id")
+                .is_some()
+        {
+            return Err(blocked.into());
+        }
+    }
+    let canonical: Vec<Value> = serde_json::from_str(canonical_items_json).map_err(|_| blocked)?;
+    let shown = session
+        .pointer("/order/order_items")
+        .and_then(Value::as_array)
+        .ok_or(blocked)?;
+    if canonical.len() != shown.len() {
+        return Err(blocked.into());
+    }
+    let identities = |item: &Value| -> [Option<String>; 4] {
+        ["source_order_item_id", "order_item_id", "id", "item_id"].map(|key| {
+            item.get(key)
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+    };
+    let mut matched = HashSet::new();
+    for line in shown {
+        let identity = identities(line);
+        let Some((index, _)) = canonical.iter().enumerate().find(|(index, item)| {
+            !matched.contains(index)
+                && identities(item)
+                    .iter()
+                    .flatten()
+                    .any(|id| identity.iter().flatten().any(|candidate| id == candidate))
+                && (value_f64(item, &["quantity"]).unwrap_or(0.0)
+                    - value_f64(line, &["quantity"]).unwrap_or(-1.0))
+                .abs()
+                    < 0.0005
+        }) else {
+            return Err(blocked.into());
+        };
+        matched.insert(index);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn order_update_items(
     arg0: Option<serde_json::Value>,
@@ -3863,11 +4414,136 @@ pub async fn order_update_items(
     let order_id_raw = payload.order_id;
     let items = payload.items;
     let notes = payload.order_notes;
+    let expected_version = payload.expected_version;
+    let table_session_id = payload.table_session_id;
+    let client_event_id = payload
+        .client_event_id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let now = Utc::now().to_rfc3339();
+
+    let (resolved_order_id, remote_edit_request) = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let actual = resolve_renderer_order_id(&conn, &order_id_raw)?;
+        let has_remote: bool = conn
+            .query_row(
+                "SELECT NULLIF(TRIM(supabase_id),'') IS NOT NULL FROM orders WHERE id=?1",
+                [&actual],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let original = if has_remote {
+            crate::table_session_cache::existing_item_edit_attempt(
+                &conn,
+                &actual,
+                &client_event_id,
+            )?
+        } else {
+            None
+        };
+        if let Some(original) = original {
+            ensure_original_item_edit_intent(
+                &original,
+                &items,
+                notes.as_deref(),
+                expected_version,
+                table_session_id.as_deref(),
+            )?;
+            crate::table_attempt_recovery::remember_item(&conn, &actual, &original)?;
+            (actual, Some(original))
+        } else {
+            ensure_full_order_item_replacement_safe(
+                &conn,
+                &actual,
+                expected_version,
+                table_session_id.as_deref(),
+            )?;
+            let (remote,status,table,guests):(Option<String>,String,Option<String>,Option<i64>)=conn.query_row(
+            "SELECT NULLIF(TRIM(supabase_id),''),status,table_id,guest_count FROM orders WHERE id=?1",
+            rusqlite::params![actual],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))
+            .map_err(|error|format!("Read canonical order edit identity: {error}"))?;
+            let request = if let Some(remote) = remote {
+                let merged = merge_existing_order_item_customizations(&conn, &actual, &items)?;
+                let canonical_items: Vec<Value> =
+                    merged.iter().map(canonical_item_edit_payload).collect();
+                let mut body = serde_json::json!({"id":remote,"status":status,"items":canonical_items,
+                "expected_version":expected_version,"table_id":table,"table_session_id":table_session_id,
+                "guest_count":guests,"client_event_id":client_event_id});
+                if let Some(notes) = &notes {
+                    body["special_instructions"] = serde_json::json!(notes);
+                }
+                crate::table_session_cache::item_edit_attempt(&conn, &actual, &mut body)?;
+                Some(body)
+            } else {
+                None
+            };
+            (actual, request)
+        }
+    };
+    if let Some(request) = remote_edit_request {
+        // A remote denial or uncertain transport leaves the old local totals
+        // intact. The durable immutable attempt permits exact replay later.
+        let answer = crate::admin_fetch_detailed(
+            Some(&db),
+            "/api/pos/orders",
+            "PATCH",
+            Some(request.clone()),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Order edit was not confirmed. Reconnect and retry the original change: {error}"
+            )
+        })?;
+        let canonical = answer
+            .get("data")
+            .filter(|order| order.get("id") == request.get("id"))
+            .ok_or("Canonical order edit response has no matching order")?;
+        if canonical
+            .get("order_items")
+            .and_then(Value::as_array)
+            .is_none()
+            || canonical
+                .get("version")
+                .and_then(Value::as_i64)
+                .is_none_or(|version| version < expected_version.unwrap_or(1))
+        {
+            return Err(
+                "Canonical order edit response has no complete item/version snapshot".into(),
+            );
+        }
+        let scoped_session = crate::table_attempt_recovery::confirm_foreground_item(
+            &db,
+            &resolved_order_id,
+            &request,
+        )
+        .await?;
+        if let Ok(order_json) = sync::get_order_by_id(&db, &resolved_order_id) {
+            let _ = app.emit("order_realtime_update", order_json);
+        }
+        return Ok(
+            serde_json::json!({"success":true,"orderId":resolved_order_id,"data":answer,"session":scoped_session}),
+        );
+    }
 
     let actual_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| format!("Begin durable order item edit: {error}"))?;
         let actual_order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
+        ensure_full_order_item_replacement_safe(
+            &conn,
+            &actual_order_id,
+            expected_version,
+            table_session_id.as_deref(),
+        )?;
+        let queued_base_version: i64 = conn
+            .query_row(
+                "SELECT COALESCE(version,1) FROM orders WHERE id=?1",
+                rusqlite::params![actual_order_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
         let merged_items =
             merge_existing_order_item_customizations(&conn, &actual_order_id, &items)?;
         let total = compute_order_items_total(&merged_items);
@@ -3897,9 +4573,15 @@ pub async fn order_update_items(
         let sync_payload = serde_json::json!({
             "orderId": actual_order_id,
             "items": merged_items,
-            "orderNotes": notes
+            "orderNotes": notes,
+            "expected_version": expected_version.unwrap_or(queued_base_version),
+            "table_session_id": table_session_id,
+            "client_event_id": client_event_id
         });
         enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("Commit durable order item edit: {error}"))?;
         actual_order_id
     };
 
@@ -3911,6 +4593,289 @@ pub async fn order_update_items(
         "success": true,
         "orderId": actual_order_id
     }))
+}
+
+fn ensure_original_item_edit_intent(
+    original: &Value,
+    items: &[Value],
+    notes: Option<&str>,
+    version: Option<i64>,
+    session: Option<&str>,
+) -> Result<(), String> {
+    let saved = original
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or("Original edit items are unavailable")?;
+    let merged = merge_order_item_customizations(saved, items)?;
+    let canonical: Vec<Value> = merged.iter().map(canonical_item_edit_payload).collect();
+    if original.get("expected_version").and_then(Value::as_i64) != version
+        || original.get("table_session_id").and_then(Value::as_str) != session
+        || original.get("special_instructions").and_then(Value::as_str) != notes
+        || canonical != *saved
+    {
+        return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
+    }
+    Ok(())
+}
+
+fn canonical_item_edit_payload(item: &Value) -> Value {
+    let mut normalized = item.clone();
+    let canonical_id = value_str(
+        item,
+        &[
+            "source_order_item_id",
+            "sourceOrderItemId",
+            "order_item_id",
+            "orderItemId",
+            "id",
+        ],
+    )
+    .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+    if let Some(id) = canonical_id {
+        normalized["id"] = serde_json::json!(id);
+    } else if let Some(object) = normalized.as_object_mut() {
+        object.remove("id");
+    }
+    normalized["menu_item_id"] = value_str(item, &["menu_item_id", "menuItemId"])
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    normalized["quantity"] = serde_json::json!(value_f64(item, &["quantity"]).unwrap_or(0.0));
+    normalized["unit_price"] =
+        serde_json::json!(value_f64(item, &["unit_price", "unitPrice", "price"]).unwrap_or(0.0));
+    if let Some(original) = value_f64(item, &["original_unit_price", "originalUnitPrice"]) {
+        normalized["original_unit_price"] = serde_json::json!(original);
+    }
+    normalized
+}
+
+#[cfg(test)]
+mod table_item_scope_guard_tests {
+    use super::*;
+    fn snapshot(quantity: f64) -> Value {
+        serde_json::json!({
+            "balance":{"paid_total":0},"order":{"order_items":[{"id":"line","quantity":quantity}]},
+            "items":[{"order_id":"parent","order_item_id":"line","quantity":quantity,"paid_quantity":0,"status":"open"}]
+        })
+    }
+    #[test]
+    fn rejects_partial_parent_replacement_and_paid_or_transferred_scopes() {
+        let parent = r#"[{"id":"line","quantity":3}]"#;
+        assert!(
+            ensure_snapshot_has_complete_unpaid_order(&snapshot(1.0), parent, "parent").is_err()
+        );
+        assert!(
+            ensure_snapshot_has_complete_unpaid_order(&snapshot(3.0), parent, "parent").is_ok()
+        );
+        let mut claimed = snapshot(3.0);
+        claimed["balance"]["paid_total"] = serde_json::json!("10");
+        assert!(ensure_snapshot_has_complete_unpaid_order(&claimed, parent, "parent").is_err());
+        let mut paid = snapshot(3.0);
+        paid["items"][0]["paid_quantity"] = serde_json::json!(1);
+        assert!(ensure_snapshot_has_complete_unpaid_order(&paid, parent, "parent").is_err());
+        let mut transferred = snapshot(3.0);
+        transferred["items"][0]["status"] = serde_json::json!("transferred");
+        assert!(ensure_snapshot_has_complete_unpaid_order(&transferred, parent, "parent").is_err());
+        let mut foreign = snapshot(3.0);
+        foreign["items"][0]["order_id"] = serde_json::json!("another-order");
+        assert!(ensure_snapshot_has_complete_unpaid_order(&foreign, parent, "parent").is_err());
+    }
+    #[test]
+    fn canonical_edit_keeps_line_identity_separate_from_menu_identity() {
+        let line = "11111111-1111-4111-8111-111111111111";
+        let menu = "22222222-2222-4222-8222-222222222222";
+        let normalized =
+            canonical_item_edit_payload(&serde_json::json!({"id":menu,"source_order_item_id":line,
+            "menuItemId":menu,"quantity":3,"price":8}));
+        assert_eq!(normalized["id"], serde_json::json!(line));
+        assert_eq!(normalized["menu_item_id"], serde_json::json!(menu));
+        assert_eq!(normalized["quantity"], serde_json::json!(3.0));
+    }
+    #[test]
+    fn crash_edit_exact_saved_intent_replays_without_current_state_rebase() {
+        let item = serde_json::json!({"id":"11111111-1111-4111-8111-111111111111","quantity":1,"price":10,"customizations":[{"name":"Oat milk"}]});
+        let original = serde_json::json!({"expected_version":7,"table_session_id":"check","items":[canonical_item_edit_payload(&item)]});
+        let mut incoming = item.clone();
+        incoming.as_object_mut().unwrap().remove("customizations");
+        assert!(ensure_original_item_edit_intent(
+            &original,
+            &[incoming.clone()],
+            None,
+            Some(7),
+            Some("check")
+        )
+        .is_ok());
+        incoming["quantity"] = serde_json::json!(2);
+        assert!(ensure_original_item_edit_intent(
+            &original,
+            &[incoming],
+            None,
+            Some(7),
+            Some("check")
+        )
+        .is_err());
+        assert!(
+            ensure_original_item_edit_intent(&original, &[item], None, Some(8), Some("check"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_original_edit_version_and_attempt_without_rebasing() {
+        let parsed = parse_order_update_items_payload(
+            Some(serde_json::json!({"orderId":"order","items":[],
+            "expectedVersion":7,"tableSessionId":"check","clientEventId":"original-attempt"})),
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed.expected_version, Some(7));
+        assert_eq!(parsed.table_session_id.as_deref(), Some("check"));
+        assert_eq!(parsed.client_event_id.as_deref(), Some("original-attempt"));
+    }
+}
+
+#[cfg(test)]
+mod generic_table_mutation_guard_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+    fn database() -> db::DbState {
+        let conn = Connection::open_in_memory().unwrap();
+        db::run_migrations_for_test(&conn);
+        conn.execute("INSERT INTO orders(id,supabase_id,status,payment_status,sync_status,items,total_amount,created_at,updated_at,order_type,organization_id,branch_id) VALUES ('local-parent','11111111-1111-4111-8111-111111111111','pending','pending','synced','[]',10,'2099-01-01T12:00:00Z','2099-01-01T12:00:00Z','dine-in','org','branch')",[]).unwrap();
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+    fn unchanged(db: &db::DbState) {
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "pending");
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(queued, 0);
+    }
+    #[test]
+    fn raw_table_cancel_refuses_before_local_status_and_queue_mutation() {
+        let db = database();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE orders SET table_session_id='canonical-check'", [])
+            .unwrap();
+        let error = apply_order_status_locally(
+            &db,
+            "local-parent",
+            "cancelled",
+            None,
+            Some("left"),
+            "2099-01-01T12:01:00Z",
+        )
+        .err()
+        .expect("bound table cancellation requires canonical Tables workflow");
+        assert!(error.contains("TABLE_ORDER_CANONICAL_CANCEL_REQUIRED"));
+        unchanged(&db);
+    }
+    #[test]
+    fn raw_decline_refuses_bound_table_before_local_status_and_queue_mutation() {
+        let db = database();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE orders SET table_id='bound-table'", [])
+            .unwrap();
+        let error =
+            decline_order_locally(&db, "local-parent", "left", "2099-01-01T12:01:00Z").unwrap_err();
+        assert!(error.contains("TABLE_ORDER_CANONICAL_CANCEL_REQUIRED"));
+        unchanged(&db);
+    }
+    #[test]
+    fn historical_wire_flag_survives_check_cache_eviction_for_delete_guard() {
+        let db = database();
+        let conn = db.conn.lock().unwrap();
+        let owner = "22222222-2222-4222-8222-222222222222";
+        for (key, value) in [
+            ("organization_id", "org"),
+            ("branch_id", "branch"),
+            ("terminal_id", owner),
+            ("owner_terminal_db_id", owner),
+        ] {
+            db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        crate::table_session_cache::remember_order_history(&conn,&serde_json::json!({"id":"11111111-1111-4111-8111-111111111111",
+            "organization_id":"org","branch_id":"branch","owner_terminal_id":owner,"has_table_service_history":true})).unwrap();
+        conn.execute(
+            "UPDATE orders SET order_type='pickup',table_id=NULL,table_session_id=NULL",
+            [],
+        )
+        .unwrap();
+        assert!(resolve_renderer_deletable_order_id(&conn, "local-parent")
+            .unwrap_err()
+            .contains("TABLE_ORDER_HISTORY_DELETE_REFUSED"));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+    #[test]
+    fn authoritative_tombstone_keeps_table_history_hidden_instead_of_hard_delete() {
+        let db = database();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE orders SET table_session_id='canonical-check'", [])
+            .unwrap();
+        assert_eq!(
+            apply_server_order_deletion(&conn, "local-parent", "2099-01-01T12:02:00Z").unwrap(),
+            ServerDeletionOutcome::KeptHidden
+        );
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status,server_deleted_at FROM orders WHERE id='local-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("pending".into(), Some("2099-01-01T12:02:00Z".into())));
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(queued, 0);
+    }
+    #[test]
+    fn renderer_delete_refuses_historical_table_even_after_conversion_clears_binding() {
+        let db = database();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE orders SET order_type='pickup',table_id=NULL,table_session_id=NULL",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("CREATE TABLE table_session_snapshots_v1(organization_id TEXT,branch_id TEXT,snapshot_json TEXT)").unwrap();
+            conn.execute("INSERT INTO table_session_snapshots_v1 VALUES ('org','branch',?1)",params![serde_json::json!({"active_order_id":"11111111-1111-4111-8111-111111111111","status":"closed"}).to_string()]).unwrap();
+            assert!(resolve_renderer_deletable_order_id(&conn, "local-parent")
+                .unwrap_err()
+                .contains("TABLE_ORDER_HISTORY_DELETE_REFUSED"));
+        }
+        unchanged(&db);
+        // Conversion clears the current binding: ordinary pickup cancel stays
+        // available, subject to the existing receipt/paid-claim guards.
+        assert!(apply_order_status_locally(
+            &db,
+            "local-parent",
+            "cancelled",
+            None,
+            Some("pickup left"),
+            "2099-01-01T12:01:00Z"
+        )
+        .is_ok());
+    }
 }
 
 #[tauri::command]
@@ -3979,10 +4944,7 @@ fn preview_edit_settlement_in_connection(
         .unwrap_or_else(|| "pending".to_string());
 
     let completed_payments = list_completed_payments_for_edit(conn, &actual_order_id)?;
-    let ledger_paid_total = completed_payments
-        .iter()
-        .map(net_paid_amount_from_edit_payment)
-        .sum::<f64>();
+    let ledger_paid_total = payments::load_principal_paid_for_order(conn, &actual_order_id)?;
     // Money the order's status already proved but the local mirror does not
     // hold still counts (see `ProvenPaymentCoverage`), so a grown paid order
     // is asked for the difference, never for its whole total again. A refund
@@ -4214,7 +5176,7 @@ fn apply_edit_settlement_changes(
         // A collection is checked against everything the order proved, not
         // only the rows this terminal still holds; a refund against the money
         // those rows hold (it must name one of them).
-        let ledger_paid_before = load_net_paid_for_order(conn, &actual_order_id)?;
+        let ledger_paid_before = payments::load_principal_paid_for_order(conn, &actual_order_id)?;
         let paid_total_before = ledger_paid_before + coverage.missing_amount();
 
         match action {
@@ -4378,6 +5340,9 @@ fn update_order_financials_in_connection(
         .max(0.0);
 
     let actual_order_id = resolve_renderer_order_id(conn, &payload.order_id)?;
+    if room_charge_is_unconfirmed(conn, &actual_order_id)? {
+        return Err("FOLIO_CHARGE_RECONCILIATION_REQUIRED: synchronize the room charge before changing its amount.".to_string());
+    }
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -4536,6 +5501,11 @@ pub(crate) fn server_deletion_keeps_order(
     local_order_id: &str,
 ) -> Result<bool, String> {
     if ensure_order_has_no_payment_records(conn, local_order_id).is_err() {
+        return Ok(true);
+    }
+    // A canonical tombstone hides table history using R7, preserving the
+    // parent and audit trail even when no money was ever collected.
+    if ensure_table_history_delete_allowed(conn, local_order_id).is_err() {
         return Ok(true);
     }
     let Some(last_z) = crate::business_day::last_z_anchor_utc(conn) else {
@@ -5000,6 +5970,17 @@ pub async fn order_save_from_remote(
             ],
         )
         .map_err(|e| format!("save remote order: {e}"))?;
+        if let Some(currency) = order_data
+            .get("currency")
+            .and_then(Value::as_str)
+            .and_then(crate::fiscal::payload_builder::normalize_currency_code)
+        {
+            conn.execute(
+                "UPDATE orders SET currency = ?1 WHERE id = ?2 AND currency IS NULL",
+                rusqlite::params![currency, local_id],
+            )
+            .map_err(|error| format!("save remote order currency: {error}"))?;
+        }
         // R6: a folio-charged order says so from the moment it arrives.
         sync::stamp_remote_folio_charge(&conn, &local_id, &order_data)?;
     }
@@ -5785,6 +6766,9 @@ pub(crate) async fn create_order_with_initial_payment(
                 .to_ascii_lowercase();
             let mut approved_payment = initial_payment.clone();
             if let Some(payment) = approved_payment.as_object_mut() {
+                if let Some(currency) = transaction.get("currency").and_then(Value::as_str) {
+                    payment.insert("currency".to_string(), serde_json::json!(currency));
+                }
                 if let Some(transaction_id) = transaction
                     .get("transactionId")
                     .and_then(|value| value.as_str())
@@ -5981,6 +6965,8 @@ pub async fn order_approve(
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
     let estimated_time = arg1;
+    let room_charge_confirmation =
+        confirm_room_charge_before_approval(&db, &order_id_raw, estimated_time).await?;
     let (confirmation, request) =
         confirm_box_decision_before_mutation(&db, &order_id_raw, "confirmed", estimated_time, None)
             .await?;
@@ -5988,6 +6974,12 @@ pub async fn order_approve(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, &order_id_raw)?;
+    let approved_status = if let Some(confirmation) = room_charge_confirmation.as_ref() {
+        recheck_room_charge_approval(&conn, &order_id, confirmation)?
+    } else {
+        "confirmed".to_string()
+    };
+    let confirmed_remotely = confirmed_box || room_charge_confirmation.is_some();
     if let Some(body) = request.as_ref() {
         if recheck_confirmed_box_decision(&conn, &order_id_raw, body)?
             == BoxDecisionConfirmation::AlreadyApplied
@@ -6003,30 +6995,44 @@ pub async fn order_approve(
         "confirmed",
         BoxOrderMutation::Accept(estimated_time),
     )?;
-    ensure_order_status_transition_allowed(&conn, &order_id, "confirmed")?;
+    ensure_order_status_transition_with_room_confirmation(
+        &conn,
+        &order_id,
+        &approved_status,
+        room_charge_confirmation.is_some(),
+    )?;
     conn.execute(
         "UPDATE orders
-         SET status = 'confirmed',
+         SET status = ?6,
              estimated_time = COALESCE(?1, estimated_time),
              sync_status = CASE WHEN ?4 THEN 'synced' ELSE 'pending' END,
+             payment_status = CASE WHEN ?5 THEN 'paid' ELSE payment_status END,
+             folio_charged = CASE WHEN ?5 THEN 1 ELSE folio_charged END,
              updated_at = ?2
          WHERE id = ?3",
-        rusqlite::params![estimated_time, now, order_id, confirmed_box],
+        rusqlite::params![
+            estimated_time,
+            now,
+            order_id,
+            confirmed_remotely,
+            room_charge_confirmation.is_some(),
+            approved_status
+        ],
     )
     .map_err(|e| format!("approve order: {e}"))?;
     let payload = serde_json::json!({
         "orderId": order_id,
-        "status": "confirmed",
+        "status": approved_status,
         "estimatedTime": estimated_time
     });
-    if !confirmed_box {
+    if !confirmed_remotely {
         let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
     }
     drop(conn);
 
     let _ = app.emit("order_status_updated", payload.clone());
     let _ = app.emit("order_realtime_update", payload.clone());
-    if let Some(remote_order_id) = remote_order_id.as_deref().filter(|_| !confirmed_box) {
+    if let Some(remote_order_id) = remote_order_id.as_deref().filter(|_| !confirmed_remotely) {
         // The answer says what the order's platform took (a shorter
         // preparation time is told to the cashier by the renderer).
         spawn_immediate_order_accept_patch(
@@ -6041,7 +7047,8 @@ pub async fn order_approve(
     // Includes acknowledged backflow; the spooler keeps its existing dedup and sandbox gate.
     enqueue_after_approve_platform_prints(&db, &order_id, &app);
     Ok(
-        serde_json::json!({ "success": true, "orderId": order_id_raw, "estimatedTime": estimated_time }),
+        serde_json::json!({ "success": true, "orderId": order_id_raw, "estimatedTime": estimated_time,
+            "roomChargeConfirmed": room_charge_confirmation.is_some() }),
     )
 }
 
@@ -6067,6 +7074,7 @@ fn decline_order_locally_with_box_confirmation(
 ) -> Result<(String, Option<String>, serde_json::Value), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    ensure_generic_table_cancellation_allowed(&conn, &order_id)?;
     let payload = serde_json::json!({
         "orderId": order_id,
         "status": "cancelled",
@@ -6175,6 +7183,7 @@ pub(crate) fn ensure_no_money_taken_before_cancel(
     local_order_id: &str,
 ) -> Result<(), String> {
     match cancel_refusal_code(conn, local_order_id)? {
+        Some("FOLIO_CHARGE_RECONCILIATION_REQUIRED") => Err("FOLIO_CHARGE_RECONCILIATION_REQUIRED: synchronize the room charge outcome before cancelling this order.".to_string()),
         Some(ORDER_HAS_PAYMENTS) => Err(format!(
             "{ORDER_HAS_PAYMENTS}: money was taken on this order. Void or refund it from the order first, or collect the rest."
         )),
@@ -6224,10 +7233,20 @@ pub(crate) const ORDER_PAYMENT_NOT_RECORDED: &str = "ORDER_PAYMENT_NOT_RECORDED"
 /// A hotel folio charge is exempt from the "not recorded" refusal (shared
 /// rule R6): the folio charge is its record ([`payments::order_is_folio_charged`],
 /// `orders.folio_charged` stamped from the server's `room_charge`).
+fn room_charge_is_unconfirmed(
+    conn: &rusqlite::Connection,
+    local_order_id: &str,
+) -> Result<bool, String> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM orders WHERE id=?1 AND json_valid(ghost_metadata) AND json_type(ghost_metadata,'$.room_charge.currency')='text' AND json_type(ghost_metadata,'$.room_charge.applied') IS NULL AND COALESCE(folio_charged,0)=0)", [local_order_id], |row| row.get(0)).map_err(|error| format!("read pending room charge: {error}"))
+}
+
 pub(crate) fn cancel_refusal_code(
     conn: &rusqlite::Connection,
     local_order_id: &str,
 ) -> Result<Option<&'static str>, String> {
+    if room_charge_is_unconfirmed(conn, local_order_id)? {
+        return Ok(Some("FOLIO_CHARGE_RECONCILIATION_REQUIRED"));
+    }
     let store_collectable = payments::order_money_is_store_collectable(conn, local_order_id);
     if payments::load_store_taken_net_paid_cents(conn, local_order_id)? > 0 {
         return Ok(Some(ORDER_HAS_PAYMENTS));
@@ -6301,6 +7320,30 @@ pub(crate) fn authorize_owing_order_cancel(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let (local_order_id, _) = resolve_order_id_with_remote(&conn, &order_id)?;
         ensure_no_money_taken_before_cancel(&conn, &local_order_id)?;
+        let (linked_session,has_table): (Option<String>,bool) = conn.query_row(
+            "SELECT NULLIF(TRIM(table_session_id),''),NULLIF(TRIM(table_id),'') IS NOT NULL FROM orders WHERE id=?1",
+            rusqlite::params![local_order_id], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|error| error.to_string())?;
+        if has_table
+            && linked_session.is_none()
+            && value_str(&payload, &["tableSessionId", "table_session_id"]).is_none()
+        {
+            return Err("TABLE_CANCEL_SYNC_REQUIRED: Reconnect and sync this table check before cancelling it. The table was not released.".into());
+        }
+        if (value_str(&payload, &["tableSessionId", "table_session_id"]).is_some()
+            || linked_session.is_some())
+            && value_str(&payload, &["managerPin", "manager_pin"]).is_none()
+        {
+            return Err(crate::auth::PrivilegedActionError {
+                code: "REAUTH_REQUIRED",
+                scope: "cash_drawer_control".into(),
+                reason:
+                    "A staff member's own PIN is required to approve canonical table cancellation"
+                        .into(),
+                ttl_seconds: None,
+                approval: Some("void_orders"),
+            }
+            .into());
+        }
     }
     // With nobody on shift at this terminal, a manager approves with their own
     // PIN (fix review 30/09/2026).
@@ -6395,6 +7438,7 @@ pub async fn order_cancel_with_approval(
     auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    let payload = arg0.clone().ok_or("Missing cancel payload")?;
     let (order_id, reason, approver) = authorize_owing_order_cancel(&db, &auth_state, arg0)?;
     let outstanding_cents = owing_order_outstanding_cents(&db, &order_id)
         .inspect_err(|error| {
@@ -6405,18 +7449,116 @@ pub async fn order_cancel_with_approval(
             );
         })
         .ok();
-    let answer = order_update_status(
-        Some(serde_json::json!({
-            "orderId": order_id,
-            "status": "cancelled",
-            "cancellationReason": reason,
-        })),
-        None,
-        db.clone(),
-        app,
-    )
-    .await
-    .map_err(crate::auth::GuardedCommandError::from)?;
+    let (local_order_id, remote_order_id, stored_session) = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let (local, remote) = resolve_order_id_with_remote(&conn, &order_id)?;
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT NULLIF(TRIM(table_session_id),'') FROM orders WHERE id=?1",
+                rusqlite::params![local],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        (local, remote, stored)
+    };
+    let table_session_id =
+        value_str(&payload, &["tableSessionId", "table_session_id"]).or(stored_session);
+    let answer = if let Some(table_session_id) = table_session_id {
+        uuid::Uuid::parse_str(&table_session_id).map_err(|_| "TABLE_CANCEL_SYNC_REQUIRED: Reconnect and sync this table check before cancelling it. The table was not released.")?;
+        let remote_order_id=remote_order_id.ok_or("TABLE_CANCEL_SYNC_REQUIRED: Reconnect and sync this order before cancelling it. The table was not released.")?;
+        let pin = value_str(&payload, &["managerPin", "manager_pin"])
+            .ok_or("A staff member's own PIN is required")?;
+        let staff_id = approver
+            .manager_staff_id
+            .as_deref()
+            .ok_or("A staff member's own cancellation approval is required")?;
+        uuid::Uuid::parse_str(staff_id)
+            .map_err(|_| "Cancellation approval has no server staff identity")?;
+        let event_id = {
+            let conn = db.conn.lock().map_err(|error| error.to_string())?;
+            if crate::sync::lan_order_has_pending_edit(&conn, &local_order_id)? {
+                return Err("TABLE_CANCEL_SYNC_REQUIRED: Sync or resolve this order's pending edits before cancelling the table check. The table was not released.".into());
+            }
+            crate::table_session_cache::cancellation_attempt(
+                &conn,
+                &local_order_id,
+                &table_session_id,
+                &reason,
+                staff_id,
+                value_str(&payload, &["clientEventId", "client_event_id"]).as_deref(),
+            )?
+        };
+        let path = format!("/api/pos/table-sessions/{table_session_id}");
+        let detail = crate::admin_fetch_detailed(Some(&db), &path, "GET", None)
+            .await
+            .map_err(|error| error.to_string())?;
+        if detail
+            .pointer("/session/active_order_id")
+            .and_then(Value::as_str)
+            != Some(remote_order_id.as_str())
+        {
+            return Err(
+                "The canonical table check belongs to another order. Refresh before cancelling."
+                    .into(),
+            );
+        }
+        let grant=crate::admin_fetch_detailed(Some(&db),"/api/pos/table-cancel-approvals","POST",Some(serde_json::json!({
+            "session_id":table_session_id,"client_event_id":event_id,"staff_id":staff_id,"pin":pin
+        }))).await.map_err(|error|error.to_string())?;
+        let approval_token = grant
+            .get("approval_token")
+            .and_then(Value::as_str)
+            .ok_or("Server cancellation approval was not granted")?;
+        let cancelled=crate::admin_fetch_detailed(Some(&db),&path,"PATCH",Some(serde_json::json!({
+            "action":"whole_order_cancel","client_event_id":event_id,"cancellation_reason":reason,
+            "approved_staff_id":staff_id,"approval_token":approval_token,"release_status":"available"
+        }))).await.map_err(|error|error.to_string())?;
+        if cancelled.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err("Server cancellation failed. The table was not released.".into());
+        }
+        // The server has cancelled the parent and every sibling atomically.
+        // Mirroring it locally cannot precede or substitute that transition.
+        {
+            let mut conn = db.conn.lock().map_err(|error| error.to_string())?;
+            let transaction = conn.transaction().map_err(|error| error.to_string())?;
+            crate::sync::apply_lan_canonical_response(&transaction, &path, &cancelled)?;
+            crate::table_attempt_recovery::foreground_applied(
+                &transaction,
+                "whole_order_cancel",
+                &event_id,
+            )?;
+            if let Some(ids) = cancelled
+                .pointer("/workflow/affected_session_ids")
+                .and_then(Value::as_array)
+            {
+                crate::table_session_cache::invalidate(&transaction, ids)?;
+            }
+            transaction
+                .execute(
+                    "UPDATE orders SET cancellation_reason=?1 WHERE id=?2",
+                    rusqlite::params![reason, local_order_id],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction.commit().map_err(|error| error.to_string())?;
+        }
+        let update = serde_json::json!({"orderId":local_order_id,"status":"cancelled","cancellationReason":reason});
+        let _ = app.emit("order_status_updated", update.clone());
+        let _ = app.emit("order_realtime_update", update);
+        serde_json::json!({"success":true,"orderId":local_order_id,"data":cancelled})
+    } else {
+        order_update_status(
+            Some(serde_json::json!({
+                "orderId": order_id,
+                "status": "cancelled",
+                "cancellationReason": reason,
+            })),
+            None,
+            db.clone(),
+            app,
+        )
+        .await
+        .map_err(crate::auth::GuardedCommandError::from)?
+    };
     if answer.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
         if let Err(error) = record_owing_order_cancel_audit(
             &db,
@@ -8076,6 +9218,39 @@ mod dto_tests {
         assert_eq!(body.get("estimatedTime").and_then(Value::as_i64), Some(20));
     }
 
+    #[test]
+    fn room_charge_acceptance_requires_exact_paid_server_acknowledgement() {
+        let confirmed = serde_json::json!({"success": true, "data": {
+            "id": "remote-room-order", "status": "confirmed",
+            "payment_method": "room_charge", "payment_status": "paid"
+        }});
+        assert!(room_charge_approval_acknowledged(
+            &confirmed,
+            "remote-room-order"
+        ));
+        assert!(!room_charge_approval_acknowledged(
+            &confirmed,
+            "another-order"
+        ));
+        for (field, value) in [
+            ("status", "pending"),
+            ("status", "cancelled"),
+            ("payment_status", "pending"),
+            ("payment_method", "cash"),
+        ] {
+            let mut refused = confirmed.clone();
+            refused["data"][field] = Value::String(value.into());
+            assert!(!room_charge_approval_acknowledged(
+                &refused,
+                "remote-room-order"
+            ));
+        }
+        assert!(!room_charge_approval_acknowledged(
+            &serde_json::json!({"success": true}),
+            "remote-room-order"
+        ));
+    }
+
     // Founder decision, 01/10/2026: a preparation time the platform does not
     // take is shortened and the cashier is told. The server says so in the
     // accept's PATCH answer (`platform_ack`); the renderer gets it as-is.
@@ -9462,6 +10637,138 @@ mod transition_tests {
         .unwrap();
     }
 
+    fn room_charge_snapshot_fixture(db: &db::DbState) -> RoomChargeApprovalSnapshot {
+        insert_order(db, "room-snapshot", "pending");
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders SET ghost_metadata = '{\"kiosk\":{\"paymentMethod\":\"room_charge\"}}', sync_status = 'synced',
+                    supabase_id = '11111111-1111-4111-8111-111111111111'
+             WHERE id = 'room-snapshot'", [],
+        ).unwrap();
+        capture_room_charge_approval_snapshot(&conn, "room-snapshot").unwrap()
+    }
+
+    #[test]
+    fn room_charge_snapshot_rejects_unsynced_rows_and_both_outstanding_queues() {
+        let db = test_db();
+        room_charge_snapshot_fixture(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders SET sync_status = 'pending' WHERE id = 'room-snapshot'",
+            [],
+        )
+        .unwrap();
+        assert!(capture_room_charge_approval_snapshot(&conn, "room-snapshot").is_err());
+        conn.execute(
+            "UPDATE orders SET sync_status = 'synced' WHERE id = 'room-snapshot'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, status)
+             VALUES ('room-edit', 'orders', 'room-snapshot', 'UPDATE', '{}', 'org-test', 'processing')", [],
+        ).unwrap();
+        assert!(capture_room_charge_approval_snapshot(&conn, "room-snapshot").is_err());
+        conn.execute("DELETE FROM parity_sync_queue WHERE id = 'room-edit'", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('order', 'room-snapshot', 'update', '{}', 'room-edit', 'pending')", [],
+        ).unwrap();
+        assert!(capture_room_charge_approval_snapshot(&conn, "room-snapshot").is_err());
+        conn.execute(
+            "DELETE FROM sync_queue WHERE idempotency_key = 'room-edit'",
+            [],
+        )
+        .unwrap();
+        assert!(capture_room_charge_approval_snapshot(&conn, "room-snapshot").is_ok());
+    }
+
+    #[test]
+    fn room_charge_ack_requires_authoritative_matching_total_and_unchanged_items() {
+        let db = test_db();
+        let snapshot = room_charge_snapshot_fixture(&db);
+        let mut answer = serde_json::json!({"success": true, "data": {
+            "id": snapshot.remote_id, "status": "ready", "payment_method": "room_charge",
+            "payment_status": "paid", "total_amount": "10.00"
+        }});
+        assert_eq!(
+            acknowledged_room_charge_status(&answer, &snapshot).unwrap(),
+            "ready"
+        );
+        for total in [
+            Value::Null,
+            serde_json::json!(15),
+            serde_json::json!(-10),
+            serde_json::json!("NaN"),
+        ] {
+            answer["data"]["total_amount"] = total;
+            assert!(acknowledged_room_charge_status(&answer, &snapshot).is_err());
+        }
+        let confirmation = RoomChargeApprovalConfirmation {
+            snapshot,
+            status: "ready".into(),
+        };
+        let conn = db.conn.lock().unwrap();
+        // Even a later completed sync cannot hide an in-flight edit from this ACK.
+        conn.execute("UPDATE orders SET total_amount = 15, total_amount_cents = 1500 WHERE id = 'room-snapshot'", []).unwrap();
+        assert!(recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).is_err());
+        conn.execute("UPDATE orders SET total_amount = 10, total_amount_cents = 1000, items = '[{\"name\":\"changed item\"}]' WHERE id = 'room-snapshot'", []).unwrap();
+        assert!(recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).is_err());
+        let (payment_status, charged): (String, i64) = conn
+            .query_row(
+                "SELECT payment_status, folio_charged FROM orders WHERE id = 'room-snapshot'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((payment_status.as_str(), charged), ("pending", 0));
+    }
+
+    #[test]
+    fn room_charge_recheck_preserves_advanced_backflow_and_rejects_cancellation() {
+        let db = test_db();
+        let snapshot = room_charge_snapshot_fixture(&db);
+        let mut confirmation = RoomChargeApprovalConfirmation {
+            snapshot,
+            status: "ready".into(),
+        };
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).unwrap(),
+            "ready"
+        );
+        conn.execute(
+            "UPDATE orders SET status = 'completed' WHERE id = 'room-snapshot'",
+            [],
+        )
+        .unwrap();
+        confirmation.status = "confirmed".into();
+        assert_eq!(
+            recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).unwrap(),
+            "completed"
+        );
+        conn.execute(
+            "UPDATE orders SET payment_status = 'refunded' WHERE id = 'room-snapshot'",
+            [],
+        )
+        .unwrap();
+        assert!(recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).is_err());
+        conn.execute(
+            "UPDATE orders SET payment_status = 'paid' WHERE id = 'room-snapshot'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE orders SET status = 'cancelled' WHERE id = 'room-snapshot'",
+            [],
+        )
+        .unwrap();
+        assert!(recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).is_err());
+        conn.execute("UPDATE orders SET status = 'pending', ghost_metadata = '{\"kiosk\":{\"paymentMethod\":\"cash\"}}' WHERE id = 'room-snapshot'", []).unwrap();
+        assert!(recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).is_err());
+    }
+
     #[tokio::test]
     async fn twint_new_checkout_refuses_held_card_unknown_sale_fiscal_and_orphan_approval() {
         for prior in ["held", "sale", "fiscal", "orphan"] {
@@ -9538,7 +10845,14 @@ mod transition_tests {
             ] {
                 db::set_setting(&conn, "terminal", key, value).unwrap();
             }
-            db::set_setting(&conn, "organization", "currency", "CHF").unwrap();
+            for (key, value) in [
+                ("currency", "CHF"),
+                ("store_currency_available", "true"),
+                ("store_currency_source", "branch_country"),
+                ("store_currency_branch_id", "manual-branch"),
+            ] {
+                db::set_setting(&conn, "restaurant", key, value).unwrap();
+            }
         }
         let payload = serde_json::json!({"clientRequestId":"manual-checkout","organizationId":"manual-org","branchId":"manual-branch","terminalId":"manual-terminal","items":[{"name":"Coffee","quantity":1,"price":12}],"totalAmount":12,"subtotal":12,"status":"completed","orderType":"takeaway","initialPayment":{"method":"twint","amount":12,"currency":"CHF","idempotencyKey":"manual-receipt-key","staffId":"manual-cashier","staffShiftId":"manual-shift","metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"skip","qr_mode":"static_qr_manual"}}});
         let mgr = crate::ecr::DeviceManager::new();
@@ -9586,7 +10900,7 @@ mod transition_tests {
                     .unwrap(),
                 0
             );
-            conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now')",[]).unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at,currency) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now','CHF')",[]).unwrap();
         }
         // Recovery loads the durable original, rather than asking the QR UI
         // for another scan or cashier receipt confirmation.
@@ -9887,9 +11201,9 @@ mod transition_tests {
             conn.execute(
                 "INSERT INTO orders (
                      id, organization_id, branch_id, items, total_amount, total_amount_cents,
-                     status, payment_status, sync_status, created_at, updated_at
+                     status, payment_status, sync_status, created_at, updated_at, currency
                  ) VALUES (?1, 'org-gift-control', 'branch-gift-control', '[]', 10.0, 1000,
-                     'pending', 'pending', 'pending', datetime('now'), datetime('now'))",
+                     'pending', 'pending', 'pending', datetime('now'), datetime('now'), 'EUR')",
                 [&order_id],
             ).unwrap();
             enqueue_order_creation_fiscal(&conn, &order_id, &payload).unwrap();
@@ -10135,6 +11449,29 @@ mod transition_tests {
             .expect("cancelled alias should normalize");
         assert_eq!(alias, "cancelled");
         assert!(can_transition_locally("approved", "ready"));
+    }
+
+    #[test]
+    fn pending_room_charge_cannot_bypass_online_approval_through_generic_status() {
+        let db = test_db();
+        insert_order(&db, "room-pending", "pending");
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE orders SET ghost_metadata = '{\"kiosk\":{\"paymentMethod\":\"room_charge\"}}' WHERE id = 'room-pending'", []).unwrap();
+        let error =
+            ensure_order_status_transition_allowed(&conn, "room-pending", "confirmed").unwrap_err();
+        assert!(error.starts_with("ROOM_CHARGE_UNAVAILABLE"));
+        assert_eq!(
+            load_canonical_order_status(&conn, "room-pending").unwrap(),
+            "pending"
+        );
+        assert!(ensure_order_status_transition_with_room_confirmation(
+            &conn,
+            "room-pending",
+            "confirmed",
+            true
+        )
+        .is_ok());
+        assert!(ensure_order_status_transition_allowed(&conn, "room-pending", "cancelled").is_ok());
     }
 
     #[test]
@@ -10474,6 +11811,47 @@ mod transition_tests {
         // gone; partial-vs-paid now lives purely in `payment_status`.
         assert_eq!(payment_method, "cash");
         assert!((total_paid - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn payment_principal_tip_edit_preview_and_snapshot_do_not_invent_missing_money() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "tip-edit",
+            r#"[{"name":"Coffee","quantity":1,"unit_price":12,"total_price":12}]"#,
+            12.0,
+            12.0,
+            "paid",
+        );
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,status,created_at,updated_at) VALUES ('tip-edit-payment','tip-edit','cash',14,1400,8,800,'completed','now','now')",[]).unwrap();
+        let coverage = capture_proven_payment_coverage(&conn, "tip-edit").unwrap();
+        assert_eq!(
+            coverage.missing_cents, 0,
+            "Known receipt tips must not manufacture missing historical money"
+        );
+        let payload = OrderEditSettlementPayload {
+            order_id: "tip-edit".into(),
+            items: vec![
+                serde_json::json!({"name":"Coffee","quantity":1,"unit_price":12,"total_price":12}),
+            ],
+            order_notes: None,
+            order_updates: None,
+            financials: None,
+        };
+        let preview = preview_edit_settlement_in_connection(&conn, &payload).unwrap();
+        assert_eq!(preview["paidTotal"], 6.0);
+        assert_eq!(preview["requiredAction"], "collect");
+        let snapshot =
+            refresh_order_payment_snapshot_with_coverage(&conn, "tip-edit", "now", &coverage)
+                .unwrap();
+        assert_eq!(snapshot.status, "partially_paid");
+        assert_eq!(snapshot.ledger_paid, 6.0);
+        assert_eq!(
+            payments::load_net_paid_for_order(&conn, "tip-edit").unwrap(),
+            14.0
+        );
     }
 
     #[test]
@@ -11397,6 +12775,7 @@ mod paid_edit_ledger_tests {
 
     #[test]
     fn collecting_the_difference_completes_a_grown_order_whose_rows_are_missing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         seed_order(
@@ -11406,6 +12785,34 @@ mod paid_edit_ledger_tests {
             "paid",
             Some("remote-order-grown-paid"),
         );
+        conn.execute(
+            "UPDATE orders SET currency='EUR', branch_id='edit-branch' WHERE id='order-grown-paid'",
+            [],
+        )
+        .unwrap();
+        for (category, key, value) in [
+            ("terminal", "branch_id", "edit-branch"),
+            ("restaurant", "store_currency_branch_id", "edit-branch"),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            db::set_setting(&conn, category, key, value).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                check_in_time, status, sync_status, created_at, updated_at, currency)
+             VALUES ('edit-cashier-shift', 'edit-cashier', 'cashier', 'edit-branch', 'edit-terminal',
+                datetime('now'), 'active', 'pending', datetime('now'), datetime('now'), 'EUR')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents, opened_at, created_at, updated_at, currency)
+             VALUES ('edit-drawer', 'edit-cashier-shift', 'edit-cashier', 'edit-branch', 'edit-terminal',
+                0, 0, datetime('now'), datetime('now'), datetime('now'), 'EUR')",
+            [],
+        ).unwrap();
         let action: EditSettlementActionPayload = serde_json::from_value(serde_json::json!({
             "type": "collect",
             "payments": [{ "method": "card", "amount": 2.0 }],

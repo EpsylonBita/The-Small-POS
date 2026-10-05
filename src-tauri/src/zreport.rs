@@ -1991,6 +1991,7 @@ fn preview_response_from_built_date_z_report(
         "preview": preview_only,
         "existing": false,
         "report": {
+            "currency": report.report_json.get("currency").cloned().unwrap_or(Value::Null),
             "shiftId": report.shift_id_for_db.clone().unwrap_or_default(),
             "shiftCount": report.shift_count,
             "branchId": report.branch_id,
@@ -2238,6 +2239,120 @@ struct BuiltDateZReport {
     gift_close: GiftCloseReport,
 }
 
+/// A report label is evidence about every amount in the snapshot, never a
+/// preference. An absent/invalid contributor or mixed original units has no
+/// single currency; even an empty report must not borrow today's store setting.
+fn common_report_currency(values: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let mut currency: Option<String> = None;
+    for value in values {
+        let value = value.filter(|value| {
+            value.len() == 3
+                && value
+                    .bytes()
+                    .all(|character| character.is_ascii_uppercase())
+        })?;
+        if currency.as_ref().is_some_and(|known| known != &value) {
+            return None;
+        }
+        currency = Some(value);
+    }
+    currency
+}
+
+fn report_shift_currency(conn: &Connection, shift_id: &str) -> Result<Option<String>, String> {
+    let Some(currency) = crate::shifts::shift_summary_currency(conn, shift_id)? else {
+        return Ok(None);
+    };
+    // Repair projections currently carry totals/version but no original unit.
+    // A generic shift snapshot cannot prove the currency of that remote ledger.
+    let uncertain: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM staff_shifts WHERE id=?1 AND
+           (COALESCE(repair_orders_count,0)<>0 OR COALESCE(repair_tender_sales,0)<>0
+            OR COALESCE(repair_cash_sales,0)<>0 OR COALESCE(repair_card_sales,0)<>0))
+         OR EXISTS(SELECT 1 FROM payment_adjustments a
+           LEFT JOIN order_payments p ON p.id=a.payment_id
+           LEFT JOIN orders o ON o.id=p.order_id
+           WHERE (a.staff_shift_id=?1 OR COALESCE(p.staff_shift_id,o.staff_shift_id)=?1)
+             AND (p.currency IS NULL OR p.currency<>?2))",
+            params![shift_id, currency],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("read report shift currency evidence: {error}"))?;
+    Ok((!uncertain).then_some(currency))
+}
+
+fn report_currency_from_staff(
+    staff: &[Value],
+    gift_close: &GiftCloseReport,
+) -> Vec<Option<String>> {
+    staff
+        .iter()
+        .map(|row| {
+            row.get("currency")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .chain(
+            gift_close
+                .originals
+                .iter()
+                .map(|row| Some(row.currency.clone())),
+        )
+        .collect()
+}
+
+/// Date reports also include platform/unassigned orders and expenses/drawers
+/// outside their staff list. Read the full scoped population, not the capped
+/// order detail list, so an unseen legacy or mixed row cannot acquire a label.
+fn report_window_currency(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
+    mut values: Vec<Option<String>>,
+) -> Result<Option<String>, String> {
+    let financial = business_day::order_financial_timestamp_expr("o");
+    let financial_start = lower_bound_mode.sql_predicate(&financial, "?1");
+    let expense_start = lower_bound_mode.sql_predicate("created_at", "?1");
+    let drawer_start = lower_bound_mode.sql_predicate("opened_at", "?1");
+    let payout_start = lower_bound_mode.sql_predicate("sp.created_at", "?1");
+    let sql = format!(
+        "WITH scoped_orders AS (
+           SELECT o.id,o.currency FROM orders o WHERE {financial_start}
+             AND (?2 IS NULL OR {financial}<=?2)
+             AND (?3='' OR o.branch_id=?3 OR o.branch_id IS NULL)
+             AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
+             AND COALESCE(o.order_context,'')<>'repair_settlement'
+         )
+         SELECT currency FROM scoped_orders
+         UNION ALL SELECT p.currency FROM order_payments p JOIN scoped_orders o ON o.id=p.order_id
+           WHERE p.status IN ('completed','refunded')
+         UNION ALL SELECT p.currency FROM payment_adjustments a JOIN scoped_orders o ON o.id=a.order_id
+           LEFT JOIN order_payments p ON p.id=a.payment_id
+         UNION ALL SELECT currency FROM shift_expenses WHERE {expense_start}
+           AND (?2 IS NULL OR created_at<=?2) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
+         UNION ALL SELECT currency FROM cash_drawer_sessions WHERE {drawer_start}
+           AND (?2 IS NULL OR opened_at<=?2) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
+         UNION ALL SELECT sp.currency FROM staff_payments sp LEFT JOIN staff_shifts ss ON ss.id=sp.cashier_shift_id
+           WHERE {payout_start} AND (?2 IS NULL OR sp.created_at<=?2)
+             AND (?3='' OR ss.branch_id=?3 OR ss.branch_id IS NULL)"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("prepare report currency: {error}"))?;
+    let rows = statement
+        .query_map(params![period_start, cutoff_at, branch_id], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .map_err(|error| format!("query report currency: {error}"))?;
+    for row in rows {
+        values.push(row.map_err(|error| format!("read report currency: {error}"))?);
+    }
+    Ok(common_report_currency(values))
+}
+
 /// Presentation evidence only: this remembered cache never admits a payment.
 fn z_report_presentation_from_cache(
     modules: &Value,
@@ -2427,7 +2542,7 @@ fn load_staff_payment_items(
                          FROM staff_shifts ss
                          WHERE ss.staff_id = sp.paid_to_staff_id
                          ORDER BY ss.check_in_time DESC
-                         LIMIT 1)
+                         LIMIT 1), sp.currency
                  FROM staff_payments sp
                  WHERE sp.cashier_shift_id = ?1
                  ORDER BY sp.created_at ASC",
@@ -2444,6 +2559,7 @@ fn load_staff_payment_items(
                     "createdAt": row.get::<_, Option<String>>(4)?,
                     "staffName": row.get::<_, Option<String>>(5)?,
                     "role": row.get::<_, Option<String>>(6)?,
+                    "currency": row.get::<_, Option<String>>(7)?,
                 }))
             })
             .map_err(|e| format!("query cashier staff payments: {e}"))?
@@ -2465,7 +2581,7 @@ fn load_staff_payment_items(
                      FROM staff_shifts ss
                      WHERE ss.staff_id = sp.paid_to_staff_id
                      ORDER BY ss.check_in_time DESC
-                     LIMIT 1)
+                     LIMIT 1), sp.currency
              FROM staff_payments sp
              WHERE sp.paid_to_staff_id = ?1
                AND (?2 IS NULL OR sp.created_at >= ?2)
@@ -2490,6 +2606,7 @@ fn load_staff_payment_items(
                     "createdAt": row.get::<_, Option<String>>(4)?,
                     "staffName": row.get::<_, Option<String>>(5)?,
                     "role": row.get::<_, Option<String>>(6)?,
+                    "currency": row.get::<_, Option<String>>(7)?,
                 }))
             },
         )
@@ -3192,7 +3309,8 @@ fn load_day_order_details(
     // LIKE treats as a single-character wildcard.
     let sql = format!(
         "SELECT x.*,
-                (SELECT ss.staff_name FROM staff_shifts ss WHERE ss.id = x.staff_shift_id) AS staff_name
+                (SELECT ss.staff_name FROM staff_shifts ss WHERE ss.id = x.staff_shift_id) AS staff_name,
+                (SELECT original.currency FROM orders original WHERE original.id=x.id) AS currency
          FROM (
             SELECT o.id AS id,
                    COALESCE(NULLIF(TRIM(o.order_number), ''), o.id) AS order_number,
@@ -3271,6 +3389,7 @@ fn load_day_order_details(
                 "platformFleet": row.get::<_, i64>(11)? == 1,
                 "staffShiftId": row.get::<_, Option<String>>(12)?,
                 "staffName": row.get::<_, Option<String>>(13)?,
+                "currency": row.get::<_, Option<String>>(14)?,
                 }))
             },
         )
@@ -3483,6 +3602,8 @@ fn build_staff_report(
 
     Ok(serde_json::json!({
         "staffShiftId": shift.id,
+        "currency": common_report_currency(std::iter::once(report_shift_currency(conn, &shift.id)?)
+            .chain(payment_items.iter().map(|row|row.get("currency").and_then(Value::as_str).map(str::to_owned)))),
         "staffId": shift.staff_id,
         "staffName": display_name,
         "role": shift.role_type,
@@ -4474,8 +4595,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             gift_close.annotate_drawer(drawer, expected_cents);
         }
     }
+    let currency = common_report_currency(report_currency_from_staff(&staff_reports, &gift_close));
     let presentation = load_z_report_presentation(db, &conn, &branch_id);
     let mut report_json = serde_json::json!({
+        "currency": currency,
         "presentation": presentation,
         "paymentsBreakdown": payments_breakdown,
         "date": report_date,
@@ -4768,6 +4891,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "zReportId": z_report_id,
         "report": {
             "id": z_report_id,
+            "currency": report_json.get("currency").cloned().unwrap_or(Value::Null),
             "shiftId": shift_id,
             "shiftCount": 1,
             "branchId": branch_id,
@@ -6270,8 +6394,25 @@ fn build_z_report_for_date(
         &integrity_blockers,
     );
 
+    let currency = if repair_orders_count != 0
+        || repair_tender_sales != 0.0
+        || repair_cash_sales != 0.0
+        || repair_card_sales != 0.0
+    {
+        None
+    } else {
+        report_window_currency(
+            &conn,
+            &branch_id,
+            &period_start,
+            cutoff_param,
+            lower_bound_mode,
+            report_currency_from_staff(&staff_reports, &gift_close),
+        )?
+    };
     let presentation = load_z_report_presentation(db, &conn, &branch_id);
     let mut report_json = serde_json::json!({
+        "currency": currency,
         "presentation": presentation,
         "paymentsBreakdown": payments_breakdown,
         "date": date,
@@ -6643,6 +6784,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "zReportId": z_report_id,
         "report": {
             "id": z_report_id,
+            "currency": built.report_json.get("currency").cloned().unwrap_or(Value::Null),
             "shiftId": shift_id_for_db,
             "shiftCount": built.shift_count,
             "branchId": built.branch_id,
@@ -7564,6 +7706,11 @@ pub fn generate_z_report_file(
     let _breakdown: Value =
         serde_json::from_str(&payments_breakdown_str).unwrap_or(serde_json::json!({}));
     let report_json: Value = serde_json::from_str(&report_json_str).unwrap_or_default();
+    let currency = common_report_currency([report_json
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(str::to_owned)])
+    .unwrap_or_else(|| "Unknown".to_string());
     let shift_count = report_json
         .pointer("/shifts/total")
         .and_then(Value::as_i64)
@@ -7613,7 +7760,8 @@ Z - R E P O R T</div>
 <div style="margin:4px 0;">
 {shift_line}Staff: {staff_name}<br/>
 Date: {report_date}<br/>
-Generated: {generated_at}
+Generated: {generated_at}<br/>
+Currency: {currency}
 </div>
 <hr style="border:none;border-top:1px dashed #000;"/>
 <div style="margin:4px 0;"><strong>SALES SUMMARY</strong></div>
@@ -7706,6 +7854,16 @@ fn get_z_report_by_id(conn: &rusqlite::Connection, z_report_id: &str) -> Result<
 
 /// Map a z_reports row to a JSON value.
 fn map_z_report_row(row: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let report_json: String = row.get(21)?;
+    let currency = serde_json::from_str::<Value>(&report_json)
+        .ok()
+        .and_then(|report| {
+            report
+                .get("currency")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let currency = common_report_currency([currency]);
     Ok(serde_json::json!({
         "id": row.get::<_, String>(0)?,
         "shiftId": row.get::<_, String>(1)?,
@@ -7728,7 +7886,8 @@ fn map_z_report_row(row: &rusqlite::Row) -> rusqlite::Result<Value> {
         "closingCash": row.get::<_, f64>(18)?,
         "expectedCash": row.get::<_, f64>(19)?,
         "paymentsBreakdown": row.get::<_, String>(20)?,
-        "reportJson": row.get::<_, String>(21)?,
+        "reportJson": report_json,
+        "currency": currency,
         "syncState": row.get::<_, String>(22)?,
         "syncLastError": row.get::<_, Option<String>>(23)?,
         "syncRetryCount": row.get::<_, i64>(24)?,
@@ -8485,6 +8644,141 @@ mod tests {
         DbState {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn seed_original_currency_report(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO staff_shifts (id,staff_id,staff_name,branch_id,terminal_id,role_type,
+               opening_cash_amount,closing_cash_amount,expected_cash_amount,cash_variance,
+               check_in_time,check_out_time,status,currency,created_at,updated_at)
+             VALUES ('currency-shift','currency-staff','Cashier','branch-1','term-1','cashier',
+               10,20,20,0,'2026-02-16T09:00:00Z','2026-02-16T18:00:00Z','closed','CHF',
+               '2026-02-16T09:00:00Z','2026-02-16T18:00:00Z');
+             INSERT INTO cash_drawer_sessions (id,staff_shift_id,cashier_id,branch_id,terminal_id,
+               opening_amount,closing_amount,expected_amount,variance_amount,total_cash_sales,
+               reconciled,opened_at,closed_at,currency,created_at,updated_at)
+             VALUES ('currency-drawer','currency-shift','currency-staff','branch-1','term-1',
+               10,20,20,0,10,1,'2026-02-16T09:00:00Z','2026-02-16T18:00:00Z','CHF',
+               '2026-02-16T09:00:00Z','2026-02-16T18:00:00Z');
+             INSERT INTO orders(id,order_number,items,total_amount,status,order_type,payment_status,
+               staff_shift_id,branch_id,currency,created_at,updated_at)
+             VALUES ('currency-order','C1','[]',10,'completed','pickup','paid','currency-shift','branch-1',
+               'CHF','2026-02-16T12:00:00Z','2026-02-16T12:00:00Z');
+             INSERT INTO order_payments(id,order_id,method,amount,status,staff_shift_id,currency,created_at,updated_at)
+             VALUES ('currency-payment','currency-order','cash',10,'completed','currency-shift','CHF',
+               '2026-02-16T12:00:00Z','2026-02-16T12:00:00Z');"
+        ).expect("seed original CHF report");
+    }
+
+    #[test]
+    fn z_report_currency_is_frozen_and_never_relabelled_by_current_country() {
+        let db = test_db();
+        seed_original_currency_report(&db);
+        let date_report = build_z_report_for_date(
+            &db,
+            &serde_json::json!({"branchId":"branch-1","date":"2026-02-16"}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(date_report.report_json["currency"], "CHF");
+        assert_eq!(date_report.report_json["dayOrders"][0]["currency"], "CHF");
+        let payload = serde_json::json!({"shiftId":"currency-shift"});
+        let first = generate_z_report(&db, &payload).unwrap();
+        assert_eq!(first["report"]["currency"], "CHF");
+        assert_eq!(first["report"]["reportJson"]["currency"], "CHF");
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
+            db::set_setting(&conn, "terminal", "store_country", "United States").unwrap();
+        }
+        let replay = generate_z_report(&db, &payload).unwrap();
+        assert_eq!(replay["report"]["currency"], "CHF");
+        let stored: Value =
+            serde_json::from_str(replay["report"]["reportJson"].as_str().unwrap()).unwrap();
+        assert_eq!(stored["currency"], "CHF");
+        assert_eq!(replay["zReportId"], first["zReportId"]);
+    }
+
+    #[test]
+    fn z_report_currency_checks_unassigned_orders_and_legacy_expenses() {
+        let db = test_db();
+        seed_original_currency_report(&db);
+        let conn = db.conn.lock().unwrap();
+        let currency = || {
+            report_window_currency(
+                &conn,
+                "branch-1",
+                "2026-02-16T00:00:00Z",
+                Some("2026-02-16T23:59:59Z"),
+                LowerBoundMode::Inclusive,
+                vec![Some("CHF".to_string())],
+            )
+            .unwrap()
+        };
+        assert_eq!(currency(), Some("CHF".to_string()));
+        conn.execute("INSERT INTO orders(id,order_number,items,total_amount,status,order_type,branch_id,currency,created_at,updated_at)
+          VALUES ('unassigned-currency','C2','[]',5,'completed','pickup','branch-1','USD','2026-02-16T12:00:00Z','2026-02-16T12:00:00Z')",[]).unwrap();
+        assert_eq!(currency(), None);
+        conn.execute("DELETE FROM orders WHERE id='unassigned-currency'", [])
+            .unwrap();
+        conn.execute("INSERT INTO shift_expenses(id,staff_shift_id,staff_id,branch_id,expense_type,amount,description,created_at,updated_at)
+          VALUES ('legacy-currency-expense','currency-shift','currency-staff','branch-1','supplies',2,'legacy unit','2026-02-16T12:00:00Z','2026-02-16T12:00:00Z')",[]).unwrap();
+        assert_eq!(currency(), None);
+    }
+
+    #[test]
+    fn z_report_currency_leaves_legacy_and_mixed_units_unknown() {
+        assert_eq!(
+            common_report_currency([Some("CHF".to_string()), None]),
+            None
+        );
+        assert_eq!(
+            common_report_currency([Some("CHF".to_string()), Some("USD".to_string())]),
+            None
+        );
+        assert_eq!(common_report_currency([Some("EUR;bad".to_string())]), None);
+        let db = test_db();
+        let shift = seed_closed_shift(&db);
+        let report = generate_z_report(&db, &serde_json::json!({"shiftId":shift})).unwrap();
+        assert!(report["report"]["currency"].is_null());
+        assert!(report["report"]["reportJson"]["currency"].is_null());
+    }
+
+    #[test]
+    fn z_report_currency_checks_void_parent_without_adjustment_shift() {
+        // Adjustment totals follow the original payment/order owner even when
+        // legacy adjustments did not capture their own staff_shift_id.
+        for payment_has_shift in [true, false] {
+            let db = test_db();
+            seed_original_currency_report(&db);
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE order_payments SET status='voided',currency='',staff_shift_id=?1
+                     WHERE id='currency-payment'",
+                    [payment_has_shift.then_some("currency-shift")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,
+                       amount,amount_cents,reason,sync_state,created_at,updated_at)
+                     VALUES ('currency-void','currency-payment','currency-order','void',10,1000,
+                       'legacy void','applied','2026-02-16T13:00:00Z','2026-02-16T13:00:00Z')",
+                    [],
+                )
+                .unwrap();
+                assert_eq!(
+                    report_shift_currency(&conn, "currency-shift").unwrap(),
+                    None
+                );
+            }
+            let report =
+                generate_z_report(&db, &serde_json::json!({"shiftId":"currency-shift"})).unwrap();
+            assert_eq!(report["report"]["voidsTotal"], 10.0);
+            assert!(report["report"]["currency"].is_null());
+            assert!(report["report"]["reportJson"]["currency"].is_null());
         }
     }
 

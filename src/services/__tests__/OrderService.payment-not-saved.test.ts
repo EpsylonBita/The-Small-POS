@@ -85,7 +85,8 @@ describe('OrderService: a card charged at checkout and not saved', () => {
     bridge.orders.saveForRetry.mockResolvedValue({ success: true, orderId: 'retry-order-1' })
   })
 
-  it('is final: typed, never saved for retry, never created again', async () => {
+  it.each(['charged receipt could not be saved', 'SHIFT_CURRENCY_MISMATCH during approved recovery'])('is final and retains recovery evidence even for %s', async message => {
+    bridge.orders.createWithInitialPayment.mockResolvedValueOnce({ success:false,errorCode:'PAYMENT_NOT_SAVED',paymentNotSaved:true,amountCents:1300,unsavedPayment:UNSAVED,error:message })
     const outcome = await OrderService.getInstance()
       .createOrder(checkout() as any)
       .then(

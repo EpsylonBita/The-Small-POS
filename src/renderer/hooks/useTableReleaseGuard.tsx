@@ -1,12 +1,13 @@
 import React, { useCallback, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 
-import { getBridge } from '../../lib';
+import { emitCompatEvent, getBridge } from '../../lib';
 import { useI18n } from '../contexts/i18n-context';
 import { TableReleaseOwedModal } from '../components/tables/TableReleaseOwedModal';
 import type { RestaurantTable } from '../types/tables';
 import { extractPrivilegedActionError } from '../utils/privileged-actions';
 import { formatTableDisplayNumber } from '../utils/table-display';
+import { isRetryableTableServiceError } from '../utils/tableSessionOfflineQueue';
 import {
   cancelRefusalFromSnapshot,
   findCancelRefusals,
@@ -17,7 +18,7 @@ import {
 
 type RunWithPrivilegedConfirmation = <T>(request: {
   scope: 'cash_drawer_control';
-  action: () => Promise<T>;
+  action: (pin?: string) => Promise<T>;
   title?: string;
   subtitle?: string;
 }) => Promise<T>;
@@ -35,6 +36,23 @@ interface PendingRelease {
   /** Why the till refuses to cancel the order, known before any reason. */
   cancelRefusal: OrderCancelRefusalCode | null;
   release: () => Promise<unknown>;
+}
+
+/** Release projections only from the acknowledged whole-order transition. */
+export function emitCanonicalTableCancellation(result: unknown, tableId: string, orderId: string, tableSessionId?: string | null) {
+  const reply = result as { success?: boolean; data?: { workflow?: { affected_table_ids?: unknown; affected_session_ids?: unknown } } } | null;
+  const workflow = reply?.data?.workflow;
+  const tableIds = Array.isArray(workflow?.affected_table_ids) ? workflow.affected_table_ids.filter((id): id is string => typeof id === 'string') : [];
+  const sessionIds = Array.isArray(workflow?.affected_session_ids) ? workflow.affected_session_ids.filter((id): id is string => typeof id === 'string') : [];
+  if (reply?.success !== true || !tableIds.includes(tableId) || (tableSessionId && !sessionIds.includes(tableSessionId))) {
+    throw new Error('Canonical cancellation was not acknowledged. Refresh before releasing the table.');
+  }
+  for (const affectedTableId of tableIds) {
+    emitCompatEvent('table-session-settled', {
+      tableId: affectedTableId, orderId, tableSessionId: affectedTableId === tableId ? tableSessionId : undefined,
+      releaseStatus: 'available', affectedSessionIds: sessionIds,
+    });
+  }
 }
 
 const readMoney = (value: unknown): number => {
@@ -63,6 +81,16 @@ export function isOwingCancelDismissed(error: unknown): boolean {
  * shift to approve it, or a plain failure. The table stays as it was.
  */
 export function owingCancelFailureMessage(error: unknown, t: Translate): string {
+  if (errorText(error).includes('ORIGINAL_CANCEL_APPROVER_REQUIRED')) {
+    return String(t('tableCheckManager.errors.originalCancelApproverRequired', {
+      defaultValue: 'A cancellation attempt is pending. Its original approving staff member must retry after reconnecting. The table was not released.',
+    }));
+  }
+  if (errorText(error).includes('TABLE_CANCEL_SYNC_REQUIRED') || isRetryableTableServiceError(error)) {
+    return String(t('tableCheckManager.errors.canonicalCancelSyncRequired', {
+      defaultValue: 'Reconnect and finish syncing or resolve this order’s pending changes before cancelling. The table was not released.',
+    }));
+  }
   // Founder rule 01/10/2026: a paid label with no payment record here is
   // restored from the server or recorded first, never charged again.
   if (errorText(error).includes(ORDER_PAYMENT_NOT_RECORDED)) {
@@ -217,10 +245,11 @@ export function useTableReleaseGuard({
       if (!current?.orderId) return;
       setBusy(true);
       try {
-        await runWithPrivilegedConfirmation({
+        const result = await runWithPrivilegedConfirmation({
           scope: 'cash_drawer_control',
-          action: () =>
-            getBridge().orders.cancelWithApproval({ orderId: current.orderId as string, reason }),
+          action: (managerPin) =>
+            getBridge().orders.cancelWithApproval({ orderId: current.orderId as string, reason,
+              tableSessionId: current.table.tableSessionId || undefined, managerPin }),
           title: t('tableRelease.cancelApprovalTitle', {
             defaultValue: 'Approve cancelling the order',
           }),
@@ -228,7 +257,7 @@ export function useTableReleaseGuard({
             defaultValue: 'Enter the cashier or manager PIN. Nothing is charged.',
           }),
         });
-        await current.release();
+        emitCanonicalTableCancellation(result, current.table.id, current.orderId as string, current.table.tableSessionId);
         toast.success(
           t('tableRelease.orderCancelled', {
             defaultValue: 'Order cancelled and table released.',
