@@ -3,7 +3,7 @@ import { createCheckoutDraft, getCheckoutDraftStore, type CheckoutDraft, type Ch
 
 /** Hydration is explicit: an empty first render must never overwrite a saved cart. */
 export function useCheckoutDraftPersistence(enabled: boolean) {
-  const [status, setStatus] = useState<'loading' | 'loaded' | 'ready' | 'error'>('loading');
+  const [status, setStatus] = useState<'loading' | 'loaded' | 'ready' | 'error' | 'invalidated'>('loading');
   const [restored, setRestored] = useState<CheckoutDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const store = useRef<CheckoutDraftStore | null>(null);
@@ -21,6 +21,12 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     void getCheckoutDraftStore().then(async owner => {
       let draft = await owner.load();
       if (generation !== epoch.current) return;
+      if (owner.invalidation?.reason === 'edit_target_cancelled') {
+        setRestored(null);
+        setError('draftTargetCancelled');
+        setStatus('invalidated');
+        return;
+      }
       if (draft?.phase === 'editing') {
         // An old editable preimage must not hide a provider reservation or held
         // payment under the same identity, even if its modal was never acknowledged.
@@ -52,7 +58,15 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     const draft = { ...current.current, ...snapshot };
     const signature = JSON.stringify(draft);
     if (signature !== lastSaved.current) {
-      await store.current.save(draft);
+      try { await store.current.save(draft); }
+      catch (cause) {
+        if (String(cause).includes('CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED')) {
+          active.current = false;
+          setError('draftTargetCancelled');
+          setStatus('invalidated');
+        }
+        throw cause;
+      }
       if (current.current.phase === 'editing') current.current = draft;
       lastSaved.current = signature;
     }
@@ -65,9 +79,11 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     const draft: CheckoutDraft = { ...current.current, ...snapshot, phase: 'checkout_pending', submission };
     // Freeze before the native await so a concurrent autosave cannot change its preimage.
     current.current = draft;
-    await store.current.save(draft);
-    lastSaved.current = JSON.stringify(draft);
     setRestored(draft);
+    try { await store.current.save(draft); }
+    catch (cause) { setError('draftSaveFailed'); throw cause; }
+    lastSaved.current = JSON.stringify(draft);
+    setError(null);
     return draft.checkoutRequestId;
   }, []);
 
@@ -81,7 +97,8 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     setRestored(null);
   }, []);
 
-  const failedSave = useCallback(() => {
+  const failedSave = useCallback((cause?: unknown) => {
+    if (String(cause).includes('CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED')) return;
     setError('draftSaveFailed');
   }, []);
 
@@ -104,6 +121,10 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
   }, []);
 
   return { status, restored, error, markHydrated, persist, freeze, clear, failedSave, resumeDeclined,
+    checkAdmission: async (context: { orderId?: string } = {}) => {
+      if (!active.current || !store.current || current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_NOT_READY');
+      return store.current.checkAdmission(context);
+    },
     identity: () => current.current.checkoutRequestId,
     isPending: () => current.current.phase === 'checkout_pending',
     inspect: () => {

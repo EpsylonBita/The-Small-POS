@@ -47,6 +47,7 @@ mod db;
 mod diagnostics;
 mod drawer;
 mod ecr;
+mod edit_settlement_recovery;
 mod escpos;
 pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_for_order, active_cache, etc.
 mod gift_financial_closing;
@@ -55,10 +56,13 @@ mod hardware_manager;
 mod idempotency;
 mod incident_reporting;
 mod lan_transport;
+mod legacy_shift_currency;
 mod loyalty;
+mod manual_order_cancellation;
 mod memory_trim;
 mod menu;
 mod money;
+mod order_header_preflight;
 mod order_ownership;
 mod panic_hook;
 mod payment_integrity;
@@ -82,11 +86,13 @@ mod scale;
 mod scanner;
 mod serial;
 mod shifts;
+mod staff_cash_returns;
 mod startup_recovery;
 mod storage;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod table_attempt_recovery;
+mod table_manual_cancellation;
 mod table_session_cache;
 mod terminal_helpers;
 mod unsaved_payments;
@@ -1317,6 +1323,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             }
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 checkout_drafts::checkout_draft_get,
+                checkout_drafts::checkout_draft_check_admission,
                 checkout_drafts::checkout_draft_put,
                 checkout_drafts::checkout_draft_delete,
                 checkout_drafts::checkout_draft_inspect,
@@ -1392,6 +1399,8 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::orders::order_create,
             commands::orders::order_create_with_initial_payment,
             commands::orders::order_update_status,
+            manual_order_cancellation::order_prepare_manual_cancel,
+            manual_order_cancellation::order_cancel_manual_refund,
             commands::orders::order_update_customer_info,
             commands::orders::order_convert_pickup_to_delivery,
             commands::orders::order_update_items,
@@ -1502,6 +1511,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::menu::menu_trigger_check_for_updates,
             // Shifts
             commands::shifts::shift_open,
+            commands::shifts::shift_confirm_legacy_currency,
             commands::shifts::shift_financial_opening_begin,
             commands::shifts::shift_financial_opening_authorize,
             commands::shifts::shift_financial_opening_status,

@@ -4188,7 +4188,11 @@
       "customerName": "Nome",
       "customerPhone": "Telefono",
       "customerNotes": "Note",
-      "loadItemsFailed": "Impossibile caricare gli articoli dell'ordine"
+      "loadItemsFailed": "Impossibile caricare gli articoli dell'ordine",
+      "editServerUpdate": "Le correzioni non sono temporaneamente disponibili. Verifica la connessione e riprova dopo l’aggiornamento del server.",
+      "editSyncRequired": "La modifica del pagamento o dell’ordine non è ancora sincronizzata. Il carrello è salvato. Riprova tra poco.",
+      "emptyEditHint": "Per rimuovere tutti gli articoli, chiudi l’editor e annulla l’ordine.",
+      "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso."
     },
     "payment": {
       "title": "Pagamento",
@@ -5200,6 +5204,20 @@
       "cashierShiftSyncUnknownReason": "Questo turno cassiere è salvato localmente, ma la sua sincronizzazione richiede attenzione."
     },
     "orderCancellation": {
+      "staffCashAmbiguous": "Non è possibile verificare chi detiene il contante. Controlla il rimborso originale prima di annullare.",
+      "staffCashUnavailable": "L’annullamento con consegna del contante non è al momento disponibile. Controlla la connessione e riprova dopo l’aggiornamento del server.",
+      "connectionUnavailable": "Lo stato della connessione dei pagamenti non è disponibile. Aggiorna le integrazioni e riprova.",
+      "permissionRequired": "Questo account non può annullare ordini pagati.",
+      "paymentSyncRequired": "Il pagamento originale deve essere sincronizzato prima di registrarne il rimborso. Sincronizza e riprova senza addebitare di nuovo.",
+      "paymentChanged": "Il pagamento è cambiato. Chiudi la finestra e seleziona di nuovo Annulla per verificare l’importo attuale.",
+      "drawerUnavailable": "È necessaria una cassa aperta per registrare un rimborso in contanti.",
+      "returnChannel": "Come è stato restituito il denaro?",
+      "returnRecorded": "{{amount}} saranno registrati come già restituiti. Non verrà eseguito alcun pagamento.",
+      "cashDrawer": "Cassa",
+      "bank": "Banca",
+      "originalReturnRequired": "L’ordine {{orderNumber}} richiede il rimborso originale o uno stato di connessione verificato prima dell’annullamento.",
+      "mixedCurrencies": "Annulla separatamente gli ordini con valute diverse.",
+      "currencyMismatch": "Le valute registrate non corrispondono. Verifica il pagamento originale e la valuta della cassa prima di annullare.",
       "title": "Annulla ordini",
       "message_one": "Stai per annullare {{count}} ordine. Fornisci un motivo per l'annullamento.",
       "message_other": "Stai per annullare {{count}} ordini. Fornisci un motivo per l'annullamento.",
@@ -6049,6 +6067,8 @@
     "paymentMethodUpdated": "Metodo di pagamento aggiornato",
     "paymentMethodUpdateFailed": "Impossibile aggiornare il metodo di pagamento",
     "paymentMethodNoChange": "Il metodo di pagamento è già selezionato",
+    "paymentMethodEditProviderOwned": "Questo pagamento appartiene a un fornitore di pagamenti. Il metodo originale non può essere modificato.",
+    "paymentMethodEditPending": "Salva e sincronizza la correzione originale dell’ordine prima di modificarne il metodo di pagamento.",
     "paymentMethodEditUnavailable": "Il metodo di pagamento può essere modificato solo per un singolo ordine contanti/carta non annullato",
     "paymentMethodEditChecking": "Verifica dei pagamenti…",
     "paymentMethodEditRequiresSingleCompletedPayment": "Questo ordine contiene pagamenti suddivisi o più pagamenti completati. I relativi metodi non possono essere modificati insieme come un unico pagamento.",
@@ -9888,21 +9908,25 @@
       "not_saved": "Non salvato"
     },
     "reasonCodes": {
+      "table_cancellation_not_saved": "Il rimborso originale per l’annullamento del tavolo non è ancora stato salvato.",
       "payments_need_review": "Sull'ordine {{orderNumber}} è stato incassato un pagamento di {{paymentAmount}} ({{paymentMethod}}) quando era già pagato. È messo da parte e non viene conteggiato: il cliente potrebbe aver pagato due volte.",
       "payments_need_review__platform_held": "Sull'ordine {{orderNumber}} è stato incassato un pagamento di {{paymentAmount}} ({{paymentMethod}}), ma la piattaforma di consegna detiene già il denaro di questo ordine. È messo da parte e non viene conteggiato: il cliente potrebbe aver pagato due volte.",
       "payments_not_saved": "Un pagamento con carta di {{paymentAmount}} è stato addebitato sull'ordine {{orderNumber}} ma non è ancora salvato su questa cassa. Il cliente è stato addebitato: non addebitare di nuovo.",
       "payments_not_saved__new_order": "Un pagamento con carta di {{paymentAmount}} è stato addebitato per un nuovo ordine non ancora salvato su questa cassa: l'ordine e il suo pagamento restano in attesa finché non vengono salvati. Il cliente è stato addebitato: non addebitare di nuovo.",
       "payments_not_saved__new_order_cannot_save": "Un pagamento con carta di {{paymentAmount}} è stato addebitato per un nuovo ordine non ancora salvato su questa cassa: l'ordine e il suo pagamento restano in attesa finché non vengono salvati. Il cliente è stato addebitato: non addebitare di nuovo.",
-      "cancelled_order_claims_payment": "Questo ordine è annullato ma risulta ancora pagato, e questa cassa non ha alcuna registrazione di pagamento per esso. Non è in questo Rapporto Z. Questo non blocca la chiusura della giornata."
+      "cancelled_order_claims_payment": "Questo ordine è annullato ma risulta ancora pagato, e questa cassa non ha alcuna registrazione di pagamento per esso. Non è in questo Rapporto Z. Questo non blocca la chiusura della giornata.",
+      "edit_settlement_not_saved": "Una correzione confermata non è ancora salvata. L’incasso o il rimborso originale è conservato."
     },
     "fixCodes": {
+      "table_cancellation_not_saved": "Recupera l’annullamento originale del tavolo. Non consegnare o rimborsare nuovamente il denaro.",
       "payments_need_review": "Restituisci il denaro al cliente, poi confermalo qui. Se è sbagliato il pagamento registrato sul server, contatta l'assistenza prima di chiudere la giornata.",
       "payments_need_review__platform_held": "Restituisci il denaro al cliente, poi confermalo qui. La piattaforma versa questo ordine al negozio con il proprio regolamento.",
       "payments_not_saved": "Salva di nuovo il pagamento. Se non si riesce a salvarlo, restituisci il denaro al cliente e confermalo qui.",
       "payments_not_saved__cannot_save": "Questo pagamento non può essere salvato su questa cassa. Restituisci il denaro al cliente, poi confermalo qui.",
       "payments_not_saved__new_order": "Salva di nuovo il pagamento: salva l'ordine e il suo pagamento, senza un nuovo addebito. Se non si riesce a salvarlo, restituisci il denaro al cliente e confermalo qui.",
       "payments_not_saved__new_order_cannot_save": "Questo ordine e il suo pagamento non possono essere salvati su questa cassa. Restituisci il denaro al cliente, poi confermalo qui.",
-      "cancelled_order_claims_payment": "Ripristina dal server («Sincronizza ora»): un pagamento che il server ha viene copiato qui. Se non ce n'è nessuno, il titolare decide cosa deve indicare l'ordine."
+      "cancelled_order_claims_payment": "Ripristina dal server («Sincronizza ora»): un pagamento che il server ha viene copiato qui. Se non ce n'è nessuno, il titolare decide cosa deve indicare l'ordine.",
+      "edit_settlement_not_saved": "Riapri la modifica salvata e salva la stessa correzione. Non incassare o rimborsare di nuovo."
     },
     "setAsidePaymentLabel": "Pagamento messo da parte",
     "takenAtLabel": "Incassato alle",

@@ -83,7 +83,7 @@ test('native payment edit remains ambiguity-safe while supporting an explicit pa
 
 test('missing-payment repair reports one truthful payment outcome and treats refresh as best-effort', () => {
   const handlerStart = dashboardSource.indexOf('const handleMissingPaymentRepair');
-  const handlerEnd = dashboardSource.indexOf('// Used when the operator changes order type', handlerStart);
+  const handlerEnd = dashboardSource.indexOf('const handleChangeOrderType', handlerStart);
   assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'missing-payment repair handler must exist');
   const handler = dashboardSource.slice(handlerStart, handlerEnd);
 

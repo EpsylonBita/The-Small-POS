@@ -1,6 +1,7 @@
 {
   "modals": {
     "menu": {
+      "draftTargetCancelled": "Kjo porosi është anuluar. Ndryshimi i mëparshëm u arkivua dhe nuk mund të ruhet.",
       "draftReadFailed": "Shporta e ruajtur nuk mund të lexohet. Përfundimi është ndalur dhe shporta e mëparshme është ruajtur.",
       "draftSaveFailed": "Shporta nuk mund të ruhet. Përfundimi pret derisa ruajtja e qëndrueshme të ketë sukses.",
       "draftDiscardFailed": "Shporta e ruajtur nuk mund të hiqet. Ajo është mbajtur.",
@@ -13,7 +14,19 @@
       "draftExistingTable": "Kjo tavolinë ka tashmë një faturë të hapur. Hapeni për të shtuar artikuj.",
       "draftDeclinedResumed": "Pagesa u refuzua. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re.",
       "draftNotSentResumed": "Nuk u dërgua kërkesë për pagesë. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re.",
-      "draftNotChargedResumed": "Përpjekjet fillestare të pagesës nuk e ngarkuan klientin. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re."
+      "draftNotChargedResumed": "Përpjekjet fillestare të pagesës nuk e ngarkuan klientin. Shporta juaj u rikthye; nuk u nis asnjë pagesë e re.",
+      "legacyCurrency": {
+        "title": "Konfirmoni monedhën e turnit të hapur",
+        "message": "Ky turn u hap me një version më të vjetër. Para se të vazhdoni, konfirmoni se gjendja fillestare e arkës dhe transaksionet ishin në {{currency}}. Shumat nuk do të konvertohen.",
+        "pin": "PIN-i i përgjegjësit (nëse kërkohet)",
+        "confirm": "Konfirmo {{currency}}",
+        "ready": "Monedha e turnit u konfirmua. Mund të vazhdoni me pagesën.",
+        "failed": "Turni nuk mund të konfirmohej. Kontrolloni monedhën dhe jepni PIN-in e përgjegjësit nëse kërkohet."
+      },
+      "editServerUpdate": "Korrigjimet nuk janë përkohësisht të disponueshme. Kontrolloni lidhjen dhe riprovoni pas përditësimit të serverit.",
+      "editSyncRequired": "Ndryshimi i pagesës ose i porosisë nuk është sinkronizuar ende. Shporta është ruajtur. Provoni përsëri pas pak.",
+      "emptyEditHint": "Për të hequr të gjithë artikujt, mbyllni redaktuesin dhe anuloni porosinë.",
+      "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash."
     }
   },
   "checkoutRecovery": {
@@ -26,5 +39,15 @@
     "auth_required": "Hyni me një seancë të autorizuar të stafit për të vazhduar.",
     "conflict": "Një terminal tjetër e ndryshoi këtë faturë. Kontrolloni gjendjen aktuale përpara se të vazhdoni.",
     "refresh": "Rifresko gjendjen"
+  },
+  "paymentIntegrity": {
+    "reasonCodes": {
+      "table_cancellation_not_saved": "Kthimi fillestar për anulimin e tavolinës nuk është ruajtur ende.",
+      "edit_settlement_not_saved": "Një korrigjim i konfirmuar nuk është ruajtur ende. Arkëtimi ose kthimi fillestar ruhet."
+    },
+    "fixCodes": {
+      "table_cancellation_not_saved": "Rikuperoni anulimin fillestar të tavolinës. Mos i dorëzoni ose rimbursoni paratë përsëri.",
+      "edit_settlement_not_saved": "Rihapni redaktimin e ruajtur dhe ruani të njëjtin korrigjim. Mos arkëtoni ose ktheni para përsëri."
+    }
   }
 }

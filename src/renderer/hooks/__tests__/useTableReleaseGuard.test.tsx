@@ -14,16 +14,19 @@ const mock = vi.hoisted(() => ({
   getSettlementSnapshot: vi.fn(),
   cancelWithApproval: vi.fn(),
   emit: vi.fn(),
+  invoke: vi.fn(),
 }));
 
 vi.mock('../../../lib', () => ({
   emitCompatEvent: mock.emit,
   getBridge: () => ({
+    invoke: mock.invoke,
     payments: { getSettlementSnapshot: mock.getSettlementSnapshot },
     orders: { cancelWithApproval: mock.cancelWithApproval },
   }),
 }));
 
+vi.mock('react-i18next', () => ({ initReactI18next: { type: '3rdParty', init: () => {} }, useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => ({ 'modals.orderCancellation.confirm': 'Cancel the order', 'modals.orderCancellation.keepOrder': 'Keep order', 'modals.orderCancellation.cashDrawer': 'Cash drawer', 'modals.orderCancellation.bank': 'Bank' }[key] ?? key) }) }));
 vi.mock('react-hot-toast', () => ({
   default: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() }),
 }));
@@ -40,11 +43,11 @@ vi.mock('../../contexts/i18n-context', () => {
 });
 
 vi.mock('../../components/ui/pos-glass-components', () => ({
-  LiquidGlassModal: ({ isOpen, title, children }: any) =>
+  LiquidGlassModal: ({ isOpen, title, children, footer }: any) =>
     isOpen ? (
       <div role="dialog">
         <h2>{title}</h2>
-        {children}
+        {children}{footer}
       </div>
     ) : null,
 }));
@@ -103,6 +106,7 @@ function Harness() {
 }
 
 beforeEach(() => {
+  mock.invoke.mockReset().mockImplementation(async (_command, args) => ({ success: true, ...args, requiresReturn: false, requiresHandback: false, amountCents: 0, currency: 'EUR', generation: 'generation-1', requestId: 'cancel-event-1' }));
   mock.getSettlementSnapshot.mockReset();
   mock.cancelWithApproval.mockReset();
   mock.emit.mockClear();
@@ -242,7 +246,7 @@ describe('releasing a table whose order owes money', () => {
     );
     expect(release).not.toHaveBeenCalled();
     // The question stays: collect the rest or keep an open tab.
-    expect(screen.getByTestId('table-release-owed')).toBeTruthy();
+    expect(screen.getByRole('textbox')).toBeTruthy();
   });
 
   it('an unreadable ledger falls back to the table balance, never "nothing owed"', async () => {
@@ -316,7 +320,7 @@ describe('releasing a table whose order the till refuses to cancel', () => {
     expect(mock.cancelWithApproval).not.toHaveBeenCalled();
   });
 
-  it('says before any reason that an order money was taken on is not cancelled', async () => {
+  it('offers canonical cancellation when the order has received money', async () => {
     mock.getSettlementSnapshot.mockResolvedValue({
       outstandingAmount: 4,
       netPaid: 5,
@@ -326,10 +330,8 @@ describe('releasing a table whose order the till refuses to cancel', () => {
     await clickRelease();
 
     expect(await screen.findByRole('button', { name: 'Collect the payment' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Cancel the order' })).toBeNull();
-    expect(screen.getByTestId('table-release-cancel-refused').textContent).toBe(
-      'Money was taken on this order. Void or refund it from the order first, or collect the rest.',
-    );
+    expect(screen.getByRole('button', { name: 'Cancel the order' })).toBeTruthy();
+    expect(screen.queryByTestId('table-release-cancel-refused')).toBeNull();
   });
 });
 

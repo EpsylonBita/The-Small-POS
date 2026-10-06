@@ -146,6 +146,7 @@ export function UnsettledPaymentBlockersPanel({
             "duplicate_payment",
             "payments_need_review",
             "payments_not_saved",
+            "edit_settlement_not_saved",
             // A cancelled order still labelled paid (item D7, a warning): its
             // record is restored from the server or the owner decides; money
             // is never recorded on a cancelled order from here.

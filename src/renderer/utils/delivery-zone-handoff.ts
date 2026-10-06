@@ -6,7 +6,7 @@ import {
   type MaterializedCustomerAddress,
 } from './customer-addresses';
 import { isDeliveryZoneUnchecked } from './delivery-fee';
-import { extractSavedAddressCoordinates } from './saved-address-geolocation';
+import { extractSavedAddressCoordinates, savedAddressIdentityKey } from './saved-address-geolocation';
 
 /**
  * Hand-off from the customer/address modals to the order menu.
@@ -25,14 +25,16 @@ import { extractSavedAddressCoordinates } from './saved-address-geolocation';
  *   the modal did not just check.
  */
 export const MODAL_ZONE_VALIDATION_FIELD = 'delivery_zone_validation' as const;
+export const MODAL_DESTINATION_UNCHANGED_FIELD = 'delivery_destination_unchanged' as const;
 
 type HandoffCustomer = CustomerWithAddressesLike & {
   editAddressId?: string | null;
   delivery_zone_validation?: unknown;
+  delivery_destination_unchanged?: unknown;
 };
 
 export interface ResolvedHandoffCustomer<T> {
-  customer: Omit<T, 'addresses' | 'editAddressId' | 'delivery_zone_validation'> & {
+  customer: Omit<T, 'addresses' | 'editAddressId' | 'delivery_zone_validation' | 'delivery_destination_unchanged'> & {
     addresses: MaterializedCustomerAddress[];
     selected_address_id: string | null;
   };
@@ -64,8 +66,8 @@ export function resolveHandoffCustomer<T extends HandoffCustomer>(
   const materialized = withMaterializedCustomerAddresses(customer);
   // Neither the edit target nor the modal's one-off check may linger on the
   // stored customer: a later modal would hand them back as if they were new.
-  const { editAddressId, delivery_zone_validation: _modalValidation, ...rest } =
-    materialized as typeof materialized & { editAddressId?: string | null; delivery_zone_validation?: unknown };
+  const { editAddressId, delivery_zone_validation: _modalValidation,
+    delivery_destination_unchanged: _unchangedDestination, ...rest } = materialized;
   const addresses = materialized.addresses;
 
   const fromModal =
@@ -84,13 +86,34 @@ export function resolveHandoffCustomer<T extends HandoffCustomer>(
 
   return {
     customer: {
-      ...(rest as Omit<T, 'addresses' | 'editAddressId' | 'delivery_zone_validation'>),
+      ...(rest as Omit<T, 'addresses' | 'editAddressId' | 'delivery_zone_validation' | 'delivery_destination_unchanged'>),
       addresses,
       selected_address_id: address?.id ?? null,
     },
     address,
     addressFromModal: Boolean(fromModal),
   };
+}
+
+/** A live metadata-only save may retain only the current cart's own destination verdict. */
+export function canKeepDeliveryZoneForCustomerEdit(options: {
+  customerId: unknown;
+  previousCustomerId: unknown;
+  address: Parameters<typeof savedAddressIdentityKey>[0];
+  previousAddress: Parameters<typeof savedAddressIdentityKey>[0];
+  unchangedDestination: unknown;
+  zoneInfo: DeliveryBoundaryValidationResponse | null;
+}): boolean {
+  const { customerId, previousCustomerId, address, previousAddress, zoneInfo } = options;
+  if (options.unchangedDestination !== true || typeof customerId !== 'string' || !customerId
+    || customerId !== previousCustomerId || !address?.id || address.id !== previousAddress?.id
+    || savedAddressIdentityKey(address) !== savedAddressIdentityKey(previousAddress)) return false;
+
+  const point = extractSavedAddressCoordinates(address);
+  const zonePoint = toValidLatLng(zoneInfo?.coordinates);
+  // Unknown coordinates cannot acquire a genuine verdict from another address.
+  if (zoneInfo && !isDeliveryZoneUnchecked(zoneInfo) && !point) return false;
+  return !zonePoint || Boolean(point && zonePoint.lat === point.lat && zonePoint.lng === point.lng);
 }
 
 function readNumber(...values: unknown[]): number | undefined {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
 import { MenuItemGrid } from '../menu/MenuItemGrid';
@@ -16,6 +16,9 @@ import type { TipSelection } from './TipModal';
 import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersistence';
+import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import { deriveMenuEditChanges, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
+import { LegacyShiftCurrencyConfirmationRequired } from '../../services/CheckoutDraftStore';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
 import { useFeaturedItems } from '../../hooks/useFeaturedItems';
@@ -382,7 +385,7 @@ interface MenuModalProps {
   isOpen: boolean;
   onClose: () => void;
   draftContext?: Record<string, any>;
-  onDraftRestore?: (context: Record<string, any>) => void;
+  onDraftRestore?: (context: Record<string, any>, renewal?: { previousCheckoutRequestId: string }) => void;
   onRecoveredOrder?: (order: any) => Promise<void>;
   selectedCustomer?: any;
   selectedAddress?: any;
@@ -438,16 +441,10 @@ interface MenuModalProps {
    * stored order row's type is used.
    */
   editSourceOrderType?: string;
+  editHeaders?: MenuEditHeaders;
   initialCartItems?: any[];
-  onEditComplete?: (orderData: {
-    orderId: string;
-    client_event_id?: string;
-    expected_version?: number;
-    items: any[];
-    total: number;
-    orderType?: string;
-    notes?: string;
-  }) => Promise<void> | void;
+  onEditPreflight?: (orderData: MenuOrderEditData) => Promise<MenuEditPreflight>;
+  onEditComplete?: (orderData: MenuOrderEditData, lifecycle?: { beforeCommit: (submission: Record<string, unknown>) => Promise<void> }) => Promise<void> | void;
 }
 
 export const MenuModal: React.FC<MenuModalProps> = ({
@@ -470,7 +467,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   editSupabaseId,
   editOrderNumber,
   editSourceOrderType,
+  editHeaders,
   initialCartItems = [],
+  onEditPreflight,
   onEditComplete
 }) => {
 
@@ -513,11 +512,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
   const [cartItems, setCartItems] = useState<MenuModalCartItem[]>([]);
   const draftPersistence = useCheckoutDraftPersistence(isOpen);
+  const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   const restoredDraftRef = useRef<string | null>(null);
   const contextRestoreRequestedRef = useRef<string | null>(null);
   const [contextRestoreTick, setContextRestoreTick] = useState(0);
+  const editOriginalOrderRef = useRef<Record<string, any> | null>(null);
   const editExpectedVersionRef = useRef<number | undefined>(undefined);
   const [draftRecoveryBusy, setDraftRecoveryBusy] = useState(false);
+  const [legacyCurrency, setLegacyCurrency] = useState<{ shiftId: string; currency: string; orderId?: string } | null>(null);
+  const [legacyCurrencyPin, setLegacyCurrencyPin] = useState('');
+  const [legacyCurrencyBusy, setLegacyCurrencyBusy] = useState(false);
+  const [legacyCurrencyError, setLegacyCurrencyError] = useState('');
   const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [checkoutPhase, setCheckoutPhase] = useState<CheckoutPhase>('editing');
@@ -538,6 +543,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [isMenuCatalogLoading, setIsMenuCatalogLoading] = useState(false);
   const [menuCatalogError, setMenuCatalogError] = useState<string | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const editSubmissionInFlight = useRef(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [isLocalProcessing, setIsLocalProcessing] = useState(false);
   const effectiveProcessing = isProcessingOrder || isLocalProcessing;
@@ -563,6 +569,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     if (!isOpen) {
       setShowPaymentModal(false);
       setCheckoutPhase('editing');
+      setLegacyCurrency(null);
+      setLegacyCurrencyPin('');
+      setLegacyCurrencyError('');
     }
   }, [isOpen]);
 
@@ -602,11 +611,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Customer popover state (for pickup orders)
   const [showCustomerPopover, setShowCustomerPopover] = useState(false);
-  // Dirty-cart discard confirmation: closing a NEW order with items in the cart must
-  // confirm before discarding the in-progress draft. Topmost role="dialog" over MenuModal.
-  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
-  const discardDialogRef = useRef<HTMLDivElement>(null);
-  const discardTitleId = useId();
+  const closingDraft = useRef(false);
+  const pickupCustomerEditedRef = useRef(false);
   const [pickupCustomerDraft, setPickupCustomerDraft] = useState(() => readPickupCustomerDraft(selectedCustomer));
   const { name: pickupCustomerName, phone: pickupCustomerPhone, notes: pickupCustomerNotes } = pickupCustomerDraft;
   const pickupFormSessionRef = useRef<string | null>(null);
@@ -623,6 +629,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
     if (pickupFormSessionRef.current === pickupFormSession) return;
     pickupFormSessionRef.current = pickupFormSession;
+    pickupCustomerEditedRef.current = false;
     setPickupCustomerDraft(readPickupCustomerDraft(selectedCustomer));
   }, [isOpen, pickupFormSession, selectedCustomer]);
 
@@ -652,54 +659,27 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
   }, [showCustomerPopover]);
 
-  // Route the user-initiated close (header X / MenuModal Escape) through a discard
-  // confirmation when a NEW order has a populated cart, so the X/Escape can't silently
-  // drop the draft. Edit mode and the post-checkout success paths (which call onClose
-  // directly) bypass this and close immediately.
-  const requestClose = useCallback(() => {
-    if (!editMode && checkoutPhase === 'editing' && cartItems.length > 0) {
-      setShowDiscardConfirm(true);
-      return;
-    }
-    onClose();
-  }, [editMode, checkoutPhase, cartItems.length, onClose]);
-
-  // LiquidGlassModal closes externally when checkout swaps the menu surface for
-  // PaymentModal. That transition is not a user request to abandon the cart, so
-  // only route close callbacks through the discard guard while actively editing.
-  const handleMenuSurfaceClose = useCallback(() => {
-    if (checkoutPhase !== 'editing') {
-      return;
-    }
-    requestClose();
-  }, [checkoutPhase, requestClose]);
-
-  const handleDiscardOrder = async () => {
+  // Closing an editable cart before payment is an ordinary dismissal. Persist
+  // the tombstone before closing; an already submitted original stays recoverable.
+  const requestClose = useCallback(async () => {
+    if (!isOpen || closingDraft.current || editSubmissionInFlight.current || checkoutPhase !== 'editing') return;
+    if (draftPersistence.isPending() && draftPersistence.error === 'draftSaveFailed') return;
+    if (editMode || draftPersistence.isPending()) { onClose(); return; }
+    if (draftPersistence.status !== 'ready') { onClose(); return; }
+    closingDraft.current = true;
     try {
       await draftPersistence.clear(false);
-      setShowDiscardConfirm(false);
       setCartItems([]);
       onClose();
-    } catch { toast.error(t('modals.menu.draftDiscardFailed', { defaultValue: 'The saved cart could not be discarded. It has been retained.' })); }
-  };
+    } catch {
+      toast.error(t('modals.menu.draftDiscardFailed', { defaultValue: 'The saved cart could not be discarded. It has been retained.' }));
+    } finally { closingDraft.current = false; }
+  }, [isOpen, editMode, checkoutPhase, draftPersistence.status, draftPersistence.error, draftPersistence.clear, onClose, t]);
 
-  // Escape closes ONLY the discard confirmation. It renders with role="dialog" above the
-  // MenuModal, so MenuModal's own Escape self-suppresses (isTopMostDialog). This supplies
-  // the close so the topmost overlay collapses while the cart/order-entry modal stay intact.
-  useEffect(() => {
-    if (!showDiscardConfirm) {
-      return;
-    }
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setShowDiscardConfirm(false);
-      }
-    };
-    window.addEventListener('keydown', onEscape);
-    return () => {
-      window.removeEventListener('keydown', onEscape);
-    };
-  }, [showDiscardConfirm]);
+  // Hiding the menu for PaymentModal is not a request to abandon the cart.
+  const handleMenuSurfaceClose = useCallback(() => {
+    if (checkoutPhase === 'editing') void requestClose();
+  }, [checkoutPhase, requestClose]);
 
   const customerChipName = orderType === 'pickup'
     ? pickupCustomerName.trim() : selectedCustomer?.name || '';
@@ -968,6 +948,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // apart from a genuine order-type change.
       const version = Number(localOrder?.remote_version ?? localOrder?.remoteVersion ?? localOrder?.version);
       editExpectedVersionRef.current = Number.isSafeInteger(version) && version > 0 ? version : undefined;
+      editOriginalOrderRef.current = localOrder;
+      if (localOrder && !pickupCustomerEditedRef.current) setPickupCustomerDraft({
+        name: localOrder.customer_name ?? localOrder.customerName ?? '', phone: localOrder.customer_phone ?? localOrder.customerPhone ?? '', notes: localOrder.notes ?? '',
+      });
       const storedOrderType = localOrder?.orderType ?? localOrder?.order_type;
       editSourceOrderTypeRef.current = typeof storedOrderType === 'string' && storedOrderType ? storedOrderType : null;
       if (localOrder?.items && Array.isArray(localOrder.items) && localOrder.items.length > 0) {
@@ -1219,6 +1203,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // This handles the case where the modal is already open and we're loading a different order
         setCartItems([]);
         editSourceOrderTypeRef.current = null;
+        editExpectedVersionRef.current = undefined;
 
         let ingredientLookup: IngredientLookup = new Map();
         let menuItemLookup: MenuItemLookup = new Map();
@@ -1256,6 +1241,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
         // If we have initialCartItems, use them
         if (initialCartItems && initialCartItems.length > 0) {
+          // Prefilled lines still belong to a versioned existing order. Read
+          // its version without replacing the caller's unsaved line edits.
+          const response: any = editOrderId ? await bridge.orders.getById(editOrderId) : null;
+          if (lastEditOrderIdRef.current !== editOrderId) return;
+          const original = response?.data ?? response;
+          editOriginalOrderRef.current = original;
+          if (original && !pickupCustomerEditedRef.current) setPickupCustomerDraft({ name: original.customer_name ?? original.customerName ?? '', phone: original.customer_phone ?? original.customerPhone ?? '', notes: original.notes ?? '' });
+          const version = Number(original?.remote_version ?? original?.remoteVersion ?? original?.version);
+          editExpectedVersionRef.current = Number.isSafeInteger(version) && version > 0 ? version : undefined;
+          editSourceOrderTypeRef.current = original?.orderType ?? original?.order_type ?? null;
           const transformedItems = initialCartItems.map((item, index) => {
             const normalizedItem = normalizePosOrderItem(item);
             const menuItemId = normalizedItem.menuItemId ?? undefined;
@@ -2344,12 +2339,18 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const draftSnapshot = {
     cartItems,
     context: { ...draftContext, orderType, selectedCustomer, selectedAddress, roomChargeContext,
-      editMode, editOrderId, editSupabaseId, editSourceOrderType,
-      editExpectedVersion: editExpectedVersionRef.current },
-    state: { manualDiscountMode, manualDiscountValue, manualDeliveryFee, pickupCustomerDraft,
+      editMode, editOrderId, editSupabaseId, editSourceOrderType, editHeaders,
+      editExpectedVersion: editExpectedVersionRef.current, editOriginalOrder: editOriginalOrderRef.current },
+    state: { manualDiscountMode, manualDiscountValue, manualDeliveryFee, pickupCustomerDraft, pickupCustomerEdited: pickupCustomerEditedRef.current,
       appliedCoupon, appliedLoyaltyRedemption },
   };
   const draftSnapshotSignature = JSON.stringify(draftSnapshot);
+
+  useEffect(() => {
+    if (!isOpen || draftPersistence.status !== 'invalidated') return;
+    toast.error(t('modals.menu.draftTargetCancelled'));
+    onClose();
+  }, [isOpen, draftPersistence.status, onClose, t]);
 
   useEffect(() => {
     if (draftPersistence.status !== 'loaded') return;
@@ -2360,13 +2361,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // effects must finish before applying the retained cart and form state.
       if (onDraftRestore && contextRestoreRequestedRef.current !== restorationId) {
         contextRestoreRequestedRef.current = restorationId;
-        onDraftRestore({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+        onDraftRestore({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
         setContextRestoreTick(tick => tick + 1);
         return;
       }
       if ((saved.context.editMode && saved.context.editOrderId !== editOrderId) ||
         Boolean(saved.context.editMode) !== editMode || saved.context.orderType !== orderType) {
-        draftPersistence.failedSave();
+        // A controlled parent may apply the restored type/order in a later
+        // render. No write was attempted: retain the loading gate until those
+        // props agree instead of presenting a false storage-failure banner.
+        if (!onDraftRestore) draftPersistence.failedSave();
         return;
       }
       restoredDraftRef.current = restorationId;
@@ -2376,10 +2380,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       manualDeliveryFeeEditedRef.current = true;
       setManualDeliveryFee(Number(saved.state.manualDeliveryFee || 0));
       pickupFormSessionRef.current = pickupFormSession;
+      pickupCustomerEditedRef.current = saved.state.pickupCustomerEdited === true;
       if (saved.state.pickupCustomerDraft) setPickupCustomerDraft(saved.state.pickupCustomerDraft);
       setAppliedCoupon(saved.state.appliedCoupon || null);
       setAppliedLoyaltyRedemption(saved.state.appliedLoyaltyRedemption || null);
       editExpectedVersionRef.current = saved.context.editExpectedVersion;
+      editOriginalOrderRef.current = saved.context.editOriginalOrder ?? null;
       repricedForOrderTypeRef.current = saved.context.orderType;
       editSourceOrderTypeRef.current = saved.context.editSourceOrderType || saved.context.orderType;
       if (saved.context.editMode) {
@@ -2403,7 +2409,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       if (['declined', 'not_sent', 'not_charged'].includes(proof.outcome) && original?.paymentData?.method === 'card') {
         // The command rechecks the stored refusal and draft CAS atomically.
         // Rehydration propagates the renewed identity to the parent before Pay.
-        await draftPersistence.resumeDeclined();
+        const previousCheckoutRequestId = draftPersistence.identity();
+        const resumed = await draftPersistence.resumeDeclined();
+        onDraftRestore?.({ ...resumed.context, checkoutRequestId: resumed.checkoutRequestId, checkoutPhase: resumed.phase },
+          { previousCheckoutRequestId });
         setShowPaymentModal(false);
         setCheckoutPhase('editing');
         const message = proof.outcome === 'declined' ? 'draftDeclinedResumed' : proof.outcome === 'not_sent' ? 'draftNotSentResumed' : 'draftNotChargedResumed';
@@ -2417,9 +2426,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         }
         proof = await draftPersistence.inspect();
       }
-      if (proof.outcome !== 'saved' && original?.action === 'edit' && onEditComplete) {
+      if (proof.outcome !== 'saved' && original && ['edit', 'edit_settlement'].includes(original.action) && onEditComplete) {
         // A renewed permission or an ambiguous response can retry this original
-        // mutation. It keeps its event/version and never rebases or collects.
+        // mutation. Settlement replay retains the exact confirmed action and
+        // amount; it never opens another picker or starts a provider charge.
         await onEditComplete({ ...original, orderId: original.orderId, total: original.total ?? original.items.reduce((sum: number, item: any) => sum + Number(item.totalPrice || item.total_price || 0), 0) } as any);
         await draftPersistence.clear(true);
         onClose();
@@ -2456,7 +2466,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handleCheckout = async () => {
-    if (draftPersistence.status !== 'ready' || draftPersistence.isPending()) return;
+    if (draftPersistence.status !== 'ready' || draftPersistence.isPending() || editSubmissionInFlight.current) return;
+    const ownsEditSubmission = Boolean(editMode && editOrderId && onEditComplete);
+    // Fence close and repeated Save before the first persistence/preflight await.
+    // The picker can wait without its parent editor losing the draft owner.
+    if (ownsEditSubmission) { editSubmissionInFlight.current = true; setIsSavingEdit(true); }
+    try {
     try { await draftPersistence.persist(draftSnapshot); } catch { draftPersistence.failedSave(); return; }
     if (cartItems.length === 0) {
       return;
@@ -2470,24 +2485,58 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return;
     }
 
-    // In edit mode, save changes directly without payment
+    // Preview the edit before retaining a confirmed financial attempt. Opening
+    // or cancelling a delta picker is still ordinary editable cart state.
     if (editMode && editOrderId && onEditComplete) {
       if (!Number.isInteger(editExpectedVersionRef.current) || Number(editExpectedVersionRef.current) < 1) {
         toast.error(t('modals.menu.draftNeedsReconciliation'));
         return;
       }
-      setIsSavingEdit(true);
       try {
-        const total = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
-        const clientEventId = await draftPersistence.freeze(draftSnapshot, { action: 'edit', orderId: editOrderId,
-          client_event_id: draftPersistence.identity(), expected_version: editExpectedVersionRef.current, orderType, notes: '', total, items: normalizePosOrderItems(cartItems) });
-        await onEditComplete({
-          orderId: editOrderId, client_event_id: clientEventId, expected_version: editExpectedVersionRef.current,
-          items: normalizePosOrderItems(cartItems),
-          total,
-          orderType,
-          notes: ''
+        const normalizedItems = normalizePosOrderItems(cartItems);
+        const originalResponse: any = editOriginalOrderRef.current ? null : await bridge.orders.getById(editOrderId);
+        const original = editOriginalOrderRef.current ?? originalResponse?.data ?? originalResponse;
+        if (!original) throw new Error('EDIT_CANONICAL_SNAPSHOT_INVALID');
+        const changes = deriveMenuEditChanges(original, normalizedItems, orderType, editHeaders);
+        if (orderType === 'pickup' && pickupCustomerEditedRef.current) Object.assign(changes.orderUpdates, {
+          customerName: pickupCustomerDraft.name.trim(), customerPhone: pickupCustomerDraft.phone.trim(),
         });
+        const total = changes.total;
+        const orderData: MenuOrderEditData = {
+          orderId: editOrderId, client_event_id: draftPersistence.identity(), expected_version: editExpectedVersionRef.current!,
+          expected_local_version: undefined as number | undefined,
+          renderer_local_version: Number.isSafeInteger(original.version) ? original.version : undefined,
+          items: normalizedItems, ...changes, orderType,
+          ...(orderType === 'pickup' && pickupCustomerEditedRef.current ? { notes: pickupCustomerDraft.notes.trim() } : {}),
+        };
+        const preflight = await onEditPreflight?.(orderData) || { kind: 'ordinary' as const };
+        if (preflight.kind === 'settlement') {
+          if (preflight.financials) { orderData.financials=preflight.financials; orderData.total=preflight.financials.totalAmount ?? orderData.total; }
+          if (preflight.canonicalExpectedVersion !== undefined) orderData.expected_version = preflight.canonicalExpectedVersion;
+          orderData.expected_local_version = preflight.localExpectedVersion;
+          if (preflight.requiredAction === 'collect') await draftPersistence.checkAdmission({ orderId: editOrderId });
+          let frozenSubmission: string | null = null;
+          await onEditComplete(orderData, {
+            beforeCommit: async (submission) => {
+              if (submission.action !== 'edit_settlement' || submission.orderId !== editOrderId ||
+                submission.client_event_id !== orderData.client_event_id || submission.expected_version !== orderData.expected_version ||
+                submission.expected_local_version !== orderData.expected_local_version) {
+                throw new Error('CHECKOUT_DRAFT_EDIT_CHANGED');
+              }
+              const signature = JSON.stringify(submission);
+              if (frozenSubmission !== null) {
+                if (signature !== frozenSubmission) throw new Error('CHECKOUT_DRAFT_EDIT_CHANGED');
+                return;
+              }
+              await draftPersistence.freeze(draftSnapshot, { ...submission, total: orderData.total });
+              frozenSubmission = signature;
+            },
+          });
+          if (frozenSubmission === null) throw new Error('CHECKOUT_DRAFT_EDIT_NOT_APPLIED');
+        } else {
+          await draftPersistence.freeze(draftSnapshot, { action: 'edit', ...orderData });
+          await onEditComplete(orderData);
+        }
         
         await draftPersistence.clear(true);
         // Reset state
@@ -2496,10 +2545,19 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         setSelectedSubcategory("");
         onClose();
       } catch (error) {
+        if (error instanceof LegacyShiftCurrencyConfirmationRequired) {
+          setLegacyCurrency({ shiftId: error.shiftId, currency: error.currency, orderId: editOrderId });
+          setLegacyCurrencyError('');
+          setLegacyCurrencyPin('');
+          return;
+        }
+        if (!draftPersistence.isPending() && (error instanceof Error ? error.message : String(error)) === 'EDIT_SETTLEMENT_CANCELLED') return;
         console.error('Error saving order edit:', error);
-        toast.error(t('modals.menu.editFailed') || 'Failed to save changes');
-      } finally {
-        setIsSavingEdit(false);
+        const code = error instanceof Error ? error.message : String(error);
+        const message = code.includes('POS_ORDER_SETTLEMENT_UNAVAILABLE') ? 'editServerUpdate'
+          : !draftPersistence.isPending() && /(?:ORDER_HEADER_SYNC_REQUIRED|EDIT_(?:CANONICAL_ORIGINAL_CHANGED|CANONICAL_QUOTE_CHANGED|CANONICAL_QUOTE_REQUIRED|SETTLEMENT_VERSION_CHANGED|ORIGINAL_ITEMS_UNAVAILABLE|CANONICAL_SNAPSHOT_INVALID))/.test(code) ? 'editCanonicalChanged'
+          : /EDIT_(?:PREVIOUS_SETTLEMENT|ORIGINAL_PAYMENT)_SYNC_REQUIRED/.test(code) ? 'editSyncRequired' : 'editFailed';
+        toast.error(t(`modals.menu.${message}`) || 'Failed to save changes');
       }
       return;
     }
@@ -2514,6 +2572,23 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
         return;
       }
+    }
+
+    try {
+      await draftPersistence.checkAdmission();
+    } catch (error) {
+      if (error instanceof LegacyShiftCurrencyConfirmationRequired) {
+        setLegacyCurrency({ shiftId: error.shiftId, currency: error.currency });
+        setLegacyCurrencyError('');
+        setLegacyCurrencyPin('');
+        return;
+      }
+      const code = error instanceof Error ? error.message : String(error);
+      const message = code.includes('SHIFT_CURRENCY')
+        ? t('guestBilling.errors.shiftCurrency')
+        : t('guestBilling.errors.currencyUnavailable');
+      toast.error(message);
+      return;
     }
 
     if (shouldBypassPaymentWithGhostMode) {
@@ -2536,6 +2611,31 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     // Show payment modal instead of immediately completing order
     setCheckoutPhase('payment');
     setShowPaymentModal(true);
+    } finally {
+      if (ownsEditSubmission) { editSubmissionInFlight.current = false; setIsSavingEdit(false); }
+    }
+  };
+
+  const confirmLegacyCurrency = async () => {
+    if (!legacyCurrency || legacyCurrencyBusy) return;
+    setLegacyCurrencyBusy(true);
+    setLegacyCurrencyError('');
+    try {
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () => bridge.invoke('shift_confirm_legacy_currency', {
+          ...legacyCurrency, confirmed: true,
+          ...(legacyCurrencyPin ? { managerPin: legacyCurrencyPin } : {}),
+        }),
+      });
+      if (result?.success !== true) throw new Error('LEGACY_SHIFT_CURRENCY_CONFIRMATION_FAILED');
+      await draftPersistence.checkAdmission(legacyCurrency.orderId ? { orderId: legacyCurrency.orderId } : {});
+      setLegacyCurrency(null);
+      setLegacyCurrencyPin('');
+      toast.success(t('modals.menu.legacyCurrency.ready'));
+    } catch {
+      setLegacyCurrencyError(t('modals.menu.legacyCurrency.failed'));
+    } finally { setLegacyCurrencyPin(''); setLegacyCurrencyBusy(false); }
   };
 
   const handleEditCartItem = async (item: any) => {
@@ -2902,6 +3002,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         closeOnEscape={true}
       >
 
+        {editMode && hasLoadedItemsRef.current && cartItems.length === 0 && draftPersistence.status === 'ready' && (
+          <p role="status" className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{t('modals.menu.emptyEditHint')}</p>
+        )}
         {(draftPersistence.error || draftPersistence.status !== 'ready' || draftPersistence.isPending()) && (
           <div role="status" className="px-4 py-3 border-b border-amber-500 text-amber-700 dark:text-amber-200">
             {(draftPersistence.error ? t(`modals.menu.${draftPersistence.error}`) : null) || (draftPersistence.isPending()
@@ -3115,7 +3218,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               <input
                 type="text"
                 value={pickupCustomerName}
-                onChange={(e) => setPickupCustomerDraft(current => ({ ...current, name: e.target.value }))}
+                onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, name: e.target.value })); }}
                 placeholder={t('modals.menu.customerName', { defaultValue: 'Name' })}
                 className="liquid-glass-modal-input w-full"
                 autoFocus
@@ -3123,14 +3226,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               <input
                 type="tel"
                 value={pickupCustomerPhone}
-                onChange={(e) => setPickupCustomerDraft(current => ({ ...current, phone: e.target.value }))}
+                onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, phone: e.target.value })); }}
                 placeholder={t('modals.menu.customerPhone', { defaultValue: 'Phone' })}
                 className="liquid-glass-modal-input w-full"
               />
               <input
                 type="text"
                 value={pickupCustomerNotes}
-                onChange={(e) => setPickupCustomerDraft(current => ({ ...current, notes: e.target.value }))}
+                onChange={(e) => { pickupCustomerEditedRef.current = true; setPickupCustomerDraft(current => ({ ...current, notes: e.target.value })); }}
                 placeholder={t('modals.menu.customerNotes', { defaultValue: 'Notes' })}
                 className="liquid-glass-modal-input w-full"
               />
@@ -3145,39 +3248,36 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         </div>
       )}
 
-      {/* Dirty-cart discard confirmation (topmost over MenuModal) */}
-      {showDiscardConfirm && renderModalPortal(
-        <div className="fixed inset-0 z-[20060] flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
-          <div
-            ref={discardDialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={discardTitleId}
-            className="w-[340px] max-w-[90vw] rounded-2xl border border-white/15 bg-gray-900/95 p-5 shadow-2xl text-white"
-          >
-            <h3 id={discardTitleId} className="text-base font-semibold mb-2">
-              {t('modals.menu.discardOrder.title', { defaultValue: 'Discard this order?' })}
-            </h3>
-            <p className="text-sm text-gray-300 mb-4">
-              {t('modals.menu.discardOrder.message', { defaultValue: 'This order has items in the cart. Closing now will discard them.' })}
-            </p>
-            <div className="flex gap-2 justify-end">
-              <button
-                onClick={() => setShowDiscardConfirm(false)}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 active:bg-white/20 text-white transition-colors"
-              >
-                {t('modals.menu.discardOrder.keepEditing', { defaultValue: 'Keep editing' })}
-              </button>
-              <button
-                onClick={handleDiscardOrder}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 active:bg-red-700 text-white transition-colors"
-              >
-                {t('modals.menu.discardOrder.discard', { defaultValue: 'Discard order' })}
-              </button>
-            </div>
+      <LiquidGlassModal
+        isOpen={isOpen && legacyCurrency !== null}
+        onClose={() => { if (!legacyCurrencyBusy) { setLegacyCurrency(null); setLegacyCurrencyPin(''); } }}
+        title={t('modals.menu.legacyCurrency.title')}
+        size="sm"
+        closeOnBackdrop={false}
+        closeDisabled={legacyCurrencyBusy}
+      >
+        <div className="space-y-4 p-5">
+          <p className="liquid-glass-modal-text">{t('modals.menu.legacyCurrency.message', { currency: legacyCurrency?.currency })}</p>
+          <label className="block text-sm liquid-glass-modal-text">
+            {t('modals.menu.legacyCurrency.pin')}
+            <input type="password" inputMode="numeric" autoComplete="off" maxLength={8}
+              value={legacyCurrencyPin} disabled={legacyCurrencyBusy}
+              onChange={event => setLegacyCurrencyPin(event.target.value.replace(/\D/g, ''))}
+              className="liquid-glass-modal-input mt-2 w-full rounded-lg px-3 py-2" />
+          </label>
+          {legacyCurrencyError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{legacyCurrencyError}</p>}
+          <div className="flex justify-end gap-3">
+            <button disabled={legacyCurrencyBusy} onClick={() => { setLegacyCurrency(null); setLegacyCurrencyPin(''); }}
+              className="liquid-glass-modal-button rounded-lg px-4 py-2">{t('common.actions.cancel')}</button>
+            <button disabled={legacyCurrencyBusy} onClick={() => void confirmLegacyCurrency()}
+              className="rounded-lg bg-amber-500 px-4 py-2 font-semibold text-gray-950 disabled:opacity-50">
+              {t('modals.menu.legacyCurrency.confirm', { currency: legacyCurrency?.currency })}
+            </button>
           </div>
         </div>
-      )}
+      </LiquidGlassModal>
+
+      {confirmationModal}
 
       {/* Processing Overlay */}
       {isOpen && effectiveProcessing && (

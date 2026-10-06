@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useCheckoutRequestId } from '../../../hooks/useCheckoutRequestId';
 
 // Render-instrumentation probe for the shared modal shell. The mock preserves
 // the REAL LiquidGlassModal behavior while recording each render's isOpen.
@@ -136,6 +137,7 @@ beforeEach(() => { draftStorage.draft = null; draftStorage.generation = 0; draft
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
     invoke: vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_check_admission') return { success: true, currency: 'EUR' };
       if (command === 'checkout_draft_inspect') return draftStorage.inspection;
       if (command === 'checkout_draft_resume_declined') {
         if (draftStorage.resumeError) throw new Error(draftStorage.resumeError);
@@ -531,15 +533,25 @@ describe('MenuModal explicit immutable replay after crash before dispatch', () =
     fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
     expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.checkoutRequestId).toBe('card-request');
   });
-  it('explicit stored decline restores the original cart and parent identity without starting payment', async () => {
+  it('explicit stored decline renews the real parent identity only after native CAS, without starting payment', async () => {
     draftStorage.draft = { ...editor(), draftId: 'declined-card', checkoutRequestId: 'card-request',
       context: { orderType: 'pickup', editMode: false }, submission: { clientRequestId: 'card-request', paymentData: { method: 'card', amount: 4 } } };
     draftStorage.inspection = { success: true, outcome: 'declined', canCollect: false };
     const complete = vi.fn(async () => true); const restore = vi.fn();
-    render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} onDraftRestore={restore} />);
+    function Parent() {
+      const identity = useCheckoutRequestId();
+      return <MenuModal {...baseProps} isOpen onOrderComplete={async data => {
+        identity.take(data.clientRequestId);
+        return complete(data);
+      }} onDraftRestore={(context, renewal) => {
+        identity.restore(context.checkoutRequestId, { phase: context.checkoutPhase, renewedFrom: renewal?.previousCheckoutRequestId });
+        restore(context, renewal);
+      }} />;
+    }
+    render(<Parent />);
     fireEvent.click(await screen.findByText('Check original checkout'));
     await waitFor(() => expect(draftStorage.draft.checkoutRequestId).toBe('renewed-request'));
-    await waitFor(() => expect(restore).toHaveBeenLastCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request' })));
+    await waitFor(() => expect(restore).toHaveBeenCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request', checkoutPhase: 'editing' }), { previousCheckoutRequestId: 'card-request' }));
     expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.cartItems).toEqual(editor().cartItems);
     expect(draftStorage.draft.phase).toBe('editing'); expect(draftStorage.draft.submission).toBeUndefined();
     await waitFor(() => expect(screen.getByText('Checkout')).not.toBeDisabled());
@@ -552,11 +564,13 @@ describe('MenuModal explicit immutable replay after crash before dispatch', () =
       submission: { clientRequestId: 'card-request', paymentData: { method: 'card' } } };
     draftStorage.inspection = { success: true, outcome: 'declined', canCollect: false };
     draftStorage.resumeError = 'CHECKOUT_DRAFT_DECLINE_NOT_PROVEN';
-    const complete = vi.fn(async () => true); render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} />);
+    const complete = vi.fn(async () => true); const restore = vi.fn();
+    render(<MenuModal {...baseProps} isOpen onOrderComplete={complete} onDraftRestore={restore} />);
     fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
     expect(draftStorage.draft.checkoutRequestId).toBe('card-request'); expect(draftStorage.draft.phase).toBe('checkout_pending');
     fireEvent.click(screen.getByText('Checkout')); expect(screen.queryByText('Pay cash')).toBeNull();
     expect(complete).not.toHaveBeenCalled();
+    expect(restore.mock.calls.some(call => call[1] !== undefined)).toBe(false);
   });
   it.each(['not_sent', 'not_charged'])('explicit native %s proof renews the cart without payment dispatch', async outcome => {
     draftStorage.draft = { ...editor(), checkoutRequestId: 'card-request', context: { orderType: 'pickup', editMode: false },
@@ -568,6 +582,6 @@ describe('MenuModal explicit immutable replay after crash before dispatch', () =
     await waitFor(() => expect(draftStorage.draft.checkoutRequestId).toBe('renewed-request'));
     await waitFor(() => expect(screen.getByText('Checkout')).not.toBeDisabled());
     expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.cartItems).toEqual(editor().cartItems);
-    expect(restore).toHaveBeenLastCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request' }));
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request', checkoutPhase: 'editing' }), { previousCheckoutRequestId: 'card-request' });
   });
 });

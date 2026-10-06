@@ -800,7 +800,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   // While mounted (incl. the closing animation), hide the background POS app from assistive
   // tech + focus. Shared + ref-counted, so nested glass modals stay reachable and the app is
   // only un-hidden once the last one closes.
-  useBackgroundAccessibilityIsolation(mounted && !isServerRender)
+  useBackgroundAccessibilityIsolation(mounted && !isServerRender && (!cashierLocked || isRecovery))
 
   React.useEffect(() => {
     enterActionRef.current = onEnterKey

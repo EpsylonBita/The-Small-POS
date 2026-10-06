@@ -25,6 +25,7 @@ import {
 import { getSyncQueueBridge } from '../renderer/services/SyncQueueBridge';
 import { buildOrderServiceTableMetadata } from '../renderer/utils/tableOrderFlow';
 import { resolvePersistedCustomerId } from '../renderer/utils/persisted-customer-id';
+import { toValidLatLng } from '../renderer/utils/coordinates';
 
 // Utility functions - now using centralized debug logger
 
@@ -760,6 +761,12 @@ export class OrderService {
       }
 
       const orderDataAny = orderData as any;
+      const deliveryPoint = toValidLatLng(undefined,
+        orderDataAny.deliveryLatitude ?? orderDataAny.delivery_latitude,
+        orderDataAny.deliveryLongitude ?? orderDataAny.delivery_longitude);
+      const deliveryAddressId = resolvePersistedCustomerId(orderDataAny.deliveryAddressId, orderDataAny.delivery_address_id);
+      const deliveryFingerprint = normalizeOptionalText(orderDataAny.deliveryAddressFingerprint ?? orderDataAny.delivery_address_fingerprint) ?? null;
+      const deliveryZoneId = normalizeOptionalText(orderDataAny.deliveryZoneId ?? orderDataAny.delivery_zone_id) ?? null;
       const normalizeText = (value: unknown): string | null => {
         if (typeof value !== 'string') return null;
         const trimmed = value.trim();
@@ -950,6 +957,11 @@ export class OrderService {
         orderType: (orderData.orderType ?? orderData.order_type) as any,
         ...tableMetadata,
         deliveryAddress: normalizedDeliveryAddress,
+        deliveryAddressId,
+        deliveryLatitude: deliveryPoint?.lat ?? null,
+        deliveryLongitude: deliveryPoint?.lng ?? null,
+        deliveryAddressFingerprint: deliveryFingerprint,
+        deliveryZoneId,
         deliveryCity: normalizedDeliveryCity,
         deliveryPostalCode: normalizedDeliveryPostalCode,
         deliveryFloor: normalizedDeliveryFloor,
@@ -1272,6 +1284,11 @@ export class OrderService {
         ghost_source: normalizedGhostSource,
         ghost_metadata: normalizedGhostMetadata,
         delivery_address: normalizedDeliveryAddress,
+        delivery_address_id: deliveryAddressId,
+        delivery_latitude: deliveryPoint?.lat ?? null,
+        delivery_longitude: deliveryPoint?.lng ?? null,
+        delivery_address_fingerprint: deliveryFingerprint,
+        delivery_zone_id: deliveryZoneId,
         delivery_city: normalizedDeliveryCity,
         delivery_postal_code: normalizedDeliveryPostalCode,
         delivery_floor: normalizedDeliveryFloor,

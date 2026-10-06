@@ -18,6 +18,31 @@ function setup(read: ReturnType<typeof deferred<any>>, write?: ReturnType<typeof
   mocks.getStore.mockResolvedValue(new CheckoutDraftStore(scope, native)); return native;
 }
 describe('checkout draft hydration and admission', () => {
+  it('does not hydrate or overwrite an archived cancelled-target editor', async () => {
+    const read = deferred<any>(); const native = setup(read);
+    const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+    await act(async () => read.resolve({ success: true, scope, generation: 2, draft: null,
+      invalidation: { reason: 'edit_target_cancelled', orderId: 'original-order' } }));
+    expect(result.current.status).toBe('invalidated');
+    expect(result.current.error).toBe('draftTargetCancelled');
+    expect(result.current.restored).toBeNull();
+    await expect(result.current.persist(snapshot)).rejects.toThrow('NOT_READY');
+    expect(native.mock.calls.map(call => call[0])).toEqual(['checkout_draft_get']);
+  });
+  it('closes the editable lifecycle when its target is cancelled after hydration', async () => {
+    const native = vi.fn(async (command: string) => {
+      if (command === 'checkout_draft_get') return { success: true, scope, generation: 1, draft: null };
+      throw new Error('CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED');
+    });
+    mocks.getStore.mockResolvedValue(new CheckoutDraftStore(scope, native));
+    const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+    await waitFor(() => expect(result.current.status).toBe('loaded'));
+    act(() => result.current.markHydrated());
+    await act(async () => { await result.current.persist(snapshot).catch(result.current.failedSave); });
+    expect(result.current.status).toBe('invalidated');
+    expect(result.current.error).toBe('draftTargetCancelled');
+    await expect(result.current.freeze(snapshot, { action: 'edit_settlement' })).rejects.toThrow('AWAITING_RECONCILIATION');
+  });
   it('does not overwrite initial empty UI while loading; restores saved context before autosave', async () => {
     const read = deferred<any>(); const native = setup(read); const saved = { ...createCheckoutDraft(), ...snapshot };
     const { result, unmount } = renderHook(() => useCheckoutDraftPersistence(true));
@@ -55,6 +80,22 @@ describe('checkout draft hydration and admission', () => {
 
 
 describe('restored editing-phase money protection', () => {
+  it('retains the exact confirmed edit in memory when the durable freeze fails', async () => {
+    const native = vi.fn(async (command: string) => {
+      if (command === 'checkout_draft_get') return { success: true, scope, generation: 0, draft: null };
+      throw new Error('disk full');
+    });
+    mocks.getStore.mockResolvedValue(new CheckoutDraftStore(scope, native));
+    const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+    await waitFor(() => expect(result.current.status).toBe('loaded'));
+    act(() => result.current.markHydrated());
+    const submission = { action: 'edit_settlement', settlementRequest: { client_event_id: result.current.identity(), action: { type: 'collect', method: 'card' } } };
+    await act(async () => { await expect(result.current.freeze(snapshot, submission)).rejects.toThrow('disk full'); });
+    expect(result.current.restored?.submission).toEqual(submission);
+    expect(result.current.isPending()).toBe(true);
+    expect(result.current.error).toBe('draftSaveFailed');
+    await expect(result.current.persist(snapshot)).rejects.toThrow('AWAITING_RECONCILIATION');
+  });
   it('explicit native refusal resumes hydration and rotates identity without invoking checkout', async () => {
     const draft = { ...createCheckoutDraft(), ...snapshot, phase: 'checkout_pending' as const,
       submission: { clientRequestId: 'original', paymentData: { method: 'card' } } };

@@ -222,7 +222,7 @@ fn a_payment_set_aside_or_given_back_leaves_the_couriers_cash() {
         let conn = td.state.conn.lock().unwrap();
         seed_shifts(&conn);
         seed_delivery(&conn, "ord-dup");
-        add_payment(&conn, "pay-dup", "ord-dup", "cash", 1300, CASHIER_SHIFT);
+        add_payment(&conn, "pay-dup", "ord-dup", "cash", 1300, DRIVER_SHIFT);
         assign(&conn, "ord-dup");
         assert_eq!(earning(&conn, "ord-dup"), (1300, 0, 1300));
 
@@ -308,7 +308,7 @@ fn a_voided_courier_payment_leaves_the_couriers_cash() {
         let conn = td.state.conn.lock().unwrap();
         seed_shifts(&conn);
         seed_delivery(&conn, "ord-void");
-        add_payment(&conn, "pay-courier", "ord-void", "cash", 800, CASHIER_SHIFT);
+        add_payment(&conn, "pay-courier", "ord-void", "cash", 800, DRIVER_SHIFT);
         assign(&conn, "ord-void");
         assert_eq!(earning(&conn, "ord-void"), (800, 0, 800));
         add_payment(&conn, "pay-counter", "ord-void", "cash", 500, CASHIER_SHIFT);
@@ -360,7 +360,7 @@ fn the_driver_id_repair_takes_the_couriers_money_from_payment_rows() {
         )
         .unwrap();
     }
-    add_payment(&conn, "pay-part", "ord-part", "cash", 500, CASHIER_SHIFT);
+    add_payment(&conn, "pay-part", "ord-part", "cash", 500, DRIVER_SHIFT);
 
     let fixed = crate::commands::diagnostics::fix_missing_driver_ids_in_connection(&conn, DRIVER)
         .expect("repair");

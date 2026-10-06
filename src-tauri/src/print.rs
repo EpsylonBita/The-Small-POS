@@ -6448,7 +6448,19 @@ fn build_shift_checkout_doc(
     let is_active_cashier_checkout =
         shift_status == "active" && matches!(resolved_role_type.as_str(), "cashier" | "manager");
     let cash_sales = if is_active_cashier_checkout {
-        number_from_paths(&summary, &["/breakdown/instore/cashTotal"])
+        number_from_paths(
+            &summary,
+            &[
+                "/cashierCash/cashCollections",
+                "/breakdown/instore/cashTotal",
+            ],
+        )
+        .or(persisted_cash_sales)
+        .unwrap_or(0.0)
+    } else if matches!(resolved_role_type.as_str(), "cashier" | "manager") {
+        // Closed checkout prints retain the drawer's frozen custody snapshot;
+        // staff_shifts.total_cash_sales is a recognized-sales statistic.
+        number_from_paths(&summary, &["/cashDrawer/total_cash_sales"])
             .or(persisted_cash_sales)
             .unwrap_or(0.0)
     } else {
@@ -6461,6 +6473,15 @@ fn build_shift_checkout_doc(
     } else {
         persisted_card_sales.unwrap_or(0.0)
     };
+
+    let cash_refunds = if is_active_cashier_checkout {
+        number_from_paths(&summary, &["/cashierCash/cashRefunds", "/cashRefunds"])
+    } else if matches!(resolved_role_type.as_str(), "cashier" | "manager") {
+        number_from_paths(&summary, &["/cashDrawer/total_refunds", "/cashRefunds"])
+    } else {
+        number_from_paths(&summary, &["/cashRefunds"])
+    }
+    .unwrap_or(0.0);
 
     let mut doc = Ok(ShiftCheckoutDoc {
         currency: summary
@@ -6513,10 +6534,7 @@ fn build_shift_checkout_doc(
             .get("totalExpenses")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
-        cash_refunds: summary
-            .get("cashRefunds")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
+        cash_refunds,
         opening_amount: number_from_paths(&cash_drawer, &["/opening_amount", "/openingAmount"])
             .or_else(|| number_from_paths(&shift, &["/opening_cash_amount", "/openingCashAmount"]))
             .unwrap_or(0.0),
@@ -18168,6 +18186,36 @@ mod tests {
             }
             _ => panic!("expected shift checkout document"),
         }
+    }
+
+    #[test]
+    fn cancellation_cashier_print_uses_cash_movements_without_restoring_cancelled_sales() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "cashier-shift-money-print", "drawer-money-print");
+            for (id, method, cents, kind) in [
+                ("cancelled-cash", "cash", 1500, "pickup"),
+                ("cancelled-card", "card", 600, "pickup"),
+                ("cancelled-delivery", "cash", 2930, "delivery"),
+            ] {
+                conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,order_type,payment_status,staff_shift_id,terminal_id,branch_id,created_at,updated_at)
+                    VALUES(?1,'[]',?2,?3,'cancelled',?4,'refunded','cashier-shift-money-print','term-1','branch-1','2026-03-18T09:00:00Z','2026-03-18T09:00:00Z')",params![id,f64::from(cents)/100.0,cents,kind]).unwrap();
+                conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,payment_origin,created_at,updated_at)
+                    VALUES(?1,?1,?2,?3,?4,'refunded','cashier-shift-money-print','EUR','manual','2026-03-18T09:00:00Z','2026-03-18T09:00:00Z')",params![id,method,f64::from(cents)/100.0,cents]).unwrap();
+                conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,staff_shift_id,refund_method,cash_handler,created_at,updated_at)
+                    VALUES(?1,?1,?1,'refund',?2,?3,'returned','cashier-shift-money-print','cash','cashier_drawer','2026-03-18T09:00:00Z','2026-03-18T09:00:00Z')",params![id,f64::from(cents)/100.0,cents]).unwrap();
+            }
+        }
+        let doc = build_shift_checkout_doc(&db, "cashier-shift-money-print", None).unwrap();
+        assert_eq!(doc.cash_sales, 44.30);
+        assert_eq!(doc.cash_refunds, 50.30);
+        assert_eq!(doc.sales_amount, 0.0);
+        assert_eq!(doc.orders_count, 0);
+        assert_eq!(
+            doc.currency, None,
+            "unknown historical sale currency is not relabelled by drawer proof"
+        );
     }
 
     #[test]

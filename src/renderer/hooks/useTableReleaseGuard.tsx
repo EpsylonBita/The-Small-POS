@@ -4,6 +4,8 @@ import toast from 'react-hot-toast';
 import { emitCompatEvent, getBridge } from '../../lib';
 import { useI18n } from '../contexts/i18n-context';
 import { TableReleaseOwedModal } from '../components/tables/TableReleaseOwedModal';
+import { OrderCancellationModal, type CancellationReturnChannel } from '../components/modals/OrderCancellationModal';
+import { prepareTableCancellation, tableCancellationFields, type TableCancellationPlan } from '../services/TableManualCancellation';
 import type { RestaurantTable } from '../types/tables';
 import { extractPrivilegedActionError } from '../utils/privileged-actions';
 import { formatTableDisplayNumber } from '../utils/table-display';
@@ -40,11 +42,12 @@ interface PendingRelease {
 
 /** Release projections only from the acknowledged whole-order transition. */
 export function emitCanonicalTableCancellation(result: unknown, tableId: string, orderId: string, tableSessionId?: string | null) {
-  const reply = result as { success?: boolean; data?: { workflow?: { affected_table_ids?: unknown; affected_session_ids?: unknown } } } | null;
+  const reply = result as { success?: boolean; data?: { order?: { status?: string }; workflow?: { affected_table_ids?: unknown; affected_session_ids?: unknown } } } | null;
   const workflow = reply?.data?.workflow;
   const tableIds = Array.isArray(workflow?.affected_table_ids) ? workflow.affected_table_ids.filter((id): id is string => typeof id === 'string') : [];
   const sessionIds = Array.isArray(workflow?.affected_session_ids) ? workflow.affected_session_ids.filter((id): id is string => typeof id === 'string') : [];
-  if (reply?.success !== true || !tableIds.includes(tableId) || (tableSessionId && !sessionIds.includes(tableSessionId))) {
+  const historicalCancellation = Boolean(tableSessionId && sessionIds.includes(tableSessionId) && reply?.data?.order?.status === 'cancelled');
+  if (reply?.success !== true || (!tableIds.includes(tableId) && !historicalCancellation) || (tableSessionId && !sessionIds.includes(tableSessionId))) {
     throw new Error('Canonical cancellation was not acknowledged. Refresh before releasing the table.');
   }
   for (const affectedTableId of tableIds) {
@@ -194,6 +197,8 @@ export function useTableReleaseGuard({
 }: UseTableReleaseGuardOptions) {
   const { t } = useI18n();
   const [pending, setPending] = useState<PendingRelease | null>(null);
+  const [cancelPlan, setCancelPlan] = useState<TableCancellationPlan | null>(null);
+  const cancelOriginalRef = useRef<{ reason: string; channel?: CancellationReturnChannel } | null>(null);
   const [busy, setBusy] = useState(false);
   const checkingRef = useRef(false);
 
@@ -207,6 +212,8 @@ export function useTableReleaseGuard({
           await release();
           return;
         }
+        setCancelPlan(null);
+        cancelOriginalRef.current = null;
         setPending({ table, orderId, outstandingAmount, cancelRefusal, release });
       } finally {
         checkingRef.current = false;
@@ -217,6 +224,7 @@ export function useTableReleaseGuard({
 
   const close = useCallback(() => {
     if (busy) return;
+    setCancelPlan(null);
     setPending(null);
   }, [busy]);
 
@@ -240,16 +248,21 @@ export function useTableReleaseGuard({
   }, [pending]);
 
   const cancelOrder = useCallback(
-    async (reason: string) => {
+    async (reason: string, returnChannel?: CancellationReturnChannel) => {
       const current = pending;
       if (!current?.orderId) return;
       setBusy(true);
       try {
         const result = await runWithPrivilegedConfirmation({
           scope: 'cash_drawer_control',
-          action: (managerPin) =>
-            getBridge().orders.cancelWithApproval({ orderId: current.orderId as string, reason,
-              tableSessionId: current.table.tableSessionId || undefined, managerPin }),
+          action: (managerPin) => {
+            const original = cancelOriginalRef.current;
+            if (original && (original.reason !== reason || original.channel !== returnChannel)) throw new Error('CANCELLATION_REQUEST_CONFLICT');
+            cancelOriginalRef.current = { reason, channel: returnChannel };
+            return getBridge().orders.cancelWithApproval({ orderId: current.orderId as string, reason,
+              tableSessionId: current.table.tableSessionId || undefined, managerPin,
+              ...(cancelPlan ? tableCancellationFields(cancelPlan, returnChannel) : {}) });
+          },
           title: t('tableRelease.cancelApprovalTitle', {
             defaultValue: 'Approve cancelling the order',
           }),
@@ -264,6 +277,8 @@ export function useTableReleaseGuard({
           }),
         );
         setPending(null);
+        setCancelPlan(null);
+        cancelOriginalRef.current = null;
       } catch (error) {
         if (isOwingCancelDismissed(error)) {
           return;
@@ -273,10 +288,26 @@ export function useTableReleaseGuard({
         setBusy(false);
       }
     },
-    [pending, runWithPrivilegedConfirmation, t],
+    [pending, cancelPlan, runWithPrivilegedConfirmation, t],
   );
 
-  const modal = pending ? (
+  const requestCancel = async () => {
+    if (!pending?.orderId || !pending.table.tableSessionId || busy) return;
+    setBusy(true);
+    try {
+      const plan = await prepareTableCancellation(pending.orderId, pending.table.tableSessionId);
+      if (plan.requestId !== cancelPlan?.requestId) cancelOriginalRef.current = null;
+      setCancelPlan(plan);
+    } catch (error) { toast.error(owingCancelFailureMessage(error, t)); }
+    finally { setBusy(false); }
+  };
+
+  const modal = pending && cancelPlan ? (
+    <OrderCancellationModal isOpen orderCount={1}
+      recovery={cancelPlan.pending ? { reason: cancelPlan.reason!, returnChannel: cancelPlan.returnChannel } : undefined}
+      manualReturn={cancelPlan.requiresReturn ? { amountCents: cancelPlan.amountCents, currency: cancelPlan.currency } : undefined}
+      onConfirmCancel={cancelOrder} onClose={close} />
+  ) : pending ? (
     <TableReleaseOwedModal
       isOpen
       tableLabel={formatTableDisplayNumber(pending.table.tableNumber)}
@@ -291,6 +322,7 @@ export function useTableReleaseGuard({
       onCancelOrder={(reason) => {
         void cancelOrder(reason);
       }}
+      onRequestCancel={() => { void requestCancel(); }}
       onClose={close}
     />
   ) : null;

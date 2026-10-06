@@ -202,9 +202,14 @@ test('menu surface remains suppressed from payment selection through completion'
     menuModal,
     /if \(checkoutPhase === ['"]payment['"]\) \{\s*setCheckoutPhase\(['"]editing['"]\)/,
   );
-  assert.match(
-    menuModal,
-    /if \(!editMode && checkoutPhase === ['"]editing['"] && cartItems\.length > 0\)/,
-    'the unsaved-cart dialog must only run while actively editing, never while payment is finishing',
-  );
+  const closeStart = menuModal.indexOf('const requestClose = useCallback(');
+  const clearIndex = menuModal.indexOf('await draftPersistence.clear(false);', closeStart);
+  const closeGuard = menuModal.slice(closeStart, clearIndex);
+  assert.ok(closeStart >= 0 && clearIndex > closeStart, 'editable dismissal must persist its tombstone');
+  assert.match(closeGuard, /if \([^\n]*editSubmissionInFlight\.current[^\n]*checkoutPhase !== ['"]editing['"]\) return;/,
+    'the phase and in-flight guards precede every durable dismissal');
+  assert.match(closeGuard, /if \(draftPersistence\.isPending\(\) && draftPersistence\.error === 'draftSaveFailed'\) return;/,
+    'a confirmed submission held only in memory cannot be discarded');
+  assert.match(menuModal, /if \(checkoutPhase === ['"]editing['"]\) void requestClose\(\);/,
+    'payment and finishing surface animation callbacks cannot dismiss the checkout');
 });

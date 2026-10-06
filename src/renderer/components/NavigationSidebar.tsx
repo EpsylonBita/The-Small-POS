@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
+import { useOperationalShift } from '../contexts/cashier-gate-context';
 import { useModules, type NavigationModule } from '../contexts/module-context';
 import { isModuleComingSoon } from '../../shared/constants/pos-modules';
 import { resolveNavigationLabel } from '../utils/i18nLabels';
@@ -177,6 +178,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff, isShiftActive } = useShift();
+  const isOperationalShiftActive = useOperationalShift(isShiftActive);
   const { navigationModules: rawNavigationModules, isLoading } = useModules();
   // efood Partner (Live Orders) hosted in the POS: shown only where this
   // register manages efood (see useEfoodPartner).
@@ -397,7 +399,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     }
 
     // For unlocked modules, enforce shift requirement
-    if (!isShiftActive) {
+    if (!isOperationalShiftActive) {
       onStartShift && onStartShift();
       return;
     }
@@ -546,7 +548,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
 
   const handleOpenZ = () => {
-    if (!isShiftActive && !hasPendingLocalSubmit) {
+    if (!isOperationalShiftActive && !hasPendingLocalSubmit) {
       onStartShift && onStartShift();
       return;
     }

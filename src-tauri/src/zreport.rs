@@ -7109,6 +7109,13 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     }
     // Nor while a card charged on this till is not saved: the record is the
     // only trace of money the customer paid (fix review 30/09/2026).
+    if !crate::table_manual_cancellation::pending(conn, "")?.is_empty() {
+        return Err("Cannot close the day: the original table cancellation return must be saved (table_cancellation_not_saved)".into());
+    }
+    let pending_edits = crate::edit_settlement_recovery::pending_financial_edits(conn, "")?.len();
+    if pending_edits > 0 {
+        return Err(format!("Cannot close the day: {pending_edits} confirmed order correction(s) need their original collection/refund saved (edit_settlement_not_saved)"));
+    }
     let not_saved = crate::unsaved_payments::count(conn)?;
     if not_saved > 0 {
         return Err(format!(
@@ -7912,6 +7919,23 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn confirmed_edit_refund_pending_blocks_cleanup_before_any_deletion() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("CREATE TABLE edit_settlement_attempts_v1(order_id TEXT,branch_id TEXT,state TEXT,request_json TEXT); INSERT INTO edit_settlement_attempts_v1 VALUES('held-order','branch','refused','{\"action\":{\"type\":\"refund\"}}');").unwrap();
+        let error = super::finalize_end_of_day_counts(&conn, "2026-10-05T18:00:00Z").unwrap_err();
+        assert!(error.contains("edit_settlement_not_saved"), "{error}");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM edit_settlement_attempts_v1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
     use super::*;
     use crate::db;
     use chrono::{LocalResult, TimeZone};
@@ -12513,6 +12537,13 @@ mod tests {
 
         {
             let conn = db.conn.lock().unwrap();
+            // Keep the late receipt's branch consistent with its original
+            // cashier shift, so custody remains valid even outside the cutoff.
+            conn.execute(
+                "UPDATE orders SET branch_id = 'branch-1' WHERE id = 'ord-late'",
+                [],
+            )
+            .expect("scope late order to its cashier branch");
             persist_pending_z_report_context(
                 &conn,
                 &PendingZReportContext {

@@ -35,7 +35,7 @@ describe('routePaymentEdit', () => {
             status: 'completed',
             amount: 18.5,
             currency: 'CHF',
-            transactionRef: 'SAFE-REFERENCE',
+            transactionRef: 'CASH-123',
           },
         ],
       ),
@@ -48,7 +48,7 @@ describe('routePaymentEdit', () => {
           method: 'cash',
           amount: 18.5,
             currency: 'CHF',
-          transactionRef: 'SAFE-REFERENCE',
+          transactionRef: 'CASH-123',
         },
       ],
     });
@@ -176,5 +176,118 @@ describe('routePaymentEdit on platform-held money (R4)', () => {
     ]) {
       expect(routePaymentEdit(order, [])).toEqual({ kind: 'collect-missing' });
     }
+  });
+});
+
+
+it.each([
+  { method:'card', paymentOrigin:'terminal', transactionRef:'provider-proof' },
+  { method:'card', paymentOrigin:'manual', terminalDeviceId:'reader' },
+  { method:'card', paymentOrigin:'manual', transactionRef:'provider-proof' },
+  { method:'card' },
+  { method:'card', transactionRef:'CARD-1791226924826' },
+  { method:'card', paymentOrigin:'terminal', transactionRef:'CARD-1791226924826' },
+  { method:'card', paymentOrigin:'manual', transactionRef:'CARD-1791226924826', terminalDeviceId:'reader' },
+  { method:'card', paymentOrigin:'manual', payment_origin:'terminal', transactionRef:'CARD-1791226924826' },
+  { method:'card', paymentOrigin:'manual', transactionRef:'CARD-1791226924826', transaction_ref:'provider-proof' },
+  { method:'card', paymentOrigin:'manual', transactionRef:'CARD-' },
+])('does not offer manual relabel for provider or unproven original %j', row => {
+  expect(routePaymentEdit({ status:'pending', paymentStatus:'paid' }, [{ id:'paid', status:'completed', amount:6, ...row }])).toEqual({ kind:'blocked', reason:'provider_owned' });
+});
+it.each([
+  { method:'card', paymentOrigin:'manual', transactionRef:'CASH-123' },
+  { method:'card', transactionRef:'CASH-123' },
+  { method:'cash' },
+  { method:'card', paymentOrigin:'manual', transactionRef:'CARD-1791226924826' },
+  { method:'card', paymentOrigin:'manual_card', transactionRef:'CARD-1791226924826' },
+  { method:'card', paymentOrigin:'manual_recovery', transactionRef:'CARD-1791226924826' },
+  { method:'card', payment_origin:'manual', transaction_ref:'CARD-1791226924826' },
+])('allows proven original manual relabel %j', row => {
+  expect(routePaymentEdit({ status:'pending', paymentStatus:'paid' }, [{ id:'paid', status:'completed', amount:6, ...row }]).kind).toBe('edit-existing');
+});
+
+it('loads an explicitly manual card for a customer and driver named Wolt into method editing', async () => {
+  const order = { id:'manual-wolt', status:'pending', paymentStatus:'paid', customer_name:'WOLT', driver_name:'WOLT', plugin:null };
+  const getOrderPayments = vi.fn().mockResolvedValue([{id:'manual-card',method:'card',status:'completed',amount:13.8,paymentOrigin:'manual',transactionRef:'CARD-1791226924826'}]);
+  await expect(loadPaymentEditRoute({payments:{getOrderPayments}},order)).resolves.toMatchObject({kind:'edit-existing',currentMethod:'card',payments:[{id:'manual-card',amount:13.8}]});
+});
+
+describe('new collection after a fully returned manual order is restored', () => {
+  const restored = { id: 'restored-order', status: 'pending', paymentStatus: 'pending' };
+  const returned = {
+    id: 'original-receipt', method: 'cash', status: 'refunded', amount: 10,
+    paymentOrigin: 'manual', transactionRef: 'CASH-123',
+    refundedAmount: 10, remainingRefundable: 0, isProvenManualOriginal: true,
+  };
+
+  it.each(['refunded', 'completed'])('routes %s originals with complete refund proof to fresh collection without changing them', (status) => {
+    const rows = [
+      { ...returned, status },
+      { ...returned, id: 'original-card', status, method: 'card', transactionRef: 'CARD-456', amount: 6, refundedAmount: 6 },
+    ];
+    const before = structuredClone(rows);
+    expect(routePaymentEdit(restored, rows)).toEqual({ kind: 'collect-missing' });
+    expect(rows).toEqual(before);
+  });
+
+  it('loads the original history through the bridge before offering fresh collection', async () => {
+    const getOrderPayments = vi.fn().mockResolvedValue([returned]);
+    await expect(loadPaymentEditRoute({ payments: { getOrderPayments } }, restored))
+      .resolves.toEqual({ kind: 'collect-missing' });
+    expect(getOrderPayments).toHaveBeenCalledWith(restored.id);
+  });
+
+  it.each([
+    { isProvenManualOriginal: false },
+    { isProvenManualOriginal: undefined },
+    { isProvenManualOriginal: 'true' },
+    { paymentOrigin: 'terminal' },
+    { terminalDeviceId: 'terminal-device' },
+    { transactionRef: 'provider-transaction' },
+    { method: 'gift_card' },
+    { method: 'twint' },
+    { status: 'voided' },
+    { status: 'duplicate_review' },
+    { status: 'failed' },
+    { id: '' },
+    { amount: Number.NaN },
+    { amount: Number.POSITIVE_INFINITY },
+    { amount: '10' },
+    { amount: 0 },
+    { amount: -10 },
+    { amount: 10.001, refundedAmount: 10.001 },
+    { refundedAmount: undefined },
+    { refundedAmount: Number.NaN },
+    { refundedAmount: 9 },
+    { refundedAmount: 11 },
+    { remainingRefundable: undefined },
+    { remainingRefundable: 1 },
+    { remainingRefundable: -1 },
+  ])('does not infer fully returned manual history from incomplete or conflicting proof %j', (change) => {
+    expect(routePaymentEdit(restored, [{ ...returned, ...change }]).kind).toBe('blocked');
+  });
+
+  it.each(['cancelled', 'completed', 'delivered', 'refunded'])('requires a pending order, not %s', (status) => {
+    expect(routePaymentEdit({ ...restored, status }, [returned]).kind).toBe('blocked');
+  });
+
+  it.each(['paid', 'refunded', 'voided', 'failed'])('requires a pending payment label, not %s', (paymentStatus) => {
+    expect(routePaymentEdit({ ...restored, paymentStatus }, [returned]).kind).toBe('blocked');
+  });
+
+  it('keeps adjusted originals and a newly retained receipt out of tender editing or fresh collection', () => {
+    const fresh = { ...returned, id: 'new-receipt', status: 'completed', refundedAmount: 0, remainingRefundable: 10 };
+    expect(routePaymentEdit(restored, [returned, fresh])).toEqual({ kind: 'blocked', reason: 'adjusted' });
+    expect(routePaymentEdit({ ...restored, paymentStatus: 'paid' }, [returned, fresh]))
+      .toEqual({ kind: 'blocked', reason: 'adjusted' });
+  });
+
+  it('keeps platform-held money out of fresh collection even with fully returned manual history', () => {
+    expect(routePaymentEdit({
+      ...restored, plugin: 'efood', external_plugin_order_id: 'platform-order',
+      ghost_metadata: { food_delivery: { prepaid: true, payment_method: 'online' } },
+    }, [returned])).toEqual({ kind: 'blocked', reason: 'platform_held' });
+    expect(routePaymentEdit(restored, [{ ...returned, platformHeldSetAside: true }]))
+      .toEqual({ kind: 'blocked', reason: 'platform_held' });
   });
 });

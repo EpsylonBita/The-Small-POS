@@ -26,6 +26,6 @@ describe('Store currency authority', () => {
   ])('refuses missing, stale or unavailable authority', value => {
     expect(configuredStoreCurrency(value)).toBeNull();
     setStoreCurrencyFromSettings(value);
-    expect(formatCurrency(12.5, undefined, 'en-US')).toBe('12.50 —');
+    expect(formatCurrency(12.5, undefined, 'en-US')).toBe('12.50');
   });
 });

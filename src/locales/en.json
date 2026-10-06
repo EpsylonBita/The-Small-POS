@@ -4188,7 +4188,11 @@
       "customerName": "Name",
       "customerPhone": "Phone",
       "customerNotes": "Notes",
-      "loadItemsFailed": "Failed to load order items"
+      "loadItemsFailed": "Failed to load order items",
+      "editServerUpdate": "Order corrections are temporarily unavailable. Check your connection and retry after the server update.",
+      "editSyncRequired": "The payment or order change has not synced yet. Your cart is saved. Try again shortly.",
+      "emptyEditHint": "To remove every item, close the editor and cancel the order.",
+      "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund."
     },
     "payment": {
       "title": "Payment",
@@ -5200,6 +5204,20 @@
       "cashierShiftSyncUnknownReason": "This cashier shift is saved locally, but its sync needs attention."
     },
     "orderCancellation": {
+      "staffCashAmbiguous": "Staff cash custody cannot be verified. Review the original cash return before cancelling.",
+      "staffCashUnavailable": "Cash handover cancellation is temporarily unavailable. Check your connection and retry after the server update.",
+      "connectionUnavailable": "Payment connection status is unavailable. Refresh Integrations and try again.",
+      "permissionRequired": "This account does not have permission to cancel paid orders.",
+      "paymentSyncRequired": "The original payment must finish syncing before recording its return. Sync and try again; do not charge again.",
+      "paymentChanged": "The payment changed. Close this window and select Cancel again to review the current amount.",
+      "drawerUnavailable": "An open cashier drawer is required to record a cash return.",
+      "returnChannel": "How was the money returned?",
+      "returnRecorded": "{{amount}} will be recorded as already returned. No payment will be sent.",
+      "cashDrawer": "Cash drawer",
+      "bank": "Bank",
+      "originalReturnRequired": "Order {{orderNumber}} needs its original payment return or verified connection status before cancellation.",
+      "mixedCurrencies": "Cancel orders with different currencies separately.",
+      "currencyMismatch": "The recorded currencies do not agree. Check the original payment and cashier currency before cancelling.",
       "title": "Cancel Orders",
       "message_one": "You are about to cancel {{count}} order. Please provide a reason for the cancellation.",
       "message_other": "You are about to cancel {{count}} orders. Please provide a reason for the cancellation.",
@@ -6049,6 +6067,8 @@
     "paymentMethodUpdated": "Payment method updated",
     "paymentMethodUpdateFailed": "Failed to update payment method",
     "paymentMethodNoChange": "Payment method is already selected",
+    "paymentMethodEditProviderOwned": "This payment belongs to a payment provider. Its original payment method cannot be relabeled.",
+    "paymentMethodEditPending": "Save and sync the original order correction before changing its payment method.",
     "paymentMethodEditUnavailable": "Payment method can be edited only for one non-cancelled cash/card order",
     "paymentMethodEditChecking": "Checking payment records…",
     "paymentMethodEditRequiresSingleCompletedPayment": "This order has split or multiple completed payments. Its payment methods cannot be changed together as one payment.",
@@ -9888,21 +9908,25 @@
       "not_saved": "Not saved"
     },
     "reasonCodes": {
+      "table_cancellation_not_saved": "The original table cancellation return has not been saved yet.",
       "payments_need_review": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}} after it was already paid. It is set aside and not counted: the customer may have paid twice.",
       "payments_need_review__platform_held": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}}, but the delivery platform already holds this order's money. It is set aside and not counted: the customer may have paid twice.",
       "payments_not_saved": "A card payment of {{paymentAmount}} was charged on order {{orderNumber}} but is not saved on this till yet. The customer was charged: do not charge again.",
       "payments_not_saved__new_order": "A card payment of {{paymentAmount}} was charged for a new order that is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged: do not charge again.",
       "payments_not_saved__new_order_cannot_save": "A card payment of {{paymentAmount}} was charged for a new order that is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged: do not charge again.",
-      "cancelled_order_claims_payment": "This order is cancelled but still marked paid, and this till has no payment record for it. It is not in this Z-Report. This does not hold the day."
+      "cancelled_order_claims_payment": "This order is cancelled but still marked paid, and this till has no payment record for it. It is not in this Z-Report. This does not hold the day.",
+      "edit_settlement_not_saved": "A confirmed order correction is not saved yet. Its original collection or refund is retained."
     },
     "fixCodes": {
+      "table_cancellation_not_saved": "Recover the original table cancellation. Do not hand back or refund the money again.",
       "payments_need_review": "Give the money back to the customer, then confirm it here. If the payment on the server is the wrong one, contact support before closing the day.",
       "payments_need_review__platform_held": "Give the money back to the customer, then confirm it here. The platform pays this order to the store through its own settlement.",
       "payments_not_saved": "Save the payment again. If it cannot be saved, give the money back to the customer and confirm it here.",
       "payments_not_saved__cannot_save": "This payment cannot be saved on this till. Give the money back to the customer, then confirm it here.",
       "payments_not_saved__new_order": "Save the payment again: it saves the order and its payment, with no new charge. If it cannot be saved, give the money back to the customer and confirm it here.",
       "payments_not_saved__new_order_cannot_save": "This order and its payment cannot be saved on this till. Give the money back to the customer, then confirm it here.",
-      "cancelled_order_claims_payment": "Restore from server (Sync Now): a payment the server holds is copied here. If there is none, the owner decides what the order should say."
+      "cancelled_order_claims_payment": "Restore from server (Sync Now): a payment the server holds is copied here. If there is none, the owner decides what the order should say.",
+      "edit_settlement_not_saved": "Reopen the saved order edit and save the same correction. Do not collect or return money again."
     },
     "setAsidePaymentLabel": "Set-aside payment",
     "takenAtLabel": "Taken at",
@@ -9916,9 +9940,9 @@
     "unsavedResolving": "Recording..."
   },
   "cashierGate": {
-    "title": "Cashier shift required",
-    "body": "Normal POS operations are locked. A cashier or manager must check in on this register to open the day.",
-    "waiterBody": "The main register is closed. A cashier or manager must check in on this device’s parent register. You can then check in your own staff shift and continue.",
+    "title": "Open your shift",
+    "body": "Start a cashier or manager shift to take orders.",
+    "waiterBody": "Open the main register shift first, then start your own shift.",
     "checking": "Checking the cashier shift…",
     "recheck": "Check again"
   }

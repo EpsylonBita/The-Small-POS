@@ -1546,7 +1546,7 @@ fn should_persist_receipt_number_for_branch(conn: &Connection, branch_id: &str) 
 const NO_ACTIVE_CASHIER_ORDER_CREATE_ERROR: &str =
     "Cannot create orders until a cashier opens the day.";
 
-fn require_active_cashier_for_order_create(
+pub(crate) fn require_active_cashier_for_order_create(
     conn: &Connection,
     branch_id: &str,
     terminal_id: &str,
@@ -12365,6 +12365,7 @@ fn apply_lan_canonical_response_inner(
             }
         }
     }
+    crate::table_manual_cancellation::mirror(conn, response)?;
     let mut local_parents = std::collections::BTreeMap::new();
     for (remote_id, (order, version)) in &parents {
         let existing = resolve_local_order_id(conn, order);
@@ -12433,6 +12434,12 @@ fn apply_lan_canonical_response_inner(
         local_parents.insert(remote_id.clone(), local_id);
     }
     let mut payments = lan_snapshot_rows(response, "payments");
+    if let Some(rows) = response
+        .pointer("/workflow/manual_cancellation/payments")
+        .and_then(Value::as_array)
+    {
+        payments.extend(rows.iter().cloned());
+    }
     if let Some(payment) = response
         .get("payment")
         .or_else(|| response.pointer("/data/payment"))
@@ -19803,8 +19810,14 @@ async fn sync_payment_items(
         // sync_state = 'syncing'` used to live here; it was redundant
         // with the atomic claim and has been removed.
 
-        match api::fetch_from_admin(admin_url, api_key, "/api/pos/payments", "POST", Some(body))
-            .await
+        match api::fetch_from_admin_detailed(
+            admin_url,
+            api_key,
+            "/api/pos/payments",
+            "POST",
+            Some(body),
+        )
+        .await
         {
             Ok(resp) => {
                 let typed: Option<PaymentSyncResponse> = serde_json::from_value(resp.clone()).ok();
@@ -19943,6 +19956,15 @@ async fn sync_payment_items(
                 synced += 1;
             }
             Err(e) => {
+                match defer_remote_handover_payment_retry(db, item, &e) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(%error, "Could not persist remote handover payment retry");
+                        continue;
+                    }
+                }
+                let e = e.to_string();
                 if crate::payment_review::error_message_reports_platform_held_refusal(&e) {
                     // Item D (founder decision 30/09/2026): the server refused
                     // cash/card on money the delivery platform holds. The
@@ -20413,7 +20435,7 @@ async fn sync_adjustment_items(
             Some(canonical_payment_id.as_str()),
         );
 
-        match api::fetch_from_admin(
+        match api::fetch_from_admin_detailed(
             admin_url,
             api_key,
             "/api/pos/payments/adjustments/sync",
@@ -20500,6 +20522,15 @@ async fn sync_adjustment_items(
                 synced += 1;
             }
             Err(e) => {
+                match defer_remote_handover_payment_retry(db, item, &e) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(%error, "Could not persist remote handover adjustment retry");
+                        continue;
+                    }
+                }
+                let e = e.to_string();
                 warn!(adjustment_id = %entity_id, error = %e, "Adjustment sync failed");
                 if let Ok(conn) = db.conn.lock() {
                     let new_retry = retry_count + 1;
@@ -21017,6 +21048,58 @@ fn mark_order_batch_failures(
     }
 
     Ok(had_non_backpressure_failure)
+}
+
+/// A proven remote lock refusal has not consumed the original financial attempt.
+/// Keep both mirrors retryable atomically; never infer this from display text.
+fn defer_remote_handover_payment_retry(
+    db: &DbState,
+    item: &SyncItem,
+    error: &api::AdminFetchError,
+) -> Result<bool, String> {
+    if error.status() != Some(503) || error.code() != Some("REMOTE_HANDOVER_RETRY") {
+        return Ok(false);
+    }
+    let table = match item.1.as_str() {
+        "payment" | "order_payment" | "order_payments" => "order_payments",
+        "payment_adjustment" => "payment_adjustments",
+        _ => return Ok(false),
+    };
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin remote lock retry: {e}"))?;
+    let delay = tx.query_row(
+        "SELECT retry_delay_ms FROM sync_queue WHERE id = ?1 AND entity_type = ?2 AND entity_id = ?3
+         AND status IN ('pending', 'in_progress')",
+        params![item.0, item.1, item.2],
+        |row| row.get::<_, i64>(0),
+    ).optional().map_err(|e| format!("read remote lock retry: {e}"))?;
+    if let Some(delay) = delay {
+        let delay = delay
+            .max(DEFAULT_RETRY_DELAY_MS)
+            .saturating_mul(2)
+            .min(MAX_RETRY_DELAY_MS);
+        let next_retry = schedule_next_retry(delay, item.0);
+        tx.execute(
+            "UPDATE sync_queue SET status = 'pending', next_retry_at = ?1, retry_delay_ms = ?2,
+             last_error = 'REMOTE_HANDOVER_RETRY', updated_at = datetime('now') WHERE id = ?3",
+            params![next_retry, delay, item.0],
+        )
+        .map_err(|e| format!("defer remote lock queue: {e}"))?;
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET sync_state = 'pending', sync_next_retry_at = ?1,
+              sync_last_error = 'REMOTE_HANDOVER_RETRY', updated_at = datetime('now')
+              WHERE id = ?2 AND sync_state <> 'applied'"
+            ),
+            params![next_retry, item.2],
+        )
+        .map_err(|e| format!("defer remote lock financial row: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("commit remote lock retry: {e}"))?;
+    Ok(true)
 }
 
 fn mark_batch_failed(
@@ -30490,6 +30573,204 @@ mod tests {
         assert_eq!(status, "pending");
         assert_eq!(retry_count, 0);
         assert!(next_retry_at.is_some());
+    }
+
+    fn legacy_lock_retry_fixture(adjustment: bool) -> (DbState, i64, String) {
+        let db = test_db();
+        insert_minimal_order(&db, "lock-order", "synced");
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE orders SET supabase_id='10000000-0000-4000-8000-000000000001' WHERE id='lock-order'", []).unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,sync_status,sync_state,remote_payment_id,sync_retry_count,created_at,updated_at)
+          VALUES('lock-payment','lock-order','cash',6,600,'completed','pending',?1,'10000000-0000-4000-8000-000000000002',4,datetime('now'),datetime('now'))",
+          [if adjustment { "applied" } else { "pending" }]).unwrap();
+        let (kind, id, payload) = if adjustment {
+            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,sync_retry_count,created_at,updated_at)
+              VALUES('lock-adjustment','lock-payment','lock-order','refund',2,200,'Test','pending',4,datetime('now'),datetime('now'))", []).unwrap();
+            (
+                "payment_adjustment",
+                "lock-adjustment",
+                serde_json::json!({"paymentId":"lock-payment","orderId":"lock-order","adjustmentType":"refund","amount":2,"currency":"CHF"}),
+            )
+        } else {
+            (
+                "payment",
+                "lock-payment",
+                serde_json::json!({"paymentId":"lock-payment","orderId":"lock-order","method":"cash","amount":6,"amount_cents":600,"currency":"CHF"}),
+            )
+        };
+        let payload = payload.to_string();
+        conn.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,idempotency_key,status,retry_count,max_retries,retry_delay_ms)
+          VALUES(?1,?2,'insert',?3,'original-lock-key','pending',4,5,5000)", params![kind,id,payload]).unwrap();
+        let queue_id = conn.last_insert_rowid();
+        drop(conn);
+        (db, queue_id, payload)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_remote_lock_retries_preserve_originals_at_budget_ceiling_then_apply() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "term-lock-retry")]);
+        for adjustment in [false, true] {
+            let (db, queue_id, payload) = legacy_lock_retry_fixture(adjustment);
+            let table = if adjustment {
+                "payment_adjustments"
+            } else {
+                "order_payments"
+            };
+            for _ in 0..8 {
+                let item = claim_pending_sync_items(&db.conn.lock().unwrap(), 1)
+                    .unwrap()
+                    .remove(0);
+                let (url, server) = spawn_status_json_server(
+                    503,
+                    r#"{"success":false,"code":"REMOTE_HANDOVER_RETRY","error":"The shift is being updated"}"#,
+                );
+                let synced = if adjustment {
+                    sync_adjustment_items(
+                        &url,
+                        "test-key",
+                        "term-lock-retry",
+                        "branch-1",
+                        &db,
+                        &[&item],
+                    )
+                    .await
+                } else {
+                    sync_payment_items(&url, "test-key", "term-lock-retry", &db, &[&item]).await
+                };
+                server.join().unwrap();
+                assert_eq!(synced, 0);
+                let after = load_sync_item(&db, queue_id);
+                assert_eq!(
+                    (after.4.as_str(), after.5.as_str(), after.6),
+                    (payload.as_str(), "original-lock-key", 4)
+                );
+                assert!((DEFAULT_RETRY_DELAY_MS..=MAX_RETRY_DELAY_MS).contains(&after.9));
+                let retry = after.8.expect("scheduled backoff");
+                assert!(chrono::DateTime::parse_from_rfc3339(&retry).unwrap() > Utc::now());
+                assert!(claim_pending_sync_items(&db.conn.lock().unwrap(), 1)
+                    .unwrap()
+                    .is_empty());
+                let conn = db.conn.lock().unwrap();
+                let state: (String, i64, i64) = conn.query_row(&format!("SELECT sync_state,sync_retry_count,amount_cents FROM {table} WHERE id=?1"),
+                    [&item.2], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+                assert_eq!(
+                    state,
+                    ("pending".to_string(), 4, if adjustment { 200 } else { 600 })
+                );
+                conn.execute(
+                    "UPDATE sync_queue SET next_retry_at=NULL WHERE id=?1",
+                    [queue_id],
+                )
+                .unwrap();
+            }
+            let mut claimed = claim_pending_sync_items(&db.conn.lock().unwrap(), 1).unwrap();
+            assert_eq!(claimed.len(), 1);
+            let item = claimed.remove(0);
+            let (url, server) = spawn_single_json_response_server(
+                r#"{"success":true,"payment_id":"10000000-0000-4000-8000-000000000002"}"#
+                    .to_string(),
+                |request| {
+                    assert!(request.contains("original-lock-key"));
+                },
+            );
+            let synced = if adjustment {
+                sync_adjustment_items(
+                    &url,
+                    "test-key",
+                    "term-lock-retry",
+                    "branch-1",
+                    &db,
+                    &[&item],
+                )
+                .await
+            } else {
+                sync_payment_items(&url, "test-key", "term-lock-retry", &db, &[&item]).await
+            };
+            server.join().unwrap();
+            assert_eq!(synced, 1);
+            let conn = db.conn.lock().unwrap();
+            let state: String = conn
+                .query_row(
+                    &format!("SELECT sync_state FROM {table} WHERE id=?1"),
+                    [&item.2],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, "applied");
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM sync_queue WHERE id=?1",
+                    [queue_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "synced");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_remote_lock_retry_never_reclassifies_genuine_409() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "term-lock-refusal")]);
+        for adjustment in [false, true] {
+            let (db, queue_id, payload) = legacy_lock_retry_fixture(adjustment);
+            let item = claim_pending_sync_items(&db.conn.lock().unwrap(), 1)
+                .unwrap()
+                .remove(0);
+            let (url, server) = spawn_status_json_server(
+                409,
+                r#"{"success":false,"code":"REMOTE_HANDOVER_SNAPSHOT_FROZEN","error":"Custody refused"}"#,
+            );
+            let synced = if adjustment {
+                sync_adjustment_items(
+                    &url,
+                    "test-key",
+                    "term-lock-refusal",
+                    "branch-1",
+                    &db,
+                    &[&item],
+                )
+                .await
+            } else {
+                sync_payment_items(&url, "test-key", "term-lock-refusal", &db, &[&item]).await
+            };
+            server.join().unwrap();
+            assert_eq!(synced, 0);
+            let after = load_sync_item(&db, queue_id);
+            assert_eq!(after.6, 5);
+            assert_eq!(after.4, payload);
+            let conn = db.conn.lock().unwrap();
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM sync_queue WHERE id=?1",
+                    [queue_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "failed");
+        }
+    }
+
+    #[test]
+    fn legacy_remote_lock_retry_requires_typed_status_and_code() {
+        let (db, queue_id, _) = legacy_lock_retry_fixture(false);
+        let item = load_sync_item(&db, queue_id);
+        for error in [
+            api::AdminFetchError::statusless("REMOTE_HANDOVER_RETRY HTTP 503"),
+            api::AdminFetchError::from_http_response_for_test(
+                503,
+                r#"{"error":"REMOTE_HANDOVER_RETRY"}"#,
+            ),
+            api::AdminFetchError::from_http_response_for_test(503, r#"{"code":"OTHER_FAILURE"}"#),
+            api::AdminFetchError::from_http_response_for_test(
+                409,
+                r#"{"code":"REMOTE_HANDOVER_RETRY"}"#,
+            ),
+        ] {
+            assert!(!defer_remote_handover_payment_retry(&db, &item, &error).unwrap());
+            assert_eq!(load_sync_item(&db, queue_id), item);
+        }
     }
 
     #[test]

@@ -111,6 +111,9 @@ const coordinatedDefault = {
   delivery_notes: '',
   latitude: 40.6301,
   longitude: 22.9502,
+  zone_id: 'stored-zone',
+  validation_status: 'in_zone',
+  address_fingerprint: 'stored-fingerprint',
   is_default: true,
   version: 2,
 };
@@ -185,6 +188,46 @@ beforeEach(() => {
     success: true,
     data: { id: 'addr-new', ...address },
   }));
+  mock.createCustomer.mockImplementation(async (data: any) => ({
+    success: true, data: { id: customer.id, ...data },
+  }));
+});
+
+describe('selected coordinate persistence at every customer entry point', () => {
+  it.each(['new', 'addAddress', 'editAddress', 'edit'] as const)('%s passes the exact newly selected point and its provenance', async mode => {
+    const point = { lat: 40.6402, lng: 22.9441 };
+    mock.searchAddressSuggestions.mockResolvedValue([
+      { place_id: 'new-place', main_text: 'Synthetic New Street 8', secondary_text: 'Thessaloniki' },
+    ]);
+    mock.resolveAddressSuggestion.mockResolvedValue({
+      streetAddress: 'Synthetic New Street 8', city: 'Thessaloniki', postalCode: '54622',
+      coordinates: point, placeId: 'new-place', addressFingerprint: 'fp-new', validationSource: 'online',
+    });
+    const { container, onCustomerAdded } = await renderModal({
+      mode,
+      ...(mode === 'new' ? { initialPhone: customer.phone } : {
+        initialCustomer: { ...customer, selected_address_id: coordinatedDefault.id, editAddressId: coordinatedDefault.id },
+      }),
+    });
+    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.streetPlaceholder), { target: { value: 'Synthetic New Street' } });
+    fireEvent.click(await screen.findByText('Thessaloniki', { selector: 'p' }));
+    await waitFor(() => expect(mock.validateAddressForDelivery).toHaveBeenCalled());
+    if (mode === 'new') fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.namePlaceholder), { target: { value: customer.name } });
+    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.floorPlaceholder), { target: { value: '3' } });
+    fireEvent.change(screen.getByPlaceholderText(en.modals.addCustomer.nameOnRingerPlaceholder), { target: { value: 'Synthetic' } });
+    submit(container);
+    await waitFor(() => expect(onCustomerAdded).toHaveBeenCalledTimes(1));
+    const write = mode === 'new' ? mock.createCustomer.mock.calls[0][0]
+      : mode === 'addAddress' ? mock.addCustomerAddress.mock.calls[0][1]
+      : mock.updateCustomerAddress.mock.calls[0][1];
+    expect(write).toMatchObject({ coordinates: point, latitude: point.lat, longitude: point.lng });
+    expect(mode === 'new' ? write.delivery_validation : write).toMatchObject({
+      place_id: 'new-place', address_fingerprint: 'fp-validated', validation_status: 'in_zone', zone_id: 'zone-1',
+    });
+    const saved = onCustomerAdded.mock.calls[0][0];
+    expect(saved.delivery_destination_unchanged).not.toBe(true);
+    expect(saved.addresses.find((address: any) => address.street_address === 'Synthetic New Street 8')).toMatchObject({ latitude: point.lat, longitude: point.lng });
+  });
 });
 
 describe('a saved address without coordinates', () => {
@@ -209,12 +252,13 @@ describe('a saved address without coordinates', () => {
     expect(patch).toMatchObject({
       street_address: 'Synthetic Street 12',
       floor_number: '3',
-      validation_status: 'requires_selection',
     });
     // Whatever point the office holds is left alone: no null, no (0,0).
     expect(patch).not.toHaveProperty('coordinates');
     expect(patch).not.toHaveProperty('latitude');
     expect(patch).not.toHaveProperty('longitude');
+    expect(patch).not.toHaveProperty('zone_id');
+    expect(patch).not.toHaveProperty('validation_status');
     await waitFor(() => expect(onCustomerAdded).toHaveBeenCalledWith(expect.objectContaining({
       selected_address_id: uncoordinatedAddress.id,
       editAddressId: uncoordinatedAddress.id,
@@ -295,7 +339,8 @@ describe('a saved address without coordinates', () => {
 });
 
 describe('full "Edit customer" saves address changes (founder, 29/09/2026)', () => {
-  it('writes a changed floor to the selected address with its point and zone, and hands on fresh addresses', async () => {
+  it('writes a changed floor without rechecking or replacing the selected address point and zone', async () => {
+    mock.validateAddressForDelivery.mockRejectedValue(new Error('zone service offline'));
     const { container, onCustomerAdded } = await renderModal({
       mode: 'edit',
       initialCustomer: { ...customer, selected_address_id: coordinatedDefault.id },
@@ -306,7 +351,7 @@ describe('full "Edit customer" saves address changes (founder, 29/09/2026)', () 
     submit(container);
 
     await waitFor(() => expect(mock.updateCustomerAddress).toHaveBeenCalledTimes(1));
-    expect(everyValidationPoint()).toEqual([{ lat: 40.6301, lng: 22.9502 }]);
+    expect(mock.validateAddressForDelivery).not.toHaveBeenCalled();
     expect(mock.updateCustomer).toHaveBeenCalledTimes(1);
     const [addressId, patch, version] = mock.updateCustomerAddress.mock.calls[0];
     expect(addressId).toBe(coordinatedDefault.id);
@@ -315,16 +360,20 @@ describe('full "Edit customer" saves address changes (founder, 29/09/2026)', () 
       street_address: 'Synthetic Avenue 3',
       floor_number: '4',
       customer_id: customer.id,
-      coordinates: { lat: 40.6301, lng: 22.9502 },
-      latitude: 40.6301,
-      longitude: 22.9502,
-      validation_status: 'in_zone',
-      zone_id: 'zone-1',
     });
+    for (const key of ['coordinates', 'latitude', 'longitude', 'zone_id', 'validation_status', 'address_fingerprint']) {
+      expect(patch).not.toHaveProperty(key);
+      expect(mock.updateCustomer.mock.calls[0][1]).not.toHaveProperty(key);
+    }
+    expect(mock.updateCustomer.mock.calls[0][1]).not.toHaveProperty('delivery_validation');
     await waitFor(() => expect(onCustomerAdded).toHaveBeenCalledTimes(1));
     const handedOn = onCustomerAdded.mock.calls[0][0];
+    expect(handedOn.delivery_destination_unchanged).toBe(true);
     expect(handedOn.selected_address_id).toBe(coordinatedDefault.id);
     expect(handedOn.addresses.find((address: any) => address.id === coordinatedDefault.id).floor_number).toBe('4');
+    expect(handedOn.addresses.find((address: any) => address.id === coordinatedDefault.id)).toMatchObject({
+      latitude: 40.6301, longitude: 22.9502, zone_id: 'stored-zone', address_fingerprint: 'stored-fingerprint',
+    });
   });
 
   it('edits the selected address, not the default, when one is selected', async () => {
@@ -419,6 +468,14 @@ describe('full "Edit customer" saves address changes (founder, 29/09/2026)', () 
   });
 
   it('a genuine out-of-zone point keeps the desktop override flow', async () => {
+    mock.searchAddressSuggestions.mockResolvedValue([
+      { place_id: 'new-place', main_text: 'Synthetic New Street 8', secondary_text: 'Thessaloniki' },
+    ]);
+    mock.resolveAddressSuggestion.mockResolvedValue({
+      streetAddress: 'Synthetic New Street 8', city: 'Thessaloniki', postalCode: '54622',
+      coordinates: { lat: 40.7, lng: 23.1 }, placeId: 'new-place', addressFingerprint: 'fp-new',
+      validationSource: 'online',
+    });
     mock.validateAddressForDelivery.mockResolvedValue({
       ...inZone({ lat: 40.7, lng: 23.1 }),
       isValid: false,
@@ -428,7 +485,9 @@ describe('full "Edit customer" saves address changes (founder, 29/09/2026)', () 
       selectedZone: null,
     });
     const { container } = await renderModal({ mode: 'edit', initialCustomer: customer });
-    fireEvent.change(screen.getByDisplayValue('1'), { target: { value: '4' } });
+    fireEvent.change(screen.getByDisplayValue('Synthetic Avenue 3'), { target: { value: 'Synthetic New Street' } });
+    fireEvent.click(await screen.findByText('Thessaloniki', { selector: 'p' }));
+    await waitFor(() => expect(mock.validateAddressForDelivery).toHaveBeenCalled());
     submit(container);
     await waitFor(() => expect(container.textContent).toContain(en.modals.addCustomer.outOfZoneOverrideRequired));
     expect(mock.updateCustomer).not.toHaveBeenCalled();

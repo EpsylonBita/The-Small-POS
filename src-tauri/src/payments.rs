@@ -2239,6 +2239,13 @@ pub(crate) fn record_payment_in_connection(
     input: &PaymentRecordInput,
     options: &PaymentInsertOptions,
 ) -> Result<RecordedPayment, String> {
+    if options.enqueue_sync {
+        crate::edit_settlement_recovery::require_original_financial_attempt(
+            conn,
+            &input.order_id,
+            input.idempotency_key.as_deref(),
+        )?;
+    }
     let mut resolved_input = input.clone();
     if options.platform_settlement {
         let kind = platform_settlement_kind(conn, &input.order_id)
@@ -4212,11 +4219,69 @@ pub fn update_payment_method(
     update_payment_method_for_payment(db, order_id_raw, None, next_method)
 }
 
+fn ensure_manual_payment_method_edit(
+    conn: &Connection,
+    order: &str,
+    payment: &str,
+) -> Result<(), String> {
+    crate::edit_settlement_recovery::require_original_financial_attempt(conn, order, None)?;
+    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE json_valid(data) AND ((table_name='orders' AND record_id=?1 AND json_extract(data,'$.settlement_context.kind')='pos_edit_settlement') OR (table_name IN ('payments','payment_adjustments') AND json_extract(data,'$.parentEditOrderId')=?1)))",[order],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if pending {
+        return Err("ORDER_EDIT_SETTLEMENT_PENDING".into());
+    }
+    let (method,origin,device,reference,metadata):(String,String,String,String,Option<String>)=conn.query_row(
+        "SELECT LOWER(TRIM(method)),LOWER(TRIM(COALESCE(payment_origin,''))),TRIM(COALESCE(terminal_device_id,'')),TRIM(COALESCE(transaction_ref,'')),metadata FROM order_payments WHERE id=?1 AND order_id=?2",
+        params![payment,order],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e|e.to_string())?;
+    let legacy_cash =
+        origin.is_empty() && method == "cash" && device.is_empty() && reference.is_empty();
+    let legacy_reference = origin.is_empty()
+        && reference
+            .strip_prefix("CASH-")
+            .is_some_and(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()));
+    let normalized_origin = if legacy_cash || legacy_reference {
+        "manual"
+    } else {
+        &origin
+    };
+    if !crate::manual_order_cancellation::original_is_manual_with_metadata(
+        &method,
+        normalized_origin,
+        &device,
+        &reference,
+        metadata.as_deref(),
+    ) || payment_is_platform_settlement(conn, payment)?
+        || payment_is_placeholder(conn, payment)?
+    {
+        return Err("PAYMENT_METHOD_EDIT_PROVIDER_PAYMENT_IMMUTABLE".into());
+    }
+    let provider:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM ecr_transactions WHERE order_id=?1 AND LOWER(transaction_type)='sale')",[order],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if provider {
+        return Err("PAYMENT_METHOD_EDIT_PROVIDER_PAYMENT_IMMUTABLE".into());
+    }
+    Ok(())
+}
+
 pub fn update_payment_method_for_payment(
     db: &DbState,
     order_id_raw: &str,
     target_payment_id: Option<&str>,
     next_method: &str,
+) -> Result<Value, String> {
+    update_payment_method_for_payment_with_actor(
+        db,
+        order_id_raw,
+        target_payment_id,
+        next_method,
+        None,
+    )
+}
+
+pub(crate) fn update_payment_method_for_payment_with_actor(
+    db: &DbState,
+    order_id_raw: &str,
+    target_payment_id: Option<&str>,
+    next_method: &str,
+    actor: Option<&str>,
 ) -> Result<Value, String> {
     let next_method = match next_method.trim().to_ascii_lowercase().as_str() {
         "cash" => "cash".to_string(),
@@ -4366,6 +4431,7 @@ pub fn update_payment_method_for_payment(
             completed_payments[0].clone()
         };
 
+    ensure_manual_payment_method_edit(&conn, &order_id, &payment_id)?;
     if current_method == next_method {
         let now = Utc::now().to_rfc3339();
         let tx = conn
@@ -4407,6 +4473,7 @@ pub fn update_payment_method_for_payment(
     tx.execute(
         "UPDATE order_payments
          SET method = ?1,
+             payment_origin = CASE WHEN TRIM(COALESCE(payment_origin,''))='' THEN 'manual' ELSE payment_origin END,
              cash_received = CASE
                 WHEN ?1 = 'cash' THEN CAST(
                     COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER)) AS REAL
@@ -4424,6 +4491,8 @@ pub fn update_payment_method_for_payment(
         params![next_method, now, payment_id],
     )
     .map_err(|e| format!("update local payment method: {e}"))?;
+    let evidence:Value=tx.query_row("SELECT json_object('paymentId',id,'orderId',order_id,'idempotencyKey',idempotency_key,'amountCents',COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),'currency',currency,'fromMethod',?2,'toMethod',?3,'charged',json('false')) FROM order_payments WHERE id=?1",params![payment_id,current_method,next_method],|r| { let raw:String=r.get(0)?;Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO recovery_action_log(id,action_id,issue_code,entity_type,entity_id,order_id,success,payload_json,created_at,actor_staff_id) VALUES(?1,'manual_payment_method_correction','MANUAL_PAYMENT_METHOD_CORRECTION','payment',?2,?3,1,?4,?5,?6)",params![uuid::Uuid::new_v4().to_string(),payment_id,order_id,evidence.to_string(),now,actor]).map_err(|e|format!("Write manual tender correction audit: {e}"))?;
     recompute_order_payment_state(&tx, &order_id, &now, &payment_id)?;
     refresh_driver_earning_for_payment_method_edit(&tx, &order_id, &now)?;
     refresh_payment_sync_queue_entry(&tx, &payment_id)?;
@@ -4535,6 +4604,59 @@ fn original_gift_split_json(split: &OriginalGiftSplit) -> Value {
     }
 }
 
+/// A read-only original-provenance proof for routing a restored order to a new
+/// collection. Never use the display origin's legacy `manual` default as proof.
+fn is_proven_manual_original(
+    conn: &Connection,
+    order_id: &str,
+    payment_id: &str,
+) -> Result<bool, String> {
+    let (method, origin, device, reference, metadata): (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT LOWER(TRIM(method)), LOWER(TRIM(COALESCE(payment_origin,''))),
+                TRIM(COALESCE(terminal_device_id,'')), TRIM(COALESCE(transaction_ref,'')), metadata
+         FROM order_payments WHERE id=?1 AND order_id=?2",
+            params![payment_id, order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    if !crate::manual_order_cancellation::original_is_manual_with_metadata(
+        &method,
+        &origin,
+        &device,
+        &reference,
+        metadata.as_deref(),
+    ) || payment_is_placeholder(conn, payment_id)?
+        || payment_is_platform_settlement(conn, payment_id)?
+        || payment_is_platform_held_set_aside(conn, payment_id)?
+    {
+        return Ok(false);
+    }
+    let has_provider_sale: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ecr_transactions
+         WHERE order_id=?1 AND LOWER(transaction_type)='sale')",
+            [order_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(!has_provider_sale)
+}
+
 fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
@@ -4567,6 +4689,7 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
         )
         .map_err(|error| error.to_string())?;
 
+    let mut has_unreadable_rows = false;
     let rows: Vec<PaymentRow> = stmt
         .query_map(params![order_id], |row| {
             Ok((
@@ -4604,6 +4727,7 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
         .filter_map(|row| match row {
             Ok(payment) => Some(payment),
             Err(error) => {
+                has_unreadable_rows = true;
                 warn!("skipping malformed payment row: {error}");
                 None
             }
@@ -4682,6 +4806,8 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 "tipAmount": row.23,
                 "remotePaymentId": row.24,
                 "remainingRefundable": remaining_refundable,
+                "isProvenManualOriginal": !has_unreadable_rows
+                    && is_proven_manual_original(conn, order_id, &row.0)?,
                 "items": items,
             });
             if row.2 == "twint" {
@@ -5473,7 +5599,7 @@ mod tests {
         );
     }
     #[test]
-    fn ordinary_payment_rows_keep_the_legacy_json_contract() {
+    fn ordinary_payment_rows_keep_the_legacy_json_contract_with_manual_proof() {
         let db = test_db();
         {
             let conn = db.conn.lock().expect("lock legacy seed database");
@@ -5514,6 +5640,7 @@ mod tests {
             "currency",
             "discountAmount",
             "id",
+            "isProvenManualOriginal",
             "items",
             "method",
             "orderId",
@@ -5538,11 +5665,116 @@ mod tests {
             "voidedBy",
         ];
         legacy.sort_unstable();
-        assert_eq!(keys, legacy, "a non-gift row gains no gift projection");
+        assert_eq!(keys, legacy, "a non-gift row gains only the manual proof");
         assert_eq!(rows[0]["amount"], serde_json::json!(10.0));
+        assert_eq!(rows[0]["isProvenManualOriginal"], true);
         let snapshot =
             get_order_settlement_snapshot(&db, "order-legacy").expect("legacy settlement");
         assert_eq!(snapshot["completedPayments"], rows);
+    }
+
+    #[test]
+    fn cancelled_restore_payment_projection_proves_manual_originals_without_writes() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,payment_status,created_at,updated_at) VALUES('restored-proof','[]',10,1000,'pending','pending','now','now')", []).unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,created_at,updated_at) VALUES('original-proof','restored-proof','cash',10,1000,'EUR','refunded','manual','now','now')", []).unwrap();
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,created_at,updated_at) VALUES('return-proof','original-proof','restored-proof','refund',10,1000,'First cancellation','now','now')", []).unwrap();
+        for (method, origin, device, reference, metadata, proven) in [
+            ("cash", "manual", "", "CASH-123", None, true),
+            (
+                "card",
+                "manual",
+                "",
+                "CARD-456",
+                Some(r#"{"collected_by":"cashier_drawer"}"#),
+                true,
+            ),
+            ("card", "manual_recovery", "", "CASH-123", None, true),
+            ("cash", "", "", "CASH-123", None, false),
+            ("card", "terminal", "", "CARD-456", None, false),
+            ("cash", "sync_reconstructed", "", "", None, false),
+            ("card", "manual", "provider-device", "CARD-456", None, false),
+            ("card", "manual", "", "provider-reference", None, false),
+            (
+                "card",
+                "manual",
+                "",
+                "CARD-456",
+                Some(r#"{"provider":"stripe"}"#),
+                false,
+            ),
+            (
+                "card",
+                "manual",
+                "",
+                "CARD-456",
+                Some(r#"{"paymentOrigin":"terminal"}"#),
+                false,
+            ),
+            (
+                "card",
+                "manual",
+                "",
+                "CARD-456",
+                Some(r#"{"terminalProcessed":true}"#),
+                false,
+            ),
+            (
+                "card",
+                "manual",
+                "",
+                "CARD-456",
+                Some(r#"{"terminalDeviceId":"reader"}"#),
+                false,
+            ),
+            ("cash", "manual", "", "CASH-123", Some("not-json"), false),
+            ("other", "manual", "", "", None, false),
+        ] {
+            // Reproduce a legacy empty origin; today's writes still enforce the schema.
+            conn.execute_batch("PRAGMA ignore_check_constraints=ON")
+                .unwrap();
+            conn.execute("UPDATE order_payments SET method=?1,payment_origin=?2,terminal_device_id=?3,transaction_ref=?4,metadata=?5 WHERE id='original-proof'",params![method,origin,device,reference,metadata]).unwrap();
+            conn.execute_batch("PRAGMA ignore_check_constraints=OFF")
+                .unwrap();
+            for status in ["refunded", "completed"] {
+                conn.execute(
+                    "UPDATE order_payments SET status=?1 WHERE id='original-proof'",
+                    [status],
+                )
+                .unwrap();
+                let before = conn.total_changes();
+                let rows = load_order_payment_rows(&conn, "restored-proof").unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0]["isProvenManualOriginal"], proven,
+                    "{method}/{origin}/{status}/{metadata:?}"
+                );
+                assert_eq!(rows[0]["status"], status);
+                assert_eq!(rows[0]["amount"], 10.0);
+                assert_eq!(rows[0]["refundedAmount"], 10.0);
+                assert_eq!(rows[0]["remainingRefundable"], 0.0);
+                assert!(rows[0].get("metadata").is_none());
+                assert_eq!(
+                    conn.total_changes(),
+                    before,
+                    "projection must not mutate history"
+                );
+            }
+        }
+        conn.execute("UPDATE order_payments SET method='cash',payment_origin='manual',terminal_device_id=NULL,transaction_ref='CASH-123',metadata=NULL WHERE id='original-proof'",[]).unwrap();
+        conn.execute("INSERT INTO ecr_devices(id,name,device_type,brand,protocol,connection_type,connection_details) VALUES('restore-reader','Reader','payment_terminal','generic','generic','network','{}')",[]).unwrap();
+        db::ecr_insert_transaction(&conn, &serde_json::json!({
+            "id":"original-provider-attempt","deviceId":"restore-reader","orderId":"restored-proof",
+            "transactionType":"sale","amount":1000,"currency":"EUR","status":"failed","startedAt":"now"
+        })).unwrap();
+        let before = conn.total_changes();
+        let rows = load_order_payment_rows(&conn, "restored-proof").unwrap();
+        assert_eq!(
+            rows[0]["isProvenManualOriginal"], false,
+            "failed provider sale is not proof of no charge"
+        );
+        assert_eq!(conn.total_changes(), before);
     }
 
     fn seed_driver_delivery_with_completed_payments(
@@ -5849,6 +6081,107 @@ mod tests {
             earning,
             outboxes,
         }
+    }
+
+    #[test]
+    fn cancellation_pr_guard_tender_correction_rejects_provider_metadata() {
+        for metadata in [
+            serde_json::json!({"provider":"stripe"}),
+            serde_json::json!({"terminalProcessed":true}),
+            serde_json::json!({"terminalDeviceId":"provider-device"}),
+            serde_json::json!({"paymentOrigin":"terminal"}),
+        ] {
+            let db = test_db();
+            let payment = seed_driver_delivery_with_completed_payments(
+                &db,
+                "metadata-provider",
+                &[("card", 600)],
+                "active",
+                0,
+                0,
+            )[0]
+            .clone();
+            db.conn.lock().unwrap().execute("UPDATE order_payments SET payment_origin='manual',transaction_ref='CARD-1791226924826',metadata=?1 WHERE id=?2",params![metadata.to_string(),payment]).unwrap();
+            assert_eq!(
+                update_payment_method_for_payment(&db, "metadata-provider", Some(&payment), "cash")
+                    .unwrap_err(),
+                "PAYMENT_METHOD_EDIT_PROVIDER_PAYMENT_IMMUTABLE",
+                "{metadata}"
+            );
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT method FROM order_payments WHERE id=?1",
+                    [&payment],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "card"
+            );
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM recovery_action_log WHERE action_id='manual_payment_method_correction'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
+    }
+
+    #[test]
+    fn payment_method_edit_provenance_pending_and_audit_regression() {
+        for (origin, reference, device, allowed) in [
+            ("manual", "CASH-123", "", true),
+            ("terminal", "proof", "", false),
+            ("manual", "CASH-123", "device", false),
+            ("manual", "provider-proof", "", false),
+            ("", "", "", false),
+        ] {
+            let db = test_db();
+            let payment = seed_driver_delivery_with_completed_payments(
+                &db,
+                "method-proof",
+                &[("card", 600)],
+                "active",
+                0,
+                0,
+            )[0]
+            .clone();
+            {
+                let conn = db.conn.lock().unwrap();
+                // Legacy files may contain the historical blank origin. Seed that
+                // old shape only; enforce today's schema for the operation.
+                conn.execute_batch("PRAGMA ignore_check_constraints=ON")
+                    .unwrap();
+                conn.execute("UPDATE order_payments SET payment_origin=?1,transaction_ref=?2,terminal_device_id=?3 WHERE id=?4",params![origin,reference,device,payment]).unwrap();
+                conn.execute_batch("PRAGMA ignore_check_constraints=OFF")
+                    .unwrap();
+            }
+            let result =
+                update_payment_method_for_payment(&db, "method-proof", Some(&payment), "cash");
+            assert_eq!(
+                result.is_ok(),
+                allowed,
+                "{origin}/{reference}/{device}: {result:?}"
+            );
+            let conn = db.conn.lock().unwrap();
+            let (amount,count):(i64,i64)=conn.query_row("SELECT amount_cents,(SELECT COUNT(*) FROM recovery_action_log WHERE action_id='manual_payment_method_correction') FROM order_payments WHERE id=?1",[&payment],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert_eq!(amount, 600);
+            assert_eq!(count, if allowed { 1 } else { 0 });
+        }
+        let db = test_db();
+        let payment = seed_driver_delivery_with_completed_payments(
+            &db,
+            "pending-method",
+            &[("cash", 600)],
+            "active",
+            0,
+            0,
+        )[0]
+        .clone();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO parity_sync_queue(id,organization_id,table_name,record_id,operation,data,status,created_at) VALUES('pending-header','test-org','orders','pending-method','UPDATE','{\"settlement_context\":{\"kind\":\"pos_edit_settlement\"}}','pending','now')",[]).unwrap();
+        }
+        assert_eq!(
+            update_payment_method_for_payment(&db, "pending-method", Some(&payment), "card")
+                .unwrap_err(),
+            "ORDER_EDIT_SETTLEMENT_PENDING"
+        );
     }
 
     #[test]
@@ -6444,7 +6777,7 @@ mod tests {
                 "UPDATE order_payments
                  SET cash_received = 30.0, cash_received_cents = 3000,
                      change_given = 6.0, change_given_cents = 600,
-                     transaction_ref = 'ORIGINAL-CASH-REF'
+                     transaction_ref = 'CASH-123'
                  WHERE id = ?1",
                 params![cash_payment_id],
             )
@@ -6458,7 +6791,7 @@ mod tests {
             conn.execute(
                 "UPDATE order_payments
                  SET amount = 99.99, amount_cents = 2400,
-                     transaction_ref = 'ORIGINAL-CARD-REF'
+                     transaction_ref = 'CASH-456'
                  WHERE id = ?1",
                 params![card_payment_id],
             )
@@ -6514,7 +6847,7 @@ mod tests {
                 },
             )
             .expect("read cash reclassification metadata");
-        assert_eq!(cash_to_card, (None, None, "ORIGINAL-CASH-REF".to_string()));
+        assert_eq!(cash_to_card, (None, None, "CASH-123".to_string()));
         assert_eq!(
             card_to_cash,
             (
@@ -6522,7 +6855,7 @@ mod tests {
                 Some(2400),
                 Some(0.0),
                 Some(0),
-                "ORIGINAL-CARD-REF".to_string()
+                "CASH-456".to_string()
             ),
             "authoritative cents must drive both REAL and cents cash tender fields"
         );
@@ -7537,7 +7870,8 @@ mod tests {
                 "amount": 12.0,
                 "cashReceived": 12.0,
                 "changeGiven": 0.0,
-                "transactionRef": "CASH-METHOD-EDIT-1",
+                // Model a proven local manual original, not an unknown provider reference.
+                "transactionRef": "CASH-1760000001001",
             }),
         )
         .expect("record initial payment");
@@ -7754,7 +8088,8 @@ mod tests {
                 "amount": 4.0,
                 "cashReceived": 4.0,
                 "changeGiven": 0.0,
-                "transactionRef": "TARGETED-SPLIT-CASH-1",
+                // Each manual portion retains its own local timestamp reference.
+                "transactionRef": "CASH-1760000001002",
             }),
         )
         .expect("record first targeted split payment");
@@ -7770,7 +8105,7 @@ mod tests {
                 "amount": 6.0,
                 "cashReceived": 6.0,
                 "changeGiven": 0.0,
-                "transactionRef": "TARGETED-SPLIT-CASH-2",
+                "transactionRef": "CASH-1760000001003",
             }),
         )
         .expect("record second targeted split payment");
@@ -7969,7 +8304,8 @@ mod tests {
                 "amount": 9.5,
                 "cashReceived": 10.0,
                 "changeGiven": 0.5,
-                "transactionRef": "CASH-RETRY-1",
+                // Sync retry keeps the same proven manual original.
+                "transactionRef": "CASH-1760000001004",
             }),
         )
         .expect("record payment for same-method retry");
@@ -8083,7 +8419,8 @@ mod tests {
                 "amount": 6.25,
                 "cashReceived": 6.5,
                 "changeGiven": 0.25,
-                "transactionRef": "CASH-NOOP-1",
+                // A healthy manual original remains a no-op under the provenance guard.
+                "transactionRef": "CASH-1760000001005",
             }),
         )
         .expect("record payment for same-method noop");

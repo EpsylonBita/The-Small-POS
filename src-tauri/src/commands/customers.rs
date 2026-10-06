@@ -627,6 +627,13 @@ fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
     if let Some(coords) = source.get("coordinates") {
         body.insert("coordinates".to_string(), coords.clone());
     }
+    // PATCH distinguishes an omitted axis from an explicit location clear.
+    // Keep nulls in the captured body so an offline replay has the same intent.
+    for key in ["latitude", "longitude"] {
+        if source.get(key).is_some_and(serde_json::Value::is_null) {
+            body.insert(key.to_string(), serde_json::Value::Null);
+        }
+    }
     if let Some(latitude) = value_f64_any(source, &["latitude"]) {
         body.insert("latitude".to_string(), serde_json::json!(latitude));
     }
@@ -3778,6 +3785,34 @@ mod dto_tests {
     }
 
     #[test]
+    fn address_update_queue_preserves_explicit_flat_coordinate_clear() {
+        let body = build_address_update_queue_payload(
+            &serde_json::json!({ "latitude": null, "longitude": null }),
+            "customer-1",
+            false,
+            4,
+        )
+        .expect("flat null pair is an explicit location clear, not an empty update");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "customer_id": "customer-1", "expected_version": 4,
+                "latitude": null, "longitude": null
+            })
+        );
+        let floor_only = build_address_update_queue_payload(
+            &serde_json::json!({ "floor_number": "2" }),
+            "customer-1",
+            false,
+            4,
+        )
+        .expect("floor-only update");
+        assert!(floor_only.get("coordinates").is_none());
+        assert!(floor_only.get("latitude").is_none());
+        assert!(floor_only.get("longitude").is_none());
+    }
+
+    #[test]
     fn build_remote_address_body_maps_known_aliases() {
         let source = serde_json::json!({
             "street": "Xenofontos 28",
@@ -5260,10 +5295,11 @@ mod dto_tests {
             &cached(&db, OFFICE_ID).expect("cached")["addresses"][0],
             None,
         );
-        // `coordinates: null` without a flat pair is the office PATCH's "clear".
+        // Both supported clear representations survive the captured PATCH.
         let body = &customer_row(&db, "customer_addresses", "UPDATE")[0].3;
         assert_eq!(body.get("coordinates"), Some(&serde_json::Value::Null));
-        assert!(body.get("latitude").is_none(), "{body}");
+        assert_eq!(body.get("latitude"), Some(&serde_json::Value::Null));
+        assert_eq!(body.get("longitude"), Some(&serde_json::Value::Null));
     }
 
     #[test]

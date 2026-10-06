@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 96;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 97;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -730,6 +730,14 @@ where
     }
     if current < 96 {
         run_migration_tx(conn, 96, migrate_v96)?;
+    }
+    if current < 97 {
+        run_migration_tx(conn, 97, |conn| {
+            conn.execute_batch(crate::staff_cash_returns::SCHEMA_SQL)
+                .map_err(|error| error.to_string())?;
+            conn.execute_batch("INSERT INTO schema_version(version) VALUES(97)")
+                .map_err(|error| error.to_string())
+        })?;
     }
 
     Ok(())
@@ -2004,7 +2012,7 @@ enum PreMigrationRecoveryMode {
 }
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
-    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
+    56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
 ];
 
 fn computed_pending_migrations(
@@ -9506,16 +9514,16 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96
+                96, 97
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
         // the newest version and MAX(schema_version) says the database is current.
@@ -9539,6 +9547,10 @@ mod tests {
         // v96 adds nullable prospective snapshots, validation triggers, and a
         // satellite handover journal. It never backfills or rewrites repair data.
         assert!(native_repair_atomic_only_allowed(95, &[96]));
+        // v97 only creates the staff cash-return journal and its indexes in
+        // run_migration_tx; it neither reads nor rewrites native repair data.
+        assert!(native_repair_atomic_only_allowed(96, &[97]));
+        assert!(!native_repair_atomic_only_allowed(97, &[98]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -9821,7 +9833,7 @@ mod tests {
         // guard trigger; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(85, false, false, false, false),
-            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
+            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
     }
@@ -9832,7 +9844,7 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
+            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -9938,7 +9950,7 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94, 95, 96]
+            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -9978,7 +9990,7 @@ mod tests {
         gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
         assert_eq!(
             computed_pending_migrations(83, false, false, false, true),
-            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96]
+            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
         );
         let error = run_migrations_with_preflight(
             &conn,

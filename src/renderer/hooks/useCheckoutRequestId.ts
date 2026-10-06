@@ -18,6 +18,7 @@ const newCheckoutRequestId = (): string =>
  */
 export function useCheckoutRequestId() {
   const idRef = useRef<string | null>(null);
+  const protectedRef = useRef(false);
   const take = useCallback((persistedId?: string): string => {
     if (persistedId) {
       if (idRef.current && idRef.current !== persistedId) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
@@ -26,16 +27,34 @@ export function useCheckoutRequestId() {
     if (!idRef.current) {
       idRef.current = newCheckoutRequestId();
     }
+    protectedRef.current = true;
     return idRef.current;
   }, []);
   const reset = useCallback(() => {
     idRef.current = null;
+    protectedRef.current = false;
   }, []);
-  const restore = useCallback((persistedId: string) => {
+  const restore = useCallback((persistedId: string, draft?: { phase?: string; editMode?: boolean; renewedFrom?: string }) => {
     if (!persistedId.trim()) throw new Error('CHECKOUT_REQUEST_ID_REQUIRED');
+    // An existing-order edit has its own durable event and never owns the
+    // next create request. Its pending money remains in the edit journal.
+    if (draft?.editMode) return;
+    // Only the successful native declined-attempt CAS may replace a protected
+    // identity. This proof is supplied by its live callback, never draft JSON.
+    const renewed = draft?.phase === 'editing' && !!draft.renewedFrom &&
+      draft.renewedFrom === idRef.current && persistedId !== idRef.current;
+    if (draft?.renewedFrom && !renewed) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
+    if (idRef.current && idRef.current !== persistedId && !renewed) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
     idRef.current = persistedId;
+    if (renewed) protectedRef.current = false;
+    // Missing phase keeps the original conservative restore contract. A stale
+    // editable render must never downgrade an already submitted identity.
+    protectedRef.current ||= draft?.phase !== 'editing';
   }, []);
-  return { take, reset, restore };
+  const dismiss = useCallback(() => {
+    if (!protectedRef.current) idRef.current = null;
+  }, []);
+  return { take, reset, restore, dismiss };
 }
 
 export default useCheckoutRequestId;

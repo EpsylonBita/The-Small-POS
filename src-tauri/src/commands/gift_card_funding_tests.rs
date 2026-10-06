@@ -36,6 +36,40 @@ fn set_terminal(conn: &Connection, terminal_id: &str) {
     crate::db::set_setting(conn, "terminal", "terminal_id", terminal_id).expect("seed terminal id");
 }
 
+/// The fixture-owned terminal binding row: its value and `updated_at` stamp.
+fn terminal_binding(conn: &Connection) -> (String, Option<String>) {
+    conn.query_row(
+        "SELECT setting_value, updated_at FROM local_settings
+         WHERE setting_category = 'terminal' AND setting_key = 'terminal_id'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("fixture terminal binding")
+}
+
+/// Runs `body` with the terminal rebound to `terminal_id`, then restores the
+/// fixture-owned binding row exactly: `set_setting` stamps `updated_at` with
+/// `datetime('now')`, so a bare switch-back alters whole-table snapshots once
+/// a second boundary passes. The code under test must leave the row alone.
+fn with_terminal<T>(conn: &Connection, terminal_id: &str, body: impl FnOnce() -> T) -> T {
+    let original = terminal_binding(conn);
+    set_terminal(conn, terminal_id);
+    let rebound = terminal_binding(conn);
+    let result = body();
+    assert_eq!(
+        terminal_binding(conn),
+        rebound,
+        "the code under test never writes the terminal binding"
+    );
+    conn.execute(
+        "UPDATE local_settings SET setting_value = ?1, updated_at = ?2
+         WHERE setting_category = 'terminal' AND setting_key = 'terminal_id'",
+        params![original.0, original.1],
+    )
+    .expect("restore fixture terminal binding");
+    result
+}
+
 fn test_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory db");
     configure(&conn);
@@ -1508,16 +1542,16 @@ fn manager_grant_authority_is_separate_fenced_and_cleared_with_the_cashier() {
     )
     .unwrap();
     let foreign_plan = plan(&conn, &foreign.original.attempt_key, Requested::Resume);
-    set_terminal(&conn, OTHER_TERMINAL);
-    let foreign_done = finish(
-        &conn,
-        &foreign_plan,
-        Ok(&funding_reply(
-            &load(&conn, &foreign.original.attempt_key),
-            "completed",
-        )),
-    );
-    set_terminal(&conn, TERMINAL);
+    let foreign_done = with_terminal(&conn, OTHER_TERMINAL, || {
+        finish(
+            &conn,
+            &foreign_plan,
+            Ok(&funding_reply(
+                &load(&conn, &foreign.original.attempt_key),
+                "completed",
+            )),
+        )
+    });
     assert!(foreign_done.get("cardNumber").is_none());
 
     // No drawer cash, no other table, no retained session.
@@ -1530,6 +1564,41 @@ fn manager_grant_authority_is_separate_fenced_and_cleared_with_the_cashier() {
         .unwrap()
         .to_string()
         .contains(MANAGER_SESSION));
+}
+
+#[test]
+fn terminal_rebinding_restores_fixture_metadata_across_a_clock_second() {
+    const BACK_DATED: &str = "2000-01-01 00:00:00";
+    let conn = test_conn();
+    // Back-dating the binding puts every rewrite in a later `datetime('now')`
+    // second, as on a slow hosted runner, without sleeping.
+    conn.execute(
+        "UPDATE local_settings SET updated_at = ?1
+         WHERE setting_category = 'terminal' AND setting_key = 'terminal_id'",
+        [BACK_DATED],
+    )
+    .expect("back-date terminal binding");
+    let before = outside_journal(&conn);
+
+    // The scoped rebinding reaches the code under test and is undone exactly.
+    let rebound = with_terminal(&conn, OTHER_TERMINAL, || terminal_binding(&conn));
+    assert_eq!(rebound.0, OTHER_TERMINAL);
+    assert_ne!(rebound.1.as_deref(), Some(BACK_DATED));
+    assert_eq!(outside_journal(&conn), before);
+
+    // A bare switch and switch-back restores the value but not the stamp:
+    // the hosted snapshot mismatch, confined to the settings table.
+    set_terminal(&conn, OTHER_TERMINAL);
+    set_terminal(&conn, TERMINAL);
+    assert_eq!(terminal_binding(&conn).0, TERMINAL);
+    let after = outside_journal(&conn);
+    let changed: Vec<&str> = after
+        .iter()
+        .zip(&before)
+        .filter(|(now, then)| now != then)
+        .map(|(now, _)| now.0.as_str())
+        .collect();
+    assert_eq!(changed, ["local_settings"]);
 }
 
 #[test]

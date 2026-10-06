@@ -32,7 +32,11 @@ test('both glass modal viewport roots are marked with data-liquid-glass-modal-vi
 
   // Both modal components opt into the shared isolation hook.
   assert.match(source, /export const POSGlassModal[\s\S]*?useBackgroundAccessibilityIsolation\(isOpen\)/);
-  assert.match(source, /export const LiquidGlassModal[\s\S]*?useBackgroundAccessibilityIsolation\(mounted && !isServerRender\)/);
+  // A retained operational dialog must release background isolation while the
+  // cashier gate hides it, so settings and recovery dialogs remain reachable.
+  assert.match(source, /export const LiquidGlassModal[\s\S]*?useBackgroundAccessibilityIsolation\(mounted && !isServerRender && \(!cashierLocked \|\| isRecovery\)\)/);
+  assert.match(source, /inert=\{cashierLocked && !isRecovery\}/);
+  assert.match(source, /visibility: cashierLocked && !isRecovery \? 'hidden' : undefined/);
 });
 
 // (2) The shared isolation code sets aria-hidden + inert on non-modal body children.

@@ -127,10 +127,14 @@ pub fn parse_fiscal_status_response(body: &Value) -> Option<FiscalStatus> {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
     };
+    let reason = text("reason").unwrap_or_default();
+    // Older servers counted purchased but pending/error branch configurations
+    // as active. An explicitly disconnected branch has no active fiscal plugin.
+    let active = active && reason != "branch_config_not_connected";
     Some(FiscalStatus {
         active,
-        plugin_id: text("pluginId"),
-        reason: text("reason").unwrap_or_default(),
+        plugin_id: if active { text("pluginId") } else { None },
+        reason,
         checked_at: text("checkedAt").unwrap_or_default(),
     })
 }
@@ -220,10 +224,23 @@ where
             "fiscal status request timed out",
         )),
     };
+    let previous = active_cache::verdict(branch_id.trim());
     let outcome = apply_fiscal_status_result(branch_id, result);
     schedule_next_refresh(&outcome);
     match &outcome {
-        FiscalStatusRefresh::Active(status) | FiscalStatusRefresh::Inactive(status) => info!(
+        FiscalStatusRefresh::Active(status) if previous != CacheVerdict::Active => info!(
+            branch_id = %branch_id.trim(),
+            active = status.active,
+            reason = %status.reason,
+            "[fiscal.status] fiscalization became active"
+        ),
+        FiscalStatusRefresh::Inactive(status) if previous == CacheVerdict::Active => info!(
+            branch_id = %branch_id.trim(),
+            active = status.active,
+            reason = %status.reason,
+            "[fiscal.status] fiscalization became inactive"
+        ),
+        FiscalStatusRefresh::Active(status) | FiscalStatusRefresh::Inactive(status) => debug!(
             branch_id = %branch_id.trim(),
             active = status.active,
             reason = %status.reason,
@@ -319,6 +336,28 @@ pub(crate) fn reset_schedule_for_tests() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn explicitly_disconnected_branch_is_inactive_even_with_older_server_verdict() {
+        let reply = parse_fiscal_status_response(&json!({
+            "active":true,"pluginId":"mydata","reason":"branch_config_not_connected"
+        }))
+        .unwrap();
+        assert!(!reply.active);
+        assert_eq!(reply.plugin_id, None);
+        for reason in [
+            "active",
+            "credentials_missing",
+            "certification_missing",
+            "no_active_plugin",
+        ] {
+            assert!(
+                parse_fiscal_status_response(&json!({"active":true,"reason":reason}))
+                    .unwrap()
+                    .active
+            );
+        }
+    }
 
     #[test]
     fn parses_the_contract_body_and_the_wrapped_form() {

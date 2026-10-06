@@ -775,6 +775,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   // values they opened with (an unchanged address is not written again).
   const editTargetAddressRef = useRef<any | null>(null);
   const [initialAddressFields, setInitialAddressFields] = useState<AddressFieldsSnapshot | null>(null);
+  const [storedDestination, setStoredDestination] = useState<{
+    fields: Pick<AddressFieldsSnapshot, 'address' | 'city' | 'postalCode'>;
+    coordinates: LatLng | null;
+    details: AddressSelectionDetails | null;
+  } | null>(null);
   // A saved address opened for editing WITHOUT a real point: its delivery zone
   // was never checked. While the cashier leaves it as it is, saving is not
   // blocked and nothing is zone-checked; «pick the address again» checks it.
@@ -805,6 +810,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       setPhoneBlurred(false);
       setSubmitAttempted(false);
       setInitialAddressFields(null);
+      setStoredDestination(null);
       setUncheckedStoredAddress(null);
       setRepickSignal(0);
       editTargetAddressRef.current = null;
@@ -831,6 +837,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         setAddressCoordinates(storedCoordinates);
         setSelectedAddressDetails(storedDetails);
         setValidationSnapshot(storedDetails?.addressFingerprint || null);
+        setStoredDestination(editingSavedAddress ? {
+          fields: { address: fields.address, city: fields.city, postalCode: fields.postalCode },
+          coordinates: storedCoordinates,
+          details: storedDetails,
+        } : null);
         setUncheckedStoredAddress(
           editingSavedAddress && !storedCoordinates && fields.address.trim()
             ? { address: fields.address, city: fields.city, postalCode: fields.postalCode }
@@ -937,6 +948,18 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     && formData.city === uncheckedStoredAddress.city
     && formData.postalCode === uncheckedStoredAddress.postalCode
     && !firstValidPoint(selectedAddressDetails?.coordinates, addressCoordinates),
+  );
+  const currentPoint = firstValidPoint(selectedAddressDetails?.coordinates, addressCoordinates);
+  // Floor, bell and contact edits keep the original destination. A fresh
+  // suggestion selection (even for the same text/point) must still be checked.
+  const keepsStoredDestination = Boolean(
+    storedDestination
+    && formData.address === storedDestination.fields.address
+    && formData.city === storedDestination.fields.city
+    && formData.postalCode === storedDestination.fields.postalCode
+    && selectedAddressDetails === storedDestination.details
+    && currentPoint?.lat === storedDestination.coordinates?.lat
+    && currentPoint?.lng === storedDestination.coordinates?.lng,
   );
   // Founder (29/09/2026): never «out of zone» for an address nobody checked.
   // Say the zone was not checked and offer to pick the address again; saving
@@ -1277,10 +1300,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         submitPhoneAssessment && !submitPhoneAssessment.result.ok ? submitPhoneAssessment.result : null;
 
       let validationForSubmit: DeliveryValidationResult | null = null;
-      // A saved address without a point that the cashier left as it is is not
-      // zone-checked (and never by its text alone, which can land on a
-      // same-named street elsewhere): the save goes ahead, the notice stays.
-      if (hasDeliveryPro && !keepsUncheckedStoredAddress) {
+      // Delivery instructions do not change the destination or its saved proof.
+      // A legacy address without a point remains unchecked; never geocode its
+      // text silently while saving a floor or bell edit.
+      if (hasDeliveryPro && !keepsStoredDestination) {
         validationForSubmit = await ensureAddressValidationForSubmit();
         const validationDecisionError = evaluateValidationDecision(validationForSubmit);
         if (validationDecisionError) {
@@ -1300,7 +1323,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const refreshed = await getResolvedTerminalCredentials().catch(() => ({
         branchId: terminalBranchId || undefined,
       } as any));
-      const activeValidation = hasDeliveryPro && !keepsUncheckedStoredAddress
+      const activeValidation = hasDeliveryPro && !keepsStoredDestination
         ? (validationForSubmit || deliveryValidationResult)
         : null;
       // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
@@ -1308,10 +1331,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const persistedCoords = !parsedAddressInput.shouldSkipZoneValidation
         ? firstValidPoint(selectedAddressDetails?.coordinates, addressCoordinates, activeValidation?.coordinates)
         : null;
-      // A saved address without a point, left as it is, keeps whatever point
-      // the office holds: its coordinates are left out of the write rather
-      // than sent as null.
-      const coordinateFields = keepsUncheckedStoredAddress
+      // Omission preserves the office's exact point/provenance. When creating
+      // an address from legacy customer fields, carry its known point instead.
+      const preservesSavedLocation = keepsStoredDestination
+        && (isEditAddressMode || Boolean(editTargetAddressRef.current?.id));
+      const coordinateFields = preservesSavedLocation || keepsUncheckedStoredAddress
         ? {}
         : {
             coordinates: persistedCoords,
@@ -1320,7 +1344,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           };
       const validatedAt = hasDeliveryPro && activeValidation ? new Date().toISOString() : null;
       const normalizedOverrideReason = overrideApplied ? overrideReason.trim() : '';
-      const validationMetadata = hasDeliveryPro
+      const validationMetadata = hasDeliveryPro && !keepsStoredDestination
         ? {
             override_applied: overrideApplied,
             override_reason: normalizedOverrideReason || null,
@@ -1382,6 +1406,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           const updatedCustomer = {
             ...initialCustomer,
             // Update legacy fields for immediate UI feedback if needed,
+            delivery_destination_unchanged: false,
             // though proper selection should use selected_address_id
             address: normalizedStreetAddress,
             postal_code: formData.postalCode ? formData.postalCode.trim() : initialCustomer.postal_code,
@@ -1450,6 +1475,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           const updatedCustomer = {
             ...initialCustomer,
             addresses: updatedAddresses,
+            // Transient handoff hint; consumers must also verify exact ownership.
+            delivery_destination_unchanged: keepsStoredDestination,
             // Keep editAddressId so OrderFlow knows which address was edited
             editAddressId: initialCustomer.editAddressId,
             // The address just edited is the one the order goes to (a legacy
@@ -1508,7 +1535,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           notes: !targetAddress && notesChanged && formData.notes.trim() ? formData.notes.trim() : undefined,
           name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
           ...coordinateFields,
-          delivery_validation: validationMetadata,
+          ...(keepsStoredDestination ? {} : { delivery_validation: validationMetadata }),
         };
 
         // Use optimistic versioning if available, otherwise fetch fresh version
@@ -1607,6 +1634,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         const updatedCustomer = {
           ...(result.data as any),
+          delivery_destination_unchanged: keepsStoredDestination,
           // Include address data from form for immediate use
           address: normalizedStreetAddress,
           city: formData.city ? formData.city.trim() : undefined,

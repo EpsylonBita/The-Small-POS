@@ -1,6 +1,7 @@
 {
   "modals": {
     "menu": {
+      "draftTargetCancelled": "Cette commande a été annulée. Son ancienne modification a été archivée et ne peut pas être enregistrée.",
       "draftReadFailed": "Le panier enregistré ne peut pas être lu. La validation est suspendue et le panier précédent est conservé.",
       "draftSaveFailed": "Le panier ne peut pas être enregistré. La validation attend un enregistrement durable réussi.",
       "draftDiscardFailed": "Le panier enregistré ne peut pas être supprimé. Il est conservé.",
@@ -13,7 +14,19 @@
       "draftExistingTable": "Cette table a déjà une addition ouverte. Ouvrez-la pour ajouter des articles.",
       "draftDeclinedResumed": "Le paiement a été refusé. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé.",
       "draftNotSentResumed": "Aucune demande de paiement n’a été envoyée. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé.",
-      "draftNotChargedResumed": "Les tentatives de paiement initiales n’ont pas débité le client. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé."
+      "draftNotChargedResumed": "Les tentatives de paiement initiales n’ont pas débité le client. Votre panier a été restauré ; aucun nouveau paiement n’a été lancé.",
+      "legacyCurrency": {
+        "title": "Confirmer la devise du service ouvert",
+        "message": "Ce service a été ouvert avec une ancienne version. Confirmez que le fonds de caisse initial et ses transactions étaient en {{currency}} avant de continuer. Aucun montant ne sera converti.",
+        "pin": "Code PIN du responsable (si nécessaire)",
+        "confirm": "Confirmer {{currency}}",
+        "ready": "Devise du service confirmée. Vous pouvez poursuivre le paiement.",
+        "failed": "Le service n’a pas pu être confirmé. Vérifiez sa devise et saisissez le code PIN du responsable si nécessaire."
+      },
+      "editServerUpdate": "Les corrections sont temporairement indisponibles. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
+      "editSyncRequired": "La modification du paiement ou de la commande n’est pas encore synchronisée. Votre panier est conservé. Réessayez dans un instant.",
+      "emptyEditHint": "Pour retirer tous les articles, fermez l’éditeur et annulez la commande.",
+      "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement."
     }
   },
   "checkoutRecovery": {
@@ -26,5 +39,15 @@
     "auth_required": "Connectez-vous avec une session autorisée pour continuer.",
     "conflict": "Un autre terminal a modifié cette addition. Vérifiez son état actuel avant de continuer.",
     "refresh": "Actualiser le statut"
+  },
+  "paymentIntegrity": {
+    "reasonCodes": {
+      "table_cancellation_not_saved": "Le remboursement initial pour l’annulation de la table n’a pas encore été enregistré.",
+      "edit_settlement_not_saved": "Une correction confirmée n’est pas encore enregistrée. L’encaissement ou le remboursement initial est conservé."
+    },
+    "fixCodes": {
+      "table_cancellation_not_saved": "Récupérez l’annulation initiale de la table. Ne remettez et ne remboursez pas l’argent une seconde fois.",
+      "edit_settlement_not_saved": "Rouvrez la modification conservée et enregistrez la même correction. Ne pas encaisser ni rembourser à nouveau."
+    }
   }
 }

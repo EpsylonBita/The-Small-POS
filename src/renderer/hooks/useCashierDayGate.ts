@@ -15,7 +15,7 @@ export function useCashierDayGate(options: { isMobileWaiter?: boolean; parentTer
   const identity = getCachedTerminalCredentials();
   const branchId = identity.branchId || staff?.branchId || null;
   const terminalId = identity.terminalId || staff?.terminalId || null;
-  const scope = [branchId, terminalId, options.isMobileWaiter, options.parentTerminalId].join(':');
+  const scope = [identity.organizationId, branchId, terminalId, options.isMobileWaiter, options.parentTerminalId].join(':');
   const [state, setState] = useState({ scope, branchId, isBlocked: true, isResolving: true });
   const generation = useRef(0);
   const closedDayInvalidation = useRef(false);
@@ -26,7 +26,9 @@ export function useCashierDayGate(options: { isMobileWaiter?: boolean; parentTer
   const runCheck = useCallback(async (invalidate = false) => {
     const request = ++generation.current;
     if (invalidate) setState(previous => ({ ...previous,
-      isBlocked: previous.scope === scope ? previous.isBlocked : true, isResolving: true }));
+      isBlocked: previous.scope === scope ? previous.isBlocked : true,
+      // Refresh known same-scope evidence quietly; first resolution and identity changes stay locked.
+      isResolving: previous.scope !== scope || previous.isResolving }));
     try {
       if (options.ready === false) return;
       const bridge = getBridge();
@@ -107,5 +109,5 @@ export function useCashierDayGate(options: { isMobileWaiter?: boolean; parentTer
     lastOwnShiftVersion.current = ownShiftVersion;
     if (mounted.current) void runCheck();
   }, [ownShiftVersion, runCheck]);
-  return { ...state, isResolving: state.isResolving || state.scope !== scope || options.ready === false, recheck: () => runCheck(true) };
+  return { ...state, isResolving: state.isResolving || state.scope !== scope, recheck: () => runCheck(true) };
 }

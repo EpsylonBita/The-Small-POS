@@ -239,10 +239,10 @@ test('start-shift wizard uses the yellow brand accent without orange or amber UI
 
 test('start-shift disabled states keep readable text without fading the whole card', () => {
   const busyCardStart = modalSource.indexOf('// Busy-elsewhere card');
-  const busyCardEnd = modalSource.indexOf(
-    'return (\n                        <motion.button',
-    modalSource.indexOf('if (busyInfo)', busyCardStart) + 1,
-  );
+  // Source files may use LF or CRLF; neither line endings nor indentation
+  // should change the disabled-card contrast contract.
+  const nextActiveCard = /return\s*\(\s*<motion\.button\b/.exec(modalSource.slice(busyCardStart));
+  const busyCardEnd = nextActiveCard ? busyCardStart + nextActiveCard.index : -1;
   const checkInFooterStart = modalSource.indexOf('const renderCheckInFooter');
   const checkInFooterEnd = modalSource.indexOf('// Keyboard Shortcuts', checkInFooterStart);
   assert.ok(busyCardStart > 0 && busyCardEnd > busyCardStart);

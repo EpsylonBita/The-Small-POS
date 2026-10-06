@@ -4188,7 +4188,11 @@
       "customerName": "Emri",
       "customerPhone": "Telefoni",
       "customerNotes": "Shënime",
-      "loadItemsFailed": "Artikujt e porosisë nuk u ngarkuan"
+      "loadItemsFailed": "Artikujt e porosisë nuk u ngarkuan",
+      "editServerUpdate": "Korrigjimet nuk janë përkohësisht të disponueshme. Kontrolloni lidhjen dhe riprovoni pas përditësimit të serverit.",
+      "editSyncRequired": "Ndryshimi i pagesës ose i porosisë nuk është sinkronizuar ende. Shporta është ruajtur. Provoni përsëri pas pak.",
+      "emptyEditHint": "Për të hequr të gjithë artikujt, mbyllni redaktuesin dhe anuloni porosinë.",
+      "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash."
     },
     "payment": {
       "title": "Pagesa",
@@ -5200,6 +5204,20 @@
       "cashierShiftSyncUnknownReason": "Ky turn arkëtari është ruajtur lokalisht, por sinkronizimi i tij duhet parë."
     },
     "orderCancellation": {
+      "staffCashAmbiguous": "Nuk mund të verifikohet kush i mban paratë e stafit. Kontrolloni kthimin fillestar para anulimit.",
+      "staffCashUnavailable": "Anulimi me dorëzim parash nuk është përkohësisht i disponueshëm. Kontrolloni lidhjen dhe provoni përsëri pas përditësimit të serverit.",
+      "connectionUnavailable": "Gjendja e lidhjes së pagesave nuk është e disponueshme. Rifreskoni integrimet dhe provoni përsëri.",
+      "permissionRequired": "Kjo llogari nuk ka leje të anulojë porosi të paguara.",
+      "paymentSyncRequired": "Pagesa origjinale duhet të sinkronizohet para regjistrimit të kthimit. Sinkronizoni dhe provoni përsëri, pa tarifuar sërish.",
+      "paymentChanged": "Pagesa ka ndryshuar. Mbyllni dritaren dhe zgjidhni përsëri Anulo për të kontrolluar shumën aktuale.",
+      "drawerUnavailable": "Kërkohet një arkë e hapur për të regjistruar kthimin e parave në dorë.",
+      "returnChannel": "Si u kthyen paratë?",
+      "returnRecorded": "{{amount}} do të regjistrohen si të kthyera tashmë. Nuk do të kryhet pagesë.",
+      "cashDrawer": "Arka",
+      "bank": "Banka",
+      "originalReturnRequired": "Porosia {{orderNumber}} kërkon kthimin e pagesës origjinale ose gjendjen e verifikuar të lidhjes para anulimit.",
+      "mixedCurrencies": "Anuloni veçmas porositë me monedha të ndryshme.",
+      "currencyMismatch": "Monedhat e regjistruara nuk përputhen. Kontrolloni pagesën origjinale dhe monedhën e arkës para anulimit.",
       "title": "Anulo porositë",
       "message_one": "Po anulon {{count}} porosi. Shkruaj arsyen e anulimit.",
       "message_other": "Po anulon {{count}} porosi. Shkruaj arsyen e anulimit.",
@@ -6049,6 +6067,8 @@
     "paymentMethodUpdated": "Mënyra e pagesës u përditësua",
     "paymentMethodUpdateFailed": "Mënyra e pagesës nuk u përditësua",
     "paymentMethodNoChange": "Kjo mënyrë pagese është zgjedhur tashmë",
+    "paymentMethodEditProviderOwned": "Kjo pagesë i përket një ofruesi pagesash. Mënyra fillestare e pagesës nuk mund të ndryshohet.",
+    "paymentMethodEditPending": "Ruani dhe sinkronizoni korrigjimin fillestar të porosisë përpara se të ndryshoni mënyrën e pagesës.",
     "paymentMethodEditUnavailable": "Mënyra e pagesës ndryshohet vetëm për një porosi të paanuluar me kesh/kartë",
     "paymentMethodEditChecking": "Duke kontrolluar pagesat e regjistruara…",
     "paymentMethodEditRequiresSingleCompletedPayment": "Kjo porosi ka pagesa të ndara ose disa pagesa të përfunduara. Mënyrat e pagesës s'mund të ndryshohen bashkë si një pagesë e vetme.",
@@ -9888,21 +9908,25 @@
       "not_saved": "Pa u ruajtur"
     },
     "reasonCodes": {
+      "table_cancellation_not_saved": "Kthimi fillestar për anulimin e tavolinës nuk është ruajtur ende.",
       "payments_need_review": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}) kur ajo ishte paguar tashmë. Është lënë mënjanë dhe nuk llogaritet: klienti mund të ketë paguar dy herë.",
       "payments_need_review__platform_held": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}), por paratë e kësaj porosie i mban tashmë platforma e dërgesave. Është lënë mënjanë dhe nuk llogaritet: klienti mund të ketë paguar dy herë.",
       "payments_not_saved": "Në porosinë {{orderNumber}} u debitua një pagesë me kartë prej {{paymentAmount}}, por ende nuk është ruajtur në këtë arkë. Klienti u debitua: mos e debito përsëri.",
       "payments_not_saved__new_order": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
       "payments_not_saved__new_order_cannot_save": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
-      "cancelled_order_claims_payment": "Kjo porosi është anuluar, por shfaqet ende si e paguar, dhe ky terminal nuk ka asnjë regjistrim pagese për të. Nuk është në këtë Raport Z. Kjo nuk e bllokon mbylljen e ditës."
+      "cancelled_order_claims_payment": "Kjo porosi është anuluar, por shfaqet ende si e paguar, dhe ky terminal nuk ka asnjë regjistrim pagese për të. Nuk është në këtë Raport Z. Kjo nuk e bllokon mbylljen e ditës.",
+      "edit_settlement_not_saved": "Një korrigjim i konfirmuar nuk është ruajtur ende. Arkëtimi ose kthimi fillestar ruhet."
     },
     "fixCodes": {
+      "table_cancellation_not_saved": "Rikuperoni anulimin fillestar të tavolinës. Mos i dorëzoni ose rimbursoni paratë përsëri.",
       "payments_need_review": "Ktheja paratë klientit, pastaj konfirmoje këtu. Nëse pagesa në server është ajo e gabuara, kontakto mbështetjen para se ta mbyllësh ditën.",
       "payments_need_review__platform_held": "Ktheja paratë klientit, pastaj konfirmoje këtu. Platforma ia paguan këtë porosi dyqanit me shlyerjen e saj.",
       "payments_not_saved": "Ruaje pagesën sërish. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",
       "payments_not_saved__cannot_save": "Kjo pagesë nuk mund të ruhet në këtë arkë. Ktheja paratë klientit, pastaj konfirmoje këtu.",
       "payments_not_saved__new_order": "Ruaje pagesën sërish: kjo ruan porosinë dhe pagesën e saj, pa debitim të ri. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",
       "payments_not_saved__new_order_cannot_save": "Kjo porosi dhe pagesa e saj nuk mund të ruhen në këtë arkë. Ktheja paratë klientit, pastaj konfirmoje këtu.",
-      "cancelled_order_claims_payment": "Rikthe nga serveri («Sinkronizo tani»): një pagesë që ka serveri kopjohet këtu. Nëse nuk ka asnjë, pronari vendos çfarë duhet të tregojë porosia."
+      "cancelled_order_claims_payment": "Rikthe nga serveri («Sinkronizo tani»): një pagesë që ka serveri kopjohet këtu. Nëse nuk ka asnjë, pronari vendos çfarë duhet të tregojë porosia.",
+      "edit_settlement_not_saved": "Rihapni redaktimin e ruajtur dhe ruani të njëjtin korrigjim. Mos arkëtoni ose ktheni para përsëri."
     },
     "setAsidePaymentLabel": "Pagesë e lënë mënjanë",
     "takenAtLabel": "Marrë në",

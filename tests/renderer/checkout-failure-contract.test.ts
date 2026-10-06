@@ -137,10 +137,24 @@ test('new checkout requires readable tax settings and canonical edits preserve s
   );
   assert.doesNotMatch(edit, /resolveCheckoutTaxRate|tax_amount\s*:|tax_rate\s*:/,
     'the canonical editor must not calculate or send an assumed client tax');
-  assert.match(edit, /await bridge\.orders\.updateItems\(orderData\.orderId, orderData\.items,/);
-  assert.match(edit, /clientEventId: orderData\.client_event_id, expectedVersion: orderData\.expected_version/);
+  assert.match(edit, /await previewMenuOrderEdit\(bridge\.orders, data, bridge\.sync\)/);
+  assert.match(edit, /if \(preflight\.kind !== 'settlement'\)[\s\S]*?await bridge\.orders\.updateItems\(data\.orderId, data\.items,/);
+  assert.match(edit, /clientEventId: data\.client_event_id, expectedVersion: data\.expected_version/);
+  assert.match(edit, /expectedLocalVersion: data\.renderer_local_version/);
+  assert.match(edit, /await commitMenuOrderEdit\(bridge\.orders, data,/,
+    'paid corrections use the journaled settlement path, including exact recovery');
   assert.match(edit, /if \(result\?\.success === false\) throw new Error/,
     'unconfirmed canonical edits must retain the frozen draft');
+
+  const editService = rendererSource('services', 'MenuOrderEdit.ts');
+  assert.match(editService, /if \(!scoped\.quotedFinancials\?\.quote[\s\S]*?throw new Error\('EDIT_CANONICAL_QUOTE_REQUIRED'\)/,
+    'paid corrections require the complete authoritative quote before confirmation');
+  assert.match(editService, /financials: scoped\.quotedFinancials/);
+  const commit = editService.slice(editService.indexOf('export async function commitMenuOrderEdit('));
+  assert.match(commit, /await lifecycle\.beforeCommit\([\s\S]*?await orders\.applyEditSettlement\(request\)/,
+    'the exact quoted action is frozen before financial dispatch');
+  assert.match(commit, /if \(response\?\.success !== true\)[\s\S]*?throw new Error/,
+    'a fulfilled IPC without committed success cannot clear the correction');
 
   const api = readFileSync(path.join(process.cwd(), '..', 'admin-dashboard', 'src', 'services', 'pos', 'pos-orders-api-service.ts'), 'utf8');
   assert.match(api, /const branchComplianceSettings = await this\.getBranchComplianceSettings\(terminal\.branch_id\)\s+const computed = this\.computeOrderTotals\(/);
@@ -151,7 +165,8 @@ test('new checkout requires readable tax settings and canonical edits preserve s
   ]) {
     assert.ok(api.includes(`updateData.${field} = computed.${result}`), `${field} is server-calculated`);
   }
-  assert.match(api, /rpc\('edit_pos_order_atomic',[\s\S]*?p_header: encryptedUpdateData, p_items: replacementItems/);
+  assert.match(api, /rpc\('edit_pos_order_atomic',[\s\S]*?p_header: \{ \.\.\.encryptedUpdateData,[\s\S]*?_pos_edit_settlement: data\.settlement_context[\s\S]*?p_items: replacementItems/,
+    'the atomic edit keeps encrypted server-computed fiscal fields together with its exact settlement and items');
 
   const native = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'commands', 'orders.rs'), 'utf8');
   const remoteEdit = sliceBetween(native, 'if let Some(request) = remote_edit_request {', '\n    let actual_order_id = {');
@@ -426,8 +441,13 @@ test('every checkout surface pays the same cart with the same checkout id', () =
     const source = rendererSource(...file.split('/'));
     assert.ok(source.includes('useCheckoutRequestId()'), `${file} holds one checkout id per cart`);
     assert.ok(source.includes(take), `${file} reuses the checkout id on every press`);
-    assert.ok(source.includes('restoreCheckoutRequestId(context.checkoutRequestId)'),
-      `${file} restores the original request id before a recovered checkout`);
+    assert.match(source,
+      /restoreCheckoutRequestId\(context\.checkoutRequestId, \{ phase: context\.checkoutPhase,[^}]*renewedFrom: renewal\?\.previousCheckoutRequestId \}\)/,
+      `${file} restores the original id with its durable phase and live-only renewal proof`);
+    if (!file.startsWith('pages/')) {
+      assert.match(source, /restoreCheckoutRequestId\(context\.checkoutRequestId, \{[^}]*editMode: context\.editMode/,
+        `${file} keeps an existing-order edit separate from the next create identity`);
+    }
     assert.doesNotMatch(
       source,
       /const clientRequestId =\s*globalThis\.crypto\?\.randomUUID/,

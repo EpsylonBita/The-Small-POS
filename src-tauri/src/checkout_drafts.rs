@@ -98,6 +98,83 @@ fn validate(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn cancelled_edit_target(
+    conn: &Connection,
+    scope: &Scope,
+    draft: &Value,
+) -> Result<Option<String>, String> {
+    if draft["context"]["editMode"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let Some(target) = draft["context"]["editOrderId"].as_str() else {
+        return Ok(None);
+    };
+    conn.query_row("SELECT id FROM orders WHERE (id=?1 OR supabase_id=?1) AND organization_id=?2 AND branch_id=?3 AND LOWER(TRIM(status)) IN ('cancelled','canceled')",
+        params![target, scope.organization, scope.branch], |row| row.get(0)).optional().map_err(|error| error.to_string())
+}
+
+/// Retire an abandoned editor, never an operator-confirmed financial request.
+/// Keep its exact contents in an archive and advance the CAS generation so a
+/// renderer that loaded before cancellation cannot resurrect it.
+fn load(conn: &Connection, input: &Value) -> Result<Value, String> {
+    let scope = scope(conn, input)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let previous = read(&tx, &scope)?;
+    let draft = &previous["draft"];
+    let Some(order) = cancelled_edit_target(&tx, &scope, draft)? else {
+        tx.commit().map_err(|error| error.to_string())?;
+        return Ok(previous);
+    };
+    let request = draft["checkoutRequestId"].as_str().unwrap_or_default();
+    let event = draft["submission"]["client_event_id"]
+        .as_str()
+        .unwrap_or(request);
+    let protected = draft["phase"].as_str() != Some("editing")
+        || !draft["submission"].is_null()
+        || request.is_empty()
+        || crate::edit_settlement_recovery::inspect(&tx, event, &order)?.is_some()
+        || crate::table_attempt_recovery::inspect_edit(&tx, event, &order)?.is_some()
+        || crate::edit_settlement_recovery::require_original_financial_attempt(&tx, &order, None).is_err()
+        || crate::unsaved_payments::list(&tx, None)?.iter().any(|entry| entry.order_id == order || entry.order_id == request)
+        || tx.query_row("SELECT EXISTS(SELECT 1 FROM ecr_transactions WHERE order_id IN (?1,?2) AND LOWER(TRIM(transaction_type)) IN ('sale','fiscal_receipt') AND LOWER(TRIM(status)) NOT IN ('declined'))",
+            params![order,request], |row| row.get::<_,bool>(0)).map_err(|error|error.to_string())?;
+    if protected {
+        tx.commit().map_err(|error| error.to_string())?;
+        return Ok(previous);
+    }
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS checkout_draft_archive_v1 (
+        organization_id TEXT NOT NULL, branch_id TEXT NOT NULL, terminal_id TEXT NOT NULL,
+        generation INTEGER NOT NULL, draft_json TEXT NOT NULL, reason TEXT NOT NULL, archived_at TEXT NOT NULL,
+        PRIMARY KEY(organization_id,branch_id,terminal_id,generation))").map_err(|error|error.to_string())?;
+    let generation = previous["generation"]
+        .as_i64()
+        .ok_or("CHECKOUT_DRAFT_INVALID")?;
+    let next = generation
+        .checked_add(1)
+        .ok_or("CHECKOUT_DRAFT_VERSION_EXHAUSTED")?;
+    let now = chrono::Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO checkout_draft_archive_v1 VALUES(?1,?2,?3,?4,?5,'edit_target_cancelled',?6)",
+        params![
+            scope.organization,
+            scope.branch,
+            scope.terminal,
+            generation,
+            draft.to_string(),
+            now
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    tx.execute("UPDATE checkout_drafts_v1 SET generation=?1,draft_json=NULL,updated_at=?2 WHERE organization_id=?3 AND branch_id=?4 AND terminal_id=?5 AND generation=?6",
+        params![next,now,scope.organization,scope.branch,scope.terminal,generation]).map_err(|error|error.to_string())?;
+    let mut reply = read(&tx, &scope)?;
+    reply["invalidation"] = json!({"reason":"edit_target_cancelled","orderId":order});
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(reply)
+}
+
 pub(crate) fn write(conn: &Connection, input: &Value, deleting: bool) -> Result<Value, String> {
     let scope = scope(conn, input)?;
     let expected = input
@@ -126,6 +203,12 @@ pub(crate) fn write(conn: &Connection, input: &Value, deleting: bool) -> Result<
         return Err("CHECKOUT_DRAFT_VERSION_CHANGED".into());
     }
     if !deleting
+        && input["draft"]["phase"].as_str() == Some("editing")
+        && cancelled_edit_target(&tx, &scope, &input["draft"])?.is_some()
+    {
+        return Err("CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED".into());
+    }
+    if !deleting
         && previous["draft"].is_object()
         && previous["draft"]["checkoutRequestId"] != input["draft"]["checkoutRequestId"]
     {
@@ -144,10 +227,74 @@ pub(crate) fn write(conn: &Connection, input: &Value, deleting: bool) -> Result<
 }
 
 #[tauri::command]
+pub fn checkout_draft_check_admission(
+    arg0: Value,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    check_admission(&conn, &arg0)
+}
+
+fn check_admission(conn: &Connection, input: &Value) -> Result<Value, String> {
+    let scope = scope(conn, input)?;
+    // Existing-order collection uses original ledger provenance, never today's
+    // currency to relabel an old NULL order. Validate before proposing adoption.
+    let order_currency = if let Some(id) = input.get("orderId").and_then(Value::as_str) {
+        let order = crate::resolve_order_id(conn, id).ok_or("ORDER_NOT_FOUND")?;
+        let (organization, branch, status): (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT organization_id,COALESCE(branch_id,''),status FROM orders WHERE id=?1",
+                [&order],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if organization.as_deref() != Some(scope.organization.as_str()) || branch != scope.branch {
+            return Err("CHECKOUT_DRAFT_SCOPE_CHANGED".into());
+        }
+        if matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "cancelled" | "canceled"
+        ) {
+            return Err("CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED".into());
+        }
+        let recorded = crate::shifts::recorded_operating_currency(conn, "orders", &order)?;
+        let ledger = crate::fiscal::payload_builder::resolve_order_payment_currency(conn, &order)?;
+        if recorded
+            .as_ref()
+            .zip(ledger.as_ref())
+            .is_some_and(|(left, right)| left != right)
+        {
+            return Err("ORDER_CURRENCY_MISMATCH".into());
+        }
+        let currency = recorded.or(ledger).ok_or("ORDER_CURRENCY_UNAVAILABLE")?;
+        if crate::shifts::require_operating_currency(conn, &branch)? != currency {
+            return Err("ORDER_CURRENCY_MISMATCH".into());
+        }
+        Some(currency)
+    } else {
+        None
+    };
+    let (shift_id, _) =
+        crate::sync::require_active_cashier_for_order_create(conn, &scope.branch, &scope.terminal)?;
+    let currency = match crate::shifts::require_shift_operating_currency(conn, &shift_id) {
+        Ok(currency) => currency,
+        Err(error) if error == "SHIFT_CURRENCY_UNAVAILABLE" => {
+            return crate::legacy_shift_currency::admission(conn, &shift_id);
+        }
+        Err(error) => return Err(error),
+    };
+    if order_currency.is_some_and(|original| original != currency) {
+        return Err("ORDER_CURRENCY_MISMATCH".into());
+    }
+    Ok(json!({"success": true, "currency": currency}))
+}
+
+#[tauri::command]
 pub fn checkout_draft_get(arg0: Value, db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
     let _lease = crate::repairs::acquire_terminal_binding_lease()?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    read(&conn, &scope(&conn, &arg0)?)
+    db::with_full_sync(&conn, |conn| load(conn, &arg0))
 }
 #[tauri::command]
 pub fn checkout_draft_put(arg0: Value, db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
@@ -340,6 +487,15 @@ pub(crate) fn inspect(conn: &Connection, input: &Value) -> Result<Value, String>
         input.get("editOrderId").and_then(Value::as_str),
         input.get("clientEventId").and_then(Value::as_str),
     ) {
+        if let Some(receipt) = crate::edit_settlement_recovery::inspect(conn, event, order)? {
+            let outcome = match receipt["state"].as_str() {
+                Some("applied") => "saved",
+                _ => "uncertain",
+            };
+            return Ok(
+                json!({"success":true,"outcome":outcome,"orderId":order,"recovery":receipt,"canCollect":false}),
+            );
+        }
         let proof = crate::table_attempt_recovery::inspect_edit(conn, event, order)?;
         let outcome = match proof
             .as_ref()
@@ -425,6 +581,180 @@ pub fn checkout_draft_inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn cancelled_editor_fixture(conn: &Connection) -> Value {
+        let mut input = seed(conn);
+        conn.execute("INSERT INTO orders(id,organization_id,branch_id,items,total_amount,status,created_at,updated_at) VALUES('cancelled-target','org','branch','[]',10.5,'pending','now','now')", []).unwrap();
+        input["draft"] = json!({"schemaVersion":1,"draftId":"original-editor","checkoutRequestId":"unconfirmed-edit","phase":"editing",
+            "context":{"editMode":true,"editOrderId":"cancelled-target","orderType":"delivery"},
+            "cartItems":[{"id":"retained-line","quantity":2,"price":5.25}],"state":{"manualDeliveryFee":0}});
+        write(conn, &input, false).unwrap();
+        conn.execute(
+            "UPDATE orders SET status='cancelled' WHERE id='cancelled-target'",
+            [],
+        )
+        .unwrap();
+        input["expectedGeneration"] = json!(1);
+        input
+    }
+
+    #[test]
+    fn checkout_cancelled_target_archives_unconfirmed_editor_and_fences_late_save() {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = cancelled_editor_fixture(&conn);
+        let reply = load(&conn, &input).unwrap();
+        assert!(reply["draft"].is_null());
+        assert_eq!(reply["generation"], 2);
+        assert_eq!(reply["invalidation"]["reason"], "edit_target_cancelled");
+        let archived: String = conn
+            .query_row(
+                "SELECT draft_json FROM checkout_draft_archive_v1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&archived).unwrap(),
+            input["draft"]
+        );
+        assert_eq!(
+            write(&conn, &input, false).unwrap_err(),
+            "CHECKOUT_DRAFT_VERSION_CHANGED"
+        );
+        let mut fresh = input.clone();
+        fresh["expectedGeneration"] = json!(2);
+        assert_eq!(
+            write(&conn, &fresh, false).unwrap_err(),
+            "CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED"
+        );
+        assert_eq!(load(&conn, &input).unwrap()["generation"], 2);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM orders WHERE id='cancelled-target'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "cancelled"
+        );
+        fresh["orderId"] = json!("cancelled-target");
+        assert_eq!(
+            check_admission(&conn, &fresh).unwrap_err(),
+            "CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED"
+        );
+    }
+
+    #[test]
+    fn checkout_cancelled_target_retains_confirmed_or_uncertain_originals() {
+        for protection in ["pending", "submission", "held", "provider"] {
+            let db = crate::tests::harness::TestDb::open();
+            let conn = db.state.conn.lock().unwrap();
+            let input = cancelled_editor_fixture(&conn);
+            let mut original = input["draft"].clone();
+            match protection {
+                "pending" => original["phase"] = json!("checkout_pending"),
+                "submission" => {
+                    original["submission"] = json!({"action":"edit_settlement","settlementAction":{"type":"collect","amount":4.5}})
+                }
+                "held" => {
+                    let held:crate::unsaved_payments::UnsavedChargedPayment=serde_json::from_value(json!({"idempotencyKey":"held-original","orderId":"cancelled-target","method":"cash","amount":4.5,"amountCents":450,"currency":"EUR","kind":"single","request":{"orderId":"cancelled-target"},"capturedAt":"now"})).unwrap();
+                    crate::unsaved_payments::record(&conn, &held).unwrap();
+                }
+                "provider" => {
+                    conn.execute("INSERT INTO ecr_devices(id,name,device_type,brand,protocol,connection_type,connection_details) VALUES('terminal-device','Reader','payment_terminal','test','test','network','{}')",[]).unwrap();
+                    crate::db::ecr_insert_transaction(&conn,&json!({"id":"unknown-edit-sale","deviceId":"terminal-device","transactionType":"sale","amount":450,"currency":"EUR","orderId":"cancelled-target","status":"processing"})).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            conn.execute(
+                "UPDATE checkout_drafts_v1 SET draft_json=?1",
+                [original.to_string()],
+            )
+            .unwrap();
+            let reply = load(&conn, &input).unwrap();
+            assert_eq!(reply["draft"], original, "{protection}");
+            assert_eq!(reply["generation"], 1, "{protection}");
+        }
+    }
+
+    #[test]
+    fn checkout_cancelled_target_never_archives_foreign_scope_or_active_order() {
+        for change in [
+            "UPDATE orders SET branch_id='another'",
+            "UPDATE orders SET status='completed'",
+        ] {
+            let db = crate::tests::harness::TestDb::open();
+            let conn = db.state.conn.lock().unwrap();
+            let input = cancelled_editor_fixture(&conn);
+            conn.execute(change, []).unwrap();
+            assert_eq!(load(&conn, &input).unwrap()["draft"], input["draft"]);
+        }
+    }
+    #[test]
+    fn checkout_existing_order_admission_uses_original_eur_before_legacy_shift_confirmation() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let test = crate::tests::harness::TestDb::open();
+        let conn = test.state.conn.lock().unwrap();
+        let mut input = seed(&conn);
+        for (key, value) in [
+            ("currency", "EUR"),
+            ("store_currency_branch_id", "branch"),
+            ("store_currency_available", "true"),
+            ("store_currency_source", "branch_country"),
+        ] {
+            db::set_setting(&conn, "restaurant", key, value).unwrap();
+        }
+        conn.execute_batch("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,status,check_in_time,created_at,updated_at) VALUES('legacy-shift','cashier','branch','11111111-1111-4111-8111-111111111111','cashier','active','now','now','now');
+            INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opened_at,created_at,updated_at) VALUES('legacy-drawer','legacy-shift','cashier','branch','11111111-1111-4111-8111-111111111111',0,'now','now','now');
+            INSERT INTO orders(id,organization_id,branch_id,staff_shift_id,items,total_amount,payment_status,status,created_at,updated_at) VALUES('original-order','org','branch','legacy-shift','[]',6,'paid','pending','now','now');
+            INSERT INTO order_payments(id,order_id,method,amount,currency,status,created_at,updated_at) VALUES('original-payment','original-order','card',6,'EUR','completed','now','now');").unwrap();
+        input["orderId"] = json!("original-order");
+        let reply = check_admission(&conn, &input).unwrap();
+        assert_eq!(reply["code"], "LEGACY_SHIFT_CURRENCY_CONFIRMATION_REQUIRED");
+        assert_eq!(reply["currency"], "EUR");
+        assert_eq!(
+            conn.query_row(
+                "SELECT currency FROM orders WHERE id='original-order'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT currency FROM staff_shifts WHERE id='legacy-shift'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        conn.execute(
+            "UPDATE orders SET currency='CHF' WHERE id='original-order'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            check_admission(&conn, &input).unwrap_err(),
+            "ORDER_CURRENCY_MISMATCH"
+        );
+        conn.execute(
+            "UPDATE orders SET branch_id='foreign' WHERE id='original-order'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            check_admission(&conn, &input).unwrap_err(),
+            "CHECKOUT_DRAFT_SCOPE_CHANGED"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
     fn seed(conn: &Connection) -> Value {
         for (k, v) in [
             ("organization_id", "org"),

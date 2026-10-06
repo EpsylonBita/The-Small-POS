@@ -11,6 +11,8 @@ import ContentContainer from './ui/ContentContainer';
 import PageLoadMotion from './ui/PageLoadMotion';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
+import { CashierGateContext, useOperationalShift, useCashierOperationsLocked } from '../contexts/cashier-gate-context';
+import { CashierOperationalBoundary } from './GlobalCashierGate';
 import { useModules, useModuleAccess, getModuleAccessStatic } from '../contexts/module-context';
 import { isViewAccessDenied } from '../utils/module-view-access';
 import { DeferredModal } from './ui/DeferredModal';
@@ -190,6 +192,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
   const [repairConnectivity, setRepairConnectivity] = React.useState<RepairConnectivity>('unknown');
   const [offlineBundleStatus, setOfflineBundleStatus] = React.useState<any>(null);
   const { staff, activeShift, isShiftActive } = useShift();
+  const cashierLocked = useCashierOperationsLocked();
+  const rootGate = React.useContext(CashierGateContext);
+  const isOperationalShiftActive = useOperationalShift(isShiftActive);
   const secureRepairSessionId = getSecureSessionSync()?.sessionId ?? null;
   const repairActorKey = isShiftActive
     && secureRepairSessionId
@@ -293,7 +298,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       return; // Don't change view
     }
 
-    if (!isShiftActive && view !== 'dashboard') {
+    if ((!isOperationalShiftActive || cashierLocked) && view !== 'dashboard') {
       savePendingPostLoginIntent(window.sessionStorage, {
         view,
         repairIntent: view === 'repairs' ? nextRepairIntent : undefined,
@@ -335,10 +340,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     return () => {
       window.removeEventListener('pos:navigate-view', handleNavigateView as EventListener);
     };
-  }, [enabledModules, lockedModules, isShiftActive, onOpenConnectionSettings]);
+  }, [enabledModules, lockedModules, isOperationalShiftActive, cashierLocked, onOpenConnectionSettings]);
 
   useEffect(() => {
-    if (!isShiftActive) {
+    if (!isOperationalShiftActive || cashierLocked) {
       return;
     }
 
@@ -361,7 +366,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
 
     setRepairIntent(pendingView === 'repairs' ? pendingIntent?.repairIntent ?? null : null);
     setCurrentView(pendingView);
-  }, [currentView, enabledModules, isShiftActive, onOpenConnectionSettings]);
+  }, [currentView, enabledModules, isOperationalShiftActive, cashierLocked, onOpenConnectionSettings]);
 
   useEffect(() => {
     const handleNetworkState = () => {
@@ -580,6 +585,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
           : 'bg-black'
         } ${className}`}>
         {/* Navigation Sidebar */}
+        <div data-cashier-navigation="true" className="contents">
         <NavigationSidebar
           currentView={currentView}
           onViewChange={handleViewChange}
@@ -594,12 +600,15 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
           }}
         />
 
+        </div>
+
         {/* Main Content Area with Container */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
           <ContentContainer
             className="flex-1 min-h-0 overflow-hidden relative"
             contentClassName={locksPageScroll ? 'overflow-hidden' : undefined}
           >
+            <CashierOperationalBoundary>
             {isOffline && offlineBundleStatus && (
               <div
                 className={`mx-3 mt-3 rounded-xl border px-4 py-3 text-sm ${
@@ -646,7 +655,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
             </AnimatePresence>
 
           {/* Shift required overlay when no active shift */}
-          {!isShiftActive && isPendingLocalSubmit && (
+          {rootGate === null && !isOperationalShiftActive && !cashierLocked && isPendingLocalSubmit && (
             <div className="absolute inset-0 z-40 flex items-center justify-center p-4">
               <div
                 role="alert"
@@ -688,7 +697,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
             </div>
           )}
 
-          {!isShiftActive && !isPendingLocalSubmit && (
+          {rootGate === null && !isOperationalShiftActive && !cashierLocked && !isPendingLocalSubmit && (
             <div className="absolute inset-0 z-40 flex items-center justify-center p-4" onClick={handleStartShift}>
               <div
                 role="alert"
@@ -718,6 +727,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
             </div>
           )}
 
+            </CashierOperationalBoundary>
         </ContentContainer>
       </div>
 
@@ -747,7 +757,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
       </DeferredModal>
 
       {/* Shift Manager - Auto-prompts check-in and handles checkout */}
-      <ShiftManager ref={shiftManagerRef} suppressAutoCheckin={isPendingLocalSubmit} />
+      <ShiftManager ref={shiftManagerRef} suppressAutoCheckin={isPendingLocalSubmit || rootGate === true || isOperationalShiftActive} />
 
       {/* Upgrade Prompt Modal - Route guard for locked modules */}
       <UpgradePromptModal

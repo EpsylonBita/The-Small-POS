@@ -199,7 +199,20 @@ fn a_courier_is_not_charged_for_a_payment_voided_on_the_server() {
         params![BRANCH],
     )
     .unwrap();
-    mirror(&conn, &server_payment("completed", "2026-09-30T10:05:00Z"));
+    // The receipt was collected by this courier, whose shift is known here.
+    // A later assignment alone must never transfer another collector's cash.
+    conn.execute(
+        "UPDATE orders SET staff_shift_id = 'shift-courier-remote' WHERE id = ?1",
+        params![LOCAL_ORDER],
+    )
+    .unwrap();
+    let mut receipt = server_payment("completed", "2026-09-30T10:05:00Z");
+    receipt["metadata"] = json!({
+        "staff_id": "driver-remote",
+        "staff_shift_id": "shift-courier-remote",
+        "collected_by": "driver_shift"
+    });
+    mirror(&conn, &receipt);
     let assignment = crate::order_ownership::assign_order_to_driver_shift(
         &conn,
         LOCAL_ORDER,
@@ -218,7 +231,17 @@ fn a_courier_is_not_charged_for_a_payment_voided_on_the_server() {
     )
     .unwrap();
 
-    mirror(&conn, &server_payment("voided", "2026-09-30T11:00:00Z"));
+    let before_void: i64 = conn
+        .query_row(
+            "SELECT cash_to_return_cents FROM driver_earnings WHERE order_id = ?1",
+            params![LOCAL_ORDER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(before_void, 1300, "the courier initially holds the receipt");
+    receipt["status"] = json!("voided");
+    receipt["updated_at"] = json!("2026-09-30T11:00:00Z");
+    mirror(&conn, &receipt);
 
     let cash_to_return: i64 = conn
         .query_row(

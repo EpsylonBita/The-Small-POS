@@ -126,6 +126,7 @@ beforeEach(() => { draftStorage.draft = null; draftStorage.generation = 0; });
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
     invoke: vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_check_admission') return { success: true, currency: 'EUR' };
       if (command === 'checkout_draft_inspect') return { success: true, outcome: 'not_found', canCollect: false };
       if (command === 'checkout_draft_put') { draftStorage.draft = input.draft; draftStorage.generation++; }
       if (command === 'checkout_draft_delete') { draftStorage.draft = null; draftStorage.generation++; }

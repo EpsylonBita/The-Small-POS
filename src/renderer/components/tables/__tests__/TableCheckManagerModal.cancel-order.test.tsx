@@ -51,6 +51,7 @@ vi.mock('../../../utils/tableSessionOfflineQueue', () => ({
 vi.mock('../../../utils/format', () => ({
   formatCurrency: (amount: number) => `EUR ${amount.toFixed(2)}`,
 }));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => ({ 'modals.orderCancellation.confirm': 'Cancel the order', 'modals.orderCancellation.keepOrder': 'Keep order', 'modals.orderCancellation.cashDrawer': 'Cash drawer', 'modals.orderCancellation.bank': 'Bank' }[key] ?? key) }) }));
 vi.mock('react-hot-toast', () => ({
   default: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() }),
 }));
@@ -119,7 +120,7 @@ const refresh = vi.fn();
 describe('cancelling an owing order from its table check', { timeout: 20_000 }, () => {
   afterEach(cleanup);
   beforeEach(() => {
-    mocks.invoke.mockResolvedValue({ success: true });
+    mocks.invoke.mockReset().mockImplementation(async (_command, args) => ({ success: true, ...args, requiresReturn: false, requiresHandback: false, amountCents: 0, currency: 'EUR', generation: 'generation-1', requestId: 'cancel-event-1' }));
     mocks.orders.mockResolvedValue([order]);
     mocks.payments.mockResolvedValue([]);
     mocks.snapshot.mockReset().mockResolvedValue({ netPaid: 0, outstandingAmount: 30, cancelRefusal: null });
@@ -171,6 +172,28 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     expect(mocks.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({ tableId: 'T01', releaseStatus: 'available' }));
     expect(mocks.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({ tableId: 'T02', releaseStatus: 'available' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('offers the return channel before the reason for a fully paid manual table', async () => {
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: { ...session,
+      balance: { order_total: 30, paid_total: 30, outstanding_balance: 0 } } } });
+    mocks.invoke.mockImplementation(async (command, args) => command === 'order_prepare_manual_cancel'
+      ? { success: true, ...args, requiresReturn: true, requiresHandback: true, amountCents: 3000,
+          currency: 'EUR', generation: 'paid-generation', requestId: 'paid-table-event' }
+      : { success: true });
+    render(<TableCheckManagerModal isOpen tables={[table]} table={table} localOrders={[order] as any}
+      onClose={onClose} onAddItems={vi.fn()} onRefreshOrders={refresh} onRefreshTables={refresh} />);
+    await waitFor(() => expect(screen.queryByText('Loading table check...')).not.toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Cancel the order' })); });
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    expect(within(sheet).queryByRole('textbox')).toBeNull();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Bank' }));
+    fireEvent.change(within(sheet).getByRole('textbox'), { target: { value: 'Returned through bank' } });
+    await act(async () => { fireEvent.click(within(sheet).getByRole('button', { name: 'Cancel the order' })); });
+    expect(mocks.cancelWithApproval).toHaveBeenCalledWith(expect.objectContaining({
+      clientEventId: 'paid-table-event', reason: 'Returned through bank',
+      manualCancellation: { generation: 'paid-generation', returnChannel: 'bank' }, tableSessionId: sessionId,
+    }));
   });
 
   it('keeps the order and the table when the approval is refused', async () => {
@@ -244,11 +267,7 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
   // reason or PIN). An order labelled paid with no payment record here is
   // refused when "Cancel the order" is pressed: no reason is asked.
   it('refuses a paid label with no payment record before it asks the reason', async () => {
-    mocks.snapshot.mockResolvedValue({
-      netPaid: 0,
-      outstandingAmount: 30,
-      cancelRefusal: 'ORDER_PAYMENT_NOT_RECORDED',
-    });
+    mocks.invoke.mockImplementation(async (command) => { if (command === 'order_prepare_manual_cancel') throw new Error('ORDER_PAYMENT_NOT_RECORDED'); return { success: true }; });
     const toast = (await import('react-hot-toast')).default as unknown as {
       error: ReturnType<typeof vi.fn>;
     };
@@ -277,7 +296,7 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
         'This order is marked paid, but its payment is not recorded on this till. Restore it from the server with Sync Now, or record the payment from the Z Report, then cancel.',
       ),
     );
-    expect(mocks.snapshot).toHaveBeenCalledWith('remote-order');
+    expect(mocks.invoke).toHaveBeenCalledWith('order_prepare_manual_cancel', { orderId: 'remote-order', tableSessionId: sessionId });
     expect(screen.getAllByRole('dialog')).toHaveLength(dialogsBefore);
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(mocks.cancelWithApproval).not.toHaveBeenCalled();

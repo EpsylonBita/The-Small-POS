@@ -399,7 +399,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       </div>
 
       {/* Reuse order-flow modals/state here, but let OrderDashboard own the visible FAB */}
-      <OrderFlow showFab={false} />
+      <OrderFlow showFab={false} restoreDraftOnMount={false} />
     </div>
   );
 });

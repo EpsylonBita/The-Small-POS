@@ -1,5 +1,5 @@
 import { formatCurrency } from '../../utils/format';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { Banknote, CreditCard, AlertTriangle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -53,11 +53,12 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
 }) => {
   const { t } = useTranslation();
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   // Reset submit state whenever the modal re-opens so a previous in-flight
   // error doesn't leave the buttons disabled forever.
   useEffect(() => {
-    if (!isOpen) setSubmitting(false);
+    if (!isOpen) { setSubmitting(false); submittingRef.current = false; }
   }, [isOpen]);
 
   const displayAmount = round2(Math.max(0, Number.isFinite(amount) ? amount : 0));
@@ -78,7 +79,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
       });
 
   const handlePick = async (method: EditSettlementDeltaMethod) => {
-    if (submitting) return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await onConfirm(method);
@@ -90,6 +92,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
               defaultValue: 'Could not complete the settlement',
             });
       toast.error(message);
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -105,7 +108,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={() => {
-        if (submitting) return;
+        if (submittingRef.current) return;
         onCancel();
       }}
       title={title}
@@ -191,7 +194,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
           <button
             type="button"
             onClick={() => {
-              if (submitting) return;
+              if (submittingRef.current) return;
               onCancel();
             }}
             disabled={submitting}

@@ -167,6 +167,17 @@ test('every table release asks first when the order still owes money', () => {
   );
   // The check can cancel an owing order explicitly, with a reason and approval.
   assert.match(check, /secondaryModal === 'cancel-order'/);
-  assert.match(check, /action: \(managerPin\) => getBridge\(\)\.orders\.cancelWithApproval\(\{ orderId, reason, tableSessionId, managerPin \}\)/);
-  assert.match(check, /scope: 'cash_drawer_control'/);
+  const cancelStart = check.indexOf('const cancelOrderFromCheck = async (');
+  const cancelEnd = check.indexOf('emitCanonicalTableCancellation(result,', cancelStart);
+  assert.ok(cancelStart >= 0 && cancelEnd > cancelStart, 'approved cancellation must precede canonical release notification');
+  const cancel = check.slice(cancelStart, cancelEnd);
+  assert.match(cancel, /if \(!orderId \|\| !tableSessionId \|\| !reason\.trim\(\) \|\| !cancelPlan\) \{\s*return;/);
+  assert.match(cancel, /await runCancelApproval\(\{\s*scope: 'cash_drawer_control',\s*action: \(managerPin\) => \{/);
+  assert.match(cancel, /previous\.reason !== reason \|\| previous\.channel !== returnChannel/);
+  assert.match(cancel, /throw new Error\('CANCELLATION_REQUEST_CONFLICT'\)/);
+  assert.match(cancel, /return getBridge\(\)\.orders\.cancelWithApproval\(\{ orderId, reason, tableSessionId, managerPin,\s*\.\.\.tableCancellationFields\(cancelPlan, returnChannel\) \}\)/);
+  const cancellation = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'services', 'TableManualCancellation.ts'), 'utf8');
+  assert.match(cancellation, /clientEventId: plan\.requestId/);
+  assert.match(cancellation, /manualCancellation: \{ generation: plan\.generation, returnChannel: returnChannel \?\? 'cash_drawer' \}/);
+  assert.match(cancellation, /if \(plan\.requiresReturn && !returnChannel\) throw new Error\('CANCELLATION_RETURN_CHANNEL_REQUIRED'\)/);
 });

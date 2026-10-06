@@ -20,7 +20,7 @@ export function formatCurrency(amount: number, currency: string | null = getStor
   const raw = Number.isFinite(amount) ? amount : 0
   const safe = Object.is(raw, -0) ? 0 : raw
   // An unresolved store has no money unit to display; never invent EUR from locale.
-  if (!currency) return `${formatNumber(safe, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, locale)} —`
+  if (!currency) return formatNumber(safe, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, locale)
   try {
     return new Intl.NumberFormat(resolvedLocale, {
       style: 'currency',

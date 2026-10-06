@@ -24,7 +24,10 @@ const eur = (value: number, locale: string): string =>
 
 test('OrderCard renders the card amount via formatCurrency, not hardcoded € + toFixed(2)', () => {
   assert.match(cardSource, /import \{ formatCurrency \} from '\.\.\/\.\.\/utils\/format';/);
-  assert.match(cardSource, /\{formatCurrency\(totalNormalized\)\}/);
+  assert.match(cardSource, /\{formatCurrency\(totalNormalized, order\.currency \?\? null\)\}/);
+  // Historical money keeps its original unit; an unknown unit stays unknown
+  // instead of inheriting the currently configured store currency.
+  assert.doesNotMatch(cardSource, /\{formatCurrency\(totalNormalized\)\}/);
   // The hardcoded English-style "€{totalNormalized.toFixed(2)}" render is gone.
   assert.doesNotMatch(cardSource, /€\{totalNormalized\.toFixed\(2\)\}/);
   assert.doesNotMatch(cardSource, /totalNormalized\.toFixed\(2\)/);

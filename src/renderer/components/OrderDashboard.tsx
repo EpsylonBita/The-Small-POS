@@ -8,6 +8,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+import { commitMenuOrderEdit, menuEditRefundAction, previewMenuOrderEdit, type MenuOrderEditData, type MenuOrderEditLifecycle, type MenuEditHeaders } from '../services/MenuOrderEdit';
 import {
   adoptGiftCardPaymentIds,
   claimOrdinaryCollectionOwner,
@@ -30,6 +31,7 @@ import { giftCardsApiService, type GiftCardScope } from "../services/GiftCardsAp
 import type { GiftCardTenderEvent } from "../services/GiftCardCheckoutService";
 import type { PaymentModalExistingOrder } from "./modals/PaymentModal";
 import { useShift } from "../contexts/shift-context";
+import { useOperationalShift } from "../contexts/cashier-gate-context";
 import type { OrderItem } from "../types/orders";
 import type { Customer, CustomerInfo } from "../types/customer";
 import { mergeCustomerInfoModalSave } from "../utils/customerInfoModalMerge";
@@ -38,7 +40,8 @@ import OrderTabsBar, { type TabId } from "./OrderTabsBar";
 import { TableWorkspaceToolbar, TableWorkspaceCard } from "./tables/TableWorkspace";
 import BulkActionsBar from "./BulkActionsBar";
 import DriverAssignmentModal from "./modals/DriverAssignmentModal";
-import OrderCancellationModal from "./modals/OrderCancellationModal";
+import OrderCancellationModal, { type CancellationReturnChannel } from "./modals/OrderCancellationModal";
+import { prepareManualOrderCancellation, commitManualOrderCancellation, type ManualCancellationPlan, manualCancellationFailureKey } from "../services/ManualOrderCancellation";
 import EditOptionsModal from "./modals/EditOptionsModal";
 import EditPaymentMethodModal, {
   type EditablePaymentRow,
@@ -172,8 +175,11 @@ import {
   resolveDeliveryFee,
 } from "../utils/delivery-fee";
 import { toValidLatLng } from "../utils/coordinates";
+import { customerInfoEditUpdate, orderCustomerEditSnapshot, orderCreateDeliveryLocation } from "../utils/orderCustomerEdit";
 import {
   MODAL_ZONE_VALIDATION_FIELD,
+  MODAL_DESTINATION_UNCHANGED_FIELD,
+  canKeepDeliveryZoneForCustomerEdit,
   decidePickupToDeliveryZone,
   planDeliveryAddressRepick,
   planDeliveryZoneHandoff,
@@ -970,6 +976,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       string[]
     >([]);
     const [showCancelModal, setShowCancelModal] = useState(false);
+    const [manualCancelPlans, setManualCancelPlans] = useState<Record<string, ManualCancellationPlan>>({});
     const [pendingCancelOrders, setPendingCancelOrders] = useState<string[]>(
       [],
     );
@@ -1023,6 +1030,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const [editCustomerOrderIds, setEditCustomerOrderIds] = useState<string[]>(
       [],
     );
+    const editCustomerOriginals = useRef<Record<string, EditCustomerInfoFormData>>({});
 
     // Store edit order details separately to persist while modal is open
     const [currentEditOrderId, setCurrentEditOrderId] = useState<
@@ -1041,6 +1049,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // stored row can no longer tell MenuModal whether items need a retier).
     const [currentEditSourceOrderType, setCurrentEditSourceOrderType] =
       useState<string | undefined>(undefined);
+
+    const [editHeaders, setEditHeaders] = useState<MenuEditHeaders | undefined>(undefined);
 
     // State for new order flow
     const [showOrderTypeModal, setShowOrderTypeModal] = useState(false);
@@ -1291,6 +1301,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       orderNumber?: string | null;
       preview: OrderEditSettlementPreview;
       request: EditSettlementRequest;
+      menuCommit?: {
+        data: MenuOrderEditData;
+        lifecycle: MenuOrderEditLifecycle;
+        resolve(): void;
+        reject(error: Error): void;
+      };
     } | null>(null);
 
     // State for delivery flow
@@ -1689,6 +1705,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // We avoid continuous polling and perform a single silent refresh when a
     // shift becomes active (or when blocked modals close after activation).
     const { isShiftActive, staff, activeShift } = useShift();
+    const isOperationalShiftActive = useOperationalShift(isShiftActive);
     // One picker for every kind of work this business can start (founder,
     // 05/09/2026): the cards below are the whole story — delivery, pickup,
     // table, room, appointment, repair, quick service — filtered by acquired
@@ -1700,7 +1717,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       hasRoomsModule,
       hasServicesModule,
       primaryActions,
-      isShiftActive,
+      isShiftActive: isOperationalShiftActive,
     });
     const newWorkCard = (id: NewWorkCardId) => newWorkCards.find((card) => card.id === id);
     const canLaunchNewWork = hasLaunchableNewWork(newWorkCards);
@@ -2707,6 +2724,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     // Handle menu modal close
     const handleMenuModalClose = () => {
+      dismissCheckoutRequestId();
       setShowMenuModal(false);
       setSelectedOrderType(null);
       setPickupToDeliveryContext(null);
@@ -2911,7 +2929,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           );
           const conversionPayload: PickupToDeliveryConversionParams = {
             orderId: targetOrder.id,
-            customerId: resolvedAddress.customerId || customer.id || undefined,
+            customerId: resolvePersistedCustomerId(resolvedAddress.customerId, customer.id),
             customerName: customer.name,
             customerPhone: customer.phone,
             customerEmail: customer.email || undefined,
@@ -2931,6 +2949,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             totalAmount,
           };
 
+          if (pickupToDeliveryContext.mode === "edit" || ["paid", "partially_paid", "partial", "completed"].includes(String(targetOrder.payment_status ?? targetOrder.paymentStatus))) {
+            const { orderId: _, totalAmount: __, deliveryFee: stagedFee, ...headers } = conversionPayload;
+            setEditHeaders({ orderUpdates: { ...headers, orderType: "delivery" }, deliveryFee: stagedFee });
+            setCurrentEditOrderId(targetOrder.id);
+            setCurrentEditSupabaseId(targetOrder.supabase_id);
+            setCurrentEditOrderNumber(targetOrder.order_number || targetOrder.orderNumber);
+            setCurrentEditSourceOrderType(resolveEditableOrderType(targetOrder));
+            setEditingOrderType("delivery");
+            resetPickupToDeliveryFlow();
+            setShowEditMenuModal(true);
+            return true;
+          }
+
           const result =
             await bridge.orders.convertPickupToDelivery(conversionPayload);
           if (!result?.success) {
@@ -2946,7 +2977,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           setSelectionType("delivery");
 
           // Capture mode before resetPickupToDeliveryFlow clears context.
-          const conversionMode = pickupToDeliveryContext.mode || "finalize";
+
 
           try {
             await silentRefresh();
@@ -2956,22 +2987,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               refreshError,
             );
             await loadOrders();
-          }
-
-          if (conversionMode === "edit") {
-            // EditOptionsModal "Change Order Type → Delivery" entry path.
-            // Customer + address are persisted; order is now delivery with
-            // delivery_fee set. Reopen the menu-edit session so the operator
-            // can add/remove items against the delivery tier before saving.
-            resetPickupToDeliveryFlow();
-            setCurrentEditOrderId(targetOrder.id);
-            setCurrentEditSupabaseId(targetOrder.supabase_id);
-            setCurrentEditOrderNumber(
-              targetOrder.order_number || targetOrder.orderNumber,
-            );
-            setEditingOrderType("delivery");
-            setShowEditMenuModal(true);
-            return true;
           }
 
           resetPickupToDeliveryFlow();
@@ -3299,6 +3314,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       const resolvedAddress = resolveCanonicalCustomerAddress(
         normalizedCustomer,
       );
+      const keepDeliveryZone = canKeepDeliveryZoneForCustomerEdit({
+        customerId: normalizedCustomer.id,
+        previousCustomerId: existingCustomer?.id,
+        address: resolvedAddress,
+        previousAddress: existingCustomer ? resolveCanonicalCustomerAddress(existingCustomer) : null,
+        unchangedDestination: customer?.[MODAL_DESTINATION_UNCHANGED_FIELD],
+        zoneInfo: deliveryZoneInfo,
+      });
       menuAddressRepickRef.current = false;
       debugLog(
         "[handleNewCustomerAdded] resolvedAddress:",
@@ -3307,7 +3330,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
       // For delivery orders, validate that customer has an address
       if (orderType === "delivery") {
-        setDeliveryZoneInfo(null);
+        if (!keepDeliveryZone) setDeliveryZoneInfo(null);
         const hasAddress =
           resolvedAddress?.street_address || normalizedCustomer.address;
         debugLog(
@@ -3332,22 +3355,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // check only this address's real point. Never re-check another
         // address (the default) and never a missing point as (0,0).
         try {
-          const zonePlan = planDeliveryZoneHandoff({
-            address: resolvedAddress,
-            modalValidation: (customer as Record<string, unknown> | null)?.[
-              MODAL_ZONE_VALIDATION_FIELD
-            ],
-            addressFromModal: handoff.addressFromModal,
-          });
-          if (zonePlan.kind === "reuse") {
-            setDeliveryZoneInfo(zonePlan.zoneInfo);
-          } else if (zonePlan.kind === "check_point") {
-            const validationResult = await validateDeliveryAddress(
-              zonePlan.point,
-              0,
-            );
-            if (validationResult) {
-              setDeliveryZoneInfo(validationResult);
+          if (!keepDeliveryZone) {
+            const zonePlan = planDeliveryZoneHandoff({
+              address: resolvedAddress,
+              modalValidation: (customer as Record<string, unknown> | null)?.[
+                MODAL_ZONE_VALIDATION_FIELD
+              ],
+              addressFromModal: handoff.addressFromModal,
+            });
+            if (zonePlan.kind === "reuse") {
+              setDeliveryZoneInfo(zonePlan.zoneInfo);
+            } else if (zonePlan.kind === "check_point") {
+              const validationResult = await validateDeliveryAddress(
+                zonePlan.point,
+                0,
+              );
+              if (validationResult) {
+                setDeliveryZoneInfo(validationResult);
+              }
             }
           }
         } catch (error) {
@@ -3368,6 +3393,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         normalizedCustomer?.name,
       );
       setExistingCustomer(normalizedCustomer);
+      // A saved address edit supersedes the restored display snapshot, while
+      // the mounted menu retains the existing cart and checkout identity.
+      setRestoredCheckoutContext(null);
 
       const customerInfoData =
         buildCustomerInfoFromOrderFlowCustomer(normalizedCustomer);
@@ -3634,13 +3662,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // Fix review 30/09/2026: one checkout id per cart, reused by every press
     // of Pay until the checkout ends, so a slow card terminal is never paid
     // twice.
-    const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId } =
+    const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId, dismiss: dismissCheckoutRequestId } =
       useCheckoutRequestId();
 
     const [restoredCheckoutContext, setRestoredCheckoutContext] = useState<Record<string, any> | null>(null);
-    const restoreCheckoutContext = useCallback((context: Record<string, any>) => {
+    const restoreCheckoutContext = useCallback((context: Record<string, any>, renewal?: { previousCheckoutRequestId: string }) => {
       if (!["pickup", "delivery", "dine-in"].includes(context.orderType)) return;
-      restoreCheckoutRequestId(context.checkoutRequestId);
+      restoreCheckoutRequestId(context.checkoutRequestId, { phase: context.checkoutPhase, editMode: context.editMode, renewedFrom: renewal?.previousCheckoutRequestId });
       setRestoredCheckoutContext(context);
       setSelectedOrderType(context.orderType);
       setOrderType(context.orderType);
@@ -3656,6 +3684,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         setCurrentEditSupabaseId(context.editSupabaseId);
         setCurrentEditOrderNumber(context.editOrderNumber);
         setCurrentEditSourceOrderType(context.editSourceOrderType);
+        setEditHeaders(context.editHeaders);
         setEditingOrderType(context.orderType);
         setShowMenuModal(false);
         setShowEditMenuModal(true);
@@ -3669,7 +3698,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       let mounted = true;
       void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
         if (mounted && saved && (saved.cartItems.length || saved.phase === "checkout_pending")) {
-          restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+          restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
         }
       }).catch(() => { /* Menu admission retains and displays a failed native read. */ });
       return () => { mounted = false; };
@@ -4090,6 +4119,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderData.roomId ||
           orderData.room_id ||
           null;
+        const collectionAttribution = resolveAdjustmentAttribution({
+          databaseStaffId: staff?.databaseStaffId,
+          shiftStaffOwnerId: activeShift?.staff_id,
+          staffShiftId: activeShift?.id,
+          candidateStaffIds: [staff?.staffId],
+        });
         const initialPayment =
           !isGhostOrder &&
           !isSplitPayment &&
@@ -4097,6 +4132,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             paymentMethod === "card" ||
             paymentMethod === "room_charge" || paymentMethod === "twint")
             ? {
+                ...collectionAttribution,
+                collectedBy: ['cashier', 'manager'].includes(activeShift?.role_type ?? '') ? 'cashier_drawer' : undefined,
                 method: paymentMethod,
                 payment_method: paymentMethod,
                 amount: total,
@@ -4333,6 +4370,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           skip_auto_print: askBeforeReceiptPrint,
           // Full delivery address fields for proper sync to Supabase
           delivery_address: deliveryAddress,
+          ...(selectedOrderType === "delivery" ? orderCreateDeliveryLocation(
+            { address: deliveryAddress, city: deliveryCity, postal: deliveryPostalCode },
+            orderData.address || getSelectedAddress(), orderData.deliveryZoneInfo,
+          ) : {}),
           delivery_city: deliveryCity,
           delivery_postal_code: deliveryPostalCode,
           delivery_floor: deliveryFloor,
@@ -4714,6 +4755,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setCurrentEditOrderNumber(undefined);
       setCurrentEditSupabaseId(undefined);
       setCurrentEditSourceOrderType(undefined);
+      setEditHeaders(undefined);
     }, []);
 
     const normalizeEditOrderItems = useCallback(
@@ -5123,6 +5165,35 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         if (!editSettlementDeltaPrompt) return;
         const { mode, amount, preview, request } = editSettlementDeltaPrompt;
 
+        if (editSettlementDeltaPrompt.menuCommit) {
+          const pending = editSettlementDeltaPrompt.menuCommit;
+          try {
+            let action: Parameters<typeof commitMenuOrderEdit>[2];
+            if (mode === 'collect') {
+              const collectionAttribution = resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+                shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] });
+              action = { type: 'collect', payments: [{ orderId: request.orderId, method, amount,
+                ...collectionAttribution, paymentOrigin: 'manual', collectedBy: 'cashier_drawer' }] };
+            } else {
+              const attribution = resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+                shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] });
+              action = menuEditRefundAction(preview, amount, method,
+                t('orderDashboard.editSettlementRefundReason', { defaultValue: 'Edit settlement refund' }), attribution);
+            }
+            await commitMenuOrderEdit(bridge.orders, pending.data, action, pending.lifecycle);
+            setEditSettlementDeltaPrompt(null);
+            pending.resolve();
+            void silentRefresh().catch(() => undefined);
+            void refetchTables();
+          } catch (error) {
+            // The editor's frozen original owns recovery after confirmation.
+            // Never leave another cash/card confirmation button in front of it.
+            setEditSettlementDeltaPrompt(null);
+            pending.reject(error instanceof Error ? error : new Error(String(error)));
+          }
+          return;
+        }
+
         if (mode === "collect") {
           // Existing-order guard: the edit's collected money is written under
           // the order's ordinary claim, taken before any await. Its reply has
@@ -5159,6 +5230,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         orderId: request.orderId,
                         method,
                         amount,
+                        ...resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+                          shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] }),
                         paymentOrigin: "manual",
                         collectedBy: "cashier_drawer",
                       },
@@ -5271,6 +5344,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         ordinaryRefusalText,
         staff?.databaseStaffId,
         staff?.staffId,
+        silentRefresh,
+        refetchTables,
         t,
       ],
     );
@@ -5279,8 +5354,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       // Nothing to roll back server-side — the edit-settlement payments
       // row only gets written on confirm. Close the modal and let the
       // operator retry via the normal edit flow if they still want to.
+      editSettlementDeltaPrompt?.menuCommit?.reject(new Error('EDIT_SETTLEMENT_CANCELLED'));
       setEditSettlementDeltaPrompt(null);
-    }, []);
+    }, [editSettlementDeltaPrompt]);
 
     const handleSplitPaymentClose = useCallback(async () => {
       const closingSplitPayment = splitPaymentData;
@@ -6462,28 +6538,35 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         } else if (action === "cancel") {
           // Handle cancel action - show cancellation modal
           if (selectedOrders.length > 0) {
-            // Fix review 30/09/2026 (founder rule): an order money was taken
-            // on is never cancelled. The cashier is told before the reason is
-            // asked; the payment is voided or refunded from the order first,
-            // or the rest is collected. The till refuses it again at cancel.
-            // Founder rule 01/10/2026: an order labelled paid with no
-            // payment record here is not cancelled either: the record is
-            // restored from the server or recorded first.
             const refusals = await findCancelRefusals(selectedOrders);
-            if (refusals.hasPayments.length > 0) {
-              announceCancelRefusedPaid(refusals.hasPayments);
+            if (refusals.notRecorded.length > 0) announceCancelRefusedNotRecorded(refusals.notRecorded);
+            const plans: Record<string, ManualCancellationPlan> = {};
+            const protectedOrders: string[] = [];
+            const tableIds = selectedOrders.filter(id => {
+              const order = [...orders, ...pendingExternalOrders].find(row => row.id === id);
+              const type = String(order?.orderType || (order as any)?.order_type || "");
+              return Boolean((order as any)?.tableSessionId || (order as any)?.table_session_id || type === "dine-in" || type === "dine_in");
+            });
+            for (const orderId of new Set([...refusals.hasPayments, ...tableIds])) {
+              try {
+                plans[orderId] = await prepareManualOrderCancellation(bridge, orderId);
+              } catch (error) {
+                console.warn("Manual cancellation preflight refused", error);
+                protectedOrders.push(orderId);
+                toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers([orderId]) }), { duration: 9000 });
+              }
             }
-            if (refusals.notRecorded.length > 0) {
-              announceCancelRefusedNotRecorded(refusals.notRecorded);
-            }
-            const cancellable = selectedOrders.filter(
-              (orderId) =>
-                !refusals.hasPayments.includes(orderId) &&
-                !refusals.notRecorded.includes(orderId),
-            );
-            if (cancellable.length === 0) {
+            const cancellable = selectedOrders.filter(id => !refusals.notRecorded.includes(id) && !protectedOrders.includes(id));
+            if (cancellable.length === 0) return;
+            if (Object.values(plans).some(plan => plan.pending) && cancellable.length > 1) {
+              toast.error(t("paymentIntegrity.fixCodes.table_cancellation_not_saved"));
               return;
             }
+            if (new Set(Object.values(plans).filter(plan => plan.requiresReturn || plan.requiresHandback).map(plan => plan.currency)).size > 1) {
+              toast.error(t("modals.orderCancellation.mixedCurrencies"));
+              return;
+            }
+            setManualCancelPlans(plans);
             setPendingCancelOrders(cancellable);
             setShowCancelModal(true);
           } else {
@@ -6556,7 +6639,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     };
 
     // Handle order cancellation
-    const handleOrderCancellation = async (reason: string) => {
+    const handleOrderCancellation = async (reason: string, returnChannel?: CancellationReturnChannel) => {
       // Forward the typed reason so it's persisted locally AND included
       // in the outbound sync payload — without this, the admin dashboard's
       // cancellation panel falls back to "Reason not recorded".
@@ -6570,6 +6653,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // server's `cancellation_reason` column and shows up in both the
         // pos-tauri order detail view and the admin dashboard.
         for (const orderId of pendingCancelOrders) {
+          const manualPlan = manualCancelPlans[orderId];
+          if (manualPlan) {
+            if (manualPlan.requiresReturn && !returnChannel) return;
+            if (manualPlan.tableSessionId) {
+              const result = await runTableReleaseApproval({
+                scope: "cash_drawer_control",
+                action: (managerPin) => bridge.orders.cancelWithApproval({
+                  orderId, reason: trimmedReason, tableSessionId: manualPlan.tableSessionId,
+                  clientEventId: manualPlan.requestId, managerPin,
+                  ...((manualPlan.requiresReturn || manualPlan.requiresHandback) ? { manualCancellation: { generation: manualPlan.generation, returnChannel: returnChannel || "cash_drawer" } } : {}),
+                }),
+              });
+              if (result?.success !== true) throw new Error("ORDER_CANCELLATION_FAILED");
+            } else {
+              await commitManualOrderCancellation(bridge, manualPlan, trimmedReason, returnChannel || "cash_drawer");
+            }
+            continue;
+          }
           const targetOrder = [...orders, ...pendingExternalOrders].find(order => order.id === orderId);
           const { success, errorCode } = await updateOrderStatusDetailed(
             orderId,
@@ -6606,10 +6707,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // Close modal and clear selections
         setShowCancelModal(false);
         setPendingCancelOrders([]);
+        setManualCancelPlans({});
         clearBulkSelection();
+        await loadOrders();
       } catch (error) {
         console.error("Failed to cancel orders:", error);
-        toast.error(t("orderDashboard.cancelFailed"));
+        toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers(pendingCancelOrders) }), { duration: 9000 });
       }
     };
 
@@ -6617,6 +6720,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const handleCancelModalClose = () => {
       setShowCancelModal(false);
       setPendingCancelOrders([]);
+      setManualCancelPlans({});
     };
 
     // Handle edit options
@@ -6630,6 +6734,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
       // Capture the customer info NOW while pendingEditOrders is still populated
       setEditCustomerSnapshot(getSelectedOrderCustomerInfo());
+      editCustomerOriginals.current = Object.fromEntries(targetOrderIds.map(id =>
+        [id, orderCustomerEditSnapshot(orders.find(order => order.id === id))]));
       setEditCustomerOrderIds(targetOrderIds);
       setShowEditOptionsModal(false);
       setShowEditCustomerModal(true);
@@ -6671,6 +6777,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     const localizePaymentMethodEditError = (error: unknown) => {
       const rawMessage = extractOrderDashboardErrorMessage(error) || "";
+      if (rawMessage.includes("PAYMENT_METHOD_EDIT_PROVIDER_PAYMENT_IMMUTABLE")) return t("orderDashboard.paymentMethodEditProviderOwned");
+      if (rawMessage.includes("ORDER_EDIT_SETTLEMENT_PENDING")) return t("orderDashboard.paymentMethodEditPending");
       if (rawMessage.includes("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE")) {
         return t("orderDashboard.paymentMethodAdjustedOrder", {
           defaultValue: "This order has a refund or void. Its payment methods cannot be changed. Open the payment history to review the adjustment.",
@@ -6706,7 +6814,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const route = await loadPaymentEditRoute(bridge, editablePaymentOrder);
         if (route.kind === "blocked") {
           showPaymentMethodEditError(
-            route.reason === "adjusted"
+            route.reason === "provider_owned" ? t("orderDashboard.paymentMethodEditProviderOwned") : route.reason === "adjusted"
               ? localizePaymentMethodEditError("PAYMENT_METHOD_EDIT_ADJUSTED_ORDER_NOT_EDITABLE")
               : route.reason === "platform_held"
                 ? // R4: the platform's money is restored from the server,
@@ -6970,63 +7078,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       ],
     );
 
-    // Used when the operator changes order type FROM delivery TO pickup or
-    // dine-in via the Change-Order-Type card. Per product decision: customer
-    // name/phone are preserved on the order record (reprints, loyalty,
-    // recall search by phone) but delivery-specific fields are cleared so
-    // z-reports and driver views don't show a delivery address attached
-    // to a pickup/dine-in order. Best-effort — if the bridge call fails
-    // the local state is still updated, and the server-side update will
-    // retry through the normal sync queue on the next save.
-    //
-    const clearDeliveryFieldsForOrder = async (orderId: string) => {
-      try {
-        const order = orders.find((o) => o.id === orderId);
-        if (!order) return;
-        const customerName = String(
-          order.customer_name || order.customerName || "",
-        ).trim();
-        const customerPhone = String(
-          order.customer_phone || order.customerPhone || "",
-        ).trim();
-        if (!customerName || !customerPhone) {
-          // The `updateCustomerInfo` bridge requires name + phone as
-          // required fields. If neither is set, we can't call it —
-          // that's fine, the order had nothing delivery-specific to
-          // clear anyway (or it'll be corrected on the next save).
-          return;
-        }
-        const result = await bridge.orders.updateCustomerInfo({
-          orderId,
-          customerName,
-          customerPhone,
-          deliveryAddress: "",
-          deliveryPostalCode: "",
-          deliveryNotes: "",
-        });
-        if (!result?.success) {
-          console.warn(
-            "[OrderDashboard] clearDeliveryFieldsForOrder: non-success response",
-            result,
-          );
-        }
-        // silentRefresh picks up the cleared fields for subsequent
-        // renders; also re-hydrates any other fields that drift.
-        try {
-          await silentRefresh();
-        } catch {
-          /* non-fatal — loadOrders will converge later */
-        }
-      } catch (err) {
-        console.warn(
-          "[OrderDashboard] clearDeliveryFieldsForOrder failed (non-fatal):",
-          err,
-        );
-      }
-    };
-
     const openMenuEditSession = (targetOrderType?: EditableOrderType) => {
       setShowEditOptionsModal(false);
+      setEditHeaders(undefined);
 
       // Get the order being edited to determine its type
       if (pendingEditOrders.length > 0) {
@@ -7128,16 +7182,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return;
       }
 
-      // Delivery → pickup/dine-in: keep customer, clear delivery-only
-      // fields before reopening the menu. Per product decision: we never
-      // silently keep delivery_address on an order whose type is no
-      // longer delivery — that pollutes z-reports and driver views.
-      // TS note: targetOrderType is narrowed to "pickup" | "dine-in" here
-      // because the delivery branch above returned.
-      if (currentType === "delivery") {
-        void clearDeliveryFieldsForOrder(orderBeingEdited.id);
-      }
-
+      // Delivery-only fields are cleared atomically by the final Menu save.
       openMenuEditSession(targetOrderType);
     };
 
@@ -7228,21 +7273,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       }
 
       try {
-        const updatePayload = {
-          customerName: customerInfo.name.trim(),
-          customerPhone: customerInfo.phone.trim(),
-          deliveryAddress: customerInfo.address.trim(),
-          deliveryPostalCode: customerInfo.postal_code?.trim() || null,
-          deliveryFloor: customerInfo.delivery_floor?.trim() || null,
-          nameOnRinger: customerInfo.name_on_ringer?.trim() || null,
-          deliveryNotes: customerInfo.notes?.trim() || null,
-          deliveryLatitude:
-            toValidLatLng(customerInfo.coordinates, customerInfo.latitude, customerInfo.longitude)?.lat ?? null,
-          deliveryLongitude:
-            toValidLatLng(customerInfo.coordinates, customerInfo.latitude, customerInfo.longitude)?.lng ?? null,
-          deliveryAddressFingerprint: customerInfo.addressFingerprint ?? null,
-        };
         for (const orderId of targetOrderIds) {
+          const original = editCustomerOriginals.current[orderId];
+          if (!original) throw new Error(t("orderDashboard.customerInfoFailed"));
+          const updatePayload = customerInfoEditUpdate(customerInfo, original);
           const result = await bridge.orders.updateCustomerInfo({
             orderId,
             ...updatePayload,
@@ -7264,6 +7298,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         // Close modal and clear state
         setShowEditCustomerModal(false);
         setEditCustomerSnapshot(null);
+        editCustomerOriginals.current = {};
         setEditCustomerOrderIds([]);
         setPendingEditOrders([]);
         setEditingSingleOrder(null);
@@ -7284,6 +7319,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     };
 
     const handleEditCustomerClose = () => {
+      editCustomerOriginals.current = {};
       setShowEditCustomerModal(false);
       setEditCustomerSnapshot(null);
       setEditCustomerOrderIds([]);
@@ -7319,24 +7355,47 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       resetEditOrderState();
     };
 
-    // Handle menu-based order edit completion
-    const handleEditMenuComplete = async (orderData: {
-      orderId: string; items: any[]; total: number; orderType?: string; notes?: string;
-      client_event_id?: string; expected_version?: number;
-    }) => {
-      if (!orderData.client_event_id || !Number.isInteger(orderData.expected_version)) {
-        throw new Error("CHECKOUT_DRAFT_EDIT_VERSION_REQUIRED");
+    const handleEditMenuPreflight = async (data: MenuOrderEditData) =>
+      (await previewMenuOrderEdit(bridge.orders, data, bridge.sync)).preflight;
+
+    // Keep the cart editable through the picker; freeze the exact final action before IPC.
+    const handleEditMenuComplete = async (data: MenuOrderEditData, lifecycle?: MenuOrderEditLifecycle) => {
+      if (data.action === 'edit_settlement') {
+        if (!data.settlementAction) throw new Error('RECOVERY_ORIGINAL_REQUEST_REQUIRED');
+        await commitMenuOrderEdit(bridge.orders, data, data.settlementAction);
+        void silentRefresh().catch(() => undefined);
+        void refetchTables();
+        return;
       }
-      // The frozen editor identity belongs to the durable native recovery queue.
-      // Paid/shared edits remain fail-closed rather than opening an unjournaled settlement.
-      const target = orders.find(order => order.id === orderData.orderId) as any;
-      const result: any = await bridge.orders.updateItems(orderData.orderId, orderData.items, {
-        clientEventId: orderData.client_event_id, expectedVersion: orderData.expected_version,
-        tableSessionId: target?.table_session_id || target?.tableSessionId,
+      const { preflight, preview } = await previewMenuOrderEdit(bridge.orders, data, bridge.sync);
+      if (preflight.kind !== 'settlement') {
+        const target = orders.find(order => order.id === data.orderId) as any;
+        const result: any = await bridge.orders.updateItems(data.orderId, data.items, {
+          clientEventId: data.client_event_id, expectedVersion: data.expected_version,
+          expectedLocalVersion: data.renderer_local_version,
+          tableSessionId: target?.table_session_id || target?.tableSessionId,
+          orderUpdates: data.orderUpdates, financials: data.financials, orderNotes: data.notes,
+        });
+        if (result?.success === false) throw new Error('CHECKOUT_DRAFT_EDIT_NOT_APPLIED');
+        void silentRefresh().catch(() => undefined);
+        void refetchTables();
+        return;
+      }
+      if (!lifecycle) throw new Error('CHECKOUT_DRAFT_EDIT_FREEZE_REQUIRED');
+      if (preview.requiredAction === 'none') {
+        await commitMenuOrderEdit(bridge.orders, data, { type: 'none' }, lifecycle);
+        void silentRefresh().catch(() => undefined);
+        void refetchTables();
+        return;
+      }
+      await new Promise<void>((resolve, reject) => {
+        setEditSettlementDeltaPrompt({ mode: preview.requiredAction as 'collect' | 'refund',
+          amount: preview.requiredAction === 'collect' ? Math.max(0, preview.nextTotal - preview.paidTotal) : resolveEditSettlementRefundAmount(preview),
+          orderNumber: currentEditOrderNumber, preview,
+          request: { orderId: data.orderId, items: data.items, orderNotes: data.notes },
+          menuCommit: { data, lifecycle, resolve, reject },
+        });
       });
-      if (result?.success === false) throw new Error("CHECKOUT_DRAFT_EDIT_NOT_APPLIED");
-      await silentRefresh();
-      void refetchTables();
     };
 
     const handleEditMenuClose = () => {
@@ -7350,63 +7409,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
       const targetId = pendingEditOrders[0] || editingSingleOrder;
       const firstOrder = orders.find((order) => order.id === targetId) as any;
-      const rawAddress = firstOrder?.address && typeof firstOrder.address === "object"
-        ? firstOrder.address
-        : null;
-      return {
-        name: firstOrder?.customerName || firstOrder?.customer_name || "",
-        phone: firstOrder?.customerPhone || firstOrder?.customer_phone || "",
-        address:
-          firstOrder?.deliveryAddress ||
-          firstOrder?.delivery_address ||
-          firstOrder?.address ||
-          "",
-        postal_code:
-          firstOrder?.deliveryPostalCode ||
-          firstOrder?.delivery_postal_code ||
-          firstOrder?.postalCode ||
-          firstOrder?.postal_code ||
-          "",
-        delivery_floor:
-          firstOrder?.deliveryFloor ||
-          firstOrder?.delivery_floor ||
-          rawAddress?.floor_number ||
-          rawAddress?.floor ||
-          "",
-        name_on_ringer:
-          firstOrder?.nameOnRinger ||
-          firstOrder?.name_on_ringer ||
-          rawAddress?.name_on_ringer ||
-          rawAddress?.nameOnRinger ||
-          "",
-        notes:
-          firstOrder?.deliveryNotes ||
-          firstOrder?.delivery_notes ||
-          firstOrder?.specialInstructions ||
-          firstOrder?.special_instructions ||
-          firstOrder?.notes ||
-          "",
-        coordinates:
-          toValidLatLng(
-            firstOrder?.coordinates,
-            firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude ?? firstOrder?.latitude,
-            firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude ?? firstOrder?.longitude,
-          ) ?? undefined,
-        latitude:
-          typeof (firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude) === "number"
-            ? firstOrder?.deliveryLatitude ?? firstOrder?.delivery_latitude
-            : typeof firstOrder?.latitude === "number" ? firstOrder.latitude : null,
-        longitude:
-          typeof (firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude) === "number"
-            ? firstOrder?.deliveryLongitude ?? firstOrder?.delivery_longitude
-            : typeof firstOrder?.longitude === "number"
-              ? firstOrder.longitude
-              : null,
-        addressFingerprint:
-          firstOrder?.deliveryAddressFingerprint ||
-          firstOrder?.delivery_address_fingerprint ||
-          null,
-      };
+      return orderCustomerEditSnapshot(firstOrder);
     };
 
     // Get order items for the first selected order (for editing)
@@ -8612,6 +8615,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         <OrderCancellationModal
           isOpen={showCancelModal}
           orderCount={pendingCancelOrders.length}
+          recovery={Object.values(manualCancelPlans).find(plan => plan.pending) ? {
+            reason: Object.values(manualCancelPlans).find(plan => plan.pending)?.reason || "",
+            returnChannel: Object.values(manualCancelPlans).find(plan => plan.pending)?.returnChannel,
+          } : undefined}
+          manualReturn={Object.values(manualCancelPlans).some(plan => plan.requiresReturn) ? {
+            amountCents: Object.values(manualCancelPlans).reduce((sum, plan) => sum + plan.amountCents, 0),
+            currency: Object.values(manualCancelPlans).find(plan => plan.requiresReturn)?.currency || "",
+          } : undefined}
           platformOrder={orders.some((order) => {
             if (!pendingCancelOrders.includes(order.id)) {
               return false;
@@ -8722,9 +8733,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           editSupabaseId={currentEditSupabaseId}
           editOrderNumber={currentEditOrderNumber}
           editSourceOrderType={currentEditSourceOrderType}
+          editHeaders={editHeaders}
           initialCartItems={[]}
+          onEditPreflight={handleEditMenuPreflight}
           onEditComplete={handleEditMenuComplete}
-          draftContext={{ editOrderNumber: currentEditOrderNumber }}
+          draftContext={{ editOrderNumber: currentEditOrderNumber, editHeaders }}
           onDraftRestore={restoreCheckoutContext}
           onRecoveredOrder={acceptRecoveredCheckout}
         />

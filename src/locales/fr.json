@@ -4188,7 +4188,11 @@
       "customerName": "Nom",
       "customerPhone": "Téléphone",
       "customerNotes": "Notes",
-      "loadItemsFailed": "Échec du chargement des articles de la commande"
+      "loadItemsFailed": "Échec du chargement des articles de la commande",
+      "editServerUpdate": "Les corrections sont temporairement indisponibles. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
+      "editSyncRequired": "La modification du paiement ou de la commande n’est pas encore synchronisée. Votre panier est conservé. Réessayez dans un instant.",
+      "emptyEditHint": "Pour retirer tous les articles, fermez l’éditeur et annulez la commande.",
+      "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement."
     },
     "payment": {
       "title": "Paiement",
@@ -5200,6 +5204,20 @@
       "cashierShiftSyncUnknownReason": "Ce service de caisse est enregistré en local, mais sa synchronisation nécessite votre attention."
     },
     "orderCancellation": {
+      "staffCashAmbiguous": "La détention des espèces par le personnel ne peut pas être vérifiée. Vérifiez le remboursement initial avant l’annulation.",
+      "staffCashUnavailable": "L’annulation avec remise d’espèces est temporairement indisponible. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
+      "connectionUnavailable": "L’état de connexion des paiements est indisponible. Actualisez les intégrations et réessayez.",
+      "permissionRequired": "Ce compte ne peut pas annuler les commandes payées.",
+      "paymentSyncRequired": "Le paiement d’origine doit être synchronisé avant d’enregistrer son remboursement. Synchronisez et réessayez, sans débiter à nouveau.",
+      "paymentChanged": "Le paiement a changé. Fermez cette fenêtre et choisissez à nouveau Annuler pour vérifier le montant actuel.",
+      "drawerUnavailable": "Une caisse ouverte est nécessaire pour enregistrer un remboursement en espèces.",
+      "returnChannel": "Comment l’argent a-t-il été rendu ?",
+      "returnRecorded": "{{amount}} seront enregistrés comme déjà remboursés. Aucun paiement ne sera lancé.",
+      "cashDrawer": "Caisse",
+      "bank": "Banque",
+      "originalReturnRequired": "La commande {{orderNumber}} nécessite le remboursement d’origine ou un état de connexion vérifié avant annulation.",
+      "mixedCurrencies": "Annulez séparément les commandes dans des devises différentes.",
+      "currencyMismatch": "Les devises enregistrées ne correspondent pas. Vérifiez le paiement d’origine et la devise de la caisse avant d’annuler.",
       "title": "Annuler des commandes",
       "message_one": "Vous êtes sur le point d'annuler {{count}} commande. Veuillez indiquer une raison d'annulation.",
       "message_other": "Vous êtes sur le point d'annuler {{count}} commandes. Veuillez indiquer une raison d'annulation.",
@@ -6049,6 +6067,8 @@
     "paymentMethodUpdated": "Mode de paiement mis à jour",
     "paymentMethodUpdateFailed": "Échec de la mise à jour du mode de paiement",
     "paymentMethodNoChange": "Le mode de paiement est déjà sélectionné",
+    "paymentMethodEditProviderOwned": "Ce paiement appartient à un prestataire de paiement. Son mode de paiement initial ne peut pas être modifié.",
+    "paymentMethodEditPending": "Enregistrez et synchronisez la correction initiale de la commande avant de modifier son mode de paiement.",
     "paymentMethodEditUnavailable": "Le mode de paiement ne peut être modifié que pour une seule commande non annulée en espèces/carte",
     "paymentMethodEditChecking": "Vérification des paiements…",
     "paymentMethodEditRequiresSingleCompletedPayment": "Cette commande comporte des paiements fractionnés ou plusieurs paiements terminés. Leurs modes de paiement ne peuvent pas être modifiés ensemble comme un seul paiement.",
@@ -9888,21 +9908,25 @@
       "not_saved": "Non enregistré"
     },
     "reasonCodes": {
+      "table_cancellation_not_saved": "Le remboursement initial pour l’annulation de la table n’a pas encore été enregistré.",
       "payments_need_review": "Un paiement de {{paymentAmount}} ({{paymentMethod}}) a été encaissé sur la commande {{orderNumber}} alors qu'elle était déjà payée. Il est mis de côté et n'est pas compté : le client a peut-être payé deux fois.",
       "payments_need_review__platform_held": "Un paiement de {{paymentAmount}} ({{paymentMethod}}) a été encaissé sur la commande {{orderNumber}}, mais la plateforme de livraison détient déjà l'argent de cette commande. Il est mis de côté et n'est pas compté : le client a peut-être payé deux fois.",
       "payments_not_saved": "Un paiement par carte de {{paymentAmount}} a été débité pour la commande {{orderNumber}} mais n'est pas encore enregistré sur cette caisse. Le client a été débité : ne débitez pas à nouveau.",
       "payments_not_saved__new_order": "Un paiement par carte de {{paymentAmount}} a été débité pour une nouvelle commande qui n'est pas encore enregistrée sur cette caisse : la commande et son paiement sont conservés jusqu'à leur enregistrement. Le client a été débité : ne débitez pas à nouveau.",
       "payments_not_saved__new_order_cannot_save": "Un paiement par carte de {{paymentAmount}} a été débité pour une nouvelle commande qui n'est pas encore enregistrée sur cette caisse : la commande et son paiement sont conservés jusqu'à leur enregistrement. Le client a été débité : ne débitez pas à nouveau.",
-      "cancelled_order_claims_payment": "Cette commande est annulée mais encore indiquée comme payée, et cette caisse n'a aucun enregistrement de paiement pour elle. Elle ne figure pas dans ce Rapport Z. Cela ne bloque pas la clôture de la journée."
+      "cancelled_order_claims_payment": "Cette commande est annulée mais encore indiquée comme payée, et cette caisse n'a aucun enregistrement de paiement pour elle. Elle ne figure pas dans ce Rapport Z. Cela ne bloque pas la clôture de la journée.",
+      "edit_settlement_not_saved": "Une correction confirmée n’est pas encore enregistrée. L’encaissement ou le remboursement initial est conservé."
     },
     "fixCodes": {
+      "table_cancellation_not_saved": "Récupérez l’annulation initiale de la table. Ne remettez et ne remboursez pas l’argent une seconde fois.",
       "payments_need_review": "Rendez l'argent au client, puis confirmez-le ici. Si c'est le paiement enregistré sur le serveur qui est erroné, contactez le support avant de clôturer la journée.",
       "payments_need_review__platform_held": "Rendez l'argent au client, puis confirmez-le ici. La plateforme reverse cette commande au magasin par son propre règlement.",
       "payments_not_saved": "Enregistrez de nouveau le paiement. S'il ne peut pas être enregistré, rendez l'argent au client et confirmez-le ici.",
       "payments_not_saved__cannot_save": "Ce paiement ne peut pas être enregistré sur cette caisse. Rendez l'argent au client, puis confirmez-le ici.",
       "payments_not_saved__new_order": "Enregistrez de nouveau le paiement : cela enregistre la commande et son paiement, sans nouveau débit. S'il ne peut pas être enregistré, rendez l'argent au client et confirmez-le ici.",
       "payments_not_saved__new_order_cannot_save": "Cette commande et son paiement ne peuvent pas être enregistrés sur cette caisse. Rendez l'argent au client, puis confirmez-le ici.",
-      "cancelled_order_claims_payment": "Restaurer depuis le serveur (« Synchroniser maintenant ») : un paiement que le serveur détient est copié ici. S'il n'y en a aucun, le propriétaire décide de ce que la commande doit indiquer."
+      "cancelled_order_claims_payment": "Restaurer depuis le serveur (« Synchroniser maintenant ») : un paiement que le serveur détient est copié ici. S'il n'y en a aucun, le propriétaire décide de ce que la commande doit indiquer.",
+      "edit_settlement_not_saved": "Rouvrez la modification conservée et enregistrez la même correction. Ne pas encaisser ni rembourser à nouveau."
     },
     "setAsidePaymentLabel": "Paiement mis de côté",
     "takenAtLabel": "Encaissé à",

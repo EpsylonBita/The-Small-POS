@@ -489,10 +489,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     useCheckoutRequestId();
 
   const [restoredCheckoutContext, setRestoredCheckoutContext] = useState<Record<string, any> | null>(null);
-  const restoreCheckoutContext = useCallback((context: Record<string, any>) => {
+  const restoreCheckoutContext = useCallback((context: Record<string, any>, renewal?: { previousCheckoutRequestId: string }) => {
     if (context.editMode) { navigate('/'); return; }
     if (!['pickup', 'delivery', 'dine-in'].includes(context.orderType)) return;
-    restoreCheckoutRequestId(context.checkoutRequestId);
+    restoreCheckoutRequestId(context.checkoutRequestId, { phase: context.checkoutPhase, renewedFrom: renewal?.previousCheckoutRequestId });
     setRestoredCheckoutContext(context);
     setSelectedOrderType(context.orderType);
     setOrderType(context.orderType);
@@ -507,7 +507,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     let mounted = true;
     void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
       if (mounted && saved && (saved.cartItems.length || saved.phase === 'checkout_pending')) {
-        restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+        restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
       }
     }).catch(() => { /* Native read errors are shown at cart admission. */ });
     return () => { mounted = false; };

@@ -21,6 +21,12 @@ vi.mock('../../../services/OrderService', () => ({
   },
 }));
 
+// Creating an order also starts a fiscal poll. This storage-label fixture must
+// not leave a real network request or retry timer running after its assertions.
+vi.mock('../../services/fiscal-status', () => ({
+  pollFiscalReceiptStatus: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock('react-hot-toast', () => ({
   default: Object.assign(vi.fn(), {
     success: vi.fn(),

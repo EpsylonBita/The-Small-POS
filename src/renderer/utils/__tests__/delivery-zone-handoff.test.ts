@@ -4,6 +4,7 @@ import { resolveCanonicalCustomerAddress } from '../customer-addresses'
 import { createUncheckedDeliveryZoneResult, getDeliveryFeeStatus, resolveDeliveryFee } from '../delivery-fee'
 import {
   decidePickupToDeliveryZone,
+  canKeepDeliveryZoneForCustomerEdit,
   planDeliveryAddressRepick,
   planDeliveryZoneHandoff,
   resolveHandoffCustomer,
@@ -90,9 +91,35 @@ describe('address hand-off after the customer/address modal', () => {
       id: 'cust-1',
       selected_address_id: 'addr-edited',
       delivery_zone_validation: inZoneModalCheck,
+      delivery_destination_unchanged: true,
       addresses: [editedWithPoint],
     })
     expect('delivery_zone_validation' in handoff.customer).toBe(false)
+    expect('delivery_destination_unchanged' in handoff.customer).toBe(false)
+  })
+
+  it('retains an existing verdict only for the exact live owner and unchanged destination', () => {
+    const current = toDeliveryZoneInfoFromModalValidation(inZoneModalCheck)!
+    const options = { customerId: 'cust-1', previousCustomerId: 'cust-1', address: { ...editedWithPoint, floor_number: '2' },
+      previousAddress: editedWithPoint, unchangedDestination: true, zoneInfo: current }
+    expect(canKeepDeliveryZoneForCustomerEdit(options)).toBe(true)
+    for (const change of [
+      { customerId: 'cust-2' },
+      { unchangedDestination: undefined },
+      { unchangedDestination: false },
+      { address: { ...editedWithPoint, id: 'different-address' } },
+      { address: { ...editedWithPoint, street_address: 'Other street 7' } },
+      { address: { ...editedWithPoint, postal_code: '99999' } },
+      { address: { ...editedWithPoint, latitude: 40.7 } },
+      { zoneInfo: { ...current, coordinates: { lat: 40.7, lng: 23 } } },
+    ]) expect(canKeepDeliveryZoneForCustomerEdit({ ...options, ...change })).toBe(false)
+  })
+
+  it('does not manufacture a known zone for an unchanged legacy destination without coordinates', () => {
+    const options = { customerId: 'cust-1', previousCustomerId: 'cust-1', address: defaultWithoutPoint,
+      previousAddress: defaultWithoutPoint, unchangedDestination: true, zoneInfo: createUncheckedDeliveryZoneResult() }
+    expect(canKeepDeliveryZoneForCustomerEdit(options)).toBe(true)
+    expect(canKeepDeliveryZoneForCustomerEdit({ ...options, zoneInfo: toDeliveryZoneInfoFromModalValidation(inZoneModalCheck) })).toBe(false)
   })
 
   it('reuses the modal\'s in-zone check for the address it saved (no second check)', () => {

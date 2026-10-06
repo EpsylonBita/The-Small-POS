@@ -5,7 +5,7 @@ import { useCashierDayGate } from '../useCashierDayGate';
 const mocks = vi.hoisted(() => ({
   resolve: vi.fn(), listeners: new Map<string, (payload?: any) => void>(),
   shift: { id: 'driver', status: 'active', role_type: 'driver' } as any,
-  identity: { branchId: 'branch-1', terminalId: 'terminal-1' },
+  identity: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' },
 }));
 vi.mock('../../contexts/shift-context', () => ({ useShift: () => ({ staff: null, activeShift: mocks.shift }) }));
 vi.mock('../../services/terminal-credentials', () => ({ getCachedTerminalCredentials: () => mocks.identity }));
@@ -20,7 +20,7 @@ beforeEach(() => {
   mocks.resolve.mockReset().mockResolvedValue(cashier);
   mocks.listeners.clear();
   mocks.shift = { id: 'driver', status: 'active', role_type: 'driver' };
-  mocks.identity = { branchId: 'branch-1', terminalId: 'terminal-1' };
+  mocks.identity = { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' };
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => cleanup());
@@ -77,6 +77,47 @@ describe('useCashierDayGate', () => {
     expect(result.current.isBlocked).toBe(false);
   });
 
+  it.each(['terminal-settings-updated', 'terminal-config-updated', 'focus', 'recheck'])('keeps a verified open day usable during same-scope %s refresh', async trigger => {
+    const { result } = renderHook(() => useCashierDayGate());
+    await waitFor(() => expect(result.current.isBlocked).toBe(false));
+    let finish!: (value: unknown) => void;
+    mocks.resolve.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    let checking: Promise<void> | undefined;
+    act(() => {
+      if (trigger === 'focus') window.dispatchEvent(new Event('focus'));
+      else if (trigger === 'recheck') checking = result.current.recheck();
+      else mocks.listeners.get(trigger)?.();
+    });
+    expect(result.current.isBlocked).toBe(false);
+    expect(result.current.isResolving).toBe(false);
+    await act(async () => { finish(cashier); await checking; });
+  });
+
+  it('locks immediately when terminal identity changes while its lookup is pending', async () => {
+    const { result, rerender } = renderHook(() => useCashierDayGate());
+    await waitFor(() => expect(result.current.isBlocked).toBe(false));
+    mocks.identity = { organizationId: 'org-1', branchId: 'branch-2', terminalId: 'terminal-2' };
+    let finish!: (value: unknown) => void;
+    mocks.resolve.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    rerender();
+    expect(result.current.isResolving).toBe(true);
+    expect(result.current.isBlocked).toBe(true);
+    await act(async () => { finish(null); });
+    expect(result.current.isBlocked).toBe(true);
+  });
+
+  it.each(['org-2', ''])('locks immediately on organization-only identity change to %s', async organizationId => {
+    const { result, rerender } = renderHook(() => useCashierDayGate());
+    await waitFor(() => expect(result.current.isBlocked).toBe(false));
+    mocks.identity = { ...mocks.identity, organizationId };
+    let finish!: (value: unknown) => void;
+    mocks.resolve.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    rerender();
+    expect(result.current.isResolving).toBe(true);
+    expect(result.current.isBlocked).toBe(true);
+    await act(async () => { finish(null); });
+  });
+
   it('fences a stale open response after the newer close response', async () => {
     const { result } = renderHook(() => useCashierDayGate());
     await waitFor(() => expect(result.current.isBlocked).toBe(false));
@@ -97,4 +138,30 @@ describe('useCashierDayGate', () => {
     expect(mocks.listeners.size).toBe(0);
     expect(clear).toHaveBeenCalled();
   });
+
+  it.each(['focus', 'visibilitychange', 'terminal-settings-updated', 'terminal-config-updated'])('does not relock a confirmed same-scope day during %s refresh', async event => {
+    const { result } = renderHook(() => useCashierDayGate());
+    await waitFor(() => expect(result.current.isBlocked).toBe(false));
+    mocks.resolve.mockImplementation(() => new Promise(() => {}));
+    act(() => {
+      if (event === 'focus') window.dispatchEvent(new Event('focus'));
+      else if (event === 'visibilitychange') document.dispatchEvent(new Event('visibilitychange'));
+      else mocks.listeners.get(event)?.();
+    });
+    expect(result.current.isBlocked).toBe(false);
+    expect(result.current.isResolving).toBe(false);
+  });
+
+  it('keeps confirmed same-scope authority during feature refresh but locks immediately on terminal change', async () => {
+    const { result, rerender } = renderHook(({ ready }) => useCashierDayGate({ ready }), { initialProps: { ready: true } });
+    await waitFor(() => expect(result.current.isBlocked).toBe(false));
+    mocks.resolve.mockImplementation(() => new Promise(() => {}));
+    rerender({ ready: false });
+    expect(result.current.isResolving).toBe(false);
+    expect(result.current.isBlocked).toBe(false);
+    mocks.identity = { branchId: 'branch-1', terminalId: 'terminal-2' };
+    rerender({ ready: true });
+    expect(result.current.isResolving).toBe(true);
+  });
+
 });

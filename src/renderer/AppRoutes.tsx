@@ -1,5 +1,6 @@
 import React, { lazy } from "react";
 import { Routes, Route, useLocation } from "react-router-dom";
+import { CashierOperationalBoundary } from './components/GlobalCashierGate';
 import PageLoadMotion from "./components/ui/PageLoadMotion";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
 
@@ -53,7 +54,7 @@ export function AppRoutes({ onLogout, onOpenConnectionSettings }: AppRoutesProps
           path="/new-order"
           element={
             <PageLoadMotion animationKey="new-order" className="h-full min-h-0">
-              <NewOrderPage />
+              <CashierOperationalBoundary><NewOrderPage /></CashierOperationalBoundary>
             </PageLoadMotion>
           }
         />

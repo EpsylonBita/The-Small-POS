@@ -1784,3 +1784,18 @@ mod tests {
         );
     }
 }
+
+/// Explicit, audited adoption of the active pre-v96 cashier's operating unit.
+#[tauri::command]
+pub fn shift_confirm_legacy_currency(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+    crate::legacy_shift_currency::confirm(
+        &db,
+        &auth_state,
+        arg0.ok_or("Missing currency confirmation")?,
+    )
+}

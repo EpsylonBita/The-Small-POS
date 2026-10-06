@@ -36,6 +36,15 @@ const cart = () => ({ ...createCheckoutDraft(), cartItems: [{ id: 'item', quanti
     selectedCustomer: { id: 'customer', name: 'Alex' }, editExpectedVersion: 8 },
   state: { manualDiscountMode: 'amount', manualDiscountValue: 2, notes: 'birthday' } });
 describe('CheckoutDraftStore durable identity', () => {
+  it('closes a new cart before its first autosave and fences a late save', async () => {
+    const { transport } = database(fixture());
+    const owner = new CheckoutDraftStore(scope, transport);
+    const unsaved = cart();
+    await owner.load();
+    await owner.clear(unsaved.draftId);
+    await expect(owner.save(unsaved)).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+    expect(await new CheckoutDraftStore(scope, transport).load()).toBeNull();
+  });
   it('restores the complete actual cart and table binding after closing and reopening storage', async () => {
     const file = fixture(); const first = database(file); const saved = cart();
     await new CheckoutDraftStore(scope, first.transport).save(saved);
@@ -84,6 +93,13 @@ describe('CheckoutDraftStore durable identity', () => {
     const owner = new CheckoutDraftStore(scope, native); expect(await owner.inspect(draft.checkoutRequestId)).toMatchObject({ outcome: 'not_found', canCollect: false });
     expect(native).toHaveBeenLastCalledWith('checkout_draft_inspect', { ...scope, clientRequestId: draft.checkoutRequestId, editOrderId: 'order', clientEventId: 'event' });
     await expect(owner.inspect('new-id')).rejects.toThrow('CHANGED');
+  });
+  it('paid edit admission includes its original order within the current terminal scope', async () => {
+    const native = vi.fn(async (command: string) => command === 'checkout_draft_get'
+      ? { success: true, scope, generation: 0, draft: null }
+      : { success: true, currency: 'EUR' });
+    await new CheckoutDraftStore(scope, native).checkAdmission({ orderId: 'paid-original' });
+    expect(native).toHaveBeenCalledWith('checkout_draft_check_admission', { ...scope, orderId: 'paid-original' });
   });
   it('factory requires fresh full scope and never keeps a stale owner across reset/rebinding', async () => {
     vi.mocked(refreshTerminalCredentialCache).mockResolvedValue({ ...scope, apiKey: '' });

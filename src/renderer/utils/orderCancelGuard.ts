@@ -23,6 +23,7 @@ export interface OrderCancelRefusals {
 /** The refusal code a till error carries, if any. */
 export function cancelRefusalCodeFromError(errorText: string): OrderCancelRefusalCode | null {
   if (errorText.includes(ORDER_PAYMENT_NOT_RECORDED)) return ORDER_PAYMENT_NOT_RECORDED;
+  if (errorText.includes('STAFF_CASH_RETURN_REQUIRED')) return ORDER_HAS_PAYMENTS;
   if (errorText.includes(ORDER_HAS_PAYMENTS)) return ORDER_HAS_PAYMENTS;
   return null;
 }
@@ -38,6 +39,7 @@ export function cancelRefusalFromSnapshot(snapshot: unknown): OrderCancelRefusal
   const record = (snapshot ?? {}) as { cancelRefusal?: unknown; netPaid?: unknown };
   if (Object.prototype.hasOwnProperty.call(record, 'cancelRefusal')) {
     if (record.cancelRefusal === ORDER_PAYMENT_NOT_RECORDED) return ORDER_PAYMENT_NOT_RECORDED;
+    if (record.cancelRefusal === 'STAFF_CASH_RETURN_REQUIRED') return ORDER_HAS_PAYMENTS;
     if (record.cancelRefusal === ORDER_HAS_PAYMENTS) return ORDER_HAS_PAYMENTS;
     if (record.cancelRefusal === null) return null;
   }

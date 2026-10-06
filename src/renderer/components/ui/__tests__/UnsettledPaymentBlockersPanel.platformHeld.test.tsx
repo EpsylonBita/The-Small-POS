@@ -42,6 +42,10 @@ const recordButtons = () =>
   screen.queryAllByRole('button').filter((button) => /cash|card/i.test(button.textContent ?? ''))
 
 describe('UnsettledPaymentBlockersPanel and platform-held money', () => {
+  it('does not offer a replacement payment for a confirmed edit still waiting to be saved', () => {
+    render(<UnsettledPaymentBlockersPanel blockers={[blocker({ reasonCode: 'edit_settlement_not_saved' })]} onResolveBlocker={vi.fn()} />)
+    expect(recordButtons()).toEqual([])
+  })
   it('offers to record cash or card for a store order with no payment', () => {
     render(<UnsettledPaymentBlockersPanel blockers={[blocker()]} onResolveBlocker={vi.fn()} />)
     expect(recordButtons().length).toBeGreaterThan(0)

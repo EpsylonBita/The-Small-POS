@@ -1,8 +1,10 @@
 import React from 'react'
+import { CashierGateContext } from '../../contexts/cashier-gate-context'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
+  checkIn: vi.fn(),
   integrationMounts: 0,
   integrationUnmounts: 0,
   loadedPages: [] as string[],
@@ -21,8 +23,9 @@ vi.mock('../../contexts/navigation-context', () => ({
 }))
 
 vi.mock('../NavigationSidebar', () => ({
-  default: ({ onViewChange }: { onViewChange: (view: string) => void }) => (
+  default: ({ onViewChange, onOpenSettings }: { onViewChange: (view: string) => void; onOpenSettings: () => void }) => (
     <>
+      <button type="button" onClick={onOpenSettings}>Settings</button>
       <button type="button" onClick={() => onViewChange('plugin_integrations')}>Plugins</button>
       <button type="button" onClick={() => onViewChange('customers')}>Customers</button>
       <button type="button" onClick={() => onViewChange('tables')}>Tables</button>
@@ -71,7 +74,10 @@ vi.mock('../../utils/module-view-access', () => ({
 vi.mock('../modals/ZReportModal', () => ({ default: () => null }))
 vi.mock('../modals/UpgradePromptModal', () => ({ default: () => null }))
 vi.mock('../ShiftManager', () => ({
-  ShiftManager: React.forwardRef(() => null),
+  ShiftManager: React.forwardRef((_props, ref) => {
+    React.useImperativeHandle(ref, () => ({ openCheckin: mocks.checkIn }))
+    return null
+  }),
 }))
 vi.mock('../../hooks/useEndOfDayStatus', () => ({
   useEndOfDayStatus: () => ({
@@ -154,6 +160,7 @@ import { RefactoredMainLayout } from '../RefactoredMainLayout'
 describe('Integrations view stability', () => {
   afterEach(cleanup)
   beforeEach(() => {
+    mocks.checkIn.mockClear()
     mocks.integrationMounts = 0
     mocks.integrationUnmounts = 0
   })
@@ -191,4 +198,17 @@ describe('Integrations view stability', () => {
       expect(mocks.integrationUnmounts).toBe(0)
     })
   })
+
+  it('keeps settings on the shell while a remaining staff shift cannot bypass the closed cashier day', () => {
+    const settings = vi.fn()
+    render(<CashierGateContext.Provider value={true}><RefactoredMainLayout onOpenConnectionSettings={settings} /></CashierGateContext.Provider>)
+    expect(screen.getByText('Dashboard').closest('[data-cashier-operational="true"]')).toHaveAttribute('inert')
+    expect(screen.getByText('Settings').closest('[inert]')).toBeNull()
+    fireEvent.click(screen.getByText('Settings'))
+    expect(settings).toHaveBeenCalledWith(null)
+    fireEvent.click(screen.getByText('Customers'))
+    expect(mocks.checkIn).toHaveBeenCalledOnce()
+    expect(screen.queryByText('Customer directory')).not.toBeInTheDocument()
+  })
+
 })

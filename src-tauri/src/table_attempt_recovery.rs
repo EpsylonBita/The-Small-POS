@@ -113,7 +113,7 @@ pub(crate) fn remember_cancel(
         "whole_order_cancel",
         order,
         Some(session),
-        &json!({"client_event_id":event,"cancellation_reason":reason,"approved_staff_id":actor,"action":"whole_order_cancel"}),
+        &crate::table_manual_cancellation::original(conn,event)?.unwrap_or_else(||json!({"client_event_id":event,"cancellation_reason":reason,"approved_staff_id":actor,"action":"whole_order_cancel"})),
     )
 }
 pub(crate) fn foreground_applied(conn: &Connection, kind: &str, event: &str) -> Result<(), String> {

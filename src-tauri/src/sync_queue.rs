@@ -125,6 +125,7 @@ fn bounded_module_category(module_type: &str) -> &'static str {
         "staff_shift" => "staff_shift",
         "shift_expense" => "shift_expense",
         "staff_payment" => "staff_payment",
+        "staff_cash_return" => "staff_cash_return",
         "driver_earning" | "driver_earnings" => "driver_earning",
         "operations" => "operations",
         "catalog" => "catalog",
@@ -143,6 +144,7 @@ fn monetary_dead_letter_category(module_type: &str) -> Option<MonetaryDeadLetter
         "staff_shift" => Some(MonetaryDeadLetterCategory::StaffShift),
         "shift_expense" => Some(MonetaryDeadLetterCategory::ShiftExpense),
         "staff_payment" => Some(MonetaryDeadLetterCategory::StaffPayment),
+        "staff_cash_return" => Some(MonetaryDeadLetterCategory::StaffCashReturn),
         "driver_earning" | "driver_earnings" => Some(MonetaryDeadLetterCategory::DriverEarning),
         _ => None,
     }
@@ -470,6 +472,7 @@ pub(crate) enum MonetaryDeadLetterCategory {
     StaffShift,
     ShiftExpense,
     StaffPayment,
+    StaffCashReturn,
     DriverEarning,
 }
 
@@ -1767,8 +1770,35 @@ fn merge_customer_address_payload_from_cache(
 
     let mut merged = cached_address.as_object().cloned().unwrap_or_default();
     if let Some(payload_object) = payload.as_object() {
+        let point_keys = ["coordinates", "latitude", "longitude"];
+        if point_keys
+            .iter()
+            .any(|key| payload_object.contains_key(*key))
+        {
+            // Materializing a local address still needs its cached street, but
+            // an explicit point/clear must not inherit another representation
+            // of the old point or its provider proof. A one-axis edit may keep
+            // the other cached axis, just as the canonical PATCH does.
+            merged.remove("coordinates");
+            if payload_object.contains_key("coordinates")
+                || (payload_object.contains_key("latitude")
+                    && payload_object.contains_key("longitude"))
+            {
+                merged.remove("latitude");
+                merged.remove("longitude");
+            }
+            for key in [
+                "place_id",
+                "google_place_id",
+                "formatted_address",
+                "resolved_street_number",
+                "address_fingerprint",
+            ] {
+                merged.remove(key);
+            }
+        }
         for (key, value) in payload_object {
-            if !value.is_null() {
+            if !value.is_null() || point_keys.contains(&key.as_str()) {
                 merged.insert(key.clone(), value.clone());
             }
         }
@@ -4899,6 +4929,11 @@ fn cleanup_superseded_synced_order_status_updates_in_transaction(
         let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
+        if is_identified_order_edit_payload(&payload) {
+            // A failed atomic event cannot be repaired by changing its body
+            // under the same event identity. Leave the conflict reviewable.
+            continue;
+        }
         if let Some(reason) = superseded_synced_order_status_update_reason(
             conn,
             record_id.as_str(),
@@ -8278,6 +8313,12 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "payment_adjustments" => {
             prepare_adjustment_request(conn, item, &payload, terminal_id.as_str())
         }
+        "staff_order_cash_returns" => Ok(RequestPreparation::Ready(RequestSpec {
+            endpoint: "/api/pos/staff-cash-returns/sync".to_string(),
+            method: Method::POST,
+            body: Some(payload.to_string()),
+            terminal_id,
+        })),
         "staff_shifts" => prepare_shift_request(conn, item, &payload, terminal_id.as_str()),
         "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
             prepare_financial_request(conn, item, &payload, terminal_id.as_str())
@@ -8872,12 +8913,10 @@ fn prepare_customer_address_request(
                 payload,
             )
         } else {
-            merge_customer_address_payload_from_cache(
-                conn,
-                customer_id.as_str(),
-                item.record_id.as_str(),
-                payload,
-            )
+            // Canonical PATCH is the captured mutation: omitted destination
+            // fields stay omitted and explicit nulls stay clears. Hydration is
+            // only for a local/legacy address that must first be materialized.
+            payload.clone()
         };
 
         if should_create && !has_customer_address_street(&request_payload) {
@@ -8908,6 +8947,16 @@ fn prepare_customer_address_request(
         body,
         terminal_id: terminal_id.to_string(),
     }))
+}
+
+fn is_identified_order_edit_payload(payload: &Value) -> bool {
+    string_field(payload, &["client_event_id"])
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+        && payload
+            .get("expected_version")
+            .and_then(Value::as_i64)
+            .is_some_and(|version| version > 0)
 }
 
 fn is_status_only_order_update_payload(payload: &Value) -> bool {
@@ -9209,7 +9258,13 @@ fn prepare_order_request(
         ],
     );
 
-    let local_order_fallback = if payload_requests_order_hydration {
+    // Atomic edits are identified requests, not hints to hydrate from the latest
+    // local order. Changing any input on replay changes the server request hash.
+    let identified_edit = is_identified_order_edit_payload(payload);
+    let explicit_edit_notes = identified_edit
+        && payload.get("notes").is_some()
+        && payload.get("special_instructions").is_some();
+    let local_order_fallback = if payload_requests_order_hydration && !identified_edit {
         load_local_order_insert_fallback(conn, item.record_id.as_str())?
     } else {
         None
@@ -9227,7 +9282,7 @@ fn prepare_order_request(
             .find_map(|source| string_field(source, &["status"]))
             .unwrap_or_default();
     }
-    if status.is_empty() {
+    if status.is_empty() && !identified_edit {
         status = conn
             .query_row(
                 "SELECT COALESCE(status, '') FROM orders WHERE id = ?1",
@@ -9239,8 +9294,11 @@ fn prepare_order_request(
             .unwrap_or_default();
     }
     let normalized_status = normalize_status_for_storage(&status);
-    if let Some(newer_status) = next_queued_cancellation_status(conn, item, &normalized_status)? {
-        status = newer_status;
+    if !identified_edit {
+        if let Some(newer_status) = next_queued_cancellation_status(conn, item, &normalized_status)?
+        {
+            status = newer_status;
+        }
     }
     if status.trim().is_empty() {
         return Ok(RequestPreparation::Failed {
@@ -9251,6 +9309,19 @@ fn prepare_order_request(
     let mut body = Map::new();
     body.insert("id".to_string(), Value::String(remote_id));
     body.insert("status".to_string(), Value::String(status));
+    if identified_edit {
+        body.insert(
+            "client_event_id".to_string(),
+            payload["client_event_id"].clone(),
+        );
+        body.insert(
+            "expected_version".to_string(),
+            payload["expected_version"].clone(),
+        );
+        if let Some(settlement) = payload.get("settlement_context") {
+            body.insert("settlement_context".to_string(), settlement.clone());
+        }
+    }
 
     fn copy_payload_field(
         body: &mut Map<String, Value>,
@@ -9324,19 +9395,27 @@ fn prepare_order_request(
         "estimated_time",
         false,
     );
-    copy_source_field(
-        &mut body,
-        &sources,
-        &[
+    if explicit_edit_notes {
+        body.insert("notes".into(), payload["notes"].clone());
+        body.insert(
+            "special_instructions".into(),
+            payload["special_instructions"].clone(),
+        );
+    } else {
+        copy_source_field(
+            &mut body,
+            &sources,
+            &[
+                "notes",
+                "reason",
+                "orderNotes",
+                "order_notes",
+                "special_instructions",
+            ],
             "notes",
-            "reason",
-            "orderNotes",
-            "order_notes",
-            "special_instructions",
-        ],
-        "notes",
-        true,
-    );
+            true,
+        );
+    }
     copy_source_field(
         &mut body,
         &sources,
@@ -9550,7 +9629,13 @@ fn prepare_order_request(
             body.remove("payment_status");
         }
     }
-    settle_order_update_payment_claim(conn, item.record_id.as_str(), &mut body);
+    if identified_edit {
+        // The atomic server editor derives this from its ledger. Always omit the
+        // claim: consulting the changing local ledger would mutate a replay.
+        body.remove("payment_status");
+    } else {
+        settle_order_update_payment_claim(conn, item.record_id.as_str(), &mut body);
+    }
     for source in &sources {
         if let Some(value) = source
             .get("paymentMethod")
@@ -9576,6 +9661,20 @@ fn prepare_order_request(
     ] {
         copy_financial_source_field(&mut body, &sources, &[camel, snake], snake);
     }
+    if identified_edit {
+        for (camel, snake) in [
+            ("taxRate", "tax_rate"),
+            ("serviceFee", "service_fee"),
+            ("serviceFeeCents", "service_fee_cents"),
+            ("manualDiscountMode", "manual_discount_mode"),
+            ("manualDiscountValue", "manual_discount_value"),
+            ("couponId", "coupon_id"),
+            ("couponCode", "coupon_code"),
+            ("couponDiscountAmount", "coupon_discount_amount"),
+        ] {
+            copy_payload_field(&mut body, payload, &[camel, snake], snake, true);
+        }
+    }
     if let Some(items) = payload.get("items") {
         if !items.is_null() {
             let order_discount_amount = body
@@ -9594,7 +9693,53 @@ fn prepare_order_request(
                         .and_then(number_from_value)
                         .map(|cents| cents / 100.0)
                 });
-            if let Some(normalized_items) = normalize_order_update_items_for_request(
+            if identified_edit {
+                // This path requires the atomic editor, which accepts manual
+                // lines and requires existing canonical UUIDs. Legacy insert
+                // normalization intentionally omits those identities.
+                let originals = parse_json_array(items);
+                let mut normalized = normalize_order_insert_items(items);
+                if normalized.is_empty() {
+                    return Ok(RequestPreparation::Failed {
+                        reason: "Identified order edit is missing its complete item snapshot"
+                            .to_string(),
+                    });
+                }
+                for (line, original) in normalized.iter_mut().zip(originals.iter()) {
+                    let Some(line) = line.as_object_mut() else {
+                        continue;
+                    };
+                    if let Some(id) = [
+                        "source_order_item_id",
+                        "sourceOrderItemId",
+                        "order_item_id",
+                        "orderItemId",
+                        "original_order_item_id",
+                        "originalOrderItemId",
+                        "id",
+                    ]
+                    .iter()
+                    .find_map(|key| {
+                        string_field(original, &[*key]).filter(|id| Uuid::parse_str(id).is_ok())
+                    }) {
+                        line.insert("id".to_string(), Value::String(id));
+                    }
+                    for key in [
+                        "quantity",
+                        "category_id",
+                        "category_name",
+                        "vat_category_code",
+                        "price_includes_vat",
+                        "tax_exemption_reason",
+                        "fiscal_document_profile",
+                    ] {
+                        if let Some(value) = original.get(key) {
+                            line.insert(key.to_string(), value.clone());
+                        }
+                    }
+                }
+                body.insert("items".to_string(), Value::Array(normalized));
+            } else if let Some(normalized_items) = normalize_order_update_items_for_request(
                 items,
                 order_discount_amount,
                 order_subtotal,
@@ -9603,13 +9748,15 @@ fn prepare_order_request(
             }
         }
     }
-    copy_source_field(
-        &mut body,
-        &sources,
-        &["orderNotes", "order_notes", "special_instructions"],
-        "order_notes",
-        true,
-    );
+    if !explicit_edit_notes {
+        copy_source_field(
+            &mut body,
+            &sources,
+            &["orderNotes", "order_notes", "special_instructions"],
+            "order_notes",
+            true,
+        );
+    }
 
     Ok(RequestPreparation::Ready(RequestSpec {
         endpoint: "/api/pos/orders".to_string(),
@@ -9693,7 +9840,45 @@ fn prepare_payment_request(
     }
     let payment_method = string_field(payload, &["method", "paymentMethod", "payment_method"])
         .unwrap_or_else(|| "other".to_string());
-    let canonical_idempotency_key = format!("payment:{}", item.record_id);
+    let canonical_idempotency_key = if let Some(event) =
+        string_field(payload, &["parentEditEventId", "parent_edit_event_id"])
+    {
+        // Earlier edit receipts persisted this key on the payment, while their
+        // child outbox only carried the parent event. Reuse that exact durable
+        // identity, including after a parent-wait exhausted retry bookkeeping.
+        // Never synthesize another key or change the immutable outbox payload.
+        let scope = crate::table_session_cache::current_scope(conn)?;
+        if scope.organization != item.organization_id
+            || scope.terminal != terminal_id
+            || string_field(payload, &["parentEditOrderId", "parent_edit_order_id"]).as_deref()
+                != Some(local_order_id.as_str())
+        {
+            return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+        }
+        let stored:Option<String> = conn.query_row(
+            "SELECT p.idempotency_key FROM order_payments p JOIN orders o ON o.id=p.order_id
+             WHERE p.id=?1 AND p.order_id=?2 AND o.organization_id=?3 AND o.supabase_id=?4 AND o.branch_id=?5",
+            params![item.record_id,local_order_id,item.organization_id,remote_order_id,scope.branch], |row| row.get(0))
+            .optional().map_err(|error|error.to_string())?.flatten();
+        if crate::edit_settlement_recovery::inspect(conn, &event, &local_order_id)?
+            .is_none_or(|receipt| receipt["state"] != "applied")
+        {
+            return Err("Journaled edit payment has no applied parent receipt".into());
+        }
+        let key = stored.ok_or("Journaled edit payment is missing its original idempotency key")?;
+        let prefix = format!("edit:{event}:payment:");
+        if !key
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+            || string_field(payload, &["idempotency_key", "idempotencyKey"])
+                .is_some_and(|sent| sent != key)
+        {
+            return Err("Journaled edit payment identity differs from its parent event".into());
+        }
+        key
+    } else {
+        format!("payment:{}", item.record_id)
+    };
 
     // W4d-iv additive emission: payment-sync POST body now ships `amount_cents`
     // alongside the legacy `amount` float. tip_amount gets the same treatment
@@ -9839,6 +10024,16 @@ fn prepare_adjustment_request(
         });
     };
 
+    if string_field(payload, &["parentEditEventId", "parent_edit_event_id"]).is_some()
+        && order_id
+            .as_deref()
+            .is_some_and(|id| sync::has_outstanding_local_order_queue(conn, id))
+    {
+        return Ok(RequestPreparation::Deferred {
+            reason: "Waiting for atomic order edit settlement sync".to_string(),
+        });
+    }
+
     let canonical_payment_id = remote_payment_id
         .as_deref()
         .map(str::trim)
@@ -9866,8 +10061,16 @@ fn prepare_adjustment_request(
         string_field(payload, &["orderId", "order_id"]).or_else(|| order_id.clone());
     let client_order_id_for_sync =
         string_field(payload, &["clientOrderId", "client_order_id"]).or_else(|| order_id.clone());
-    let idempotency_key = format!("adjustment:{}", item.record_id);
-    let body = sync::build_adjustment_sync_body(
+    let idempotency_key = if string_field(payload, &["parentEditEventId", "parent_edit_event_id"])
+        .is_some()
+        || payload.get("staff_cash_return").is_some()
+    {
+        string_field(payload, &["idempotency_key", "idempotencyKey"])
+            .ok_or("Journaled edit refund is missing its original idempotency key")?
+    } else {
+        format!("adjustment:{}", item.record_id)
+    };
+    let mut body = sync::build_adjustment_sync_body(
         item.record_id.as_str(),
         payment_id.as_str(),
         order_id_for_sync.as_deref(),
@@ -9890,6 +10093,9 @@ fn prepare_adjustment_request(
         canonical_payment_id.as_deref(),
         canonical_payment_id.as_deref(),
     );
+    if let Some(receipt) = payload.get("staff_cash_return") {
+        body["staff_cash_return"] = receipt.clone();
+    }
 
     let _ = conn.execute(
         "UPDATE payment_adjustments
@@ -10798,6 +11004,376 @@ pub(crate) fn apply_table_session_snapshot(
     Ok(serde_json::json!({"success": true, "applied": true, "orderId": local_order_id}))
 }
 
+/// Metadata corrections advance the canonical revision before another edit.
+fn apply_header_edit_ack(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+    now: &str,
+) -> Result<bool, String> {
+    if item.operation != "UPDATE" {
+        return Ok(false);
+    }
+    let payload: Value = serde_json::from_str(&item.data).map_err(|e| e.to_string())?;
+    if payload.get("items").is_some()
+        || payload.get("settlement_context").is_some()
+        || payload["client_event_id"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .is_none()
+        || payload["expected_version"]
+            .as_i64()
+            .filter(|v| *v > 0)
+            .is_none()
+    {
+        return Ok(false);
+    }
+    let scope = crate::table_session_cache::current_scope(conn)?;
+    let (remote,org,branch,remote_version,notes,kitchen,status):(Option<String>,Option<String>,Option<String>,Option<i64>,Option<String>,Option<String>,String)=conn.query_row(
+        "SELECT supabase_id,organization_id,branch_id,remote_version,notes,special_instructions,status FROM orders WHERE id=?1",[&item.record_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|e|e.to_string())?;
+    if org.as_deref() != Some(&scope.organization)
+        || branch.as_deref() != Some(&scope.branch)
+        || item.organization_id != scope.organization
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let live:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND claim_generation=?2 AND data=?3 AND status='processing')",params![item.id,item.claim_generation,item.data],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let newer:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND id<>?2)",params![item.record_id,item.id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if !live || newer {
+        return Ok(true);
+    }
+    let answer = response
+        .filter(|v| v["success"] == true)
+        .ok_or("ORDER_HEADER_ACK_SNAPSHOT_REQUIRED")?;
+    let canonical = &answer["data"];
+    if canonical["id"].as_str() != remote.as_deref()
+        || canonical["organization_id"] != scope.organization
+        || canonical["branch_id"] != scope.branch
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let version = canonical["version"]
+        .as_i64()
+        .filter(|v| *v > payload["expected_version"].as_i64().unwrap())
+        .ok_or("ORDER_HEADER_ACK_SNAPSHOT_REQUIRED")?;
+    if remote_version.is_some_and(|old| old > version) {
+        return Ok(true);
+    }
+    let mut local = crate::edit_settlement_recovery::capture_order_headers(conn, &item.record_id)?;
+    local["notes"] = serde_json::json!(notes);
+    local["special_instructions"] = serde_json::json!(kitchen);
+    local["status"] = serde_json::json!(status);
+    let equal = |a: &Value, b: &Value| {
+        a == b
+            || (a.as_str().unwrap_or("").is_empty()
+                && b.as_str().unwrap_or("").is_empty()
+                && (a.is_null() || a.is_string())
+                && (b.is_null() || b.is_string()))
+    };
+    for (camel, snake) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS
+        .iter()
+        .copied()
+        .chain([
+            ("notes", "notes"),
+            ("special_instructions", "special_instructions"),
+            ("status", "status"),
+        ])
+    {
+        if let Some(expected) = payload.get(snake).or_else(|| payload.get(camel)) {
+            if !equal(&local[snake], expected) {
+                return Ok(true);
+            }
+            if !equal(&canonical[snake], expected) {
+                return Err("ORDER_HEADER_ACK_SNAPSHOT_REQUIRED".into());
+            }
+        }
+    }
+    conn.execute(
+        "UPDATE orders SET remote_version=?1,sync_status='synced',last_synced_at=?2 WHERE id=?3",
+        params![version, now, item.record_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// An identified paid edit's ACK supplies canonical UUIDs for new item lines.
+/// Without this projection a second edit sees transient renderer IDs and cannot
+/// prove its original. This runs inside the same fenced ACK transaction as the
+/// queue deletion, and never rewrites the applied receipt or its local version.
+fn apply_edit_settlement_ack(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+    now: &str,
+) -> Result<bool, String> {
+    if item.operation != "UPDATE" {
+        return Ok(false);
+    }
+    let payload: Value = serde_json::from_str(&item.data).map_err(|error| error.to_string())?;
+    let context = &payload["settlement_context"];
+    if context["kind"] != "pos_edit_settlement" || context["version"] != 1 {
+        return Ok(false);
+    }
+    let invalid = || "EDIT_SETTLEMENT_ACK_CANONICAL_SNAPSHOT_REQUIRED".to_string();
+    let event = payload["client_event_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(invalid)?;
+    if context["client_event_id"] != event {
+        return Err(invalid());
+    }
+    let scope = crate::table_session_cache::current_scope(conn)?;
+    if item.organization_id != scope.organization {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let live:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND claim_generation=?2 AND data=?3 AND status='processing')",
+        params![item.id,item.claim_generation,item.data],|row|row.get(0)).map_err(|error|error.to_string())?;
+    if !live {
+        return Ok(true);
+    }
+    let Some(journal) = crate::edit_settlement_recovery::inspect(conn, event, &item.record_id)?
+    else {
+        return Err(invalid());
+    };
+    // Native item merging can enrich raw renderer items with preserved stored
+    // customizations. The scoped applied receipt binds the event/order/result;
+    // its raw request bytes must remain untouched, not rewritten to that merge.
+    if journal["state"] != "applied"
+        || journal["request"]["client_event_id"] != event
+        || journal["response"]["success"] != true
+        || journal["response"]["nextTotal"]
+            .as_f64()
+            .map(|n| Cents::round_half_even(n).as_i64())
+            != context["next_total_cents"].as_i64()
+    {
+        return Err(invalid());
+    }
+    if journal["response"]
+        .get("frozenItems")
+        .is_some_and(|items| items != &payload["items"])
+    {
+        return Err(invalid());
+    }
+    let (remote_id,organization,branch,terminal,local_items,local_total,local_notes,local_status,remote_version,local_order_notes):
+        (Option<String>,Option<String>,Option<String>,Option<String>,String,f64,Option<String>,String,Option<i64>,Option<String>)=
+        conn.query_row("SELECT supabase_id,organization_id,branch_id,terminal_id,items,total_amount,special_instructions,status,remote_version,notes FROM orders WHERE id=?1",
+            [&item.record_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?))).map_err(|error|error.to_string())?;
+    if organization.as_deref() != Some(&scope.organization)
+        || branch.as_deref() != Some(&scope.branch)
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let newer:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND id<>?2)",
+        params![item.record_id,item.id],|row|row.get(0)).map_err(|error|error.to_string())?;
+    let explicit_notes =
+        payload.get("notes").is_some() && payload.get("special_instructions").is_some();
+    let notes_changed = if explicit_notes {
+        local_order_notes.as_deref().unwrap_or("") != payload["notes"].as_str().unwrap_or("")
+            || local_notes.as_deref().unwrap_or("")
+                != payload["special_instructions"].as_str().unwrap_or("")
+    } else {
+        local_notes.as_deref().unwrap_or("") != payload["orderNotes"].as_str().unwrap_or("")
+    };
+    if newer
+        || serde_json::from_str::<Value>(&local_items).ok().as_ref() != Some(&payload["items"])
+        || Some(Cents::round_half_even(local_total).as_i64())
+            != context["next_total_cents"].as_i64()
+        || notes_changed
+        || payload["status"]
+            .as_str()
+            .is_some_and(|status| status != local_status)
+    {
+        // The original server mutation is acknowledged, but a newer local
+        // edit must remain pending and must not be overwritten by this reply.
+        return Ok(true);
+    }
+    let answer = response
+        .filter(|value| value["success"] == true)
+        .ok_or_else(invalid)?;
+    let canonical = answer.get("data").ok_or_else(invalid)?;
+    if canonical["id"].as_str() != remote_id.as_deref()
+        || canonical["organization_id"] != scope.organization
+        || canonical["branch_id"] != scope.branch
+        || terminal
+            .as_deref()
+            .zip(canonical["terminal_id"].as_str())
+            .is_some_and(|(original, returned)| original != returned)
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let version = canonical["version"]
+        .as_i64()
+        .filter(|v| *v > payload["expected_version"].as_i64().unwrap_or(i64::MAX))
+        .ok_or_else(invalid)?;
+    if remote_version.is_some_and(|old| old > version) {
+        return Ok(true);
+    }
+    let total = canonical["total_amount"]
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(invalid)?;
+    if Some(Cents::round_half_even(total).as_i64()) != context["next_total_cents"].as_i64() {
+        return Err(invalid());
+    }
+    if canonical["notes"].as_str().unwrap_or("")
+        != payload[if explicit_notes {
+            "notes"
+        } else {
+            "orderNotes"
+        }]
+        .as_str()
+        .unwrap_or("")
+        || explicit_notes
+            && canonical["special_instructions"].as_str().unwrap_or("")
+                != payload["special_instructions"].as_str().unwrap_or("")
+    {
+        return Err(invalid());
+    }
+    let local_headers =
+        crate::edit_settlement_recovery::capture_order_headers(conn, &item.record_id)?;
+    for (camel, snake) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
+        if let Some(expected) = payload.get(*camel).or_else(|| payload.get(*snake)) {
+            if local_headers[*snake] != *expected {
+                return Ok(true);
+            }
+            if canonical[*snake] != *expected {
+                return Err(invalid());
+            }
+        }
+    }
+    let submitted = payload["items"].as_array().ok_or_else(invalid)?;
+    let returned = canonical["items"]
+        .as_array()
+        .filter(|rows| rows.len() == submitted.len())
+        .ok_or_else(invalid)?;
+    crate::edit_settlement_recovery::items(&canonical["items"])?;
+    let identity = |line: &Value| {
+        string_field(
+            line,
+            &[
+                "source_order_item_id",
+                "sourceOrderItemId",
+                "order_item_id",
+                "orderItemId",
+                "id",
+            ],
+        )
+        .filter(|id| Uuid::parse_str(id).is_ok())
+    };
+    let signature = |line: &Value| -> Result<Value, String> {
+        let mut line = line.clone();
+        let object = line.as_object_mut().ok_or_else(invalid)?;
+        for key in [
+            "source_order_item_id",
+            "sourceOrderItemId",
+            "order_item_id",
+            "orderItemId",
+        ] {
+            object.remove(key);
+        }
+        object.insert(
+            "id".into(),
+            Value::String("00000000-0000-4000-8000-000000000001".into()),
+        );
+        Ok(crate::edit_settlement_recovery::items(&serde_json::json!([line]))?.remove(0))
+    };
+    let mut unmatched: Vec<usize> = (0..returned.len()).collect();
+    // Match canonical retained UUIDs first, then UUID-less new lines by their
+    // exact semantic multiset. Response ordering is not an identity contract.
+    let mut candidates: Vec<&Value> = submitted.iter().collect();
+    candidates.sort_by_key(|line| identity(line).is_none());
+    for line in candidates {
+        let original_id = identity(line);
+        let mut expected = signature(line)?;
+        // The canonical editor preserves omitted historical/display metadata
+        // from the retained UUID. Absence is not an instruction to replace it
+        // with the new effective price (or an empty name/note/override flag).
+        let omitted: Vec<&str> = [
+            (
+                "originalUnitCents",
+                &["original_unit_price", "originalUnitPrice"][..],
+            ),
+            (
+                "overridden",
+                &["is_price_overridden", "isPriceOverridden"][..],
+            ),
+            ("name", &["name", "menu_item_name", "menuItemName"][..]),
+            ("notes", &["notes"][..]),
+        ]
+        .into_iter()
+        .filter(|(_, aliases)| !aliases.iter().any(|key| line.get(*key).is_some()))
+        .map(|(normalized, _)| normalized)
+        .collect();
+        for key in &omitted {
+            expected.as_object_mut().unwrap().remove(*key);
+        }
+        let index = unmatched
+            .iter()
+            .position(|index| {
+                original_id
+                    .as_ref()
+                    .is_none_or(|id| identity(&returned[*index]).as_ref() == Some(id))
+                    && signature(&returned[*index]).is_ok_and(|mut actual| {
+                        for key in &omitted {
+                            actual.as_object_mut().unwrap().remove(*key);
+                        }
+                        actual == expected
+                    })
+            })
+            .ok_or_else(invalid)?;
+        unmatched.remove(index);
+    }
+    let number = |key: &str| {
+        canonical[key]
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(invalid)
+    };
+    let subtotal = number("subtotal")?;
+    let tax = number("tax_amount")?;
+    let discount = number("discount_amount")?;
+    let delivery = number("delivery_fee")?;
+    let tip = number("tip_amount")?;
+    conn.execute("UPDATE orders SET items=?1,remote_version=?2,subtotal=?3,tax_amount=?4,discount_amount=?5,delivery_fee=?6,tip_amount=?7,
+        subtotal_cents=?8,tax_amount_cents=?9,discount_amount_cents=?10,delivery_fee_cents=?11,tip_amount_cents=?12,
+        sync_status='synced',last_synced_at=?13,notes=?17,special_instructions=?18 WHERE id=?14 AND organization_id=?15 AND items=?16",
+        params![canonical["items"].to_string(),version,subtotal,tax,discount,delivery,tip,
+            Cents::round_half_even(subtotal).as_i64(),Cents::round_half_even(tax).as_i64(),Cents::round_half_even(discount).as_i64(),Cents::round_half_even(delivery).as_i64(),Cents::round_half_even(tip).as_i64(),
+            now,item.record_id,scope.organization,local_items,canonical["notes"].as_str(),canonical["special_instructions"].as_str()]).map_err(|error|error.to_string())?;
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn apply_ack_for_test(
+    conn: &Connection,
+    table: &str,
+    record: &str,
+    response: &Value,
+) -> Result<Value, String> {
+    let mut item=conn.query_row("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE table_name=?1 AND record_id=?2",
+        params![table,record],map_internal_queue_item).map_err(|error|error.to_string())?;
+    item.claim_generation += 1;
+    item.status = "processing".into();
+    conn.execute(
+        "UPDATE parity_sync_queue SET status='processing',claim_generation=?1 WHERE id=?2",
+        params![item.claim_generation, item.id],
+    )
+    .map_err(|error| error.to_string())?;
+    let body = match prepare_request(conn, &item)? {
+        RequestPreparation::Ready(spec) => spec
+            .body
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+            .unwrap_or(Value::Null),
+        other => return Err(format!("Unexpected test request: {other:?}")),
+    };
+    with_live_generic_claim(conn, &item, |conn| {
+        apply_success(conn, &item, Some(response))?;
+        mark_success(conn, &item.id, item.claim_generation)
+    })?
+    .ok_or("Test ACK lost its claim")?;
+    Ok(body)
+}
+
 fn apply_success(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -10807,6 +11383,11 @@ fn apply_success(
 
     match item.table_name.as_str() {
         "orders" => {
+            if apply_edit_settlement_ack(conn, item, response, &now)?
+                || apply_header_edit_ack(conn, item, response, &now)?
+            {
+                return Ok(());
+            }
             let response_customer_id = extract_response_string(
                 response,
                 &[
@@ -10959,6 +11540,13 @@ fn apply_success(
                 )?;
             }
         }
+        "staff_order_cash_returns" => {
+            conn.execute(
+                "UPDATE staff_order_cash_returns SET sync_status='synced' WHERE id=?1",
+                [&item.record_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
         "payment_adjustments" => {
             conn.execute(
                 "UPDATE payment_adjustments
@@ -10974,6 +11562,12 @@ fn apply_success(
 
             let payload = serde_json::from_str::<Value>(&item.data)
                 .unwrap_or_else(|_| Value::Object(Map::new()));
+            if let Some(id) = payload
+                .pointer("/staff_cash_return/id")
+                .and_then(Value::as_str)
+            {
+                conn.execute("UPDATE staff_order_cash_returns SET sync_status='synced' WHERE id=?1 AND adjustment_id=?2",params![id,item.record_id]).map_err(|error|error.to_string())?;
+            }
             let adjustment_type =
                 string_field(&payload, &["adjustmentType", "adjustment_type"]).unwrap_or_default();
             if adjustment_type.eq_ignore_ascii_case("void") {
@@ -12553,8 +13147,10 @@ where
                         _ if is_monetary => "server-wins",
                         _ => "auto-server-wins",
                     };
-                    let requires_operator_review =
-                        resolution == "manual" || resolution == "client-wins" || is_monetary;
+                    let requires_operator_review = resolution == "manual"
+                        || resolution == "client-wins"
+                        || is_monetary
+                        || (item.table_name == "orders" && item.operation == "UPDATE");
                     // Name the conflict from the server's own answer. The 409
                     // body carries a machine code (`DUPLICATE` for a customer
                     // whose phone already belongs to another record) and a
@@ -13168,6 +13764,7 @@ fn resolve_financial_endpoint(item: &SyncQueueItem) -> String {
     match item.table_name.as_str() {
         "payments" => "/api/pos/payments".to_string(),
         "payment_adjustments" => "/api/pos/payments/adjustments/sync".to_string(),
+        "staff_order_cash_returns" => "/api/pos/staff-cash-returns/sync".to_string(),
         "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
             "/api/pos/financial/sync".to_string()
         }
@@ -13222,6 +13819,7 @@ fn is_monetary_item(item: &SyncQueueItem) -> bool {
     let monetary_tables = [
         "payments",
         "payment_adjustments",
+        "staff_order_cash_returns",
         "payment_transactions",
         "refund_transactions",
         "driver_earnings",
@@ -13243,6 +13841,16 @@ fn is_monetary_item(item: &SyncQueueItem) -> bool {
         "unit_price",
         "order_total",
         "grand_total",
+        "total_amount",
+        "totalAmount",
+        "delivery_fee",
+        "deliveryFee",
+        "tax_amount",
+        "taxAmount",
+        "discountAmount",
+        "tipAmount",
+        "items",
+        "settlement_context",
         "tip",
         "tip_amount",
     ];
@@ -14484,6 +15092,146 @@ mod tests {
         assert!(!is_local_placeholder_id(
             "2ba6e969-99c7-42c8-a185-19b58e1e4531"
         ));
+    }
+
+    #[test]
+    fn prepare_customer_address_request_keeps_canonical_patch_intent_after_cache_refresh() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let address_id = "2ba6e969-99c7-42c8-a185-19b58e1e4531";
+        // These are the sparse bodies captured by customer_update_address before
+        // an offline defer. A later cache pull must not change the queued intent.
+        for payload in [
+            json!({ "customer_id": "cust-1", "floor_number": "2", "expected_version": 4 }),
+            json!({ "customer_id": "cust-1", "coordinates": null, "expected_version": 4 }),
+            json!({
+                "customer_id": "cust-1", "coordinates": { "lat": 40.62, "lng": 22.96 },
+                "latitude": 40.62, "longitude": 22.96, "place_id": "selected-point",
+                "expected_version": 4
+            }),
+        ] {
+            let item = queue_item("customer_addresses", "UPDATE", address_id, payload.clone());
+            let original_data = item.data.clone();
+            for cached_point in [json!(null), json!({ "lat": 40.61, "lng": 22.95 })] {
+                seed_customer_cache(
+                    &conn,
+                    "cust-1",
+                    json!({
+                        "id": address_id, "street_address": "Synthetic Street 42", "city": "Athens",
+                        "coordinates": cached_point, "latitude": 40.61, "longitude": 22.95,
+                        "place_id": "cached-point", "address_fingerprint": "cached-fingerprint",
+                        "floor_number": "1", "version": 9
+                    }),
+                );
+                let request = match prepare_request(&conn, &item).expect("prepare canonical patch")
+                {
+                    RequestPreparation::Ready(spec) => spec,
+                    other => panic!("expected ready request, got {other:?}"),
+                };
+                assert_eq!(request.method, Method::PATCH);
+                assert_eq!(
+                    request.endpoint,
+                    format!("/api/pos/customers/cust-1/addresses/{address_id}")
+                );
+                let body: Value =
+                    serde_json::from_str(request.body.as_deref().expect("body")).expect("JSON");
+                assert_eq!(
+                    body, payload,
+                    "canonical PATCH must preserve omissions and explicit clears"
+                );
+                assert_eq!(
+                    item.data, original_data,
+                    "replay must not rewrite the durable mutation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_customer_address_request_keeps_new_address_selected_point() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let payload = json!({
+            "customer_id": "cust-1", "street_address": "Synthetic Street 42", "city": "Athens",
+            "coordinates": { "lat": 40.62, "lng": 22.96 }, "latitude": 40.62, "longitude": 22.96,
+            "place_id": "selected-point", "formatted_address": "Synthetic Street 42, Athens",
+            "resolved_street_number": "42", "address_fingerprint": "selected-fingerprint"
+        });
+        let item = queue_item("customer_addresses", "INSERT", "local-new", payload.clone());
+        let request = match prepare_request(&conn, &item).expect("prepare address insert") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.endpoint, "/api/pos/customers/cust-1/addresses");
+        let body: Value =
+            serde_json::from_str(request.body.as_deref().expect("body")).expect("JSON");
+        assert_eq!(body, payload);
+    }
+
+    #[test]
+    fn prepare_customer_address_request_recreate_respects_explicit_location_intent() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        for point in [
+            json!({ "coordinates": null }),
+            json!({ "latitude": null, "longitude": null }),
+            json!({ "coordinates": { "lat": 40.62, "lng": 22.96 } }),
+            json!({ "latitude": 40.62, "longitude": 22.96 }),
+        ] {
+            seed_customer_cache(
+                &conn,
+                "cust-1",
+                json!({
+                    "id": "local-new", "street_address": "Synthetic Street 42", "city": "Athens",
+                    "coordinates": { "lat": 40.61, "lng": 22.95 }, "latitude": 40.61, "longitude": 22.95,
+                    "place_id": "cached-place", "address_fingerprint": "cached-fingerprint"
+                }),
+            );
+            let mut payload = point.clone();
+            payload["customer_id"] = json!("cust-1");
+            let item = queue_item("customer_addresses", "UPDATE", "local-new", payload);
+            let request = match prepare_request(&conn, &item).expect("prepare placeholder update") {
+                RequestPreparation::Ready(spec) => spec,
+                other => panic!("expected ready request, got {other:?}"),
+            };
+            assert_eq!(request.method, Method::POST);
+            let body: Value =
+                serde_json::from_str(request.body.as_deref().expect("body")).expect("JSON");
+            assert_eq!(body["street_address"], "Synthetic Street 42");
+            assert_eq!(body["city"], "Athens");
+            for key in ["coordinates", "latitude", "longitude"] {
+                assert_eq!(body.get(key), point.get(key), "{key}: {body}");
+            }
+            assert!(
+                body.get("place_id").is_none(),
+                "old point proof must not follow a new point"
+            );
+            assert!(body.get("address_fingerprint").is_none());
+        }
+    }
+
+    #[test]
+    fn prepare_customer_replay_preserves_first_address_selected_point() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let payload = json!({
+            "name": "Synthetic Customer", "phone_country_code": null,
+            "address": "Synthetic Street 42", "city": "Athens",
+            "coordinates": { "lat": 40.62, "lng": 22.96 }, "latitude": 40.62, "longitude": 22.96,
+            "place_id": "selected-point", "formatted_address": "Synthetic Street 42, Athens",
+            "resolved_street_number": "42", "address_fingerprint": "selected-fingerprint"
+        });
+        let item = queue_item("customers", "INSERT", "local-customer", payload.clone());
+        let request = match prepare_request(&conn, &item).expect("prepare customer insert") {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.endpoint, "/api/pos/customers");
+        let body: Value =
+            serde_json::from_str(request.body.as_deref().expect("body")).expect("JSON");
+        assert_eq!(body, payload);
     }
 
     #[test]
@@ -18086,6 +18834,227 @@ mod tests {
     }
 
     #[test]
+    fn header_correction_wire_keeps_customer_nulls_type_and_canonical_version() {
+        let conn = test_connection();
+        conn.execute("INSERT INTO orders(id,supabase_id,items,total_amount,status,payment_status,sync_status,created_at,updated_at) VALUES('headers','remote-headers','[]',11.5,'pending','paid','pending','now','now')",[]).unwrap();
+        let payload = json!({"client_event_id":"header-event","expected_version":7,"status":"pending","orderType":"delivery","customerId":null,"customerName":"Selected","deliveryAddressId":null,"deliveryAddress":"Street","deliveryLatitude":null,"deliveryLongitude":null,"deliveryZoneId":null,"totalAmount":11.5,"deliveryFee":0});
+        let item = queue_item("orders", "UPDATE", "headers", payload.clone());
+        assert!(is_monetary_item(&item));
+        let RequestPreparation::Ready(spec) =
+            prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+        else {
+            panic!("header request unavailable")
+        };
+        let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["expected_version"], 7);
+        assert_eq!(body["order_type"], "delivery");
+        assert_eq!(body["customer_name"], "Selected");
+        for key in [
+            "customer_id",
+            "delivery_address_id",
+            "delivery_latitude",
+            "delivery_longitude",
+            "delivery_zone_id",
+        ] {
+            assert!(body.get(key).unwrap().is_null(), "{key}");
+        }
+        assert!(body.get("payment_status").is_none());
+    }
+
+    #[test]
+    fn prepare_order_request_identified_edit_replays_frozen_body_after_local_mutation() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, status, payment_status, sync_status, created_at, updated_at)
+             VALUES ('order-frozen-edit', 'remote-frozen-edit', '[]', 10.5, 1050,
+                10.5, 1050, 'pending', 'paid', 'pending', datetime('now'), datetime('now'))",
+            [],
+        ).expect("seed edited local order");
+        let mut item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-frozen-edit",
+            json!({
+                "orderId": "order-frozen-edit",
+                "client_event_id": "edit-event-frozen",
+                "expected_version": 7,
+                "status": "pending",
+                "orderType": "pickup",
+                "orderNotes": "Original edit notes",
+                "totalAmount": 10.5,
+                "total_amount_cents": 1050,
+                "subtotal": 10.5,
+                "subtotal_cents": 1050,
+                "deliveryFee": 0,
+                "delivery_fee_cents": 0,
+                "discountAmount": 0,
+                "discount_amount_cents": 0,
+                "manual_discount_mode": null,
+                "manual_discount_value": null,
+                "paymentStatus": "paid",
+                "paymentMethod": "cash",
+                "items": [
+                    {"id": "edit-renderer-synthetic", "source_order_item_id": "00000000-0000-0000-0000-000000000031",
+                     "menu_item_id": TEST_MENU_ITEM_ID, "name": "Original", "quantity": 1,
+                     "unit_price": 6.0, "total_price": 6.0, "price_includes_vat": true},
+                    {"id": "local-new-line", "menu_item_id": TEST_MENU_ITEM_ID,
+                     "name": "Added", "quantity": 1, "unit_price": 4.5, "total_price": 4.5}
+                ]
+            }),
+        );
+        item.created_at = "2026-10-05T12:00:00Z".to_string();
+        let payload: Value = serde_json::from_str(&item.data).expect("parse frozen edit");
+        let prepare = || match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare identified edit")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let original = prepare();
+        let body: Value = serde_json::from_str(original.body.as_deref().expect("body"))
+            .expect("parse outgoing body");
+        assert_eq!(body["expected_version"], 7);
+        assert_eq!(body["client_event_id"], "edit-event-frozen");
+        assert_eq!(
+            body["items"][0]["id"],
+            "00000000-0000-0000-0000-000000000031"
+        );
+        assert!(body["items"][1].get("id").is_none());
+        assert_eq!(body["items"][0]["price_includes_vat"], true);
+        assert_eq!(body["total_amount_cents"], 1050);
+        assert_eq!(body["delivery_fee_cents"], 0);
+        assert_eq!(body["manual_discount_mode"], Value::Null);
+        assert_eq!(body["order_notes"], "Original edit notes");
+        assert!(
+            body.get("payment_status").is_none(),
+            "server ledger owns the money claim"
+        );
+
+        conn.execute(
+            "UPDATE orders SET total_amount=99, total_amount_cents=9900, subtotal=97,
+                subtotal_cents=9700, delivery_fee=2, delivery_fee_cents=200,
+                discount_amount=5, discount_amount_cents=500, status='cancelled',
+                payment_status='refunded', order_type='delivery', customer_name='Later customer',
+                items='[]', sync_status='synced' WHERE id='order-frozen-edit'",
+            [],
+        )
+        .expect("simulate later local edit");
+        conn.execute(
+            "INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data,
+                organization_id, created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status)
+             VALUES ('later-cancel', 'orders', 'order-frozen-edit', 'UPDATE', ?1, 'org-1',
+                '2026-10-05T12:01:00Z', 0, 1000, 0, 'orders', 'server-wins', 1, 'pending')",
+            [json!({"orderId":"order-frozen-edit", "status":"cancelled"}).to_string()],
+        )
+        .expect("queue later cancellation");
+        let replay = prepare();
+        assert_eq!(
+            replay.body, original.body,
+            "exact replay cannot acquire a new server hash"
+        );
+        assert_eq!(replay.method, Method::PATCH);
+        assert_eq!(replay.endpoint, "/api/pos/orders");
+    }
+
+    #[test]
+    fn prepare_order_request_identified_edit_refuses_missing_frozen_status() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, status)
+             VALUES ('edit-no-status', 'remote-edit-no-status', '[]', 6, 'pending')",
+            [],
+        )
+        .expect("seed parent");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "edit-no-status",
+            json!({
+                "client_event_id": "edit-no-status-event", "expected_version": 1,
+                "items": [{"menu_item_id": TEST_MENU_ITEM_ID, "quantity":1, "unit_price":6}]
+            }),
+        );
+        let payload = serde_json::from_str(&item.data).expect("parse payload");
+        match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).expect("prepare") {
+            RequestPreparation::Failed { reason } => assert!(reason.contains("missing status")),
+            other => panic!("must not hydrate changing parent status: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_order_request_identified_edit_is_not_rebased_by_failed_status_cleanup() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, status, sync_status)
+             VALUES ('edit-conflict', 'remote-edit-conflict', '[]', 6, 'cancelled', 'synced')",
+            [],
+        )
+        .expect("seed changed parent");
+        let payload = json!({"client_event_id":"edit-conflict-event", "expected_version":1,
+            "status":"pending", "items":[{"menu_item_id":TEST_MENU_ITEM_ID,"quantity":1,"unit_price":6}]
+        }).to_string();
+        conn.execute(
+            "INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data,
+                organization_id, created_at, attempts, retry_delay_ms, priority, module_type,
+                conflict_strategy, version, status, error_message)
+             VALUES ('failed-edit', 'orders', 'edit-conflict', 'UPDATE', ?1, 'org-1',
+                '2026-10-05T12:01:00Z', 1, 1000, 0, 'orders', 'server-wins', 1, 'failed',
+                'HTTP 400: Invalid status transition: Cannot transition from cancelled to pending')",
+            [&payload],
+        ).expect("seed failed identified edit");
+        assert_eq!(
+            cleanup_superseded_synced_order_status_updates_in_transaction(&conn).expect("cleanup"),
+            0
+        );
+        let retained: (String, String) = conn
+            .query_row(
+                "SELECT data, status FROM parity_sync_queue WHERE id='failed-edit'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read unchanged event");
+        assert_eq!(retained, (payload, "failed".into()));
+    }
+
+    #[test]
+    fn prepare_order_request_identified_edit_keeps_complete_manual_and_fractional_lines() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, status)
+             VALUES ('edit-manual-line', 'remote-edit-manual-line', '[]', 4.5, 'pending')",
+            [],
+        )
+        .expect("seed parent");
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "edit-manual-line",
+            json!({
+                "client_event_id":"edit-manual-event", "expected_version":1, "status":"pending",
+                "items":[{"id":"00000000-0000-0000-0000-000000000032", "menu_item_id":null,
+                    "name":"Measured manual item", "quantity":0.5, "unit_price":9, "total_price":4.5}]
+            }),
+        );
+        let payload = serde_json::from_str(&item.data).expect("parse payload");
+        match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).expect("prepare") {
+            RequestPreparation::Ready(spec) => {
+                let body: Value =
+                    serde_json::from_str(spec.body.as_deref().expect("body")).expect("parse body");
+                assert_eq!(
+                    body["items"][0]["id"],
+                    "00000000-0000-0000-0000-000000000032"
+                );
+                assert_eq!(body["items"][0]["quantity"], 0.5);
+                assert_eq!(body["items"][0]["unit_price"], 9.0);
+                assert!(body["items"][0]["menu_item_id"].is_null());
+            }
+            other => panic!("atomic editor requires the complete snapshot: {other:?}"),
+        }
+    }
+
+    #[test]
     fn prepare_order_request_prefers_current_local_order_over_stale_payload() {
         let conn = test_connection();
         conn.execute(
@@ -19941,6 +20910,384 @@ mod tests {
         assert_eq!(
             body.get("idempotency_key").and_then(Value::as_str),
             Some("loyalty:loyalty-row-orderless-1")
+        );
+    }
+
+    fn paid_edit_ack_fixture(conn: &Connection) -> (SyncQueueItem, SyncQueueItem, Value, String) {
+        seed_terminal_context(conn);
+        db::set_setting(conn, "terminal", "organization_id", "org-1").unwrap();
+        let remote = "44444444-4444-4444-8444-444444444444";
+        let first = "22222222-2222-4222-8222-222222222222";
+        let added = "55555555-5555-4555-8555-555555555555";
+        let payment = "66666666-6666-4666-8666-666666666666";
+        let items = json!([{"id":first,"name":"Original","quantity":1,"unit_price":6,"total_price":6},
+            {"id":"renderer-transient-new","name":"Added","quantity":1,"unit_price":4.5,"total_price":4.5}]);
+        conn.execute("INSERT INTO orders(id,supabase_id,organization_id,branch_id,terminal_id,items,total_amount,subtotal,tax_amount,discount_amount,delivery_fee,tip_amount,status,payment_status,order_type,sync_status,version,created_at,updated_at) VALUES('ack-order',?1,'org-1',?2,?3,?4,10.5,10.5,1.16,0,0,0,'pending','paid','pickup','pending',1,datetime('now'),datetime('now'))",
+            params![remote,TEST_BRANCH_ID,TEST_TERMINAL_ID,items.to_string()]).unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,sync_status,sync_state,remote_payment_id,idempotency_key,created_at,updated_at) VALUES('original-six','ack-order','card',6,600,'EUR','completed','synced','applied','77777777-7777-4777-8777-777777777777','original-key',datetime('now'),datetime('now'))",[]).unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,sync_status,sync_state,idempotency_key,created_at,updated_at) VALUES(?1,'ack-order','cash',4.5,450,'EUR','completed','failed','failed','edit:ack-edit:payment:0',datetime('now'),datetime('now'))",[payment]).unwrap();
+        let parent_body = json!({"orderId":"ack-order","client_event_id":"ack-edit","expected_version":3,"items":items,"status":"pending","totalAmount":10.5,"orderNotes":null,
+            "settlement_context":{"kind":"pos_edit_settlement","version":1,"client_event_id":"ack-edit","action":"collect","currency":"EUR","original_total_cents":600,"original_paid_cents":600,"next_total_cents":1050,"payments":[{"payment_id":payment,"idempotency_key":"edit:ack-edit:payment:0","amount_cents":450,"currency":"EUR","payment_method":"cash","external_transaction_id":null,"metadata":{"payment_origin":"manual"}}],"refunds":[]}});
+        let child_body = json!({"paymentId":payment,"orderId":"ack-order","amount":4.5,"amount_cents":450,"currency":"EUR","method":"cash","paymentOrigin":"manual","parentEditEventId":"ack-edit","parentEditOrderId":"ack-order"});
+        let mut parent = queue_item("orders", "UPDATE", "ack-order", parent_body.clone());
+        parent.id = enqueue_test_item(conn, "orders", "UPDATE", "ack-order", parent_body);
+        parent.status = "processing".into();
+        parent.claim_generation = 3;
+        conn.execute(
+            "UPDATE parity_sync_queue SET status='processing',claim_generation=3 WHERE id=?1",
+            [&parent.id],
+        )
+        .unwrap();
+        let mut child = queue_item("payments", "INSERT", payment, child_body.clone());
+        child.id = enqueue_test_item(conn, "payments", "INSERT", payment, child_body);
+        crate::edit_settlement_recovery::inspect(conn, "ack-edit", "ack-order").unwrap();
+        let request=json!({"client_event_id":"ack-edit","orderId":"ack-order","expected_version":1,"items":items,"action":{"type":"collect"}}).to_string();
+        conn.execute("INSERT INTO edit_settlement_attempts_v1(organization_id,branch_id,terminal_id,client_event_id,order_id,request_json,state,response_json,created_at) VALUES('org-1',?1,?2,'ack-edit','ack-order',?3,'applied','{\"success\":true,\"nextTotal\":10.5}',datetime('now'))",
+            params![TEST_BRANCH_ID,TEST_TERMINAL_ID,request]).unwrap();
+        // Real API ACK has data=canonical order, fresh UUIDs, fiscal totals and
+        // no request event echo. Returned line ordering can differ.
+        let answer = json!({"success":true,"data":{"id":remote,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"terminal_id":TEST_TERMINAL_ID,
+            "version":4,"items":[{"id":added,"name":"Added","quantity":1,"unit_price":4.5,"total_price":4.5,"original_unit_price":4.5},
+                {"id":first,"name":"Original","quantity":1,"unit_price":6,"total_price":6,"original_unit_price":6}],
+            "total_amount":10.5,"subtotal":10.5,"tax_amount":2.03,"discount_amount":0,"delivery_fee":0,"tip_amount":0,"status":"pending","payment_status":"paid","order_type":"pickup","notes":null,"special_instructions":null,"currency":null}});
+        (parent, child, answer, request)
+    }
+
+    #[test]
+    fn edit_ack_projects_real_response_then_failed_child_replays_same_receipt_and_next_preflight_succeeds(
+    ) {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_connection();
+        let (parent, child, answer, journal) = paid_edit_ack_fixture(&conn);
+        let wire = prepare_request(&conn, &parent).unwrap();
+        match wire {
+            RequestPreparation::Ready(spec) => {
+                let sent: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+                assert_eq!(sent["expected_version"], 3);
+                assert_eq!(sent["client_event_id"], "ack-edit");
+                assert_eq!(
+                    sent["settlement_context"]["payments"][0]["payment_id"],
+                    child.record_id
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let payments_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM order_payments", [], |r| r.get(0))
+            .unwrap();
+        with_live_generic_claim(&conn, &parent, |conn| {
+            apply_success(conn, &parent, Some(&answer))?;
+            mark_success(conn, &parent.id, parent.claim_generation)
+        })
+        .unwrap()
+        .unwrap();
+        let (items,version,remote_version,tax):(String,i64,i64,i64)=conn.query_row("SELECT items,version,remote_version,tax_amount_cents FROM orders WHERE id='ack-order'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&items).unwrap(),
+            answer["data"]["items"]
+        );
+        assert_eq!((version, remote_version, tax), (1, 4, 203));
+        assert_eq!(
+            conn.query_row(
+                "SELECT request_json FROM edit_settlement_attempts_v1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            journal
+        );
+        let original:(f64,String,String)=conn.query_row("SELECT amount,idempotency_key,remote_payment_id FROM order_payments WHERE id='original-six'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(
+            original,
+            (
+                6.0,
+                "original-key".into(),
+                "77777777-7777-4777-8777-777777777777".into()
+            )
+        );
+        // This is the live legacy shape: no key in its immutable outbox, key
+        // durable on the failed receipt. Preparation must use that exact key.
+        match prepare_request(&conn, &child).unwrap() {
+            RequestPreparation::Ready(spec) => {
+                let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+                assert_eq!(body["idempotency_key"], "edit:ack-edit:payment:0");
+                assert_eq!(body["payment_id"], child.record_id);
+                assert_eq!(body["amount_cents"], 450);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT data FROM parity_sync_queue WHERE id=?1",
+                [&child.id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            child.data
+        );
+        let mut claimed = child.clone();
+        claimed.status = "processing".into();
+        claimed.claim_generation = 1;
+        conn.execute(
+            "UPDATE parity_sync_queue SET status='processing',claim_generation=1 WHERE id=?1",
+            [&child.id],
+        )
+        .unwrap();
+        with_live_generic_claim(&conn, &claimed, |conn| {
+            apply_success(
+                conn,
+                &claimed,
+                Some(&json!({"success":true,"payment_id":child.record_id})),
+            )?;
+            mark_success(conn, &claimed.id, claimed.claim_generation)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT sync_state FROM order_payments WHERE id=?1",
+                [&child.record_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "applied"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            payments_before
+        );
+        let original =
+            crate::edit_settlement_recovery::capture_preflight(&conn, "ack-order").unwrap();
+        let payments:Vec<Value>=original["payments"].as_array().unwrap().iter().map(|p|json!({"id":p["id"],"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"order_id":answer["data"]["id"],"payment_method":p["method"],"amount_cents":p["amountCents"],"tip_amount_cents":p["tipCents"],"currency":p["currency"],"status":"completed","metadata":{"payment_origin":"manual"}})).collect();
+        let canonical = json!({"order":answer["data"],"payments":payments,"adjustments":[],"retained_paid_cents":1050});
+        assert_eq!(
+            crate::edit_settlement_recovery::remember_canonical_preflight(
+                &conn,
+                "ack-order",
+                "next-edit",
+                &original,
+                &canonical
+            )
+            .unwrap(),
+            (4, 1)
+        );
+    }
+
+    #[test]
+    fn edit_ack_preserves_newer_local_items_or_pending_mutation_and_rejects_foreign_or_changed_response(
+    ) {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        for change in [
+            "local_items",
+            "new_queue",
+            "foreign",
+            "changed_item",
+            "explicit_original",
+            "explicit_null_note",
+            "stale_claim",
+        ] {
+            let conn = test_connection();
+            let (mut parent, _, mut answer, _) = paid_edit_ack_fixture(&conn);
+            match change {
+                "local_items" => {
+                    conn.execute("UPDATE orders SET items='[{\"name\":\"newer local edit\"}]' WHERE id='ack-order'",[]).unwrap();
+                }
+                "new_queue" => {
+                    conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,status) VALUES('newer','orders','ack-order','UPDATE','{}','org-1',datetime('now'),'pending')",[]).unwrap();
+                }
+                "foreign" => answer["data"]["branch_id"] = json!("foreign"),
+                "changed_item" => answer["data"]["items"][0]["unit_price"] = json!(1),
+                "explicit_original" => {
+                    let mut payload: Value = serde_json::from_str(&parent.data).unwrap();
+                    payload["items"][0]["original_unit_price"] = json!(6);
+                    payload["items"][0]["is_price_overridden"] = json!(false);
+                    parent.data = payload.to_string();
+                    conn.execute(
+                        "UPDATE parity_sync_queue SET data=?1 WHERE id=?2",
+                        params![parent.data, parent.id],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "UPDATE orders SET items=?1 WHERE id='ack-order'",
+                        [payload["items"].to_string()],
+                    )
+                    .unwrap();
+                    answer["data"]["items"][1]["original_unit_price"] = json!(7);
+                    answer["data"]["items"][1]["is_price_overridden"] = json!(true);
+                }
+                "explicit_null_note" => {
+                    let mut payload: Value = serde_json::from_str(&parent.data).unwrap();
+                    payload["items"][0]["notes"] = Value::Null;
+                    parent.data = payload.to_string();
+                    conn.execute(
+                        "UPDATE parity_sync_queue SET data=?1 WHERE id=?2",
+                        params![parent.data, parent.id],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "UPDATE orders SET items=?1 WHERE id='ack-order'",
+                        [payload["items"].to_string()],
+                    )
+                    .unwrap();
+                    answer["data"]["items"][1]["notes"] = json!("Unrequested retained note");
+                }
+                "stale_claim" => {
+                    conn.execute(
+                        "UPDATE parity_sync_queue SET claim_generation=4 WHERE id=?1",
+                        [&parent.id],
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before: (String, String, Option<i64>) = conn
+                .query_row(
+                    "SELECT items,sync_status,remote_version FROM orders WHERE id='ack-order'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            let result = with_live_generic_claim(&conn, &parent, |c| {
+                apply_success(c, &parent, Some(&answer))?;
+                mark_success(c, &parent.id, parent.claim_generation)
+            });
+            if [
+                "foreign",
+                "changed_item",
+                "explicit_original",
+                "explicit_null_note",
+            ]
+            .contains(&change)
+            {
+                assert!(result.is_err(), "{change}");
+            } else {
+                assert!(result.is_ok(), "{change}");
+            }
+            assert_eq!(
+                conn.query_row(
+                    "SELECT items,sync_status,remote_version FROM orders WHERE id='ack-order'",
+                    [],
+                    |r| Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?
+                    ))
+                )
+                .unwrap(),
+                before,
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_ack_child_rejects_changed_persisted_or_payload_key() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        for changed in ["stored", "payload", "scope"] {
+            let conn = test_connection();
+            let (parent, child, answer, _) = paid_edit_ack_fixture(&conn);
+            with_live_generic_claim(&conn, &parent, |c| {
+                apply_success(c, &parent, Some(&answer))?;
+                mark_success(c, &parent.id, parent.claim_generation)
+            })
+            .unwrap();
+            let mut body: Value = serde_json::from_str(&child.data).unwrap();
+            match changed {
+                "stored" => {
+                    conn.execute("UPDATE order_payments SET idempotency_key='edit:another:payment:0' WHERE id=?1",[&child.record_id]).unwrap();
+                }
+                "payload" => body["idempotency_key"] = json!("payment:another"),
+                "scope" => {
+                    conn.execute(
+                        "UPDATE orders SET branch_id='elsewhere' WHERE id='ack-order'",
+                        [],
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                prepare_payment_request(&conn, &child, &body, TEST_TERMINAL_ID).is_err(),
+                "{changed}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_ack_keeps_explicit_order_and_kitchen_notes_separate_on_wire_and_mirror() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_connection();
+        let (mut parent, _, mut answer, _) = paid_edit_ack_fixture(&conn);
+        let mut payload: Value = serde_json::from_str(&parent.data).unwrap();
+        payload.as_object_mut().unwrap().remove("orderNotes");
+        payload["notes"] = json!("Order note");
+        payload["special_instructions"] = json!("Kitchen note");
+        // Existing EUR 6 line repriced to EUR 5, plus a EUR 5.50 line: the
+        // server preserves original price 6 and enriches its override flag.
+        // The submitted request genuinely omitted both historical fields.
+        payload["items"][0]["unit_price"] = json!(5);
+        payload["items"][0]["total_price"] = json!(5);
+        payload["items"][1]["unit_price"] = json!(5.5);
+        payload["items"][1]["total_price"] = json!(5.5);
+        parent.data = payload.to_string();
+        conn.execute(
+            "UPDATE parity_sync_queue SET data=?1 WHERE id=?2",
+            params![parent.data, parent.id],
+        )
+        .unwrap();
+        conn.execute("UPDATE orders SET notes='Order note',special_instructions='Kitchen note' WHERE id='ack-order'",[]).unwrap();
+        conn.execute(
+            "UPDATE orders SET items=?1 WHERE id='ack-order'",
+            [payload["items"].to_string()],
+        )
+        .unwrap();
+        answer["data"]["notes"] = json!("Order note");
+        answer["data"]["special_instructions"] = json!("Kitchen note");
+        answer["data"]["items"][1]["unit_price"] = json!(5);
+        answer["data"]["items"][1]["total_price"] = json!(5);
+        answer["data"]["items"][1]["is_price_overridden"] = json!(true);
+        answer["data"]["items"][0]["unit_price"] = json!(5.5);
+        answer["data"]["items"][0]["total_price"] = json!(5.5);
+        answer["data"]["items"][0]["original_unit_price"] = json!(5.5);
+        match prepare_request(&conn, &parent).unwrap() {
+            RequestPreparation::Ready(spec) => {
+                let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+                assert_eq!(body["notes"], "Order note");
+                assert_eq!(body["special_instructions"], "Kitchen note");
+                assert!(body.get("order_notes").is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        with_live_generic_claim(&conn, &parent, |c| {
+            apply_success(c, &parent, Some(&answer))?;
+            mark_success(c, &parent.id, parent.claim_generation)
+        })
+        .unwrap()
+        .unwrap();
+        let mirrored: Value = serde_json::from_str(
+            &conn
+                .query_row("SELECT items FROM orders WHERE id='ack-order'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mirrored[1]["original_unit_price"], 6);
+        assert_eq!(mirrored[1]["is_price_overridden"], true);
+        assert_eq!(
+            conn.query_row(
+                "SELECT notes,special_instructions,remote_version FROM orders WHERE id='ack-order'",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?
+                ))
+            )
+            .unwrap(),
+            ("Order note".into(), "Kitchen note".into(), 4)
         );
     }
 

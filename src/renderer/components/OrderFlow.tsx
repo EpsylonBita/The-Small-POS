@@ -1,6 +1,11 @@
+import { resolveAdjustmentAttribution } from '../utils/staffAttribution';
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { LiquidGlassModal } from './ui/pos-glass-components';
 import { MenuModal } from './modals/MenuModal';
+import { EditSettlementDeltaModal } from './modals/EditSettlementDeltaModal';
+import { commitMenuOrderEdit, menuEditRefundAction, previewMenuOrderEdit, type MenuOrderEditData, type MenuOrderEditLifecycle } from '../services/MenuOrderEdit';
+import type { OrderEditSettlementPreview } from '../../lib/ipc-adapter';
+import { resolveEditSettlementRefundAmount } from '../utils/editSettlementFinancials';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
@@ -40,6 +45,7 @@ import {
 import { giftCardsApiService, type GiftCardScope } from '../services/GiftCardsApiService';
 import type { GiftCardTenderEvent } from '../services/GiftCardCheckoutService';
 import { useShift } from '../contexts/shift-context';
+import { useOperationalShift } from '../contexts/cashier-gate-context';
 import { useI18n } from '../contexts/i18n-context';
 import { MODULE_IDS, useAcquiredModules } from '../hooks/useAcquiredModules';
 import { useTables } from '../hooks/useTables';
@@ -100,6 +106,8 @@ import {
 } from '../utils/customer-addresses';
 import {
   MODAL_ZONE_VALIDATION_FIELD,
+  MODAL_DESTINATION_UNCHANGED_FIELD,
+  canKeepDeliveryZoneForCustomerEdit,
   planDeliveryAddressRepick,
   planDeliveryZoneHandoff,
   resolveHandoffCustomer,
@@ -112,6 +120,8 @@ interface OrderFlowProps {
   forceRetailMode?: boolean;
   /** Hide the floating action button when a parent screen already owns the entry point */
   showFab?: boolean;
+  /** Disable automatic draft restoration when a paired OrderDashboard owns it. */
+  restoreDraftOnMount?: boolean;
 }
 
 interface Customer {
@@ -172,7 +182,7 @@ const composeOrderTypeAriaLabel = (title: string, description: string): string =
   return `${cleanTitle}. ${cleanDescription}`;
 };
 
-const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false, showFab = true }) => {
+const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false, showFab = true, restoreDraftOnMount = true }) => {
   const bridge = getBridge();
   const { t } = useI18n();
   const { isFeatureEnabled } = useFeatures();
@@ -228,6 +238,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Order flow states
   const [selectedOrderType, setSelectedOrderType] = useState<'pickup' | 'delivery' | 'dine-in' | null>(null);
   const [restoredEditContext, setRestoredEditContext] = useState<Record<string, any> | null>(null);
+  const [recoveredEditPrompt, setRecoveredEditPrompt] = useState<{
+    data: MenuOrderEditData; lifecycle: MenuOrderEditLifecycle; preview: OrderEditSettlementPreview;
+    amount: number; resolve(): void; reject(error: Error): void;
+  } | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [selectedAddress, setSelectedAddress] = useState<any>(null);
   const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
@@ -245,6 +259,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
   // Shift context for linking orders to shifts
   const { staff, activeShift, isShiftActive } = useShift();
+  const isOperationalShiftActive = useOperationalShift(isShiftActive);
   const { requestOverride } = useDeliveryValidation();
 
   // Module-based feature flags
@@ -427,12 +442,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Fix review 30/09/2026: one checkout id per cart, reused by every press
   // of Pay until the checkout ends, so a slow card terminal is never paid
   // twice.
-  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId } =
+  const { take: takeCheckoutRequestId, reset: resetCheckoutRequestId, restore: restoreCheckoutRequestId, dismiss: dismissCheckoutRequestId } =
     useCheckoutRequestId();
 
   // Reset all flow states
   const resetFlow = useCallback(() => {
-    resetCheckoutRequestId();
+    dismissCheckoutRequestId();
     setRestoredEditContext(null);
     setSelectedTable(null);
     setTableNumber('');
@@ -449,9 +464,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setIsTransitioning(false);
     setShowZoneAlert(false);
     setOverrideApproved(false);
-  }, [resetCheckoutRequestId]);
+  }, [dismissCheckoutRequestId]);
 
-  const restoreDraftContext = useCallback((context: Record<string, any>) => {
+  const restoreDraftContext = useCallback((context: Record<string, any>, renewal?: { previousCheckoutRequestId: string }) => {
     if (!['pickup', 'delivery', 'dine-in'].includes(context.orderType)) throw new Error('CHECKOUT_DRAFT_CONTEXT_INVALID');
     setSelectedOrderType(context.orderType);
     setSelectedCustomer(context.selectedCustomer || { id: 'pickup-customer', name: '', phone: '', email: '', addresses: [] });
@@ -460,38 +475,78 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setTableNumber(context.tableNumber || '');
     setDeliveryZoneInfo(context.deliveryZoneInfo || null);
     setRestoredEditContext(context.editMode ? context : null);
-    if (context.checkoutRequestId) restoreCheckoutRequestId(context.checkoutRequestId);
+    if (context.checkoutRequestId) restoreCheckoutRequestId(context.checkoutRequestId, { phase: context.checkoutPhase, editMode: context.editMode, renewedFrom: renewal?.previousCheckoutRequestId });
     setIsMenuModalOpen(true);
   }, [restoreCheckoutRequestId]);
 
   useEffect(() => {
-    if (isRetailVertical || !organizationId || !effectiveBranchId || !resolvedIdentityTerminalId) return;
+    if (!restoreDraftOnMount || isRetailVertical || !organizationId || !effectiveBranchId || !resolvedIdentityTerminalId) return;
     let disposed = false;
     void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
       if (!disposed && saved && (saved.cartItems.length || saved.phase === 'checkout_pending')) {
-        restoreDraftContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId });
+        restoreDraftContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
       }
     }).catch(() => { /* The modal's durable read gate surfaces failure without replacing the cart. */ });
     return () => { disposed = true; };
-  }, [organizationId, effectiveBranchId, resolvedIdentityTerminalId, isRetailVertical, restoreDraftContext]);
+  }, [organizationId, effectiveBranchId, resolvedIdentityTerminalId, isRetailVertical, restoreDraftOnMount, restoreDraftContext]);
 
   const acceptRecoveredDraftOrder = useCallback(async (order: any) => {
     const response = await bridge.orders.getById(order.id);
     const saved = (response as any)?.data || response;
     if (!saved?.id) throw new Error('CHECKOUT_DRAFT_ORDER_UNAVAILABLE');
     await silentRefresh();
+    resetCheckoutRequestId();
     toast.success(t('modals.menu.draftRecovered', { defaultValue: 'The original order is saved. No new payment was started.' }));
-  }, [bridge.orders, silentRefresh, t]);
+  }, [bridge.orders, silentRefresh, resetCheckoutRequestId, t]);
 
-  const completeRecoveredEdit = useCallback(async (data: { orderId: string; items: any[]; client_event_id?: string; expected_version?: number }) => {
-    if (!data.client_event_id || !Number.isSafeInteger(data.expected_version)) throw new Error('Reload the original order before confirming this saved edit.');
-    const result = await bridge.orders.updateItems(data.orderId, data.items, {
-      clientEventId: data.client_event_id, expectedVersion: data.expected_version,
-      tableSessionId: restoredEditContext?.tableSessionId || restoredEditContext?.table_session_id,
-    });
-    if ((result as any)?.success === false) throw new Error((result as any)?.error || 'The saved edit remains pending.');
-    await silentRefresh();
-  }, [bridge.orders, restoredEditContext, silentRefresh]);
+  const preflightRecoveredEdit = useCallback(async (data: MenuOrderEditData) =>
+    (await previewMenuOrderEdit(bridge.orders, data, bridge.sync)).preflight, [bridge.orders, bridge.sync]);
+
+  const completeRecoveredEdit = useCallback(async (data: MenuOrderEditData, lifecycle?: MenuOrderEditLifecycle) => {
+    if (data.action === 'edit_settlement') {
+      if (!data.settlementAction) throw new Error('RECOVERY_ORIGINAL_REQUEST_REQUIRED');
+      await commitMenuOrderEdit(bridge.orders, data, data.settlementAction);
+      void silentRefresh().catch(() => undefined);
+      return;
+    }
+    const { preflight, preview } = await previewMenuOrderEdit(bridge.orders, data, bridge.sync);
+    if (preflight.kind !== 'settlement') {
+      const result = await bridge.orders.updateItems(data.orderId, data.items, {
+        clientEventId: data.client_event_id, expectedVersion: data.expected_version,
+          expectedLocalVersion: data.renderer_local_version,
+        tableSessionId: restoredEditContext?.tableSessionId || restoredEditContext?.table_session_id,
+        orderUpdates: data.orderUpdates, financials: data.financials, orderNotes: data.notes,
+      });
+      if (result?.success === false) throw new Error(result.error || 'CHECKOUT_DRAFT_EDIT_NOT_APPLIED');
+    } else {
+      if (!lifecycle) throw new Error('CHECKOUT_DRAFT_EDIT_FREEZE_REQUIRED');
+      if (preview.requiredAction === 'none') await commitMenuOrderEdit(bridge.orders, data, { type: 'none' }, lifecycle);
+      else await new Promise<void>((resolve, reject) => setRecoveredEditPrompt({ data, lifecycle, preview,
+        amount: preview.requiredAction === 'collect' ? Math.max(0, preview.nextTotal - preview.paidTotal) : resolveEditSettlementRefundAmount(preview), resolve, reject }));
+    }
+    void silentRefresh().catch(() => undefined);
+  }, [bridge.orders, bridge.sync, restoredEditContext, silentRefresh]);
+
+  const confirmRecoveredEdit = async (method: 'cash' | 'card') => {
+    if (!recoveredEditPrompt) return;
+    const pending = recoveredEditPrompt;
+    try {
+      const collectionAttribution = resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+        shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] });
+      const action = pending.preview.requiredAction === 'collect'
+        ? { type: 'collect' as const, payments: [{ orderId: pending.data.orderId, method, amount: pending.amount,
+          ...collectionAttribution, paymentOrigin: 'manual' as const, collectedBy: 'cashier_drawer' as const }] }
+        : menuEditRefundAction(pending.preview, pending.amount, method,
+          t('orderDashboard.editSettlementRefundReason', { defaultValue: 'Edit settlement refund' }),
+          { staffId: staff?.databaseStaffId || staff?.staffId, staffShiftId: activeShift?.id });
+      await commitMenuOrderEdit(bridge.orders, pending.data, action, pending.lifecycle);
+      setRecoveredEditPrompt(null);
+      pending.resolve();
+    } catch (error) {
+      setRecoveredEditPrompt(null);
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
 
   const handleStartNewOrder = useCallback(() => {
     resetFlow();
@@ -685,14 +740,22 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [selectedAddress, selectedCustomer]);
 
   const handleCustomerAdded = useCallback((newCustomer: Customer) => {
+    const handoff = resolveHandoffCustomer(newCustomer as any, {
+      customerId: typeof selectedCustomer?.id === 'string' ? selectedCustomer.id : null,
+      selectedAddressId: typeof selectedAddress?.id === 'string' ? selectedAddress.id : null,
+    });
+    const keepDeliveryZone = canKeepDeliveryZoneForCustomerEdit({
+      customerId: handoff.customer.id,
+      previousCustomerId: selectedCustomer?.id,
+      address: handoff.address,
+      previousAddress: selectedAddress,
+      unchangedDestination: (newCustomer as any)[MODAL_DESTINATION_UNCHANGED_FIELD],
+      zoneInfo: deliveryZoneInfo,
+    });
     if (menuAddressRepickRef.current) {
       menuAddressRepickRef.current = false;
       // The order goes to the address that was just edited, and the modal's
       // own zone check is reused (never re-checked) when it ran one.
-      const handoff = resolveHandoffCustomer(newCustomer as any, {
-        customerId: typeof selectedCustomer?.id === 'string' ? selectedCustomer.id : null,
-        selectedAddressId: typeof selectedAddress?.id === 'string' ? selectedAddress.id : null,
-      });
       const zonePlan = planDeliveryZoneHandoff({
         address: handoff.address,
         modalValidation: (newCustomer as any)?.[MODAL_ZONE_VALIDATION_FIELD],
@@ -704,7 +767,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       }
       // Anything but a reusable check: the menu checks the point itself, or
       // geolocates the address, or shows "zone not checked".
-      setDeliveryZoneInfo(zonePlan.kind === 'reuse' ? zonePlan.zoneInfo : null);
+      if (!keepDeliveryZone) setDeliveryZoneInfo(zonePlan.kind === 'reuse' ? zonePlan.zoneInfo : null);
       setIsAddCustomerModalOpen(false);
       setCustomerToEdit(null);
       setCustomerModalMode('new');
@@ -716,7 +779,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     const wasEditingAddress = customerModalMode === 'editAddress';
     const wasAddingAddress = customerModalMode === 'addAddress';
     
-    setSelectedCustomer(newCustomer);
+    setSelectedCustomer(handoff.customer as unknown as Customer);
+    if (!keepDeliveryZone) setDeliveryZoneInfo(null);
     setIsAddCustomerModalOpen(false);
     setCustomerToEdit(null); // Clear edit state
     setCustomerModalMode('new'); // Reset mode
@@ -737,7 +801,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       setIsMenuModalOpen(true);
       toast.success(t('orderFlow.customerAdded'));
     }
-  }, [t, customerToEdit, customerModalMode, selectedAddress, selectedCustomer]);
+  }, [t, customerToEdit, customerModalMode, selectedAddress, selectedCustomer, deliveryZoneInfo]);
 
   const handleMenuModalClose = useCallback(() => {
     resetFlow();
@@ -1082,8 +1146,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                   metadata: selection.metadata,
               collectOutstandingBalance: true,
               expectedSettlementGeneration: pendingPayment.settlementGeneration,
-              staffId: pendingPayment.orderType === 'delivery' ? undefined : staff?.staffId,
-              staffShiftId: pendingPayment.orderType === 'delivery' ? undefined : activeShift?.id,
+              ...resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+                shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] }),
+              collectedBy: ['cashier', 'manager'].includes(activeShift?.role_type ?? '') ? 'cashier_drawer' : undefined,
               tipAmount: pendingPayment.tipAmount,
               tipRecipientRole: pendingPayment.tipRecipientRole,
               tipRecipientStaffId: pendingPayment.tipRecipientStaffId,
@@ -1588,8 +1653,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               idempotencyKey: orderData.paymentData.idempotencyKey,
               currency: orderData.paymentData.currency,
               metadata: orderData.paymentData.metadata,
-              staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
-              staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+              ...resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+                shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] }),
+              collectedBy: ['cashier', 'manager'].includes(activeShift?.role_type ?? '') ? 'cashier_drawer' : undefined,
               tipAmount,
               tipRecipientRole,
               tipRecipientStaffId,
@@ -1598,7 +1664,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           : undefined;
 
       // Warn if no active shift
-      if (!isShiftActive) {
+      if (!isOperationalShiftActive) {
         toast(t('orderFlow.noActiveShift'), {
           duration: 3000,
           icon: <AlertTriangle className="w-4 h-4 text-white" />,
@@ -1662,8 +1728,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                 idempotencyKey: orderData.paymentData.idempotencyKey,
                 currency: orderData.paymentData.currency,
                 metadata: orderData.paymentData.metadata,
-                staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
-                staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+                ...resolveAdjustmentAttribution({ databaseStaffId: staff?.databaseStaffId,
+                  shiftStaffOwnerId: activeShift?.staff_id, staffShiftId: activeShift?.id, candidateStaffIds: [staff?.staffId] }),
+              collectedBy: ['cashier', 'manager'].includes(activeShift?.role_type ?? '') ? 'cashier_drawer' : undefined,
                 tipAmount,
                 tipRecipientRole,
                 tipRecipientStaffId,
@@ -1989,7 +2056,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId, selectedTable, tableNumber]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isOperationalShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId, selectedTable, tableNumber]);
 
   // Order-type chooser ergonomics aligned with the main OrderDashboard modal (Round 346): modal width + grid
   // scale to the number of visible cards (pickup always present; delivery/tables optional), and each card
@@ -2020,9 +2087,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       {showFab && canCreateOrders && (
         <FloatingActionButton
           onClick={handleStartNewOrder}
-          disabled={!isShiftActive}
-          aria-label={!isShiftActive ? t('orders.startShiftFirst', 'Start a shift first to create orders') : t('orderFlow.startNewOrder')}
-          className={!isShiftActive ? 'bg-gray-400 cursor-not-allowed opacity-50' : ''}
+          disabled={!isOperationalShiftActive}
+          aria-label={!isOperationalShiftActive ? t('orders.startShiftFirst', 'Start a shift first to create orders') : t('orderFlow.startNewOrder')}
+          className={!isOperationalShiftActive ? 'bg-gray-400 cursor-not-allowed opacity-50' : ''}
         />
       )}
 
@@ -2245,6 +2312,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             editOrderId={restoredEditContext?.editOrderId}
             editSupabaseId={restoredEditContext?.editSupabaseId}
             editSourceOrderType={restoredEditContext?.editSourceOrderType}
+            editHeaders={restoredEditContext?.editHeaders}
+            onEditPreflight={preflightRecoveredEdit}
             onEditComplete={completeRecoveredEdit}
             isOpen={isMenuModalOpen}
             onClose={handleMenuModalClose}
@@ -2258,6 +2327,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           />
         )
       )}
+
+      <EditSettlementDeltaModal isOpen={recoveredEditPrompt !== null}
+        mode={recoveredEditPrompt?.preview.requiredAction === 'refund' ? 'refund' : 'collect'}
+        amount={recoveredEditPrompt?.amount ?? 0} onConfirm={confirmRecoveredEdit}
+        onCancel={() => { recoveredEditPrompt?.reject(new Error('EDIT_SETTLEMENT_CANCELLED')); setRecoveredEditPrompt(null); }} />
 
       {splitPaymentData && (
         <SplitPaymentModal

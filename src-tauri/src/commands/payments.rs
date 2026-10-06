@@ -564,13 +564,17 @@ pub async fn payment_update_payment_method(
     arg1: Option<String>,
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
 ) -> Result<serde_json::Value, String> {
+    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+    let session = crate::auth::get_session_json(&auth_state);
     let payload = parse_payment_method_update_payload(arg0, arg1)?;
-    let result = payments::update_payment_method_for_payment(
+    let result = payments::update_payment_method_for_payment_with_actor(
         &db,
         &payload.order_id,
         payload.payment_id.as_deref(),
         &payload.payment_method,
+        session["staffId"].as_str(),
     )?;
     if let Some(event_payload) = result.get("data").cloned() {
         let _ = app.emit("order_payment_updated", event_payload);

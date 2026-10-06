@@ -32,6 +32,10 @@ const h = vi.hoisted(() => {
   const state = {
     orderId: '',
     checkoutDraft: null as any,
+    returnedCustomer: null as any,
+    menuProps: null as any,
+    menuCreateId: undefined as string | undefined,
+    recoveryError: '',
     serial: 0,
     orderTotal: 12.5,
     giftBooked: false,
@@ -144,6 +148,7 @@ const h = vi.hoisted(() => {
   };
 
   const bridge = {
+    orders: { previewEditSettlement: vi.fn(), applyEditSettlement: vi.fn(async () => ({ success: true })), getById: vi.fn(async (id: string) => ({ id })) },
     payments: {
       getSettlementSnapshot: native.getSettlementSnapshot,
       recordPayment: native.recordPayment,
@@ -240,7 +245,7 @@ vi.mock('../../contexts/i18n-context', () => ({
 vi.mock('../../contexts/shift-context', () => ({
   useShift: () => ({
     staff: { staffId: 'staff-1', terminalId: 'term-1', branchId: 'branch-1' },
-    activeShift: { id: 'shift-1' },
+    activeShift: { id: '50000000-0000-4000-8000-000000000001', staff_id: '30000000-0000-4000-8000-000000000001', role_type: 'cashier' },
     isShiftActive: true,
   }),
 }));
@@ -310,15 +315,21 @@ vi.mock('../ui/FloatingActionButton', () => ({
 }));
 vi.mock('../../services/CheckoutDraftStore', () => ({ getCheckoutDraftStore: async () => ({ load: async () => h.state.checkoutDraft }) }));
 vi.mock('../modals/MenuModal', () => ({
-  MenuModal: ({ isOpen, onOrderComplete, orderType, draftContext }: any) => (
+  MenuModal: (props: any) => { if (props.isOpen) h.state.menuProps = props; const { isOpen, onOrderComplete, onEditComplete, onRecoveredOrder, onClose, editMode, orderType, draftContext } = props; return (
     isOpen
-      ? <button type="button" data-testid="menu-complete" data-order-type={orderType} data-table-id={draftContext?.selectedTable?.id} onClick={() => { void onOrderComplete(h.state.checkoutDraft ? { ...h.orderData(), clientRequestId: h.state.checkoutDraft.checkoutRequestId, paymentData: { method: 'table', status: 'pending', amount: 0 } } : h.orderData()); }}>complete order</button>
+      ? <><button data-testid="edit-address" onClick={props.onRepickDeliveryAddress}>edit address</button><button type="button" data-testid={editMode ? 'edit-complete' : 'menu-complete'} data-order-type={orderType} data-table-id={draftContext?.selectedTable?.id} onClick={() => {
+          if (editMode) void onEditComplete(h.state.checkoutDraft.submission).then(() => { h.state.checkoutDraft = null; onClose(); });
+          else void onOrderComplete(h.state.checkoutDraft ? { ...h.orderData(), clientRequestId: h.state.menuCreateId ?? h.state.checkoutDraft.checkoutRequestId, paymentData: { method: 'table', status: 'pending', amount: 0 } }
+            : { ...h.orderData(), ...(h.state.menuCreateId ? { clientRequestId: h.state.menuCreateId } : {}) });
+        }}>complete order</button>
+        <button type="button" data-testid="menu-close" onClick={() => { h.state.checkoutDraft = null; onClose(); }}>close editor</button>
+        <button type="button" data-testid="menu-recover-saved" onClick={() => { void onRecoveredOrder({ id: 'original-saved-order' }).then(() => { h.state.checkoutDraft = null; onClose(); }).catch((error: unknown) => { h.state.recoveryError = String(error); }); }}>recover saved order</button></>
       : null
-  ),
+  ); },
 }));
 vi.mock('../modals/ProductCatalogModal', () => ({ ProductCatalogModal: () => null }));
 vi.mock('../modals/CustomerSearchModal', () => ({ CustomerSearchModal: () => null }));
-vi.mock('../modals/AddCustomerModal', () => ({ AddCustomerModal: () => null }));
+vi.mock('../modals/AddCustomerModal', () => ({ AddCustomerModal: ({ isOpen, onCustomerAdded }: any) => isOpen ? <button data-testid="save-address-edit" onClick={() => onCustomerAdded(h.state.returnedCustomer)}>save address</button> : null }));
 vi.mock('../modals/SplitPaymentModal', () => ({
   SplitPaymentModal: ({ orderId, onClose }: { orderId: string; onClose: () => void }) => (
     <div data-testid="split-payment-modal" data-order-id={orderId}>
@@ -418,6 +429,10 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
     Object.assign(h.state, {
       orderId: '',
       checkoutDraft: null,
+      returnedCustomer: null,
+      menuProps: null,
+      menuCreateId: undefined,
+      recoveryError: '',
       giftBooked: false,
       importPending: false,
       imports: 0,
@@ -437,6 +452,154 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it.each([false, true])('keeps the current delivery verdict only for an unchanged destination (changed=%s)', async changed => {
+    const point = { lat: 40.61, lng: 22.96 };
+    const address = { id: 'address-owned', street_address: 'Test Street 5', city: 'Test City', postal_code: '55133', latitude: point.lat, longitude: point.lng, floor_number: '1' };
+    const customer = { id: 'customer-owned', name: 'Test', phone: '6900000000', selected_address_id: address.id, addresses: [address] };
+    const zone = { success: true, isValid: true, validation_status: 'in_zone', coordinates: point, zone: { id: 'zone-owned', deliveryFee: 2.5, minimumOrderAmount: 7 } };
+    h.state.checkoutDraft = { phase: 'editing', checkoutRequestId: 'address-editor', cartItems: [{ id: 'cart-line' }],
+      context: { orderType: 'delivery', selectedCustomer: customer, selectedAddress: address, deliveryZoneInfo: zone } };
+    h.state.returnedCustomer = { ...customer, delivery_destination_unchanged: !changed,
+      addresses: [{ ...address, floor_number: '2', ...(changed ? { street_address: 'Different Street 9', latitude: 40.65 } : {}) }] };
+    render(<OrderFlow />);
+    fireEvent.click(await screen.findByTestId('edit-address'));
+    fireEvent.click(await screen.findByTestId('save-address-edit'));
+    await waitFor(() => expect(screen.queryByTestId('save-address-edit')).toBeNull());
+    if (changed) {
+      expect(h.state.menuProps.deliveryZoneInfo).not.toEqual(zone);
+
+    } else {
+      expect(h.state.menuProps.deliveryZoneInfo).toEqual(zone);
+      expect(h.state.menuProps.deliveryZoneInfo.zone.deliveryFee).toBe(2.5);
+      expect(h.state.menuProps.selectedAddress.floor_number).toBe('2');
+
+    }
+    expect(h.state.menuProps.selectedCustomer).not.toHaveProperty('delivery_destination_unchanged');
+    expect(h.state.checkoutDraft.cartItems).toEqual([{ id: 'cart-line' }]);
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+  });
+
+  it('preserves the cashier collector when a restored delivery edit collects an extra amount', async () => {
+    targetOrder('cashier-delivery-edit');
+    h.state.checkoutDraft = { draftId: 'delivery-edit', checkoutRequestId: 'delivery-edit-event', phase: 'editing', cartItems: [{}],
+      context: { orderType: 'delivery', editMode: true, editOrderId: 'cashier-delivery-edit' } };
+    h.bridge.orders.previewEditSettlement.mockResolvedValue({ success: true, paidTotal: 12.5, nextTotal: 17,
+      requiredAction: 'collect', completedPayments: [{ id: 'original', method: 'cash', amount: 12.5 }], paymentStatus: 'paid',
+      canonicalExpectedVersion: 1, localExpectedVersion: 1, quotedFinancials: { totalAmount: 17, quote: 'proof' } });
+    render(<OrderFlow />);
+    await screen.findByTestId('edit-complete');
+    const beforeCommit = vi.fn(async () => undefined);
+    let completion!: Promise<void>;
+    await act(async () => { completion = h.state.menuProps.onEditComplete({ orderId: 'cashier-delivery-edit',
+      client_event_id: 'delivery-edit-event', expected_version: 1, expected_local_version: 1, items: [], total: 17 }, { beforeCommit }); });
+    fireEvent.click(await screen.findByTestId('edit-settlement-delta-cash'));
+    await act(async () => { await completion; });
+    expect(beforeCommit).toHaveBeenCalledOnce();
+    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({
+      action: { type: 'collect', payments: [expect.objectContaining({ amount: 4.5, method: 'cash', collectedBy: 'cashier_drawer',
+        staffId: '30000000-0000-4000-8000-000000000001', staffShiftId: '50000000-0000-4000-8000-000000000001' })] },
+    }));
+  });
+
+  it('attributes an upfront delivery receipt to the collecting cashier without assigning courier custody', async () => {
+    targetOrder('cashier-paid-delivery');
+    const address = { id: 'address-owned', street_address: 'Street 5', city: 'City', postal_code: '55133', latitude: 40.61, longitude: 22.96 };
+    h.state.checkoutDraft = { draftId: 'cashier-delivery', checkoutRequestId: 'cashier-delivery-create', phase: 'editing', cartItems: [{}],
+      context: { orderType: 'delivery', editMode: false, selectedAddress: address,
+        selectedCustomer: { id: 'customer-1', name: 'Person', phone: '123', addresses: [address] } } };
+    render(<OrderFlow />);
+    await screen.findByTestId('menu-complete');
+    await act(async () => { await h.state.menuProps.onOrderComplete({ ...h.orderData(), clientRequestId: 'cashier-delivery-create', address,
+      deliveryFee: 0, deliveryZoneInfo: { zone: { id: 'zone-1', name: 'Zone', estimatedTime: 15 } },
+      paymentData: { method: 'cash', amount: 12.5, currency: 'EUR', cashReceived: 12.5, change: 0 } }); });
+    expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      initialPayment: expect.objectContaining({ method: 'cash', collectedBy: 'cashier_drawer', staffId: '30000000-0000-4000-8000-000000000001',
+        staffShiftId: '50000000-0000-4000-8000-000000000001' }),
+    }));
+  });
+
+  it('delegates bootstrap restoration without disabling an explicitly opened flow', async () => {
+    h.state.checkoutDraft = { draftId: 'original-draft', checkoutRequestId: 'original-frozen-cash', phase: 'checkout_pending', cartItems: [{}],
+      context: { orderType: 'pickup', editMode: false } };
+    const original = JSON.stringify(h.state.checkoutDraft);
+    render(<OrderFlow restoreDraftOnMount={false} />);
+    await settle();
+    expect(screen.queryByTestId('menu-complete')).toBeNull();
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByRole('button', { name: /orderFlow.pickupOrder/ }));
+    await screen.findByTestId('menu-complete');
+    expect(JSON.stringify(h.state.checkoutDraft)).toBe(original);
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+  });
+
+  it('restores and completes an edit, then creates the next checkout with its own persisted identity', async () => {
+    targetOrder('flow-after-edit');
+    const request = { orderId: 'old-paid-order', client_event_id: 'restored-edit-event', expected_version: 3,
+      expected_local_version: 1, items: [], action: { type: 'none' } };
+    h.state.checkoutDraft = { draftId: 'edit-draft', checkoutRequestId: 'restored-edit-event', phase: 'checkout_pending', cartItems: [{}],
+      context: { editMode: true, editOrderId: 'old-paid-order', orderType: 'pickup' },
+      submission: { ...request, action: 'edit_settlement', settlementAction: request.action, settlementRequest: request } };
+    render(<OrderFlow />);
+    fireEvent.click(await screen.findByTestId('edit-complete'));
+    await waitFor(() => expect(screen.queryByTestId('edit-complete')).toBeNull());
+    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(request);
+    h.state.menuCreateId = 'flow-new-create';
+    const calls = h.store.createOrder.mock.calls.length;
+    await openOutstanding();
+    expect(h.store.createOrder).toHaveBeenCalledTimes(calls + 1);
+    expect(h.store.createOrder.mock.calls.at(-1)?.[0]).toMatchObject({ clientRequestId: 'flow-new-create' });
+  });
+
+  it('discards an unsubmitted restored cart before starting the next checkout', async () => {
+    targetOrder('flow-after-discard');
+    h.state.checkoutDraft = { draftId: 'editable-draft', checkoutRequestId: 'discarded-create', phase: 'editing', cartItems: [{}],
+      context: { orderType: 'pickup', editMode: false } };
+    render(<OrderFlow />);
+    fireEvent.click(await screen.findByTestId('menu-close'));
+    h.state.menuCreateId = 'flow-after-discard-create';
+    const calls = h.store.createOrder.mock.calls.length;
+    await openOutstanding();
+    expect(h.store.createOrder).toHaveBeenCalledTimes(calls + 1);
+    expect(h.store.createOrder.mock.calls.at(-1)?.[0]).toMatchObject({ clientRequestId: 'flow-after-discard-create' });
+  });
+
+  it('releases the original create only after recovery proves its saved order', async () => {
+    targetOrder('flow-after-saved-recovery');
+    h.state.checkoutDraft = { draftId: 'original-draft', checkoutRequestId: 'saved-create', phase: 'checkout_pending', cartItems: [{}],
+      context: { orderType: 'pickup', editMode: false } };
+    render(<OrderFlow />);
+    fireEvent.click(await screen.findByTestId('menu-recover-saved'));
+    await waitFor(() => expect(screen.queryByTestId('menu-complete')).toBeNull());
+    expect(h.bridge.orders.getById).toHaveBeenCalledWith('original-saved-order');
+    h.state.menuCreateId = 'after-proven-saved-create';
+    const calls = h.store.createOrder.mock.calls.length;
+    await openOutstanding();
+    expect(h.store.createOrder).toHaveBeenCalledTimes(calls + 1);
+    expect(h.store.createOrder.mock.calls.at(-1)?.[0]).toMatchObject({ clientRequestId: 'after-proven-saved-create' });
+  });
+
+  it('retains the original identity when saved-order recovery cannot verify its target', async () => {
+    targetOrder('flow-failed-recovery');
+    h.state.checkoutDraft = { draftId: 'original-draft', checkoutRequestId: 'protected-create', phase: 'checkout_pending', cartItems: [{}],
+      context: { orderType: 'pickup', editMode: false } };
+    h.bridge.orders.getById.mockRejectedValueOnce(new Error('original order unavailable'));
+    render(<OrderFlow />);
+    fireEvent.click(await screen.findByTestId('menu-recover-saved'));
+    await waitFor(() => expect(h.state.recoveryError).toContain('original order unavailable'));
+    expect(h.state.checkoutDraft.checkoutRequestId).toBe('protected-create');
+    h.state.menuCreateId = 'different-create';
+    const calls = h.store.createOrder.mock.calls.length;
+    const errors = h.toast.error.mock.calls.length;
+    fireEvent.click(screen.getByTestId('menu-complete'));
+    await waitFor(() => expect(h.toast.error.mock.calls.length).toBe(errors + 1));
+    expect(h.store.createOrder).toHaveBeenCalledTimes(calls);
+    h.state.menuCreateId = 'protected-create';
+    fireEvent.click(screen.getByTestId('menu-complete'));
+    await waitFor(() => expect(h.store.createOrder).toHaveBeenCalledTimes(calls + 1));
+    expect(h.store.createOrder).toHaveBeenLastCalledWith(expect.objectContaining({ clientRequestId: 'protected-create' }));
   });
 
   it('keeps the booked receipt reachable when Close beats the ledger reread, then reopens the same Tender', async () => {

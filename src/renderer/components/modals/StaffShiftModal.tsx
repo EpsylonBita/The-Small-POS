@@ -1,4 +1,5 @@
 import { shiftSummaryCurrency } from '../../utils/shift-currency';
+import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import { recordedFolioCurrency } from '../../utils/folio-currency';
 import { submitSatelliteHandover } from '../../utils/satellite-handover';
 import React, { useState, useEffect, useRef } from 'react';
@@ -880,8 +881,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     expensesTotal?: number,
   ) => {
     const calculationVersion = Number(shift?.calculation_version ?? 1);
-    const sales = Number(summary?.breakdown?.instore?.cashTotal || 0);
-    const cashRefunds = Number(summary?.cashRefunds || 0);
+    const sales = Number(summary?.cashierCash?.cashCollections ?? summary?.breakdown?.instore?.cashTotal ?? 0);
+    const cashRefunds = Number(summary?.cashierCash?.cashRefunds ?? summary?.cashRefunds ?? 0);
     const expenses = expensesTotal ?? Number(summary?.totalExpenses || 0);
     const cashDrops = Number(summary?.cashDrawer?.cash_drops || 0);
     const driverGiven = getCurrentCashierIssuedFloat(summary);
@@ -1171,6 +1172,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const formatCurrency = (amount: number, currency?: string | null) => formatMoney(
     amount, currency !== undefined ? currency : effectiveMode === 'checkout' ? checkoutDisplayCurrency : undefined,
   );
+  const cashierDrawerCurrency = shiftSummary?.cashierCash
+    ? recordedFolioCurrency(shiftSummary.cashierCash.currency) : checkoutDisplayCurrency;
+  const formatDrawerCurrency = (amount: number) => formatMoney(amount, cashierDrawerCurrency);
   const cashierCheckoutExpenseTotal = React.useMemo(
     () => resolveCashierCheckoutExpenseTotal(shiftSummary, expenses, effectiveShift?.id),
     [shiftSummary, expenses, effectiveShift?.id],
@@ -1454,7 +1458,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         const status = (d?.status || d?.order_status || '').toLowerCase();
         return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
       });
-      const collected = completed.reduce((sum: number, d: any) => sum + Number(d?.cash_collected || 0), 0);
+      const collected = deliveries.reduce((sum: number, d: any) => sum + Number(d?.cash_collected || 0), 0);
       const driverPayment = parseMoneyInputValue(staffPayment) || 0;
       const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
       const returnBeforeLegacyPayment = calculateDriverReturn({
@@ -3212,14 +3216,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       // Calculate cash to return using the specified formula:
       // cashToReturn = openingCash + totalCashCollected - totalExpenses - tips - driverPayment
-      // Filter out canceled orders before calculating
+      // Custody is net of recorded handbacks; status alone never moves cash.
       const openingCash = getEffectiveOpeningAmount(effectiveShift, freshSummary);
       const deliveries = freshSummary?.driverDeliveries || [];
       const completedDeliveries = deliveries.filter((d: any) => {
         const status = (d.status || d.order_status || '').toLowerCase();
         return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
       });
-      const totalCashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
+      const totalCashCollected = deliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const totalExpenses = freshSummary?.totalExpenses || 0;
       const tipsReceived = Number(freshSummary?.tipsReceived || freshSummary?.tips_received || 0);
       const expectedReturn = calculateDriverReturn({
@@ -4112,7 +4116,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         const status = (d.status || d.order_status || '').toLowerCase();
         return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
       });
-      const cashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
+      const cashCollected = deliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
       const amountToReturn = calculateDriverReturn({
         openingAmount,
@@ -4215,8 +4219,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         note: closingCash.trim()
           ? t('modals.staffShift.countedCashVariance', {
             defaultValue: 'Counted {{counted}} · Variance {{variance}}',
-            counted: formatCurrency(actual ?? 0),
-            variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance ?? 0))}`,
+            counted: formatDrawerCurrency(actual ?? 0),
+            variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatDrawerCurrency(Math.abs(variance ?? 0))}`,
           })
           : t('modals.staffShift.countedCashPrompt', {
             defaultValue: 'Enter counted cash to confirm the final drawer amount.'
@@ -4233,7 +4237,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
       });
       const expected = getEffectiveOpeningAmount(effectiveShift, shiftSummary)
-        + completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0)
+        + deliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0)
         - (shiftSummary.totalExpenses || 0);
       const actual = driverActualCash.trim() ? parseMoneyInputValue(driverActualCash) : null;
       const variance = actual === null ? null : actual - expected;
@@ -5174,7 +5178,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {t('modals.staffShift.expectedInDrawer', { defaultValue: 'Expected In Drawer' })}
                   </div>
                   <div className="mt-3 text-4xl font-black tracking-tight text-slate-900 dark:text-white">
-                    {formatCurrency(breakdown.expected)}
+                    {formatDrawerCurrency(breakdown.expected)}
                   </div>
                   <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
                     {t('modals.staffShift.expectedInDrawerHelper', {
@@ -5208,7 +5212,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     </p>
                   ) : (
                     <div className="mt-4 flex justify-center">
-                      <VarianceBadge currency={checkoutDisplayCurrency} variance={variance} size="lg" showIcon />
+                      <VarianceBadge currency={cashierDrawerCurrency} variance={variance} size="lg" showIcon />
                     </div>
                   )}
                 </div>
@@ -5232,7 +5236,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <div className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
                     {actual === null
                       ? t('common.notEntered', { defaultValue: 'Not entered' })
-                      : formatCurrency(actual)}
+                      : formatDrawerCurrency(actual)}
                   </div>
                 </div>
               </div>
@@ -5257,7 +5261,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     >
                       <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{row.label}</span>
                       <span className={`text-lg font-black ${row.tone}`}>
-                        {row.prefix}{formatCurrency(row.amount)}
+                        {row.prefix}{formatDrawerCurrency(row.amount)}
                       </span>
                     </div>
                   ))}
@@ -5646,7 +5650,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
     });
     const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
-    const cashCollected = completedDeliveries.reduce((sum: number, delivery: any) => sum + Number(delivery.cash_collected || 0), 0);
+    const cashCollected = deliveries.reduce((sum: number, delivery: any) => sum + Number(delivery.cash_collected || 0), 0);
     const tipsReceived = Number(shiftSummary?.tipsReceived || shiftSummary?.tips_received || 0);
     const amountToReturn = calculateDriverReturn({
       openingAmount: opening,
@@ -6989,7 +6993,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   }
 
   return (
-    <>
+    <CashierRecovery>
       <LiquidGlassModal
         modalId={keyboardDialogId}
         recoveryAccess
@@ -8747,7 +8751,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 });
 
                 // Calculate cash collected from completed deliveries only
-                const cashCollected = completedDeliveries.reduce((sum: number, d: any) =>
+                const cashCollected = deliveries.reduce((sum: number, d: any) =>
                   sum + (d.cash_collected || 0), 0);
 
                 // Get total expenses
@@ -8894,7 +8898,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </div>
                   {!checkoutFooterData.minimal && (
                     <div className={`mt-1 text-2xl font-black ${checkoutFooterData.accentClass}`}>
-                      {formatCurrency(checkoutFooterData.amount)}
+                      {isCashierCheckoutRole ? formatDrawerCurrency(checkoutFooterData.amount) : formatCurrency(checkoutFooterData.amount)}
                     </div>
                   )}
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -8977,6 +8981,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       />
       {recordCheckoutBlocker.confirmDialog}
       {checkoutRecordApprovalModal}
-    </>
+    </CashierRecovery>
   );
 }

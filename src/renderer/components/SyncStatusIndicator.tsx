@@ -549,6 +549,7 @@ const ENTITY_TYPE_KEYS: Record<string, string> = {
   payment_adjustment: 'sync.entityTypes.paymentAdjustment',
   shift_expense: 'sync.entityTypes.shiftExpense',
   driver_earning: 'sync.entityTypes.driverEarning',
+  staff_cash_return: 'sync.entityTypes.paymentAdjustment',
   staff_payment: 'sync.entityTypes.staffPayment',
 };
 

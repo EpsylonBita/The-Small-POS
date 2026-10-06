@@ -31,6 +31,13 @@ const h = vi.hoisted(() => {
 
   const state = {
     orderId: '',
+    checkoutDraft: null as any,
+    returnedCustomer: null as any,
+    menuProps: null as any,
+    menuCreateId: undefined as string | undefined,
+    menuSubmission: null as any,
+    restoreContext: null as any,
+    restoreError: '' as string,
     serial: 0,
     orderTotal: 12.5,
     giftBooked: false,
@@ -101,6 +108,7 @@ const h = vi.hoisted(() => {
     : { status: 'ready', orderId, order: { orderId, status: 'approved', certified: true } });
 
   const native = {
+    validateAddress: vi.fn(async () => null),
     getSettlementSnapshot: vi.fn((orderId: string) => snapshot(orderId)),
     recordPayment: vi.fn(async (payload: { transactionRef?: string }) => {
       if (state.holdRefreshOn === 'record') state.refreshArmed = true;
@@ -141,6 +149,7 @@ const h = vi.hoisted(() => {
   };
 
   const bridge = {
+    orders: { previewEditSettlement: vi.fn(), applyEditSettlement: vi.fn(async () => ({ success: true })) },
     payments: {
       listUnsavedPayments: vi.fn(async () => []),
       getSettlementSnapshot: native.getSettlementSnapshot,
@@ -162,6 +171,7 @@ const h = vi.hoisted(() => {
 
   const store = {
     pendingExternalOrders: [],
+    initializeOrders: vi.fn(),
     filter: {},
     setFilter: vi.fn(),
     isLoading: false,
@@ -265,7 +275,7 @@ vi.mock('../../contexts/theme-context', () => {
 vi.mock('../../contexts/shift-context', () => {
   const value = {
     staff: { staffId: 'staff-1', terminalId: 'term-1', branchId: 'branch-1' },
-    activeShift: { id: 'shift-1' },
+    activeShift: { id: '50000000-0000-4000-8000-000000000001', staff_id: '30000000-0000-4000-8000-000000000001', role_type: 'cashier' },
     isShiftActive: true,
   };
   return { useShift: () => value };
@@ -305,7 +315,7 @@ vi.mock('../../hooks/useRooms', () => {
   return { useRooms: () => value };
 });
 vi.mock('../../hooks/useDeliveryValidation', () => {
-  const value = { requestOverride: vi.fn(), validateAddress: vi.fn() };
+  const value = { requestOverride: vi.fn(), validateAddress: h.native.validateAddress };
   return { useDeliveryValidation: () => value };
 });
 vi.mock('../../hooks/useTerminalSettings', () => {
@@ -387,9 +397,9 @@ vi.mock('../modals/EditCustomerInfoModal', () => ({ EditCustomerInfoModal: none 
 vi.mock('../modals/EditOrderItemsModal', () => ({ default: none }));
 vi.mock('../modals/CustomerSearchModal', () => ({ CustomerSearchModal: none }));
 vi.mock('../modals/CustomerInfoModal', () => ({ CustomerInfoModal: none }));
-vi.mock('../modals/AddCustomerModal', () => ({ AddCustomerModal: none }));
+vi.mock('../modals/AddCustomerModal', () => ({ AddCustomerModal: ({ isOpen, onCustomerAdded }: any) => isOpen ? <button data-testid="save-address-edit" onClick={() => onCustomerAdded(h.state.returnedCustomer)}>save address</button> : null }));
 vi.mock('../modals/EditOrderRefundSettlementModal', () => ({ EditOrderRefundSettlementModal: none }));
-vi.mock('../modals/EditSettlementDeltaModal', () => ({ EditSettlementDeltaModal: none }));
+vi.mock('../modals/EditSettlementDeltaModal', () => ({ EditSettlementDeltaModal: ({ isOpen, onConfirm }: any) => isOpen ? <button data-testid="edit-settlement-delta-cash" onClick={() => { void onConfirm('cash'); }}>collect edit difference</button> : null }));
 vi.mock('../modals/SinglePaymentCollectionModal', () => ({ SinglePaymentCollectionModal: none }));
 vi.mock('../modals/OrderDetailsModal', () => ({ default: none }));
 vi.mock('../modals/PrintPreviewModal', () => ({ PrintPreviewModal: none }));
@@ -418,12 +428,20 @@ vi.mock('../ui/FloatingActionButton', () => ({
   ),
 }));
 vi.mock('../modals/MenuModal', () => ({
-  MenuModal: ({ isOpen, onOrderComplete }: { isOpen: boolean; onOrderComplete: (data: unknown) => Promise<boolean> }) => (
+  MenuModal: (props: any) => { if (props.isOpen) h.state.menuProps = props; const { isOpen, onOrderComplete, onEditComplete, onClose, onDraftRestore, editMode } = props; return (
     isOpen
-      ? <button type="button" data-testid="menu-complete" onClick={() => { void onOrderComplete(h.orderData()); }}>complete order</button>
+      ? <><button data-testid="edit-address" onClick={props.onRepickDeliveryAddress}>edit address</button><button type="button" data-testid={editMode ? 'edit-complete' : 'menu-complete'} onClick={() => {
+        if (editMode) {
+          void onEditComplete(h.state.checkoutDraft.submission).then(() => { h.state.checkoutDraft = null; onClose(); });
+        } else void onOrderComplete({ ...h.orderData(), ...h.state.menuSubmission, ...(h.state.menuCreateId ? { clientRequestId: h.state.menuCreateId } : {}) });
+      }}>complete order</button><button data-testid="menu-close" onClick={() => { h.state.checkoutDraft = null; onClose(); }}>close editor</button>
+      <button data-testid="restore-context" onClick={() => {
+        try { onDraftRestore(h.state.restoreContext); } catch (error) { h.state.restoreError = String(error); }
+      }}>restore context</button></>
       : null
-  ),
+  ); },
 }));
+vi.mock('../../services/CheckoutDraftStore', () => ({ getCheckoutDraftStore: async () => ({ load: async () => h.state.checkoutDraft }) }));
 vi.mock('../modals/SplitPaymentModal', () => ({
   SplitPaymentModal: ({ orderId, onClose }: { orderId: string; onClose: () => void }) => (
     <div data-testid="split-payment-modal" data-order-id={orderId}>
@@ -433,6 +451,7 @@ vi.mock('../modals/SplitPaymentModal', () => ({
 }));
 
 import OrderDashboard from '../OrderDashboard';
+import FoodDashboard from '../dashboards/FoodDashboard';
 import {
   claimOrdinaryCollectionOwner,
   releaseOrdinaryOwnerBeforeSend,
@@ -538,6 +557,13 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     Object.assign(h.modules, { hasDeliveryModule: false, hasTablesModule: false });
     Object.assign(h.state, {
       orderId: '',
+      checkoutDraft: null,
+      returnedCustomer: null,
+      menuProps: null,
+      menuCreateId: undefined,
+      menuSubmission: null,
+      restoreContext: null,
+      restoreError: '',
       giftBooked: false,
       importPending: false,
       imports: 0,
@@ -557,6 +583,155 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it.each([false, true])('keeps the current delivery verdict only for an unchanged destination (changed=%s)', async changed => {
+    const point = { lat: 40.61, lng: 22.96 };
+    const address = { id: 'address-owned', street_address: 'Test Street 5', city: 'Test City', postal_code: '55133', latitude: point.lat, longitude: point.lng, floor_number: '1' };
+    const customer = { id: 'customer-owned', name: 'Test', phone: '6900000000', selected_address_id: address.id, addresses: [address] };
+    const zone = { success: true, isValid: true, validation_status: 'in_zone', coordinates: point, zone: { id: 'zone-owned', deliveryFee: 2.5, minimumOrderAmount: 7 } };
+    h.state.checkoutDraft = { phase: 'editing', checkoutRequestId: 'address-editor', cartItems: [{ id: 'cart-line' }],
+      context: { orderType: 'delivery', selectedCustomer: customer, selectedAddress: address, deliveryZoneInfo: zone } };
+    h.state.returnedCustomer = { ...customer, delivery_destination_unchanged: !changed,
+      addresses: [{ ...address, floor_number: '2', ...(changed ? { street_address: 'Different Street 9', latitude: 40.65 } : {}) }] };
+    render(<OrderDashboard />);
+    fireEvent.click(await screen.findByTestId('edit-address'));
+    fireEvent.click(await screen.findByTestId('save-address-edit'));
+    await waitFor(() => expect(screen.queryByTestId('save-address-edit')).toBeNull());
+    if (changed) {
+      expect(h.state.menuProps.deliveryZoneInfo).not.toEqual(zone);
+      expect(h.native.validateAddress).toHaveBeenCalledWith({ lat: 40.65, lng: 22.96 }, 0);
+    } else {
+      expect(h.state.menuProps.deliveryZoneInfo).toEqual(zone);
+      expect(h.state.menuProps.deliveryZoneInfo.zone.deliveryFee).toBe(2.5);
+      expect(h.state.menuProps.selectedAddress.floor_number).toBe('2');
+      expect(h.native.validateAddress).not.toHaveBeenCalled();
+    }
+    expect(h.state.menuProps.selectedCustomer).not.toHaveProperty('delivery_destination_unchanged');
+    expect(h.state.checkoutDraft.cartItems).toEqual([{ id: 'cart-line' }]);
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+  });
+
+  it('preserves the cashier collector when a restored delivery edit collects an extra amount', async () => {
+    targetOrder('cashier-delivery-edit');
+    h.state.checkoutDraft = { draftId: 'delivery-edit', checkoutRequestId: 'delivery-edit-event', phase: 'editing', cartItems: [{}],
+      context: { orderType: 'delivery', editMode: true, editOrderId: 'cashier-delivery-edit' } };
+    h.bridge.orders.previewEditSettlement.mockResolvedValue({ success: true, paidTotal: 12.5, nextTotal: 17,
+      requiredAction: 'collect', completedPayments: [{ id: 'original', method: 'cash', amount: 12.5 }], paymentStatus: 'paid',
+      canonicalExpectedVersion: 1, localExpectedVersion: 1, quotedFinancials: { totalAmount: 17, quote: 'proof' } });
+    render(<OrderDashboard />);
+    await screen.findByTestId('edit-complete');
+    const beforeCommit = vi.fn(async () => undefined);
+    let completion!: Promise<void>;
+    await act(async () => { completion = h.state.menuProps.onEditComplete({ orderId: 'cashier-delivery-edit',
+      client_event_id: 'delivery-edit-event', expected_version: 1, expected_local_version: 1, items: [], total: 17 }, { beforeCommit }); });
+    fireEvent.click(await screen.findByTestId('edit-settlement-delta-cash'));
+    await act(async () => { await completion; });
+    expect(beforeCommit).toHaveBeenCalledOnce();
+    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({
+      action: { type: 'collect', payments: [expect.objectContaining({ amount: 4.5, method: 'cash', collectedBy: 'cashier_drawer',
+        staffId: '30000000-0000-4000-8000-000000000001', staffShiftId: '50000000-0000-4000-8000-000000000001' })] },
+    }));
+  });
+
+  it('attributes an upfront delivery receipt to the collecting cashier without assigning courier custody', async () => {
+    targetOrder('cashier-paid-delivery');
+    const address = { id: 'address-owned', street_address: 'Street 5', city: 'City', postal_code: '55133', latitude: 40.61, longitude: 22.96 };
+    h.state.checkoutDraft = { draftId: 'cashier-delivery', checkoutRequestId: 'cashier-delivery-create', phase: 'editing', cartItems: [{}],
+      context: { orderType: 'delivery', editMode: false, selectedAddress: address,
+        selectedCustomer: { id: 'customer-1', name: 'Person', phone: '123', addresses: [address] } } };
+    render(<OrderDashboard />);
+    await screen.findByTestId('menu-complete');
+    await act(async () => { await h.state.menuProps.onOrderComplete({ ...h.orderData(), clientRequestId: 'cashier-delivery-create', address,
+      deliveryFee: 0, deliveryZoneInfo: { zone: { id: 'zone-1', name: 'Zone', estimatedTime: 15 } },
+      paymentData: { method: 'cash', amount: 12.5, currency: 'EUR', cashReceived: 12.5, change: 0 } }); });
+    expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      initialPayment: expect.objectContaining({ method: 'cash', collectedBy: 'cashier_drawer', staffId: '30000000-0000-4000-8000-000000000001',
+        staffShiftId: '50000000-0000-4000-8000-000000000001' }),
+    }));
+  });
+
+  it('creates a delivery order with the exact frozen address point while filtering its legacy placeholder ID', async () => {
+    targetOrder('saved-delivery-point');
+    const address = { id: 'legacy:81ecd4e9-1738-4835-acc4-b9c8f4bbc069', street_address: 'Test street 12', city: 'City', postal_code: '54321',
+      coordinates: { lat: 40.6138032, lng: 22.9601881 }, address_fingerprint: 'frozen-address-proof', floor_number: '2', name_on_ringer: 'Person' };
+    h.state.checkoutDraft = { draftId: 'delivery-draft', checkoutRequestId: 'original-delivery-create', phase: 'checkout_pending', cartItems: [{}],
+      context: { orderType: 'delivery', editMode: false, selectedAddress: address, selectedCustomer: { id: '81ecd4e9-1738-4835-acc4-b9c8f4bbc069', name: 'Person', phone: '123' } } };
+    h.state.menuSubmission = { address, deliveryZoneInfo: { zone: { id: 'zone-1', name: 'Zone', estimatedTime: 15 } }, deliveryFee: 0 };
+    h.state.menuCreateId = 'original-delivery-create';
+    render(<OrderDashboard />);
+    fireEvent.click(await screen.findByTestId('menu-complete'));
+    await waitFor(() => expect(h.store.createOrder).toHaveBeenCalledTimes(1));
+    expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: 'original-delivery-create', delivery_address: 'Test street 12',
+      delivery_address_id: null, delivery_latitude: 40.6138032, delivery_longitude: 22.9601881, delivery_address_fingerprint: 'frozen-address-proof',
+      delivery_zone_id: 'zone-1', delivery_floor: '2', delivery_fee: 0 }));
+  });
+
+  it('restores one pending checkout in the paired FoodDashboard and hidden OrderFlow hosts', async () => {
+    h.state.checkoutDraft = { draftId: 'original-draft', checkoutRequestId: 'original-frozen-cash', phase: 'checkout_pending', cartItems: [{}],
+      context: { orderType: 'pickup', editMode: false } };
+    const original = JSON.stringify(h.state.checkoutDraft);
+    render(<FoodDashboard />);
+    await screen.findAllByTestId('menu-complete');
+    await settle();
+    expect(screen.getAllByTestId('menu-complete')).toHaveLength(1);
+    expect(JSON.stringify(h.state.checkoutDraft)).toBe(original);
+    expect(h.store.createOrder).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+  });
+
+  it('restores and completes an edit, then creates the next checkout using its new persisted identity', async () => {
+    targetOrder('dashboard-next-create');
+    const settlementRequest = { orderId:'old-paid-order',client_event_id:'restored-edit-event',expected_version:3,expected_local_version:1,items:[],action:{type:'none'} };
+    h.state.checkoutDraft = { phase:'checkout_pending',checkoutRequestId:'restored-edit-event',cartItems:[{id:'line'}],
+      context:{editMode:true,editOrderId:'old-paid-order',orderType:'pickup'},
+      submission:{...settlementRequest,action:'edit_settlement',settlementAction:settlementRequest.action,settlementRequest} };
+    render(<OrderDashboard />);
+    fireEvent.click(await screen.findByTestId('edit-complete'));
+    await waitFor(() => expect(screen.queryByTestId('edit-complete')).toBeNull());
+    expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(settlementRequest);
+    h.state.menuCreateId='new-delivery-durable-id';
+    const calls=h.store.createOrder.mock.calls.length;
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-complete'));
+    await waitFor(() => expect(h.store.createOrder.mock.calls.length).toBe(calls+1));
+    expect(h.store.createOrder).toHaveBeenLastCalledWith(expect.objectContaining({clientRequestId:'new-delivery-durable-id'}));
+  });
+
+  it('discards an unsubmitted restored cart and admits a new durable checkout identity', async () => {
+    targetOrder('dashboard-after-discard');
+    h.state.checkoutDraft={phase:'editing',checkoutRequestId:'discarded-editor',cartItems:[{id:'line'}],context:{orderType:'pickup'}};
+    render(<OrderDashboard />);
+    await screen.findByTestId('menu-complete');
+    fireEvent.click(screen.getByTestId('menu-close'));
+    h.state.menuCreateId='after-discard';
+    const calls=h.store.createOrder.mock.calls.length;
+    fireEvent.click(screen.getByTestId('new-order'));
+    fireEvent.click(await screen.findByTestId('menu-complete'));
+    await waitFor(() => expect(h.store.createOrder.mock.calls.length).toBe(calls+1));
+    expect(h.store.createOrder).toHaveBeenLastCalledWith(expect.objectContaining({clientRequestId:'after-discard'}));
+  });
+
+  it('keeps a pending original through customer/type context changes and ignores forged persisted renewal proof', async () => {
+    targetOrder('dashboard-original-recovery');
+    h.state.checkoutDraft = { draftId: 'pending-draft', checkoutRequestId: 'original-frozen-cash', phase: 'checkout_pending', cartItems: [{}],
+      context: { orderType: 'pickup', editMode: false } };
+    render(<OrderDashboard />);
+    await screen.findByTestId('menu-complete');
+    h.state.restoreContext = { orderType: 'delivery', selectedCustomer: { id: 'customer-2', name: 'Customer' },
+      checkoutRequestId: 'wrong-id', checkoutPhase: 'editing', renewedFrom: 'original-frozen-cash', previousCheckoutRequestId: 'original-frozen-cash' };
+    fireEvent.click(screen.getByTestId('restore-context'));
+    expect(h.state.restoreError).toContain('CHECKOUT_REQUEST_ID_CHANGED');
+    h.state.restoreContext = { ...h.state.restoreContext, orderType: 'pickup', checkoutRequestId: 'original-frozen-cash' };
+    h.state.restoreError = '';
+    fireEvent.click(screen.getByTestId('restore-context'));
+    expect(h.state.restoreError).toBe('');
+    h.state.menuCreateId = 'original-frozen-cash';
+    const calls = h.store.createOrder.mock.calls.length;
+    fireEvent.click(screen.getByTestId('menu-complete'));
+    await waitFor(() => expect(h.store.createOrder).toHaveBeenCalledTimes(calls + 1));
+    expect(h.store.createOrder).toHaveBeenLastCalledWith(expect.objectContaining({ clientRequestId: 'original-frozen-cash' }));
   });
 
   it('keeps the booked receipt reachable when Close beats the ledger reread, then reopens the same Tender', async () => {

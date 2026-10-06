@@ -25,12 +25,16 @@ export type PlatformCancellationReason = typeof PLATFORM_CANCELLATION_REASONS[nu
 const platformReasonLabelKey = (code: PlatformCancellationReason) =>
   `modals.orderCancellation.platformReasons.${code.toLowerCase()}`;
 
+export type CancellationReturnChannel = 'cash_drawer' | 'bank';
+
 interface OrderCancellationModalProps {
   isOpen: boolean;
   orderCount: number;
   /** True when any order being cancelled came from a delivery platform. */
   platformOrder?: boolean;
-  onConfirmCancel: (reason: string) => void;
+  manualReturn?: { amountCents: number; currency: string };
+  recovery?: { reason: string; returnChannel?: CancellationReturnChannel };
+  onConfirmCancel: (reason: string, returnChannel?: CancellationReturnChannel) => void | Promise<void>;
   onClose: () => void;
 }
 
@@ -38,11 +42,16 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
   isOpen,
   orderCount,
   platformOrder = false,
+  manualReturn,
+  recovery,
   onConfirmCancel,
   onClose
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [cancelReason, setCancelReason] = useState('');
+  const [returnChannel, setReturnChannel] = useState<CancellationReturnChannel>();
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [platformCode, setPlatformCode] = useState<PlatformCancellationReason | null>(null);
   const reasonInputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -77,16 +86,30 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
     }, 75);
 
     return () => window.clearTimeout(focusTimer);
+  }, [isOpen, returnChannel]);
+
+  useEffect(() => {
+    if (!isOpen) resetForm();
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && recovery) {
+      setCancelReason(recovery.reason);
+      setReturnChannel(recovery.returnChannel);
+    }
+  }, [isOpen, recovery?.reason, recovery?.returnChannel]);
 
   const resetForm = () => {
     setCancelReason('');
     setPlatformCode(null);
+    setReturnChannel(undefined);
   };
 
-  const canConfirm = platformOrder ? platformCode !== null : Boolean(cancelReason.trim());
+  const needsChannel = Boolean(manualReturn) && !returnChannel;
+  const canConfirm = !submitting && !needsChannel && (platformOrder ? platformCode !== null : Boolean(cancelReason.trim()));
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
+    if (submittingRef.current || needsChannel) return;
     if (platformOrder && !platformCode) {
       toast.error(t('modals.orderCancellation.platformReasonRequired'));
       return;
@@ -101,11 +124,18 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
     const reason = platformCode
       ? (note ? `${platformCode} — ${note}` : platformCode)
       : note;
-    onConfirmCancel(reason);
-    resetForm();
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onConfirmCancel(reason, returnChannel);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const handleClose = () => {
+    if (submittingRef.current) return;
     resetForm();
     onClose();
   };
@@ -117,8 +147,8 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
       title={t('modals.orderCancellation.title')}
       size="md"
       className="!max-w-lg"
-      closeOnBackdrop={true}
-      closeOnEscape={true}
+      closeOnBackdrop={!submitting}
+      closeOnEscape={!submitting}
       initialFocusRef={reasonInputRef}
       footer={(
         /* Fixed glass action bar: neutral safe close + red destructive confirm (disabled until a reason is given). */
@@ -126,6 +156,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           <button
             type="button"
             onClick={handleClose}
+            disabled={submitting}
             className="liquid-glass-modal-button liquid-glass-modal-secondary flex-1 rounded-xl"
           >
             {t('modals.orderCancellation.keepOrder')}
@@ -149,6 +180,25 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         {t('modals.orderCancellation.message', { count: orderCount })}
       </p>
 
+      {manualReturn && !recovery && (
+        <fieldset className="mb-6" disabled={submitting}>
+          <legend className="mb-2 font-medium liquid-glass-modal-text">{t('modals.orderCancellation.returnChannel')}</legend>
+          <p className="mb-3 text-sm liquid-glass-modal-text-muted">
+            {t('modals.orderCancellation.returnRecorded', { amount: new Intl.NumberFormat(i18n?.resolvedLanguage || i18n?.language, { style: 'currency', currency: manualReturn.currency }).format(manualReturn.amountCents / 100) })}
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            {(['cash_drawer', 'bank'] as const).map((channel) => (
+              <button key={channel} type="button" aria-pressed={returnChannel === channel}
+                onClick={() => setReturnChannel(channel)}
+                className={`rounded-xl border px-4 py-3 font-medium ${returnChannel === channel ? 'border-amber-400 bg-amber-400 text-black' : 'border-white/20 bg-white/[0.06] liquid-glass-modal-text'}`}>
+                {t(`modals.orderCancellation.${channel === 'cash_drawer' ? 'cashDrawer' : 'bank'}`)}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+      )}
+
+      {!needsChannel && <>
       {platformOrder && (
         <div className="mb-6">
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
@@ -189,6 +239,8 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         <textarea
           ref={reasonInputRef}
           value={cancelReason}
+          readOnly={Boolean(recovery)}
+          disabled={submitting}
           onChange={(e) => setCancelReason(e.target.value)}
           placeholder={t('modals.orderCancellation.reasonPlaceholder')}
           className="liquid-glass-modal-input w-full resize-none"
@@ -199,6 +251,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
           {t('modals.orderCancellation.characterCount', { current: cancelReason.length, max: 500 })}
         </div>
       </div>
+      </>}
     </LiquidGlassModal>
   );
 };

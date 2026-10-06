@@ -883,6 +883,7 @@ export interface CreateOrderInitialPayment {
 }
 
 export interface OrderFinancialsUpdateParams {
+  quote?: Record<string, unknown>;
   orderId: string;
   totalAmount: number;
   subtotal?: number;
@@ -900,6 +901,11 @@ export interface EditSettlementOrderUpdates {
   customerPhone?: string;
   customerEmail?: string | null;
   deliveryAddress?: string | null;
+  deliveryAddressId?: string | null;
+  deliveryLatitude?: number | null;
+  deliveryLongitude?: number | null;
+  deliveryAddressFingerprint?: string | null;
+  deliveryZoneId?: string | null;
   deliveryCity?: string | null;
   deliveryPostalCode?: string | null;
   deliveryFloor?: string | null;
@@ -914,6 +920,9 @@ export interface EditSettlementOrderUpdates {
 
 export interface OrderCustomerInfoUpdateParams {
   orderId: string;
+  expectedVersion?: number;
+  expectedLocalVersion?: number;
+  clientEventId?: string;
   customerId?: string | null;
   customerName: string;
   customerPhone: string;
@@ -953,6 +962,8 @@ export interface PickupToDeliveryConversionParams {
 // -- Sync --------------------------------------------------------------------
 
 export interface SyncStatus {
+  /** Native queue ownership signal; it is not proof that an order is synced. */
+  syncInProgress?: boolean;
   isOnline: boolean;
   lastSyncAt: string | null;
   pendingChanges: number;
@@ -1281,6 +1292,7 @@ export interface CancelOrderWithApprovalParams {
   clientEventId?: string;
   /** Transient approval input; never persist or include in a sync queue. */
   managerPin?: string;
+  manualCancellation?: { generation: string; returnChannel: "cash_drawer" | "bank" };
 }
 
 export interface ResolvePaymentBlockerParams {
@@ -1320,6 +1332,10 @@ export interface EditSettlementCompletedPayment {
 }
 
 export interface OrderEditSettlementPreview {
+  quotedFinancials?: Partial<OrderFinancialsUpdateParams>;
+  metadataOnly?: boolean;
+  canonicalExpectedVersion?: number;
+  localExpectedVersion?: number;
   success: boolean;
   orderId: string;
   branchId?: string;
@@ -1773,9 +1789,13 @@ export interface PlatformBridge {
       status: string,
       extra?: { cancellationReason?: string; cancelledAt?: string } | string,
     ): Promise<IpcResult>;
-    updateItems(orderId: string, items: OrderItem[], context?: { expectedVersion?: number; tableSessionId?: string; clientEventId?: string }): Promise<IpcResult>;
+    updateItems(orderId: string, items: OrderItem[], context?: { orderNotes?: string; expectedVersion?: number; expectedLocalVersion?: number; tableSessionId?: string; clientEventId?: string; orderUpdates?: Partial<EditSettlementOrderUpdates>; financials?: Partial<OrderFinancialsUpdateParams> }): Promise<IpcResult>;
     previewEditSettlement(payload: {
       orderId: string;
+      client_event_id?: string;
+      expected_version?: number;
+      expected_local_version?: number;
+      expectedLocalVersion?: number;
       items: OrderItem[];
       orderNotes?: string;
       financials?: Partial<OrderFinancialsUpdateParams>;
@@ -1783,6 +1803,9 @@ export interface PlatformBridge {
     }): Promise<OrderEditSettlementPreview>;
     applyEditSettlement(payload: {
       orderId: string;
+      client_event_id?: string;
+      expected_version?: number;
+      expected_local_version?: number;
       items: OrderItem[];
       orderNotes?: string;
       financials?: Partial<OrderFinancialsUpdateParams>;
@@ -3515,12 +3538,16 @@ export class TauriBridge implements PlatformBridge {
           })
         : this.inv("order:update-status", id, s);
     },
-    updateItems: (id: string, items: OrderItem[], context?: { expectedVersion?: number; tableSessionId?: string; clientEventId?: string }) =>
+    updateItems: (id: string, items: OrderItem[], context?: { orderNotes?: string; expectedVersion?: number; expectedLocalVersion?: number; tableSessionId?: string; clientEventId?: string; orderUpdates?: Partial<EditSettlementOrderUpdates>; financials?: Partial<OrderFinancialsUpdateParams> }) =>
       context
         ? this.inv("order:update-items", { orderId: id, items, ...context })
         : this.inv("order:update-items", id, items),
     previewEditSettlement: (payload: {
       orderId: string;
+      client_event_id?: string;
+      expected_version?: number;
+      expected_local_version?: number;
+      expectedLocalVersion?: number;
       items: OrderItem[];
       orderNotes?: string;
       financials?: Partial<OrderFinancialsUpdateParams>;
@@ -3528,6 +3555,9 @@ export class TauriBridge implements PlatformBridge {
     }) => this.inv("orders:preview-edit-settlement", payload),
     applyEditSettlement: (payload: {
       orderId: string;
+      client_event_id?: string;
+      expected_version?: number;
+      expected_local_version?: number;
       items: OrderItem[];
       orderNotes?: string;
       financials?: Partial<OrderFinancialsUpdateParams>;

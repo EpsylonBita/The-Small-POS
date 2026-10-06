@@ -10,7 +10,7 @@
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{collections::BTreeMap, future::Future};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -1069,36 +1069,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 ));
             }
 
-            // Reconcile-at-close: re-derive drawer totals from source-of-truth tables.
-            // This catches any missed incremental updates during the shift.
-            // W4b-ii: cents-with-real-fallback shim wraps each SUM (4e removes).
-            // Z-17/08 forensics, defect 2 — a cancelled order that still has a
-            // 'completed' payment row (live case: order «δεν άνοιξε», 11,40,
-            // cancelled with its cash payment never voided) must not count as
-            // money in the drawer. REFUNDED orders deliberately stay in: their
-            // money WAS collected, and the refund line above subtracts it.
-            // Residual: an order paid, cancelled, and NOT refunded now
-            // undercounts expected by its amount — the correct flow for kept
-            // money is recording the refund/void, not the cancellation alone.
-            let reconciled_cash_sales: f64 = conn
-                .query_row(
-                    &format!(
-                        "SELECT COALESCE(SUM(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER))), 0)
-                 FROM orders o
-                 LEFT JOIN order_payments op ON op.order_id = o.id
-                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                   AND op.method = 'cash'
-                   AND (op.status IN ('completed', 'refunded') AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
-                   AND COALESCE(o.is_ghost, 0) = 0
-                   AND COALESCE(o.is_test, 0) = 0
-                   AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
-                   AND {order_financial_expr} >= ?2
-                   AND {order_financial_expr} <= ?3"
-                    ),
-                    params![shift_id, shift_check_in_time, now],
-                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
-                )
-                .unwrap_or(0.0);
+            // Reconcile custody from the same immutable ledger read shown in preview.
+            let cashier_cash = cashier_cash_totals(&conn, &shift_id, &shift_check_in_time, Some(&now))?;
+            let reconciled_cash_sales = Cents::new(cashier_cash.collections_cents).to_f64_dp2();
+            let reconciled_refunds = Cents::new(cashier_cash.refunds_cents).to_f64_dp2();
             let reconciled_card_sales: f64 = conn
                 .query_row(
                     &format!(
@@ -1113,62 +1087,6 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                    AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
                    AND {order_financial_expr} >= ?2
                    AND {order_financial_expr} <= ?3"
-                    ),
-                    params![shift_id, shift_check_in_time, now],
-                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
-                )
-                .unwrap_or(0.0);
-            // Z-17/08 forensics, defect 1 — this query was wrong on BOTH sides:
-            // card refunds (money that never left the drawer) lowered cash
-            // expected, while a cash refund PAID FROM THIS DRAWER for another
-            // shift's order (the live 0,09: cashier drawer refunding a
-            // driver-attributed order) was missed entirely, because the old
-            // WHERE keyed only on the order's shift attribution.
-            // - A refund that names no tender is the payment's own tender
-            //   (shared rule R5, round 3): never cash for an `other` or gift
-            //   row; pre-v37 rows on a cash row keep the cash reading.
-            // - Only the drawer's refunds lower it (shared rule R2): a
-            //   `driver_shift` refund, or one naming no handler on an order a
-            //   courier earning carries, is the courier's cash, once, never
-            //   both (`refunds::refund_paid_by_drawer_sql`).
-            // - Handler-tagged rows anchor on pa.created_at: the drawer pays
-            //   when the refund HAPPENS, not when the order was earned.
-            // - Known limit: two concurrently open cashier drawers would both
-            //   count a handler-tagged refund (payment_adjustments has no
-            //   drawer column yet); single-drawer shops are exact.
-            // - Cancelled orders stay SYMMETRIC with the sales exclusion
-            //   below: when this shift's cancelled sale is excluded from cash
-            //   sales, its refund must be excluded too, or a paid→cancelled→
-            //   refunded order (collect 11,40, hand back 11,40 — physically
-            //   net zero) would report a false 11,40 shortage. A cashier-
-            //   drawer refund for ANOTHER shift's cancelled order still
-            //   counts — that drawer never held the collection, the payout
-            //   is a real cash-out.
-            let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
-            let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
-            let reconciled_refunds: f64 = conn
-                .query_row(
-                    &format!(
-                        "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
-                 FROM orders o
-                 JOIN payment_adjustments pa ON pa.order_id = o.id
-                 LEFT JOIN order_payments op ON op.id = pa.payment_id
-                 WHERE pa.adjustment_type = 'refund'
-                   AND {refund_is_cash}
-                   AND COALESCE(o.is_ghost, 0) = 0
-                   AND (
-                        (COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                         AND {refund_paid_by_drawer}
-                         AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
-                         AND {order_financial_expr} >= ?2
-                         AND {order_financial_expr} <= ?3)
-                     OR (pa.cash_handler = 'cashier_drawer'
-                         AND (COALESCE(op.staff_shift_id, o.staff_shift_id) IS NULL
-                              OR COALESCE(op.staff_shift_id, o.staff_shift_id) <> ?1
-                              OR LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled'))
-                         AND pa.created_at >= ?2
-                         AND pa.created_at <= ?3)
-                   )"
                     ),
                     params![shift_id, shift_check_in_time, now],
                     |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
@@ -1315,7 +1233,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         } else {
             // Driver / server cash return. Driver tips are kept by the driver,
             // so they are removed from the cash handed back to the cashier.
-            let cash_collected = if role_type == "driver" {
+            let cash_collected = if role_type == "driver" || role_type == "server" {
                 compute_shift_cash_collected(&conn, &shift_id, &role_type)?
             } else {
                 let (_, cash_collected, _, _) = compute_shift_payment_totals_in_window(
@@ -2374,6 +2292,86 @@ pub fn get_shift_sync_state(db: &DbState, shift_id: &str) -> Result<Value, Strin
 // Shift summary
 // ---------------------------------------------------------------------------
 
+struct CashierCashTotals {
+    collections_cents: i64,
+    refunds_cents: i64,
+    currency: Option<String>,
+}
+
+impl CashierCashTotals {
+    fn as_json(&self) -> Value {
+        serde_json::json!({
+            "cashCollections": Cents::new(self.collections_cents).to_f64_dp2(),
+            "cashCollectionsCents": self.collections_cents,
+            "cashRefunds": Cents::new(self.refunds_cents).to_f64_dp2(),
+            "cashRefundsCents": self.refunds_cents,
+            "currency": self.currency,
+        })
+    }
+}
+
+/// Drawer custody is independent of recognized sales. Cancellation cannot erase
+/// received cash, and a card receipt returned as cash is a real drawer payout.
+/// Reuse this exact read for preview, close, and authorized close corrections.
+fn cashier_cash_totals(
+    conn: &Connection,
+    shift_id: &str,
+    window_start: &str,
+    window_end: Option<&str>,
+) -> Result<CashierCashTotals, String> {
+    let currency = recorded_operating_currency(conn, "staff_shifts", shift_id)?;
+    let unit = currency.as_deref().unwrap_or_default();
+    let (collections_cents, unknown_collection): (i64, bool) = conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER))),0),
+                COALESCE(MAX(op.currency IS NULL OR op.currency<>?4),0)
+         FROM order_payments op JOIN orders o ON o.id=op.order_id
+         WHERE COALESCE(op.staff_shift_id,o.staff_shift_id)=?1
+           AND (op.staff_shift_id IS NOT NULL OR NOT EXISTS(SELECT 1 FROM driver_earnings de WHERE de.order_id=o.id))
+           AND op.method='cash' AND op.status IN ('completed','refunded')
+           AND NOT (COALESCE(op.payment_origin,'')='sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,''))='')
+           AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
+           AND op.created_at>=?2 AND (?3 IS NULL OR op.created_at<=?3)",
+        params![shift_id,window_start,window_end,unit], |row|Ok((row.get(0)?,row.get(1)?))
+    ).map_err(|error|format!("read cashier cash collections: {error}"))?;
+    let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
+    let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
+    let (refunds_cents, unknown_refund): (i64, bool) = conn.query_row(
+        &format!("SELECT COALESCE(SUM(COALESCE(pa.amount_cents,CAST(ROUND(pa.amount*100) AS INTEGER))),0),
+                         COALESCE(MAX(op.currency IS NULL OR op.currency<>?4),0)
+         FROM payment_adjustments pa JOIN orders o ON o.id=pa.order_id
+         LEFT JOIN order_payments op ON op.id=pa.payment_id AND op.order_id=o.id
+         WHERE pa.adjustment_type='refund' AND {refund_is_cash} AND {refund_paid_by_drawer}
+           AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
+           AND ((LOWER(TRIM(COALESCE(pa.cash_handler,'')))='cashier_drawer' AND pa.staff_shift_id=?1)
+                OR (TRIM(COALESCE(pa.cash_handler,''))='' AND COALESCE(pa.staff_shift_id,op.staff_shift_id,o.staff_shift_id)=?1))
+           AND pa.created_at>=?2 AND (?3 IS NULL OR pa.created_at<=?3)"),
+        params![shift_id,window_start,window_end,unit], |row|Ok((row.get(0)?,row.get(1)?))
+    ).map_err(|error|format!("read cashier cash refunds: {error}"))?;
+    // A legacy sale header is not a cash movement. Keep the all-sales aggregate
+    // unknown while allowing the independently recorded drawer unit to display.
+    let other_unknown: bool = conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM cash_drawer_sessions WHERE staff_shift_id=?1)
+          OR EXISTS(SELECT 1 FROM (
+            SELECT currency FROM cash_drawer_sessions WHERE staff_shift_id=?1
+            UNION ALL SELECT currency FROM shift_expenses WHERE staff_shift_id=?1
+            UNION ALL SELECT currency FROM staff_payments WHERE cashier_shift_id=?1
+            UNION ALL SELECT currency FROM staff_shifts WHERE transferred_to_cashier_shift_id=?1
+            UNION ALL SELECT currency FROM satellite_cash_handovers WHERE cashier_shift_id=?1 AND state='applied'
+            UNION ALL SELECT currency FROM staff_order_cash_returns WHERE receiving_cashier_shift_id=?1
+          ) WHERE currency IS NULL OR currency<>?2)",
+        params![shift_id,unit], |row|row.get(0)
+    ).map_err(|error|format!("read cashier drawer currency: {error}"))?;
+    Ok(CashierCashTotals {
+        collections_cents,
+        refunds_cents,
+        currency: if unknown_collection || unknown_refund || other_unknown {
+            None
+        } else {
+            currency
+        },
+    })
+}
+
 /// Get a summary of a shift: totals, payment breakdown, expenses, variance.
 pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -2756,7 +2754,10 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     } else if role_type == "driver" {
         // Backfill: create missing driver_earnings from orders assigned to this driver
         let driver_staff_id = shift["staff_id"].as_str().unwrap_or("");
-        if !driver_staff_id.is_empty() {
+        if !driver_staff_id.is_empty()
+            && shift["status"].as_str() == Some("active")
+            && shift["check_out_time"].is_null()
+        {
             // W6: `orders.payment_method` was dropped in v55. Drop the
             // column from the SELECT; the Rust re-derives the method
             // from `order_payments` sums below anyway (cash/card
@@ -2927,6 +2928,20 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             .map_err(|e| format!("query driver earnings: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
+        for delivery in &mut driver_deliveries {
+            let returned = crate::staff_cash_returns::sum(
+                &conn,
+                delivery["order_id"].as_str(),
+                Some(shift_id),
+            )?;
+            let original =
+                Cents::round_half_even(delivery["cash_collected"].as_f64().unwrap_or(0.0)).as_i64();
+            delivery["original_cash_collected"] = delivery["cash_collected"].clone();
+            delivery["cash_returned_to_cashier"] = json!(Cents::new(returned).to_f64_dp2());
+            delivery["cash_collected"] =
+                json!(Cents::new((original - returned).max(0)).to_f64_dp2());
+            delivery["cash_to_return"] = delivery["cash_collected"].clone();
+        }
     } else if role_type == "server" {
         waiter_tables = build_waiter_tables(&conn, shift_id)?;
     }
@@ -2977,18 +2992,6 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         let opening = shift["opening_cash_amount"].as_f64().unwrap_or(0.0);
         let cash_collected = driver_deliveries
             .iter()
-            .filter(|delivery| {
-                !matches!(
-                    delivery
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "cancelled" | "canceled" | "refunded"
-                )
-            })
             .map(|delivery| {
                 delivery
                     .get("cash_collected")
@@ -3035,6 +3038,9 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
 
     if role_type == "cashier" || role_type == "manager" {
         result["cashierOrders"] = serde_json::json!(cashier_orders);
+        let cash = cashier_cash_totals(&conn, shift_id, &check_in_time, shift_end_param)?;
+        result["cashRefunds"] = serde_json::json!(Cents::new(cash.refunds_cents).to_f64_dp2());
+        result["cashierCash"] = cash.as_json();
     }
 
     Ok(result)
@@ -3542,11 +3548,9 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         return Err(format!("Closed shift {shift_id} is missing check_out_time"));
     }
 
-    let order_financial_expr = business_day::order_financial_timestamp_expr("o");
-
     let (
         reconciled_order_count,
-        reconciled_cash_sales,
+        reported_cash_sales,
         reconciled_card_sales,
         reconciled_total_sales,
     ) = compute_shift_close_totals(
@@ -3557,37 +3561,9 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
         check_out_time.as_str(),
     )?;
 
-    // W4b-ii: cents-with-real-fallback shim (removed in 4e).
-    let refund_is_cash = crate::refunds::refund_counts_as_cash_sql("pa", "op");
-    let refund_paid_by_drawer = crate::refunds::refund_paid_by_drawer_sql("pa", "o");
-    let reconciled_refunds: f64 = conn
-                .query_row(
-                    &format!(
-                        "SELECT COALESCE(SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER))), 0)
-                 FROM orders o
-                 JOIN payment_adjustments pa ON pa.order_id = o.id
-                 LEFT JOIN order_payments op ON op.id = pa.payment_id
-                 WHERE pa.adjustment_type = 'refund'
-                   AND {refund_is_cash}
-                   AND COALESCE(o.is_ghost, 0) = 0
-                   AND (
-                        (COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                         AND {refund_paid_by_drawer}
-                         AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
-                         AND {order_financial_expr} >= ?2
-                         AND {order_financial_expr} <= ?3)
-                     OR (pa.cash_handler = 'cashier_drawer'
-                         AND (COALESCE(op.staff_shift_id, o.staff_shift_id) IS NULL
-                              OR COALESCE(op.staff_shift_id, o.staff_shift_id) <> ?1
-                              OR LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled'))
-                         AND pa.created_at >= ?2
-                         AND pa.created_at <= ?3)
-                   )"
-                    ),
-                    params![shift_id, check_in_time, check_out_time],
-                    |row| row.get::<_, i64>(0).map(|c| Cents::new(c).to_f64_dp2()),
-                )
-                .unwrap_or(0.0);
+    let cashier_cash = cashier_cash_totals(conn, shift_id, &check_in_time, Some(&check_out_time))?;
+    let reconciled_cash_sales = Cents::new(cashier_cash.collections_cents).to_f64_dp2();
+    let reconciled_refunds = Cents::new(cashier_cash.refunds_cents).to_f64_dp2();
     let reconciled_expenses: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
@@ -3719,8 +3695,8 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
             reconciled_order_count,
             reconciled_total_sales,
             reconciled_total_sales_cents,
-            reconciled_cash_sales,
-            reconciled_cash_sales_cents,
+            reported_cash_sales,
+            Cents::round_half_even(reported_cash_sales).as_i64(),
             reconciled_card_sales,
             reconciled_card_sales_cents,
             written_at,
@@ -4607,23 +4583,34 @@ fn compute_shift_payment_totals(
 }
 
 fn compute_driver_shift_earning_totals(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     shift_id: &str,
 ) -> Result<(i64, f64, f64, f64), String> {
-    conn.query_row(
-        "SELECT
-            COUNT(*),
-            COALESCE(SUM(cash_collected), 0),
-            COALESCE(SUM(card_amount), 0),
-            COALESCE(SUM(cash_collected + card_amount), 0)
-         FROM driver_earnings
-         WHERE staff_shift_id = ?1
-           AND COALESCE(settled, 0) = 0
-           AND COALESCE(is_transferred, 0) = 0",
-        params![shift_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    )
-    .map_err(|e| format!("query driver earning totals: {e}"))
+    let mut stmt=conn.prepare("SELECT order_id,COALESCE(cash_collected_cents,CAST(ROUND(cash_collected*100) AS INTEGER),0),COALESCE(card_amount_cents,CAST(ROUND(card_amount*100) AS INTEGER),0) FROM driver_earnings WHERE staff_shift_id=?1 AND COALESCE(settled,0)=0 AND COALESCE(is_transferred,0)=0").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map([shift_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let (mut cash, mut card) = (0, 0);
+    for (order, original_cash, original_card) in &rows {
+        cash += (original_cash
+            - crate::staff_cash_returns::sum(conn, Some(order), Some(shift_id))?)
+        .max(0);
+        card += original_card;
+    }
+    Ok((
+        rows.len() as i64,
+        Cents::new(cash).to_f64_dp2(),
+        Cents::new(card).to_f64_dp2(),
+        Cents::new(cash + card).to_f64_dp2(),
+    ))
 }
 
 /// The completed cash and card money of one order, for a courier earning.
@@ -4653,6 +4640,10 @@ fn compute_shift_cash_collected(
     shift_id: &str,
     role_type: &str,
 ) -> Result<f64, String> {
+    if role_type == "server" {
+        return crate::staff_cash_returns::waiter_cash(conn, shift_id, None)
+            .map(|cents| Cents::new(cents).to_f64_dp2());
+    }
     if role_type == "driver" {
         let (earning_count, driver_cash_collected, _, _) =
             compute_driver_shift_earning_totals(conn, shift_id)?;
@@ -5417,7 +5408,7 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
                         END
                         FROM order_payments op2
                         WHERE op2.order_id = o.id
-                          AND op2.status = 'completed'
+                          AND (op2.status = 'completed' OR (o.status IN ('cancelled','canceled') AND op2.status='refunded'))
                           AND TRIM(COALESCE(op2.method, '')) != ''
                     ), 'pending'),
                     o.status,
@@ -5439,7 +5430,6 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
              WHERE o.staff_shift_id = ?1
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.order_type, 'dine-in') != 'delivery'
-               AND o.status NOT IN ('cancelled', 'canceled')
              ORDER BY table_number ASC, o.created_at ASC",
         )
         .map_err(|e| format!("prepare waiter tables: {e}"))?;
@@ -5479,10 +5469,16 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
         total_amount,
         payment_method,
         status,
-        cash_amount,
+        _cash_amount,
         card_amount,
     ) in orders
     {
+        let cash_amount = Cents::new(crate::staff_cash_returns::waiter_cash(
+            conn,
+            shift_id,
+            Some(&order_id),
+        )?)
+        .to_f64_dp2();
         tables
             .entry(table_number.clone())
             .or_default()
@@ -5503,6 +5499,7 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
         let order_count = orders.len() as i64;
         let total_amount: f64 = orders
             .iter()
+            .filter(|order| !matches!(order["status"].as_str(), Some("cancelled" | "canceled")))
             .map(|order| order["total_amount"].as_f64().unwrap_or(0.0))
             .sum();
         let cash_amount: f64 = orders
@@ -5511,6 +5508,7 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
             .sum();
         let card_amount: f64 = orders
             .iter()
+            .filter(|order| !matches!(order["status"].as_str(), Some("cancelled" | "canceled")))
             .map(|order| order["card_amount"].as_f64().unwrap_or(0.0))
             .sum();
         // W6: align the table-level method label with the new canonical
@@ -5620,6 +5618,24 @@ mod tests {
 
     const TEST_MANAGER_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
+    #[test]
+    fn cancellation_waiter_history_retains_original_and_excludes_refunded_sale() {
+        let conn = crate::manual_order_cancellation::tests::setup();
+        crate::manual_order_cancellation::tests::staff_custody_fixture(&conn, "server");
+        conn.execute(
+            "UPDATE orders SET status='cancelled',updated_by='other-user'",
+            [],
+        )
+        .unwrap();
+        let rows = build_waiter_tables(&conn, "worker-shift").unwrap();
+        assert_eq!(rows[0]["orders"][0]["status"], "cancelled");
+        assert_eq!(rows[0]["total_amount"], 0.0);
+        assert_eq!(
+            rows[0]["cash_amount"], 4.5,
+            "cancelled label alone cannot erase held money"
+        );
+        assert_eq!(rows[0]["card_amount"], 0.0);
+    }
     #[test]
     fn test_shift_close_repair_bridge_reenters_tokio_runtime_without_panicking() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -6284,11 +6300,10 @@ mod tests {
         assert_eq!(result["variance"], 0.0);
     }
 
-    /// Z-17/08 forensics defect 2: a cancelled order («δεν ανοιξε», 11,40)
-    /// whose completed cash payment was never voided must not count as money
-    /// in the drawer.
+    /// A cancelled sale with no recorded return still represents held cash.
+    /// Status is not evidence that the cashier physically returned the money.
     #[test]
-    fn test_cancelled_order_payment_does_not_count_as_drawer_cash() {
+    fn cancellation_cashier_retained_receipt_stays_in_drawer_until_return() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         seed_operating_currency_for_test(&db, "b-cx", "EUR");
@@ -6346,11 +6361,11 @@ mod tests {
             }
         }
 
-        // Expected = 100 opening + 50 live cash. The cancelled 11,40 stays out.
-        let close = serde_json::json!({ "shiftId": shift_id, "closingCash": 150.0 });
+        // Sale metrics exclude cancellation, while actual drawer cash remains.
+        let close = serde_json::json!({ "shiftId": shift_id, "closingCash": 161.4 });
         let result = close_shift(&db, &close).unwrap();
         assert_eq!(result["success"], true);
-        assert_eq!(result["expected"], 150.0);
+        assert_eq!(result["expected"], 161.4);
         assert_eq!(result["variance"], 0.0);
     }
 
@@ -6433,6 +6448,8 @@ mod tests {
             )
             .unwrap();
         }
+
+        db.conn.lock().unwrap().execute("UPDATE payment_adjustments SET staff_shift_id=?1 WHERE id IN ('adj-rf-card', 'adj-rf-drv')", [&shift_id]).unwrap();
 
         // Pin every fixture row inside the [check_in, close] window: the
         // fixtures were stamped by SQLite's clock while the window bounds come
@@ -6642,6 +6659,374 @@ mod tests {
         );
     }
 
+    fn cashier_cancellation_ledger_fixture() -> (DbState, String, String) {
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "cash-ledger-branch", "EUR");
+        let shift = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId":"cash-ledger-staff", "branchId":"cash-ledger-branch",
+                "terminalId":"cash-ledger-terminal", "roleType":"cashier", "openingCash":0
+            }),
+        )
+        .unwrap()["shiftId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let at = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT check_in_time FROM staff_shifts WHERE id=?1",
+                [&shift],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        (db, shift, at)
+    }
+
+    fn cashier_cancellation_receipt(
+        db: &DbState,
+        id: &str,
+        shift: Option<&str>,
+        at: &str,
+        method: &str,
+        amount: f64,
+        order_type: &str,
+        refunded: bool,
+        refund_shift: Option<&str>,
+    ) {
+        cashier_cancellation_receipt_with_currency(
+            db,
+            id,
+            shift,
+            at,
+            method,
+            amount,
+            order_type,
+            refunded,
+            refund_shift,
+            Some("EUR"),
+            Some("EUR"),
+        );
+    }
+
+    fn cashier_cancellation_receipt_with_currency(
+        db: &DbState,
+        id: &str,
+        shift: Option<&str>,
+        at: &str,
+        method: &str,
+        amount: f64,
+        order_type: &str,
+        refunded: bool,
+        refund_shift: Option<&str>,
+        order_currency: Option<&str>,
+        payment_currency: Option<&str>,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO orders(id,branch_id,items,order_type,total_amount,total_amount_cents,status,payment_status,staff_shift_id,currency,sync_status,created_at,updated_at)
+            VALUES(?1,'cash-ledger-branch','[]',?2,?3,?4,?5,?6,?7,?9,'synced',?8,?8)",
+            params![id,order_type,amount,Cents::round_half_even(amount).as_i64(),if refunded {"cancelled"} else {"completed"},if refunded {"refunded"} else {"paid"},shift,at,order_currency]).unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,staff_shift_id,currency,payment_origin,sync_status,sync_state,created_at,updated_at)
+            VALUES(?1,?1,?2,?3,?4,?5,?6,?8,'manual','synced','applied',?7,?7)",
+            params![id,method,amount,Cents::round_half_even(amount).as_i64(),if refunded {"refunded"} else {"completed"},shift,at,payment_currency]).unwrap();
+        if refunded {
+            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,staff_shift_id,sync_state,created_at,updated_at,refund_method,cash_handler,adjustment_context)
+                VALUES(?1,?1,?1,'refund',?2,?3,'customer return',?4,'applied',?5,?5,'cash','cashier_drawer','manual')",
+                params![id,amount,Cents::round_half_even(amount).as_i64(),refund_shift,at]).unwrap();
+        }
+    }
+
+    #[test]
+    fn cancellation_cashier_cash_return_preview_matches_close() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        cashier_cancellation_receipt(
+            &db,
+            "cash-return",
+            Some(&shift),
+            &at,
+            "cash",
+            21.0,
+            "pickup",
+            true,
+            Some(&shift),
+        );
+        let summary = get_shift_summary(&db, &shift).unwrap();
+        assert_eq!(summary["cashierCash"]["cashCollectionsCents"], 2100);
+        assert_eq!(summary["cashierCash"]["cashRefundsCents"], 2100);
+        assert_eq!(summary["breakdown"]["overall"]["totalAmount"], 0.0);
+        let closed =
+            close_shift(&db, &serde_json::json!({"shiftId":shift,"closingCash":0})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["expected"], 0.0);
+    }
+
+    #[test]
+    fn cancellation_cashier_card_to_cash_return_preserves_real_cash_outflow() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        cashier_cancellation_receipt(
+            &db,
+            "cash-part",
+            Some(&shift),
+            &at,
+            "cash",
+            15.0,
+            "pickup",
+            true,
+            Some(&shift),
+        );
+        cashier_cancellation_receipt(
+            &db,
+            "card-part",
+            Some(&shift),
+            &at,
+            "card",
+            6.0,
+            "pickup",
+            true,
+            Some(&shift),
+        );
+        let summary = get_shift_summary(&db, &shift).unwrap();
+        assert_eq!(summary["cashierCash"]["cashCollections"], 15.0);
+        assert_eq!(summary["cashierCash"]["cashRefunds"], 21.0);
+        let closed =
+            close_shift(&db, &serde_json::json!({"shiftId":shift,"closingCash":0})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["expected"], -6.0);
+        assert_eq!(closed["variance"], 6.0);
+    }
+
+    #[test]
+    fn cancellation_cashier_delivery_collection_is_drawer_money() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        cashier_cancellation_receipt(
+            &db,
+            "delivery-cash",
+            Some(&shift),
+            &at,
+            "cash",
+            11.0,
+            "delivery",
+            false,
+            None,
+        );
+        let summary = get_shift_summary(&db, &shift).unwrap();
+        assert_eq!(summary["cashierCash"]["cashCollectionsCents"], 1100);
+        assert_eq!(summary["breakdown"]["instore"]["cashTotal"], 0.0);
+        let closed =
+            close_shift(&db, &serde_json::json!({"shiftId":shift,"closingCash":11})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["expected"], 11.0);
+    }
+
+    #[test]
+    fn cancellation_cashier_refunds_use_recorded_paying_shift_not_collection_owner() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        let other=open_shift(&db,&serde_json::json!({"staffId":"other-cashier","branchId":"cash-ledger-branch","terminalId":"other-terminal","roleType":"cashier","openingCash":0})).unwrap()["shiftId"].as_str().unwrap().to_string();
+        // Use this exact event inside both windows.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE staff_shifts SET check_in_time=?1 WHERE id=?2",
+                params![at, other],
+            )
+            .unwrap();
+        cashier_cancellation_receipt(
+            &db,
+            "cross-shift-card",
+            Some(&other),
+            &at,
+            "card",
+            6.0,
+            "pickup",
+            true,
+            Some(&shift),
+        );
+        cashier_cancellation_receipt(
+            &db,
+            "unknown-collection",
+            None,
+            &at,
+            "cash",
+            11.0,
+            "delivery",
+            true,
+            Some(&shift),
+        );
+        let ours = get_shift_summary(&db, &shift).unwrap();
+        let theirs = get_shift_summary(&db, &other).unwrap();
+        assert_eq!(ours["cashierCash"]["cashCollectionsCents"], 0);
+        assert_eq!(ours["cashierCash"]["cashRefundsCents"], 1700);
+        assert_eq!(theirs["cashierCash"]["cashRefundsCents"], 0);
+    }
+
+    #[test]
+    fn cancellation_cashier_currency_uses_money_not_legacy_sale_header() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        // Payment receipts have a required currency; legacy order headers may not.
+        for receipt_currency in [Some("EUR"), Some("USD")] {
+            let (db, shift, at) = cashier_cancellation_ledger_fixture();
+            cashier_cancellation_receipt_with_currency(
+                &db,
+                "legacy-unit",
+                Some(&shift),
+                &at,
+                "cash",
+                11.0,
+                "pickup",
+                true,
+                Some(&shift),
+                None,
+                receipt_currency,
+            );
+            let summary = get_shift_summary(&db, &shift).unwrap();
+            assert_eq!(summary["currency"], Value::Null);
+            assert_eq!(
+                summary["cashierCash"]["currency"],
+                if receipt_currency == Some("EUR") {
+                    serde_json::json!("EUR")
+                } else {
+                    Value::Null
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_cashier_actual_mixed_receipts_and_returns_keep_six_euro_difference() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        for (id, method, amount, kind) in [
+            ("old-cash", "cash", 15.0, "pickup"),
+            ("old-card", "card", 6.0, "pickup"),
+            ("delivery-18", "cash", 18.3, "delivery"),
+            ("delivery-11", "cash", 11.0, "delivery"),
+        ] {
+            cashier_cancellation_receipt(
+                &db,
+                id,
+                Some(&shift),
+                &at,
+                method,
+                amount,
+                kind,
+                true,
+                Some(&shift),
+            );
+        }
+        let summary = get_shift_summary(&db, &shift).unwrap();
+        assert_eq!(summary["cashierCash"]["cashCollectionsCents"], 4430);
+        assert_eq!(summary["cashierCash"]["cashRefundsCents"], 5030);
+        assert_eq!(summary["cashierCash"]["currency"], "EUR");
+        let closed =
+            close_shift(&db, &serde_json::json!({"shiftId":shift,"closingCash":0})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["expected"], -6.0);
+        assert_eq!(closed["variance"], 6.0);
+    }
+
+    #[test]
+    fn cancellation_cashier_excludes_nonmoney_and_keeps_receipt_time_and_original_owner() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        for id in [
+            "normal",
+            "test",
+            "ghost",
+            "void",
+            "unproven",
+            "orphan",
+            "legacy-owner",
+            "legacy-courier",
+        ] {
+            cashier_cancellation_receipt(
+                &db,
+                id,
+                if id == "orphan" { None } else { Some(&shift) },
+                &at,
+                "cash",
+                1.0,
+                "pickup",
+                false,
+                None,
+            );
+        }
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE orders SET is_test=1 WHERE id='test'", [])
+                .unwrap();
+            conn.execute("UPDATE orders SET is_ghost=1 WHERE id='ghost'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE order_payments SET status='voided' WHERE id='void'",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE order_payments SET payment_origin='sync_reconstructed',remote_payment_id=NULL WHERE id='unproven'",[]).unwrap();
+            conn.execute(
+                "UPDATE order_payments SET staff_shift_id=NULL WHERE id='legacy-owner'",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE orders SET created_at='2000-01-01',updated_at='2000-01-01' WHERE id='normal'",[]).unwrap();
+            conn.execute(
+                "UPDATE order_payments SET staff_shift_id=NULL WHERE id='legacy-courier'",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO driver_earnings(id,driver_id,order_id,branch_id,delivery_fee,tip_amount,total_earning,payment_method,cash_collected,currency,created_at,updated_at) VALUES('legacy-earning','driver','legacy-courier','cash-ledger-branch',0,0,0,'cash',1,'EUR',?1,?1)",[&at]).unwrap();
+        }
+        let summary = get_shift_summary(&db, &shift).unwrap();
+        assert_eq!(summary["cashierCash"]["cashCollectionsCents"], 200);
+        assert_eq!(summary["cashierCash"]["cashRefundsCents"], 0);
+    }
+
+    #[test]
+    fn cancellation_cashier_staff_handback_credit_is_not_a_second_collection() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, shift, at) = cashier_cancellation_ledger_fixture();
+        cashier_cancellation_receipt(
+            &db,
+            "staff-return",
+            Some("original-driver"),
+            &at,
+            "cash",
+            21.0,
+            "delivery",
+            true,
+            Some(&shift),
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,branch_id,check_in_time,check_out_time,status,currency,created_at,updated_at) VALUES('original-driver','driver','driver','cash-ledger-branch',?1,?1,'closed','EUR',?1,?1)",[&at]).unwrap();
+            let drawer: String = conn
+                .query_row(
+                    "SELECT id FROM cash_drawer_sessions WHERE staff_shift_id=?1",
+                    [&shift],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            conn.execute("INSERT INTO staff_order_cash_returns(id,organization_id,branch_id,terminal_id,order_id,payment_id,source_staff_id,source_staff_shift_id,source_role,receiving_cashier_shift_id,receiving_drawer_id,amount_cents,currency,cancellation_event_id,actor_staff_id,reason,occurred_at,idempotency_key,payload_json)
+                VALUES('handback','org','cash-ledger-branch','cash-ledger-terminal','staff-return','staff-return','driver','original-driver','driver',?1,?2,2100,'EUR','event','cashier','return',?3,'handback','{}')",params![shift,drawer,at]).unwrap();
+            conn.execute("UPDATE cash_drawer_sessions SET driver_cash_returned=21,driver_cash_returned_cents=2100 WHERE id=?1",[drawer]).unwrap();
+        }
+        let summary = get_shift_summary(&db, &shift).unwrap();
+        assert_eq!(summary["cashierCash"]["cashCollectionsCents"], 0);
+        assert_eq!(summary["cashierCash"]["cashRefundsCents"], 2100);
+        assert_eq!(summary["cashDrawer"]["driver_cash_returned"], 21.0);
+        let closed =
+            close_shift(&db, &serde_json::json!({"shiftId":shift,"closingCash":0})).unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        assert_eq!(closed["expected"], 0.0);
+    }
+
     /// Codex P1 on the cancelled-order exclusion: collect 11,40, cancel,
     /// hand the 11,40 back — physically net zero. Excluding only the sale
     /// while still subtracting the refund would report a false shortage.
@@ -6686,6 +7071,15 @@ mod tests {
             )
             .unwrap();
         }
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE payment_adjustments SET staff_shift_id=?1 WHERE id IN ('adj-cr')",
+                [&shift_id],
+            )
+            .unwrap();
 
         // Pin every fixture row inside the [check_in, close] window: the
         // fixtures were stamped by SQLite's clock while the window bounds come
@@ -7284,10 +7678,10 @@ mod tests {
             }
             conn.execute(
                 "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
-                amount, amount_cents, reason, refund_method, cash_handler, created_at, updated_at)
+                amount, amount_cents, reason, refund_method, cash_handler, created_at, updated_at, staff_shift_id)
                 VALUES ('audit-refund', 'audit-extra', 'audit-edited', 'refund', 4.0, 400,
-                    'quantity reduced', 'cash', 'cashier_drawer', ?1, ?1)",
-                params![now],
+                    'quantity reduced', 'cash', 'cashier_drawer', ?1, ?1, ?2)",
+                params![now, shift_id],
             )
             .unwrap();
         }

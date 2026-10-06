@@ -1,3 +1,5 @@
+import { OrderCancellationModal, type CancellationReturnChannel } from '../modals/OrderCancellationModal';
+import { prepareTableCancellation, tableCancellationFields, type TableCancellationPlan } from '../../services/TableManualCancellation';
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import {
@@ -30,7 +32,6 @@ import {
   isOwingCancelDismissed,
   emitCanonicalTableCancellation,
   owingCancelFailureMessage,
-  refuseOwingCancelUpFront,
 } from '../../hooks/useTableReleaseGuard';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable } from '../../types/tables';
@@ -1065,7 +1066,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     runWithPrivilegedConfirmation: runCancelApproval,
     confirmationModal: cancelApprovalModal,
   } = usePrivilegedActionConfirmation();
-  const [cancelReason, setCancelReason] = useState('');
+  const [cancelPlan, setCancelPlan] = useState<TableCancellationPlan | null>(null);
+  const cancelOriginalRef = useRef<{ reason: string; channel?: CancellationReturnChannel } | null>(null);
   const [movedTableId, setMovedTableId] = useState<string | null>(null);
   useEffect(() => { setMovedTableId(null); }, [selectedTable?.id]);
   const table = tables.find(candidate => candidate.id === movedTableId) || selectedTable;
@@ -2385,19 +2387,24 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     );
   };
 
-  const cancelOrderFromCheck = async () => {
+  const cancelOrderFromCheck = async (reason: string, returnChannel?: CancellationReturnChannel) => {
     if (isSavedSession) return;
     const orderId = session?.active_order_id;
     const tableSessionId = session?.id;
-    const reason = cancelReason.trim();
-    if (!orderId || !tableSessionId || !reason) {
+    if (!orderId || !tableSessionId || !reason.trim() || !cancelPlan) {
       return;
     }
     setIsSaving(true);
     try {
       const result = await runCancelApproval({
         scope: 'cash_drawer_control',
-        action: (managerPin) => getBridge().orders.cancelWithApproval({ orderId, reason, tableSessionId, managerPin }),
+        action: (managerPin) => {
+          const previous = cancelOriginalRef.current;
+          if (previous && (previous.reason !== reason || previous.channel !== returnChannel)) throw new Error('CANCELLATION_REQUEST_CONFLICT');
+          cancelOriginalRef.current = { reason, channel: returnChannel };
+          return getBridge().orders.cancelWithApproval({ orderId, reason, tableSessionId, managerPin,
+            ...tableCancellationFields(cancelPlan, returnChannel) });
+        },
         title: String(t('tableRelease.cancelApprovalTitle', {
           defaultValue: 'Approve cancelling the order',
         })),
@@ -2415,7 +2422,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       return;
     }
     setIsSaving(false);
-    setCancelReason('');
+    setCancelPlan(null);
+    cancelOriginalRef.current = null;
     toast.success(String(t('tableRelease.orderCancelled', {
       defaultValue: 'Order cancelled and table released.',
     })));
@@ -2800,19 +2808,19 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <Check className="h-4 w-4" />
                   {tr('actions.closeTable', 'Close Table')}
                 </ActionButton>
-                {outstanding > 0 && session?.active_order_id ? (
+                {session?.active_order_id ? (
                   <ActionButton
                     onClick={() => {
-                      // Founder rule (30/09 and 01/10/2026): an order the
-                      // till refuses to cancel (money taken on it, or a paid
-                      // label with no payment record here) is refused
-                      // before the reason is asked.
-                      const orderId = session.active_order_id as string;
-                      void (async () => {
-                        if (await refuseOwingCancelUpFront(orderId, t)) return;
-                        setCancelReason('');
-                        setSecondaryModal('cancel-order');
-                      })();
+                      if (isSaving) return;
+                      setIsSaving(true);
+                      void prepareTableCancellation(session.active_order_id as string, session.id)
+                        .then((plan) => {
+                          if (plan.requestId !== cancelPlan?.requestId) cancelOriginalRef.current = null;
+                          setCancelPlan(plan);
+                          setSecondaryModal('cancel-order');
+                        })
+                        .catch(error => toast.error(owingCancelFailureMessage(error, t)))
+                        .finally(() => setIsSaving(false));
                     }}
                     disabled={isSaving || isSavedSession}
                     tone="warn"
@@ -3357,45 +3365,14 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             </SecondarySheet>
           ) : null}
 
-          {secondaryModal === 'cancel-order' ? (
-            <SecondarySheet
-              title={String(t('tableRelease.cancelOrder', { defaultValue: 'Cancel the order' }))}
-              subtitle={tr('labels.outstandingAmount', 'Outstanding {{amount}}', { amount: money(outstanding) })}
-              icon={<Ban className="h-5 w-5" />}
+          {secondaryModal === 'cancel-order' && cancelPlan ? (
+            <OrderCancellationModal
+              recovery={cancelPlan.pending ? { reason: cancelPlan.reason!, returnChannel: cancelPlan.returnChannel } : undefined}
+              isOpen orderCount={1}
+              manualReturn={cancelPlan.requiresReturn ? { amountCents: cancelPlan.amountCents, currency: cancelPlan.currency } : undefined}
+              onConfirmCancel={cancelOrderFromCheck}
               onClose={closeSecondaryModal}
-              closeLabel={tr('actions.close', 'Close')}
-            >
-              <label className="block text-sm font-semibold liquid-glass-modal-text" htmlFor="table-check-cancel-reason">
-                {String(t('tableRelease.cancelReasonLabel', { defaultValue: 'Why is the order cancelled?' }))}
-              </label>
-              <textarea
-                id="table-check-cancel-reason"
-                value={cancelReason}
-                onChange={(event) => setCancelReason(event.target.value)}
-                rows={3}
-                maxLength={300}
-                className={glassInputClass}
-                placeholder={String(t('tableRelease.cancelReasonPlaceholder', {
-                  defaultValue: 'For example: the customer left without ordering',
-                }))}
-              />
-              <p className="text-xs liquid-glass-modal-text-muted">
-                {String(t('tableRelease.cancelApprovalHint', {
-                  defaultValue: 'A cashier or manager PIN approves the cancellation. Nothing is charged.',
-                }))}
-              </p>
-              <ActionButton
-                onClick={() => {
-                  void cancelOrderFromCheck();
-                }}
-                disabled={isSaving || isSavedSession || cancelReason.trim().length === 0}
-                tone="warn"
-                className="w-full"
-              >
-                {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
-                {String(t('tableRelease.confirmCancel', { defaultValue: 'Cancel the order' }))}
-              </ActionButton>
-            </SecondarySheet>
+            />
           ) : null}
 
           {secondaryModal === 'covers' ? (

@@ -386,6 +386,30 @@ pub fn load_payments_not_saved_blockers(
 ) -> Result<Vec<UnsettledPaymentBlocker>, String> {
     let records = crate::unsaved_payments::list(conn, None)?;
     let mut blockers = Vec::with_capacity(records.len());
+    for order_id in crate::edit_settlement_recovery::pending_financial_edits(conn, branch_id)? {
+        let (number,total,status):(String,f64,String)=conn.query_row("SELECT COALESCE(order_number,id),COALESCE(total_amount,0),COALESCE(payment_status,'pending') FROM orders WHERE id=?1",[&order_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+            .optional().map_err(|error|error.to_string())?.unwrap_or((order_id.clone(),0.0,"pending".into()));
+        let settled = crate::payments::load_principal_paid_for_order(conn, &order_id)?;
+        blockers.push(UnsettledPaymentBlocker {
+            order_id,order_number:number,total_amount:Cents::round_half_even(total),settled_amount:Cents::round_half_even(settled),
+            payment_status:status,payment_method:"pending".into(),reason_code:"edit_settlement_not_saved".into(),
+            reason_text:"A confirmed order correction is not saved yet. Its original collection or refund is retained.".into(),
+            suggested_fix:"Reopen the saved order edit and save the same correction. Do not collect or return the money again.".into(),
+            severity:IntegritySeverity::Blocking.as_str().into(),difference_cents:0,reason_amounts:BTreeMap::new(),
+            reason_variant:None,review_payment:None,unsaved_payment:None,platform_held:false,
+        });
+    }
+    for order_id in crate::table_manual_cancellation::pending(conn, branch_id)? {
+        let (number,total,status):(String,f64,String)=conn.query_row("SELECT COALESCE(order_number,id),COALESCE(total_amount,0),COALESCE(payment_status,'pending') FROM orders WHERE id=?1",[&order_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
+        blockers.push(UnsettledPaymentBlocker {
+            order_id,order_number:number,total_amount:Cents::round_half_even(total),settled_amount:Cents::new(0),
+            payment_status:status,payment_method:"pending".into(),reason_code:"table_cancellation_not_saved".into(),
+            reason_text:"The original table cancellation return is awaiting its canonical receipt.".into(),
+            suggested_fix:"Recover the original table cancellation. Do not hand back or refund the money again.".into(),
+            severity:IntegritySeverity::Blocking.as_str().into(),difference_cents:0,reason_amounts:BTreeMap::new(),
+            reason_variant:None,review_payment:None,unsaved_payment:None,platform_held:false,
+        });
+    }
     for record in records {
         let order: Option<(String, String, String)> = conn
             .query_row(

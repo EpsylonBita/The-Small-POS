@@ -1,6 +1,7 @@
 {
   "modals": {
     "menu": {
+      "draftTargetCancelled": "Questo ordine è stato annullato. La modifica precedente è stata archiviata e non può essere salvata.",
       "draftReadFailed": "Il carrello salvato non può essere letto. La conferma è sospesa e il carrello precedente viene conservato.",
       "draftSaveFailed": "Il carrello non può essere salvato. La conferma attende un salvataggio permanente riuscito.",
       "draftDiscardFailed": "Il carrello salvato non può essere scartato. Viene conservato.",
@@ -13,7 +14,19 @@
       "draftExistingTable": "Questo tavolo ha già un conto aperto. Aprilo per aggiungere articoli.",
       "draftDeclinedResumed": "Il pagamento è stato rifiutato. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento.",
       "draftNotSentResumed": "Non è stata inviata alcuna richiesta di pagamento. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento.",
-      "draftNotChargedResumed": "I tentativi di pagamento originali non hanno addebitato il cliente. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento."
+      "draftNotChargedResumed": "I tentativi di pagamento originali non hanno addebitato il cliente. Il carrello è stato ripristinato; non è stato avviato un nuovo pagamento.",
+      "legacyCurrency": {
+        "title": "Conferma la valuta del turno aperto",
+        "message": "Questo turno è stato aperto con una versione precedente. Prima di continuare, conferma che il fondo cassa iniziale e le transazioni erano in {{currency}}. Gli importi non saranno convertiti.",
+        "pin": "PIN del responsabile (se richiesto)",
+        "confirm": "Conferma {{currency}}",
+        "ready": "Valuta del turno confermata. Puoi proseguire con il pagamento.",
+        "failed": "Impossibile confermare il turno. Controlla la valuta e inserisci il PIN del responsabile se richiesto."
+      },
+      "editServerUpdate": "Le correzioni non sono temporaneamente disponibili. Verifica la connessione e riprova dopo l’aggiornamento del server.",
+      "editSyncRequired": "La modifica del pagamento o dell’ordine non è ancora sincronizzata. Il carrello è salvato. Riprova tra poco.",
+      "emptyEditHint": "Per rimuovere tutti gli articoli, chiudi l’editor e annulla l’ordine.",
+      "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso."
     }
   },
   "checkoutRecovery": {
@@ -26,5 +39,15 @@
     "auth_required": "Accedi con una sessione autorizzata per continuare.",
     "conflict": "Un altro terminale ha modificato questo conto. Controlla lo stato attuale prima di continuare.",
     "refresh": "Aggiorna stato"
+  },
+  "paymentIntegrity": {
+    "reasonCodes": {
+      "table_cancellation_not_saved": "Il rimborso originale per l’annullamento del tavolo non è ancora stato salvato.",
+      "edit_settlement_not_saved": "Una correzione confermata non è ancora salvata. L’incasso o il rimborso originale è conservato."
+    },
+    "fixCodes": {
+      "table_cancellation_not_saved": "Recupera l’annullamento originale del tavolo. Non consegnare o rimborsare nuovamente il denaro.",
+      "edit_settlement_not_saved": "Riapri la modifica salvata e salva la stessa correzione. Non incassare o rimborsare di nuovo."
+    }
   }
 }

@@ -364,6 +364,77 @@ fn currently_usable(conn: &Connection, scope: &OpeningScope, intent: &OpeningInt
         && original_mirror_open(conn, &intent.opening_key).unwrap_or(false)
 }
 
+/// Read the retained original proof for a pre-v96 shift without changing history.
+/// A merely prepared/pending intent is not evidence of an opened drawer.
+pub(crate) fn legacy_currency_proof(
+    conn: &Connection,
+    scope: &OpeningScope,
+    shift_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let key: Option<String> = conn
+        .query_row(
+            "SELECT opening_key FROM gift_financial_openings WHERE shift_id=?1",
+            [shift_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let intent = load_intent(conn, &key)?.ok_or("LEGACY_SHIFT_OPENING_PROOF_INVALID")?;
+    if !currently_usable(conn, scope, &intent)
+        || intent.confirmed_at.is_none()
+        || intent.adopted_at.is_none()
+    {
+        return Err("LEGACY_SHIFT_OPENING_PROOF_INVALID".into());
+    }
+    let raw: String = conn
+        .query_row(
+            "SELECT confirmation_json FROM gift_financial_openings WHERE opening_key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .map_err(|_| "LEGACY_SHIFT_OPENING_PROOF_INVALID")?;
+    let proof: Value =
+        serde_json::from_str(&raw).map_err(|_| "LEGACY_SHIFT_OPENING_PROOF_INVALID")?;
+    let proof = proof
+        .as_object()
+        .ok_or("LEGACY_SHIFT_OPENING_PROOF_INVALID")?;
+    if str_field(proof, "contract") != Some(OPENING_CONTRACT)
+        || str_field(proof, "state") != Some("confirmed")
+        || str_field(proof, "opening_key") != Some(key.as_str())
+        || str_field(proof, "shift_id") != Some(intent.shift_id.as_str())
+        || str_field(proof, "drawer_id") != Some(intent.drawer_id.as_str())
+        || !parse_confirmation(proof, &intent)
+            .map_err(|_| "LEGACY_SHIFT_OPENING_PROOF_INVALID")?
+            .usable
+    {
+        return Err("LEGACY_SHIFT_OPENING_PROOF_INVALID".into());
+    }
+    // Check the original amounts/time as well as the identity checked by
+    // currently_usable: a replaced mirror cannot borrow an older proof.
+    let exact: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM staff_shifts s JOIN cash_drawer_sessions d
+         ON d.staff_shift_id=s.id WHERE s.id=?1 AND d.id=?2
+         AND s.opening_cash_amount_cents=?3 AND d.opening_amount_cents=?3
+         AND julianday(s.check_in_time)=julianday(?4) AND julianday(d.opened_at)=julianday(?4))",
+            params![
+                shift_id,
+                intent.drawer_id,
+                intent.opening_cents,
+                intent.checked_in_at
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exact {
+        return Err("LEGACY_SHIFT_OPENING_PROOF_INVALID".into());
+    }
+    Ok(Some((key, intent.currency)))
+}
+
 /// Pending or currently usable originals of the current trusted full scope;
 /// the same public terminal id under another org/branch never matches.
 fn load_open_intents_for_scope(
@@ -3525,6 +3596,50 @@ mod tests {
             "a refused session is dropped"
         );
         assert_retained(&conn, &intent, &item);
+    }
+
+    #[test]
+    fn legacy_shift_currency_uses_only_exact_retained_opening_proof() {
+        let conn = test_conn();
+        let intent = prepare(&conn, 2000);
+        assert!(legacy_currency_proof(&conn, &scope(), &intent.shift_id).is_err());
+        let _item = claim(&conn);
+        let outcome = apply_sync_result(
+            &conn,
+            &intent.opening_key,
+            Ok(&confirmed_body(&intent, true)),
+            Utc::now(),
+        );
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Confirmed {
+                state: OpeningState::ConfirmedUsable
+            }
+        );
+        assert_eq!(
+            legacy_currency_proof(&conn, &scope(), &intent.shift_id).unwrap(),
+            Some((intent.opening_key.clone(), "EUR".into()))
+        );
+        let mut foreign = scope();
+        foreign.branch_id = Uuid::new_v4().to_string();
+        assert!(legacy_currency_proof(&conn, &foreign, &intent.shift_id).is_err());
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET opening_amount_cents=100 WHERE id=?1",
+            [&intent.drawer_id],
+        )
+        .unwrap();
+        assert!(legacy_currency_proof(&conn, &scope(), &intent.shift_id).is_err());
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET opening_amount_cents=2000 WHERE id=?1",
+            [&intent.drawer_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE gift_financial_openings SET confirmation_json='{}' WHERE opening_key=?1",
+            [&intent.opening_key],
+        )
+        .unwrap();
+        assert!(legacy_currency_proof(&conn, &scope(), &intent.shift_id).is_err());
     }
 
     #[test]

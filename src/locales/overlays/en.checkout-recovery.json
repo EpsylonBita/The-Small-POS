@@ -1,6 +1,7 @@
 {
   "modals": {
     "menu": {
+      "draftTargetCancelled": "This order was cancelled. Its old edit was archived and cannot be saved.",
       "draftReadFailed": "The saved cart could not be read. Checkout is paused; the previous cart has been retained.",
       "draftSaveFailed": "The cart could not be saved. Checkout is paused until its durable save succeeds.",
       "draftDiscardFailed": "The saved cart could not be discarded. It has been retained.",
@@ -13,7 +14,19 @@
       "draftExistingTable": "This table already has an active check. Open that check to add items.",
       "draftDeclinedResumed": "The payment was declined. Your cart is restored; no new payment was started.",
       "draftNotSentResumed": "No payment was sent. Your cart is restored; no new payment was started.",
-      "draftNotChargedResumed": "The original payment attempts did not charge the customer. Your cart is restored; no new payment was started."
+      "draftNotChargedResumed": "The original payment attempts did not charge the customer. Your cart is restored; no new payment was started.",
+      "legacyCurrency": {
+        "title": "Confirm the open shift currency",
+        "message": "This shift was opened with an older version. Confirm that its opening cash and transactions were in {{currency}} before continuing. No amounts will be converted.",
+        "pin": "Manager PIN (if required)",
+        "confirm": "Confirm {{currency}}",
+        "ready": "Shift currency confirmed. You can continue to payment.",
+        "failed": "The shift could not be confirmed. Check its currency and enter a manager PIN if required."
+      },
+      "editServerUpdate": "Order corrections are temporarily unavailable. Check your connection and retry after the server update.",
+      "editSyncRequired": "The payment or order change has not synced yet. Your cart is saved. Try again shortly.",
+      "emptyEditHint": "To remove every item, close the editor and cancel the order.",
+      "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund."
     }
   },
   "checkoutRecovery": {
@@ -26,5 +39,15 @@
     "auth_required": "Sign in with an authorized staff session to resume.",
     "conflict": "Another terminal changed this check. Review its current state before continuing.",
     "refresh": "Refresh status"
+  },
+  "paymentIntegrity": {
+    "reasonCodes": {
+      "table_cancellation_not_saved": "The original table cancellation return has not been saved yet.",
+      "edit_settlement_not_saved": "A confirmed order correction is not saved yet. Its original collection or refund is retained."
+    },
+    "fixCodes": {
+      "table_cancellation_not_saved": "Recover the original table cancellation. Do not hand back or refund the money again.",
+      "edit_settlement_not_saved": "Reopen the saved order edit and save the same correction. Do not collect or return money again."
+    }
   }
 }

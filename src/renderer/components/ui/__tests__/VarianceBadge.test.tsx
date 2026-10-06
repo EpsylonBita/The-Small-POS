@@ -8,9 +8,9 @@ vi.mock('../../../../lib/i18n', () => ({ default: { language: 'el' } }));
 
 describe('VarianceBadge currency', () => {
   afterEach(cleanup);
-  it('keeps an explicitly unknown historical unit unknown', () => {
+  it('keeps an explicitly unknown historical unit unknown without a trailing marker', () => {
     render(<VarianceBadge variance={4} currency={null} />);
-    expect(screen.getByRole('status')).toHaveTextContent('+4,00 —');
+    expect(screen.getByRole('status')).toHaveTextContent(/^\+4,00$/);
     expect(screen.getByRole('status').textContent).not.toContain('€');
   });
   it.each([0, 4, -4])('formats %s in euros with the active Greek locale', (variance) => {

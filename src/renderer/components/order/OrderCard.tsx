@@ -642,7 +642,7 @@ export const OrderCard = memo<OrderCardProps>(({
         <div className="flex flex-col items-center gap-1 sm:gap-2 mr-8 sm:mr-12 flex-shrink-0">
           <span className={`text-base sm:text-xl font-bold ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white/90'
             }`}>
-            {formatCurrency(totalNormalized)}
+            {formatCurrency(totalNormalized, order.currency ?? null)}
           </span>
           <div className="flex items-center gap-2">
             <OrderTypeIcon orderType={orderTypeNormalized} />

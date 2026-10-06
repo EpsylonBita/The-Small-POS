@@ -8,6 +8,35 @@ const source = readFileSync(
   'utf8',
 );
 
+// Exercise the actual close callback with its captured dependencies. This keeps
+// the durable draft ordering contract independent of dialog markup or formatting.
+const makeCloseHarness = (overrides: Record<string, any> = {}) => {
+  const calls: string[] = [];
+  const bindings = {
+    useCallback: (callback: (...args: any[]) => any) => callback,
+    isOpen: true,
+    closingDraft: { current: false },
+    editSubmissionInFlight: { current: false },
+    checkoutPhase: 'editing',
+    editMode: false,
+    draftPersistence: {
+      status: 'ready', error: null, isPending: () => false,
+      clear: async (completed: boolean) => { assert.equal(completed, false); calls.push('clear'); },
+    },
+    onClose: () => calls.push('close'),
+    setCartItems: (items: unknown[]) => { assert.deepEqual(items, []); calls.push('empty-cart'); },
+    toast: { error: () => calls.push('error') },
+    t: (key: string) => key,
+    ...overrides,
+  };
+  const start = source.indexOf('const requestClose = useCallback(');
+  const end = source.indexOf('const handleMenuSurfaceClose = useCallback(', start);
+  assert.ok(start >= 0 && end > start, 'both close callbacks must exist');
+  const requestClose = new Function(...Object.keys(bindings),
+    `${source.slice(start, end)}\nreturn requestClose;`)(...Object.values(bindings));
+  return { calls, requestClose: requestClose as () => Promise<void>, bindings };
+};
+
 test('MenuModal reserves its full working height before async delivery data arrives', () => {
   assert.match(
     source,
@@ -194,22 +223,37 @@ test('LiquidGlassModal settles a close animation from one animation endpoint onl
   );
 });
 
-// Regression contract for the discarded dirty cart (2026-06-21 live QA): closing a new
-// order with items in the cart via X/Escape dropped the draft with no warning. The close
-// must route through a discard confirmation; only final discard/success paths close directly.
-test('MenuModal routes the X / Escape close through a dirty-cart discard confirmation for new orders', () => {
-  // requestClose shows the confirmation only for a NEW order with a populated cart; it
-  // otherwise closes immediately (edit mode / empty cart).
-  assert.match(
-    source,
-    /const requestClose = useCallback\(\(\) => \{\s*if \(!editMode && checkoutPhase === 'editing' && cartItems\.length > 0\) \{\s*setShowDiscardConfirm\(true\);\s*return;\s*\}\s*onClose\(\);\s*\}, \[editMode, checkoutPhase, cartItems\.length, onClose\]\);/,
-  );
+// The current explicit close dismisses editable new carts without another prompt,
+// but must retire their durable draft before clearing UI and preserve pending money.
+test('MenuModal X / Escape tombstones editable carts and preserves protected checkout originals', async () => {
+  const editable = makeCloseHarness();
+  await editable.requestClose();
+  assert.deepEqual(editable.calls, ['clear', 'empty-cart', 'close']);
 
-  // The shell may only route a close callback while editing. Parent-driven checkout
-  // swaps to PaymentModal and must never be mistaken for a dirty-cart close request.
+  for (const protectedState of [
+    { isOpen: false },
+    { closingDraft: { current: true } },
+    { editSubmissionInFlight: { current: true } },
+    { checkoutPhase: 'payment' },
+    { checkoutPhase: 'finishing' },
+    { draftPersistence: { status: 'ready', error: 'draftSaveFailed', isPending: () => true } },
+  ]) {
+    const guarded = makeCloseHarness(protectedState);
+    await guarded.requestClose();
+    assert.deepEqual(guarded.calls, [], JSON.stringify(protectedState));
+  }
+  for (const resumable of [
+    { editMode: true },
+    { draftPersistence: { status: 'ready', error: null, isPending: () => true } },
+  ]) {
+    const guarded = makeCloseHarness(resumable);
+    await guarded.requestClose();
+    assert.deepEqual(guarded.calls, ['close'], 'an idle recoverable original is neither cleared nor discarded');
+  }
+
   assert.match(
     source,
-    /const handleMenuSurfaceClose = useCallback\(\(\) => \{\s*if \(checkoutPhase !== 'editing'\) \{\s*return;\s*\}\s*requestClose\(\);\s*\}, \[checkoutPhase, requestClose\]\);/,
+    /const handleMenuSurfaceClose = useCallback\(\(\) => \{\s*if \(checkoutPhase === 'editing'\) void requestClose\(\);/,
   );
   assert.match(
     source,
@@ -217,8 +261,7 @@ test('MenuModal routes the X / Escape close through a dirty-cart discard confirm
     'LiquidGlassModal must ignore close callbacks from the payment transition',
   );
 
-  // The header X still routes directly through the dirty-cart guard.
-  assert.match(source, /onClick=\{requestClose\}/, 'the header X must close via requestClose');
+  assert.match(source, /onClick=\{requestClose\}/, 'the header X must close via the durable guard');
   assert.doesNotMatch(source, /onClose=\{onClose\}/, 'LiquidGlassModal must no longer wire the raw onClose');
 
   // The success paths still call the raw onClose directly (after clearing the cart), so a
@@ -229,28 +272,32 @@ test('MenuModal routes the X / Escape close through a dirty-cart discard confirm
   );
 });
 
-test('MenuModal discard confirmation is a topmost portaled blurred dialog with close-only paths', () => {
-  // Portaled outside the container, blurred backdrop, topmost over MenuModal (z > 20000),
-  // labelled role="dialog".
-  assert.match(source, /\{showDiscardConfirm && renderModalPortal\(/);
-  assert.match(source, /className="fixed inset-0 z-\[20060\][^"]*bg-black\/60 backdrop-blur-md/);
-  assert.match(source, /ref=\{discardDialogRef\}\s*role="dialog"\s*aria-modal="true"\s*aria-labelledby=\{discardTitleId\}/);
-  assert.match(source, /<h3 id=\{discardTitleId\}[^>]*>\s*\{t\('modals\.menu\.discardOrder\.title'/);
+test('MenuModal waits for durable dismissal, suppresses a duplicate close, and retains a failed draft', async () => {
+  let finishClear!: () => void;
+  const pending = new Promise<void>(resolve => { finishClear = resolve; });
+  let clearCalls = 0;
+  const waiting = makeCloseHarness({ draftPersistence: {
+    status: 'ready', error: null, isPending: () => false,
+    clear: async (completed: boolean) => { assert.equal(completed, false); clearCalls += 1; await pending; },
+  } });
+  const firstClose = waiting.requestClose();
+  await waiting.requestClose();
+  assert.equal(clearCalls, 1, 'a second X/Escape cannot start another draft dismissal');
+  assert.deepEqual(waiting.calls, [], 'the cart and modal stay intact until durable clear succeeds');
+  finishClear();
+  await firstClose;
+  assert.deepEqual(waiting.calls, ['empty-cart', 'close']);
+  assert.equal(waiting.bindings.closingDraft.current, false);
 
-  // Escape closes ONLY the confirmation (MenuModal/cart stay intact).
-  assert.match(
-    source,
-    /if \(!showDiscardConfirm\) \{\s*return;\s*\}\s*const onEscape = \(event: KeyboardEvent\) => \{\s*if \(event\.key === 'Escape'\) \{\s*setShowDiscardConfirm\(false\);/,
-  );
-
-  // "Keep editing" closes only the confirmation; "Discard order" first clears the durable draft, then the cart and modal.
-  assert.match(source, /onClick=\{\(\) => setShowDiscardConfirm\(false\)\}/);
-  assert.match(
-    source,
-    /const handleDiscardOrder = async \(\) => \{\s*try \{\s*await draftPersistence\.clear\(false\);\s*setShowDiscardConfirm\(false\);\s*setCartItems\(\[\]\);\s*onClose\(\);\s*\} catch \{ toast\.error\(t\('modals\.menu\.draftDiscardFailed'/,
-  );
-  assert.match(source, /onClick=\{handleDiscardOrder\}/);
-  // No native confirm.
+  const failed = makeCloseHarness({ draftPersistence: {
+    status: 'ready', error: null, isPending: () => false,
+    clear: async () => { throw new Error('CAS draft clear failed'); },
+  } });
+  await failed.requestClose();
+  assert.deepEqual(failed.calls, ['error'], 'failure preserves the cart and open modal');
+  assert.equal(failed.bindings.closingDraft.current, false, 'a failed dismissal can be retried');
+  assert.match(source, /toast\.error\(t\('modals\.menu\.draftDiscardFailed'/);
+  assert.doesNotMatch(source, /showDiscardConfirm|handleDiscardOrder/);
   assert.doesNotMatch(source, /window\.confirm/);
 });
 

@@ -21,11 +21,15 @@ import { getResolvedTerminalCredentials } from '../../services/terminal-credenti
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
 import { parseSpecialAddressInput } from '../../utils/specialAddress';
 import { toValidLatLng } from '../../utils/coordinates';
+import { isSameCustomerEditDestination } from '../../utils/orderCustomerEdit';
 
 export interface EditCustomerInfoFormData {
   name: string;
   phone: string;
   address: string;
+  city?: string;
+  /** Computed against the editor's original destination, not caller input. */
+  destinationChanged?: boolean;
   postal_code?: string;
   delivery_floor?: string;
   name_on_ringer?: string;
@@ -34,6 +38,11 @@ export interface EditCustomerInfoFormData {
   latitude?: number | null;
   longitude?: number | null;
   addressFingerprint?: string | null;
+  customerId?: string | null;
+  addressId?: string | null;
+  orderType?: string;
+  expectedVersion?: number;
+  expectedLocalVersion?: number;
 }
 
 interface EditCustomerInfoModalProps {
@@ -88,8 +97,14 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestRef = useRef(0);
   const sessionTokenRef = useRef<string | null>(null);
+  const editGenerationRef = useRef(0);
+  const destinationGenerationRef = useRef(0);
+  const savingRef = useRef<number | null>(null);
 
   useEffect(() => {
+    editGenerationRef.current += 1;
+    destinationGenerationRef.current += 1;
+    searchRequestRef.current += 1;
     if (!isOpen) {
       return;
     }
@@ -103,7 +118,9 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       initialCustomerInfo.latitude,
       initialCustomerInfo.longitude,
     );
-    setAddressCoordinates(hasDeliveryPro ? initialCoordinates : null);
+    setAddressCoordinates(initialCoordinates);
+    savingRef.current = null;
+    setIsSaving(false);
     setValidationResult(null);
     setValidationStatus('idle');
     setValidationSnapshot(null);
@@ -126,6 +143,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     setValidationSnapshot(null);
     setOverrideApplied(false);
     setOverrideReason('');
+    setIsValidatingDelivery(false);
 
     if (!addressValue.trim()) {
       setValidationStatus('idle');
@@ -153,6 +171,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     address: string,
     details?: AddressSelectionDetails | null
   ): Promise<DeliveryValidationResult | null> => {
+    const generation = destinationGenerationRef.current;
     const trimmedAddress = address.trim();
     if (!trimmedAddress) {
       return null;
@@ -182,6 +201,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     }
 
     const creds = await getResolvedTerminalCredentials();
+    if (generation !== destinationGenerationRef.current) return null;
     const coords = details?.coordinates || addressCoordinates || undefined;
     const fallbackFingerprint = buildAddressFingerprint(trimmedAddress, coords);
 
@@ -198,6 +218,8 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         validationSource: details?.validationSource,
       });
 
+      if (generation !== destinationGenerationRef.current) return null;
+
       setValidationResult(result);
       setValidationStatus(result.validation_status);
       setValidationSnapshot(result.address_fingerprint || fallbackFingerprint);
@@ -213,6 +235,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
 
       return result;
     } catch (error) {
+      if (generation !== destinationGenerationRef.current) return null;
       console.error('[EditCustomerInfoModal] validation error:', error);
       const fallback: DeliveryValidationResult = {
         success: false,
@@ -227,7 +250,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       setValidationStatus('unverified_offline');
       return fallback;
     } finally {
-      setIsValidatingDelivery(false);
+      if (generation === destinationGenerationRef.current) setIsValidatingDelivery(false);
     }
   };
 
@@ -347,12 +370,16 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   };
 
   const handleAddressSuggestionClick = async (suggestion: AddressSuggestion) => {
+    editGenerationRef.current += 1;
+    const generation = ++destinationGenerationRef.current;
     try {
       const creds = await getResolvedTerminalCredentials();
+      if (generation !== destinationGenerationRef.current) return;
       const resolved = await resolveAddressSuggestion(suggestion, customerInfo.address, {
         branchId: creds.branchId || undefined,
         sessionToken: sessionTokenRef.current || undefined,
       });
+      if (generation !== destinationGenerationRef.current) return;
 
       void upsertVerifiedLocalCandidate({
         place_id: resolved.placeId || suggestion.place_id,
@@ -382,6 +409,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       setCustomerInfo((prev) => ({
         ...prev,
         address: resolved.streetAddress,
+        city: resolved.city || prev.city,
         postal_code: resolved.postalCode || prev.postal_code,
       }));
       setSelectedAddressDetails(details);
@@ -390,8 +418,10 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       sessionTokenRef.current = null;
 
       await runValidation(resolved.streetAddress, details);
+      if (generation !== destinationGenerationRef.current) return;
       toast.success(t('modals.editCustomer.addressAndPostalUpdated'));
     } catch (error) {
+      if (generation !== destinationGenerationRef.current) return;
       console.error('Error getting place details:', error);
       const fallback =
         getSuggestionStreetLabel(suggestion) ||
@@ -410,6 +440,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   };
 
   const handleSave = async () => {
+    if (savingRef.current !== null) return;
     if (!customerInfo.name.trim()) {
       toast.error(t('modals.editCustomer.nameRequired'));
       return;
@@ -420,33 +451,41 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       return;
     }
 
-    if (!customerInfo.delivery_floor?.trim()) {
+    const delivery = customerInfo.orderType !== 'pickup' && customerInfo.orderType !== 'dine-in';
+    if (delivery && !customerInfo.delivery_floor?.trim()) {
       toast.error(t('modals.editCustomer.floorRequired'));
       return;
     }
 
-    if (!customerInfo.name_on_ringer?.trim()) {
+    if (delivery && !customerInfo.name_on_ringer?.trim()) {
       toast.error(t('modals.editCustomer.nameOnRingerRequired'));
       return;
     }
 
-    const validation = await ensureValidationForSubmit();
-    const decisionError = evaluateValidationDecision(validation);
-    if (decisionError) {
-      toast.error(decisionError);
-      return;
-    }
-
+    const generation = editGenerationRef.current;
+    const sameDestination = isSameCustomerEditDestination(customerInfo, initialCustomerInfo) && !selectedAddressDetails;
+    savingRef.current = generation;
     setIsSaving(true);
     try {
+      const validation = delivery && !sameDestination ? await ensureValidationForSubmit() : null;
+      if (generation !== editGenerationRef.current) return;
+      const decisionError = delivery && !sameDestination ? evaluateValidationDecision(validation) : null;
+      if (decisionError) { toast.error(decisionError); return; }
       const isSpecialAddress = parseSpecialAddressInput(customerInfo.address).shouldSkipZoneValidation;
       const savedCoordinates = isSpecialAddress
         ? null
-        : addressCoordinates || selectedAddressDetails?.coordinates || null;
+        : sameDestination ? toValidLatLng(initialCustomerInfo.coordinates, initialCustomerInfo.latitude, initialCustomerInfo.longitude)
+          : toValidLatLng(validation?.coordinates || addressCoordinates || selectedAddressDetails?.coordinates);
       await onSave({
+        expectedVersion: customerInfo.expectedVersion,
+        expectedLocalVersion: customerInfo.expectedLocalVersion,
+        destinationChanged: !sameDestination,
+        orderType: customerInfo.orderType, customerId: customerInfo.customerId,
+        addressId: sameDestination ? initialCustomerInfo.addressId : null,
         name: customerInfo.name.trim(),
         phone: customerInfo.phone.trim(),
         address: customerInfo.address.trim(),
+        city: customerInfo.city,
         postal_code: customerInfo.postal_code?.trim() || undefined,
         delivery_floor: customerInfo.delivery_floor?.trim() || undefined,
         name_on_ringer: customerInfo.name_on_ringer?.trim() || undefined,
@@ -455,16 +494,23 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         latitude: savedCoordinates?.lat ?? null,
         longitude: savedCoordinates?.lng ?? null,
         addressFingerprint:
-          selectedAddressDetails?.addressFingerprint || validationSnapshot || null,
+          sameDestination ? initialCustomerInfo.addressFingerprint ?? null
+            : selectedAddressDetails?.addressFingerprint || validation?.address_fingerprint || validationSnapshot || null,
       });
-      setIsSaving(false);
     } catch (error) {
-      setIsSaving(false);
-      toast.error(t('modals.editCustomer.saveFailed'));
+      if (generation === editGenerationRef.current) toast.error(t('modals.editCustomer.saveFailed'));
+    } finally {
+      if (savingRef.current === generation) {
+        savingRef.current = null;
+        setIsSaving(false);
+      }
     }
   };
 
   const handleClose = () => {
+    editGenerationRef.current += 1;
+    destinationGenerationRef.current += 1;
+    searchRequestRef.current += 1;
     setCustomerInfo(initialCustomerInfo);
     setAddressSuggestions([]);
     setSelectedAddressDetails(null);
@@ -478,14 +524,20 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   };
 
   const handleInputChange = (field: keyof EditCustomerInfoFormData, value: string) => {
+    editGenerationRef.current += 1;
     setCustomerInfo((prev) => ({
       ...prev,
       [field]: value,
     }));
 
     if (field === 'address') {
+      destinationGenerationRef.current += 1;
       scheduleAddressSearch(value);
       clearValidation(value);
+    } else if (field === 'postal_code' || field === 'city') {
+      destinationGenerationRef.current += 1;
+      searchRequestRef.current += 1;
+      clearValidation(customerInfo.address);
     }
   };
 
@@ -495,6 +547,8 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
         clearTimeout(searchDebounceRef.current);
       }
       searchRequestRef.current += 1;
+      editGenerationRef.current += 1;
+      destinationGenerationRef.current += 1;
       sessionTokenRef.current = null;
     };
   }, []);

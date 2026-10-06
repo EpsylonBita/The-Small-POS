@@ -25,6 +25,8 @@ export interface TableReleaseOwedModalProps {
   onCollect: () => void;
   onKeepOpenTab: () => void;
   onCancelOrder: (reason: string) => void;
+  /** Use the shared channel → reason flow after fresh canonical preflight. */
+  onRequestCancel?: () => void;
   onClose: () => void;
 }
 
@@ -45,6 +47,7 @@ export function TableReleaseOwedModal({
   onCollect,
   onKeepOpenTab,
   onCancelOrder,
+  onRequestCancel,
   onClose,
 }: TableReleaseOwedModalProps) {
   const { t } = useI18n();
@@ -131,7 +134,7 @@ export function TableReleaseOwedModal({
                     })}
               </span>
             </button>
-            {cancelRefusal === 'ORDER_HAS_PAYMENTS' ? (
+            {cancelRefusal === 'ORDER_HAS_PAYMENTS' && !onRequestCancel ? (
               <p
                 data-testid="table-release-cancel-refused"
                 className="rounded-2xl border border-red-400/30 bg-red-500/5 px-4 py-3 text-sm liquid-glass-modal-text-muted"
@@ -141,11 +144,11 @@ export function TableReleaseOwedModal({
                     'Money was taken on this order. Void or refund it from the order first, or collect the rest.',
                 })}
               </p>
-            ) : canCancel && !cancelRefusal ? (
+            ) : canCancel && (!cancelRefusal || (cancelRefusal === 'ORDER_HAS_PAYMENTS' && onRequestCancel)) ? (
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => setAskingReason(true)}
+                onClick={() => onRequestCancel ? onRequestCancel() : setAskingReason(true)}
                 className="flex min-h-[48px] items-center gap-3 rounded-2xl border border-red-400/40 bg-red-500/10 px-4 py-3 text-left font-semibold transition active:bg-red-500/20 disabled:opacity-60"
               >
                 <Ban className="h-5 w-5 shrink-0 text-red-500" />

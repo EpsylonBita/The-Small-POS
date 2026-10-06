@@ -119,7 +119,7 @@ test('both order-edit modals preserve LiquidGlassModal title props + business ca
   assert.match(cancellation, /onClick=\{handleConfirm\}/);
   // The confirm ships the composed reason: the official platform code first
   // (platform orders), with any operator note appended after « — ».
-  assert.match(cancellation, /onConfirmCancel\(reason\)/);
+  assert.match(cancellation, /await onConfirmCancel\(reason, returnChannel\)/);
 });
 
 // --- Round 316 (live QA, Greek/dark): inside OrderCancellationModal the SAFE/dismiss footer button read
@@ -169,7 +169,7 @@ test('Round 316: OrderCancellationModal safe button is keep/dismiss copy; red co
   }
 
   // Cancellation guards/behavior preserved (the confirm ships the composed platform-aware reason).
-  assert.match(cancellation, /onConfirmCancel\(reason\)/);
+  assert.match(cancellation, /await onConfirmCancel\(reason, returnChannel\)/);
   assert.match(cancellation, /toast\.error\(t\('modals\.orderCancellation\.reasonRequired'\)\)/);
   assert.match(cancellation, /toast\.error\(t\('modals\.orderCancellation\.platformReasonRequired'\)\)/);
   assert.match(cancellation, /maxLength=\{500\}/);

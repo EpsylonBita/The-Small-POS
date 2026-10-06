@@ -1992,13 +1992,17 @@ test('Round 346: OrderFlow order-type chooser matches the OrderDashboard respons
   assert.doesNotMatch(modalRegion, /hover:/);
 
   // The FloatingActionButton no longer uses a native title tooltip; the disabled reason now rides on the
-  // aria-label, and the disabled visual class is preserved.
-  assert.doesNotMatch(source, /title=\{!isShiftActive \? t\('orders\.startShiftFirst'/);
+  // aria-label, and the disabled visual class uses the same operational gate.
+  // The current cashier day can authorize the terminal without a personal
+  // cashier session; waiter terminals still require their own active shift.
+  assert.match(source, /const isOperationalShiftActive = useOperationalShift\(isShiftActive\);/);
+  assert.match(source, /disabled=\{!isOperationalShiftActive\}/);
+  assert.doesNotMatch(source, /title=\{!is(?:Operational)?ShiftActive \? t\('orders\.startShiftFirst'/);
   assert.match(
     source,
-    /aria-label=\{!isShiftActive \? t\('orders\.startShiftFirst'[\s\S]*?: t\('orderFlow\.startNewOrder'\)\}/,
+    /aria-label=\{!isOperationalShiftActive \? t\('orders\.startShiftFirst'[\s\S]*?: t\('orderFlow\.startNewOrder'\)\}/,
   );
-  assert.match(source, /className=\{!isShiftActive \? 'bg-gray-400 cursor-not-allowed opacity-50' : ''\}/);
+  assert.match(source, /className=\{!isOperationalShiftActive \? 'bg-gray-400 cursor-not-allowed opacity-50' : ''\}/);
 });
 
 test('New Order chooser keeps its wrapper invisible and uses light-theme card surfaces', () => {
@@ -3099,17 +3103,26 @@ test('dashboard lists and counters share their lane predicates, with tables gati
   );
 });
 
-// Fix review 30/09/2026 (founder rule): an order money was taken on is never
-// cancelled. The dashboard's cancel (single or bulk) and the platform decline
-// ask first, before the cancel reason; the till refuses it again, and that
-// refusal is told as such, never as a generic failure.
-test('every dashboard cancel refuses an order money was taken on', () => {
+// Manual paid cancellation now prepares a generation-bound return before the
+// reason, then atomically returns money and cancels. Unsupported originals and
+// paid labels with no receipt remain protected; platform decline stays separate.
+test('dashboard cancellation prepares paid returns and preserves protected-order refusals', () => {
   const source = orderDashboardSource();
+  const prepareStart = source.indexOf('} else if (action === "cancel") {');
+  const prepareEnd = source.indexOf('} else if (action === "edit") {', prepareStart);
+  assert.ok(prepareStart >= 0 && prepareEnd > prepareStart, 'bulk cancel preparation must exist');
+  const prepare = source.slice(prepareStart, prepareEnd);
+  assert.match(prepare, /const refusals = await findCancelRefusals\(selectedOrders\);/);
+  assert.match(prepare, /if \(refusals\.notRecorded\.length > 0\) announceCancelRefusedNotRecorded\(refusals\.notRecorded\);/);
   assert.match(
-    source,
-    /else if \(action === "cancel"\) \{[\s\S]*?const refusals = await findCancelRefusals\(selectedOrders\);[\s\S]*?announceCancelRefusedPaid\(refusals\.hasPayments\);[\s\S]*?announceCancelRefusedNotRecorded\(refusals\.notRecorded\);[\s\S]*?setPendingCancelOrders\(cancellable\);\s*setShowCancelModal\(true\);/,
-    'the bulk cancel must leave out orders money was taken on, and paid labels with no payment record, before asking the reason',
+    prepare,
+    /for \(const orderId of new Set\(\[\.\.\.refusals\.hasPayments, \.\.\.tableIds\]\)\) \{\s*try \{\s*plans\[orderId\] = await prepareManualOrderCancellation\(bridge, orderId\);\s*\} catch \(error\) \{[\s\S]*?protectedOrders\.push\(orderId\);/,
+    'paid and table orders must obtain native plans; failed preflight remains protected',
   );
+  assert.match(prepare, /const cancellable = selectedOrders\.filter\(id => !refusals\.notRecorded\.includes\(id\) && !protectedOrders\.includes\(id\)\);/);
+  assert.match(prepare, /if \(cancellable\.length === 0\) return;/);
+  assert.match(prepare, /setManualCancelPlans\(plans\);\s*setPendingCancelOrders\(cancellable\);\s*setShowCancelModal\(true\);/);
+  assert.ok(prepare.indexOf('await prepareManualOrderCancellation(') < prepare.indexOf('setShowCancelModal(true)'), 'preflight must finish before the reason opens');
   assert.match(
     source,
     /const declineRefusalAnnounced = async \(orderId: string\): Promise<boolean> => \{[\s\S]*?findCancelRefusals\(\[orderId\]\)[\s\S]*?announceCancelRefusedPaid\(refusals\.hasPayments\);\s*return true;[\s\S]*?announceCancelRefusedNotRecorded\(refusals\.notRecorded\);\s*return true;/,
@@ -3130,9 +3143,11 @@ test('every dashboard cancel refuses an order money was taken on', () => {
   );
   assert.match(
     source,
-    /const handleOrderCancellation = async \(reason: string\) => \{[\s\S]*?if \(!success && errorCode === ORDER_HAS_PAYMENTS\) \{[\s\S]*?announceCancelRefusedPaid\(\[orderId\]\);[\s\S]*?if \(!success && errorCode === ORDER_PAYMENT_NOT_RECORDED\) \{[\s\S]*?announceCancelRefusedNotRecorded\(\[orderId\]\);/,
+    /const handleOrderCancellation = async \(reason: string, returnChannel\?: CancellationReturnChannel\) => \{[\s\S]*?if \(!success && errorCode === ORDER_HAS_PAYMENTS\) \{[\s\S]*?announceCancelRefusedPaid\(\[orderId\]\);[\s\S]*?if \(!success && errorCode === ORDER_PAYMENT_NOT_RECORDED\) \{[\s\S]*?announceCancelRefusedNotRecorded\(\[orderId\]\);/,
     "the till's refusals must be told as such",
   );
+  assert.match(source, /if \(manualPlan\.requiresReturn && !returnChannel\) return;/);
+  assert.match(source, /await commitManualOrderCancellation\(bridge, manualPlan, trimmedReason, returnChannel \|\| "cash_drawer"\);\s*\}\s*continue;/, 'a planned return uses the atomic command and skips generic status cancellation');
   assert.match(source, /t\("orderDashboard\.cancelRefusedPaid"/);
   assert.match(source, /t\("orderDashboard\.cancelRefusedNotRecorded"/);
 });
@@ -3158,14 +3173,21 @@ test('the dashboard approval answers whether it happened and never announces a s
   );
 });
 
-// Round 2 review (01/10/2026): the table check's "Cancel the order" asks the
-// till's refusal (money taken on it, or a paid label with no payment record
-// here) before it asks the reason, like the release question and the decline.
-test('the table check refuses a cancel before it asks the reason', () => {
+// The table check now admits a paid return through a scoped canonical plan;
+// unsupported or changed originals still refuse before asking the reason.
+test('the table check prepares a scoped cancellation before it asks the reason', () => {
   const source = tableCheckManagerSource();
   assert.match(
     source,
-    /if \(await refuseOwingCancelUpFront\(orderId, t\)\) return;\s*setCancelReason\(''\);\s*setSecondaryModal\('cancel-order'\);/,
-    'the cancel reason must be asked only once the till does not refuse the cancel',
+    /void prepareTableCancellation\(session\.active_order_id as string, session\.id\)\s*\.then\(\(plan\) => \{[\s\S]*?setCancelPlan\(plan\);\s*setSecondaryModal\('cancel-order'\);\s*\}\)\s*\.catch\(error => toast\.error\(owingCancelFailureMessage\(error, t\)\)\)/,
+    'only successful scoped preflight may open the reason; failure must surface without opening it',
   );
+  assert.match(source, /secondaryModal === 'cancel-order' && cancelPlan \? \(/);
+  assert.match(source, /recovery=\{cancelPlan\.pending \? \{ reason: cancelPlan\.reason!, returnChannel: cancelPlan\.returnChannel \} : undefined\}/);
+  assert.match(source, /manualReturn=\{cancelPlan\.requiresReturn \? \{ amountCents: cancelPlan\.amountCents, currency: cancelPlan\.currency \} : undefined\}/);
+  const service = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'services', 'TableManualCancellation.ts'), 'utf8');
+  assert.match(service, /invoke\('order_prepare_manual_cancel', \{ orderId, tableSessionId \}\)/);
+  assert.match(service, /plan\?\.success !== true \|\| plan\.orderId !== orderId \|\| plan\.tableSessionId !== tableSessionId/);
+  assert.match(service, /typeof plan\.generation !== 'string' \|\| typeof plan\.requestId !== 'string' \|\| !plan\.requestId/);
+  assert.match(service, /throw new Error\('CANCELLATION_PAYMENT_CHANGED'\);/);
 });

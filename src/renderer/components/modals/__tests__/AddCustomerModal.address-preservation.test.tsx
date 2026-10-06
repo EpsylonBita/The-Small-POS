@@ -42,10 +42,13 @@ describe('saved delivery address editing', () => {
     fireEvent.submit(container.querySelector('form')!);
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith(address.id, expect.objectContaining({
       street_address: 'Ermou 12', city: 'Athens', postal_code: '10563', notes: 'Ring twice',
-      latitude: 37.98, longitude: 23.73, coordinates: { lat: 37.98, lng: 23.73 },
       floor_number: edit === 'floor' ? '3' : '2', name_on_ringer: edit === 'ringer' ? 'Family Papas' : 'Papas',
     }), 3));
+    for (const field of ['latitude', 'longitude', 'coordinates']) {
+      expect(mock.update.mock.calls[0][1]).not.toHaveProperty(field);
+    }
     expect(onCustomerAdded).toHaveBeenCalled();
+    expect(onCustomerAdded.mock.calls[0][0].addresses[0]).toMatchObject({ latitude: 37.98, longitude: 23.73 });
   });
   it('allows an intentional city change and clears the old point', async () => {
     const { container } = render(<AddCustomerModal isOpen onClose={() => {}} onCustomerAdded={() => {}} mode="editAddress" initialCustomer={customer} />);

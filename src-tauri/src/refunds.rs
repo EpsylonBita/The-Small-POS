@@ -370,6 +370,23 @@ pub(crate) fn refund_payment_in_connection(
     conn: &Connection,
     payload: &Value,
 ) -> Result<Value, String> {
+    refund_payment_with_cash_handler(conn, payload, false)
+}
+
+/// Only the atomic manual-cancellation service may use the explicitly selected
+/// cashier drawer. Ordinary refunds retain the existing courier-custody rule.
+pub(crate) fn refund_manual_cancellation_in_connection(
+    conn: &Connection,
+    payload: &Value,
+) -> Result<Value, String> {
+    refund_payment_with_cash_handler(conn, payload, true)
+}
+
+fn refund_payment_with_cash_handler(
+    conn: &Connection,
+    payload: &Value,
+    explicit_cashier_drawer: bool,
+) -> Result<Value, String> {
     let payment_id = str_field(payload, "paymentId")
         .or_else(|| str_field(payload, "payment_id"))
         .ok_or("Missing paymentId")?;
@@ -438,6 +455,11 @@ pub(crate) fn refund_payment_in_connection(
     // row is the platform's money, mirrored from the server. The till never
     // refunds it; the server decides what becomes of it. Refused before any
     // refund row, drawer or courier entry, or queued adjustment.
+    crate::edit_settlement_recovery::require_original_financial_attempt(
+        conn,
+        &order_id,
+        client_idempotency_key.as_deref(),
+    )?;
     if crate::payments::payment_is_platform_settlement(conn, &payment_id)? {
         return Err(crate::payments::PLATFORM_SETTLEMENT_NOT_REVERSIBLE.into());
     }
@@ -508,6 +530,7 @@ pub(crate) fn refund_payment_in_connection(
     // rule only: the courier while they still hold the order's cash, else
     // the drawer. A caller's answer never overrides it.
     let cash_handler = match refund_method {
+        RefundMethod::Cash if explicit_cashier_drawer => Some(CashHandler::CashierDrawer),
         RefundMethod::Cash => {
             let by_rule = cash_handler_by_rule(conn, &order_id)?;
             if let Some(requested) = requested_cash_handler.filter(|handler| *handler != by_rule) {

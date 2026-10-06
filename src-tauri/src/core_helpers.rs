@@ -236,7 +236,9 @@ pub(crate) fn can_transition_locally(from_status: &str, to_status: &str) -> bool
             to.as_str(),
             "pending" | "completed" | "cancelled" | "refunded"
         ),
-        "completed" => matches!(to.as_str(), "pending" | "refunded"),
+        // Completion history supports explicit return-and-cancel corrections.
+        // The mutation layer still requires original money to be returned first.
+        "completed" => matches!(to.as_str(), "pending" | "cancelled" | "refunded"),
         "cancelled" => to == "pending",
         _ => false,
     }

@@ -29,15 +29,15 @@ test('module lock and upsell surfaces use amber/neutral touch styling, not old b
   assert.match(trialPrompt, /active:scale-95 active:bg-white\/10/);
 });
 
-test('module gate behavior remains wired to analytics, checkout/admin fallback, and trial dismissal', () => {
+test('module gate components keep analytics, browser purchase review, and trial dismissal', () => {
   assert.match(lockedFeature, /fetch\('\/api\/analytics\/upsell'/);
-  assert.match(lockedFeature, /fetch\('\/api\/modules\/checkout'/);
+  assert.doesNotMatch(lockedFeature, /\/api\/modules\/checkout/);
   assert.match(lockedFeature, /generateModulePurchaseUrl\(adminUrl, moduleId/);
   assert.match(lockedFeature, /await openExternalUrl\(purchaseUrl\)/);
   assert.match(lockedFeature, /onBack\?\.\(\)/);
 
-  assert.match(upsellCard, /fetch\('\/api\/modules\/checkout'/);
-  assert.match(upsellCard, /await openExternalUrl\(data\.checkout_url\)/);
+  assert.doesNotMatch(upsellCard, /\/api\/modules\/checkout/);
+  assert.match(upsellCard, /await openExternalUrl\(purchaseUrl\)/);
   assert.match(upsellCard, /generateModulePurchaseUrl\(adminUrl, moduleId/);
   assert.match(upsellCard, /onClose\?\.\(\)/);
 

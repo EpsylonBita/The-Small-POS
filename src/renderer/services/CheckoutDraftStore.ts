@@ -23,6 +23,7 @@ export interface CheckoutDraftReply {
   draft: CheckoutDraft | null;
   generation: number;
   scope: CheckoutDraftScope;
+  invalidation?: { reason: 'edit_target_cancelled'; orderId: string };
 }
 
 export interface CheckoutDraftInspection {
@@ -35,6 +36,12 @@ export interface CheckoutDraftInspection {
 }
 
 type DraftTransport = (command: string, input: Record<string, any>) => Promise<any>;
+
+export class LegacyShiftCurrencyConfirmationRequired extends Error {
+  constructor(readonly shiftId: string, readonly currency: string) {
+    super('LEGACY_SHIFT_CURRENCY_CONFIRMATION_REQUIRED');
+  }
+}
 const nativeTransport: DraftTransport = (command, input) => getBridge().invoke(command, input);
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
@@ -55,6 +62,7 @@ export class CheckoutDraftStore {
   private loaded: Promise<CheckoutDraft | null> | null = null;
   private retired = new Set<string>();
   private retiredCheckouts = new Set<string>();
+  invalidation: CheckoutDraftReply['invalidation'];
 
   constructor(private scope: CheckoutDraftScope, private readonly transport: DraftTransport = nativeTransport) {}
 
@@ -63,6 +71,7 @@ export class CheckoutDraftStore {
       reply.scope?.organizationId !== this.scope.organizationId || reply.scope?.branchId !== this.scope.branchId ||
       !reply.scope?.terminalId) throw new Error('CHECKOUT_DRAFT_STORAGE_UNAVAILABLE');
     if (reply.draft) validateCheckoutDraft(reply.draft);
+    this.invalidation = !reply.draft && reply.invalidation?.reason === 'edit_target_cancelled' ? reply.invalidation : undefined;
     this.scope = { ...reply.scope };
     this.generation = reply.generation;
     this.draft = reply.draft ? copy(reply.draft) : null;
@@ -105,14 +114,25 @@ export class CheckoutDraftStore {
   clear(draftId: string, accepted = false): Promise<void> {
     return this.ordered(async () => {
       await this.load();
-      if (!this.draft || this.draft.draftId !== draftId) throw new Error('CHECKOUT_DRAFT_CHANGED');
-      if (!accepted && this.draft.phase !== 'editing') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+      if ((this.draft && this.draft.draftId !== draftId) || (!this.draft && accepted)) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      if (!accepted && this.draft && this.draft.phase !== 'editing') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
       this.accept(await this.transport('checkout_draft_delete', {
         ...this.scope, expectedGeneration: this.generation,
       }));
       this.retired.add(draftId);
       this.loaded = Promise.resolve(null);
     });
+  }
+
+  async checkAdmission(context: { orderId?: string } = {}): Promise<string> {
+    await this.load();
+    const reply = await this.transport('checkout_draft_check_admission', { ...this.scope, ...context });
+    if (reply?.success === false && reply.code === 'LEGACY_SHIFT_CURRENCY_CONFIRMATION_REQUIRED' &&
+      typeof reply.shiftId === 'string' && reply.shiftId && /^[A-Z]{3}$/.test(reply.currency || '')) {
+      throw new LegacyShiftCurrencyConfirmationRequired(reply.shiftId, reply.currency);
+    }
+    if (reply?.success !== true || !/^[A-Z]{3}$/.test(reply.currency || '')) throw new Error('STORE_CURRENCY_UNAVAILABLE');
+    return reply.currency;
   }
 
   async inspect(checkoutRequestId: string): Promise<CheckoutDraftInspection> {

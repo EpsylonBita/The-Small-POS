@@ -4188,7 +4188,11 @@
       "customerName": "Name",
       "customerPhone": "Telefon",
       "customerNotes": "Anmerkungen",
-      "loadItemsFailed": "Bestellpositionen konnten nicht geladen werden"
+      "loadItemsFailed": "Bestellpositionen konnten nicht geladen werden",
+      "editServerUpdate": "Bestellkorrekturen sind vorübergehend nicht verfügbar. Prüfen Sie die Verbindung und versuchen Sie es nach dem Serverupdate erneut.",
+      "editSyncRequired": "Die Zahlungs- oder Bestelländerung wurde noch nicht synchronisiert. Ihr Warenkorb ist gespeichert. Versuchen Sie es gleich erneut.",
+      "emptyEditHint": "Um alle Artikel zu entfernen, schließen Sie den Editor und stornieren Sie die Bestellung.",
+      "editCanonicalChanged": "Die Bestelldaten müssen aktualisiert werden. Aktualisieren Sie die Bestellung, bevor Sie eine Zahlung oder Rückerstattung bestätigen."
     },
     "payment": {
       "title": "Zahlung",
@@ -5200,6 +5204,20 @@
       "cashierShiftSyncUnknownReason": "Diese Kassenschicht ist lokal gespeichert, aber ihre Synchronisierung benötigt Aufmerksamkeit."
     },
     "orderCancellation": {
+      "staffCashAmbiguous": "Der Bargeldbestand des Mitarbeiters kann nicht bestätigt werden. Prüfen Sie die ursprüngliche Rückzahlung vor der Stornierung.",
+      "staffCashUnavailable": "Die Stornierung mit Bargeldübergabe ist vorübergehend nicht verfügbar. Prüfen Sie die Verbindung und versuchen Sie es nach dem Serverupdate erneut.",
+      "connectionUnavailable": "Der Zahlungs-Verbindungsstatus ist nicht verfügbar. Aktualisieren Sie Integrationen und versuchen Sie es erneut.",
+      "permissionRequired": "Dieses Konto darf bezahlte Bestellungen nicht stornieren.",
+      "paymentSyncRequired": "Die ursprüngliche Zahlung muss vor der Rückgabe synchronisiert werden. Synchronisieren und erneut versuchen; nicht erneut belasten.",
+      "paymentChanged": "Die Zahlung hat sich geändert. Schließen Sie das Fenster und wählen Sie erneut Stornieren, um den aktuellen Betrag zu prüfen.",
+      "drawerUnavailable": "Für eine Bargeldrückgabe muss eine Kasse geöffnet sein.",
+      "returnChannel": "Wie wurde das Geld zurückgegeben?",
+      "returnRecorded": "{{amount}} werden als bereits zurückgegeben erfasst. Es wird keine Zahlung ausgelöst.",
+      "cashDrawer": "Kasse",
+      "bank": "Bank",
+      "originalReturnRequired": "Bestellung {{orderNumber}} benötigt vor der Stornierung die ursprüngliche Rückzahlung oder einen bestätigten Verbindungsstatus.",
+      "mixedCurrencies": "Bestellungen mit verschiedenen Währungen bitte einzeln stornieren.",
+      "currencyMismatch": "Die erfassten Währungen stimmen nicht überein. Prüfen Sie vor der Stornierung die ursprüngliche Zahlung und die Kassenwährung.",
       "title": "Bestellungen stornieren",
       "message_one": "Sie sind dabei, {{count}} Bestellung zu stornieren. Bitte geben Sie einen Grund für die Stornierung an.",
       "message_other": "Sie sind dabei, {{count}} Bestellungen zu stornieren. Bitte geben Sie einen Grund für die Stornierung an.",
@@ -6049,6 +6067,8 @@
     "paymentMethodUpdated": "Zahlungsmethode aktualisiert",
     "paymentMethodUpdateFailed": "Zahlungsmethode konnte nicht aktualisiert werden",
     "paymentMethodNoChange": "Zahlungsmethode ist bereits ausgewählt",
+    "paymentMethodEditProviderOwned": "Diese Zahlung gehört zu einem Zahlungsanbieter. Ihre ursprüngliche Zahlungsart kann nicht umbenannt werden.",
+    "paymentMethodEditPending": "Speichern und synchronisieren Sie zuerst die ursprüngliche Bestellkorrektur, bevor Sie die Zahlungsart ändern.",
     "paymentMethodEditUnavailable": "Zahlungsmethode kann nur für eine einzelne nicht stornierte Bar-/Kartenbestellung bearbeitet werden",
     "paymentMethodEditChecking": "Zahlungsdatensätze werden geprüft…",
     "paymentMethodEditRequiresSingleCompletedPayment": "Diese Bestellung hat geteilte oder mehrere abgeschlossene Zahlungen. Deren Zahlungsarten können nicht gemeinsam als eine Zahlung geändert werden.",
@@ -9888,21 +9908,25 @@
       "not_saved": "Nicht gespeichert"
     },
     "reasonCodes": {
+      "table_cancellation_not_saved": "Die ursprüngliche Rückzahlung zur Tischstornierung wurde noch nicht gespeichert.",
       "payments_need_review": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, obwohl sie bereits bezahlt war. Sie ist zurückgestellt und wird nicht gezählt: Der Kunde hat möglicherweise doppelt bezahlt.",
       "payments_need_review__platform_held": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, aber die Lieferplattform hält das Geld dieser Bestellung bereits. Sie ist zurückgestellt und wird nicht gezählt: Der Kunde hat möglicherweise doppelt bezahlt.",
       "payments_not_saved": "Eine Kartenzahlung von {{paymentAmount}} wurde für Bestellung {{orderNumber}} belastet, ist an dieser Kasse aber noch nicht gespeichert. Der Kunde wurde belastet: nicht erneut belasten.",
       "payments_not_saved__new_order": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
       "payments_not_saved__new_order_cannot_save": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
-      "cancelled_order_claims_payment": "Diese Bestellung ist storniert, gilt aber noch als bezahlt, und diese Kasse hat für sie keinen Zahlungsdatensatz. Sie ist nicht in diesem Z-Report. Der Tagesabschluss wird dadurch nicht blockiert."
+      "cancelled_order_claims_payment": "Diese Bestellung ist storniert, gilt aber noch als bezahlt, und diese Kasse hat für sie keinen Zahlungsdatensatz. Sie ist nicht in diesem Z-Report. Der Tagesabschluss wird dadurch nicht blockiert.",
+      "edit_settlement_not_saved": "Eine bestätigte Bestellkorrektur ist noch nicht gespeichert. Die ursprüngliche Zahlung oder Rückzahlung bleibt erhalten."
     },
     "fixCodes": {
+      "table_cancellation_not_saved": "Stellen Sie die ursprüngliche Tischstornierung wieder her. Übergeben oder erstatten Sie das Geld nicht erneut.",
       "payments_need_review": "Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier. Wenn die Zahlung auf dem Server die falsche ist, wenden Sie sich vor dem Tagesabschluss an den Support.",
       "payments_need_review__platform_held": "Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier. Die Plattform zahlt diese Bestellung über ihre eigene Abrechnung an das Geschäft aus.",
       "payments_not_saved": "Speichern Sie die Zahlung erneut. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
       "payments_not_saved__cannot_save": "Diese Zahlung kann an dieser Kasse nicht gespeichert werden. Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier.",
       "payments_not_saved__new_order": "Speichern Sie die Zahlung erneut: Das speichert die Bestellung und ihre Zahlung, ohne neue Belastung. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
       "payments_not_saved__new_order_cannot_save": "Diese Bestellung und ihre Zahlung können an dieser Kasse nicht gespeichert werden. Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier.",
-      "cancelled_order_claims_payment": "Vom Server wiederherstellen („Jetzt synchronisieren“): Eine Zahlung, die der Server hat, wird hierher kopiert. Gibt es keine, entscheidet der Inhaber, was die Bestellung anzeigen soll."
+      "cancelled_order_claims_payment": "Vom Server wiederherstellen („Jetzt synchronisieren“): Eine Zahlung, die der Server hat, wird hierher kopiert. Gibt es keine, entscheidet der Inhaber, was die Bestellung anzeigen soll.",
+      "edit_settlement_not_saved": "Öffnen Sie die gespeicherte Bearbeitung und speichern Sie dieselbe Korrektur. Kein Geld erneut kassieren oder zurückzahlen."
     },
     "setAsidePaymentLabel": "Zurückgestellte Zahlung",
     "takenAtLabel": "Angenommen um",

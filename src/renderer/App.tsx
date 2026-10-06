@@ -1630,7 +1630,7 @@ function AppContent() {
             )}
 
             {/* Sync Status Indicator - Heart Icon in Top-Left (after navbar) */}
-            <div className="fixed top-12 left-[9.5rem] z-40">
+            <div data-cashier-recovery="true" className="fixed top-12 left-[9.5rem] z-40">
               <SyncStatusIndicator onOpenRecovery={openSyncRecovery} />
             </div>
 

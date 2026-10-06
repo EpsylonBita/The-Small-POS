@@ -507,8 +507,8 @@ pub(crate) fn courier_order_tender_cents(
         "SELECT LOWER(TRIM(COALESCE(op.method, ''))),
                 COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
                 {courier_cash},
-                {non_cash}
-         FROM order_payments op
+                {non_cash}, op.staff_id, op.staff_shift_id, o.branch_id, op.metadata
+         FROM order_payments op JOIN orders o ON o.id=op.order_id
          WHERE op.order_id = ?1
            AND NOT {placeholder}
            AND (
@@ -536,14 +536,32 @@ pub(crate) fn courier_order_tender_cents(
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|e| format!("query courier tender for {order_id}: {e}"))?;
     let mut tender = CourierTender::default();
     let mut cash_handed_back_for_non_cash = 0_i64;
     for row in rows {
-        let (method, gross, courier_cash_refunds, non_cash_refunds) =
+        let (method, gross, courier_cash_refunds, non_cash_refunds, staff, shift, branch, metadata) =
             row.map_err(|e| format!("read courier tender row for {order_id}: {e}"))?;
+        if method == "cash"
+            && crate::staff_cash_returns::original_cash_collector(
+                conn,
+                staff.as_deref(),
+                shift.as_deref(),
+                branch.as_deref().unwrap_or_default(),
+                metadata.as_deref(),
+            )?
+            .is_some_and(|owner| matches!(owner.role.as_str(), "cashier" | "manager"))
+        {
+            // This original cash never entered courier custody. A later
+            // delivery assignment or zero-cash earning cannot transfer it.
+            continue;
+        }
         match method.as_str() {
             "cash" => tender.cash_cents += (gross - courier_cash_refunds.max(0)).max(0),
             "card" => {
@@ -1486,6 +1504,11 @@ fn adjust_drawer_totals(
     // W4c dual-write: clamped delta also applied to cents siblings.
     let cash_delta_cents = Cents::round_half_even(cash_delta).as_i64();
     let card_delta_cents = Cents::round_half_even(card_delta).as_i64();
+    // A fully returned cancellation has no sale-attribution delta. In
+    // particular it must not touch a previously closed drawer's snapshot.
+    if cash_delta_cents == 0 && card_delta_cents == 0 {
+        return Ok(());
+    }
     conn.execute(
         "UPDATE cash_drawer_sessions
          SET total_cash_sales = CASE
