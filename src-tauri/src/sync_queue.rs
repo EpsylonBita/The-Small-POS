@@ -180,7 +180,7 @@ pub const MAX_RETRY_ATTEMPTS: i64 = 10;
 
 fn is_safe_transient_retry(code: &str, module: &str) -> bool {
     module != "repairs"
-        && matches!(
+        && (matches!(
             code,
             "NETWORK_ERROR"
                 | "HTTP_408_CLIENT_ERROR"
@@ -188,7 +188,35 @@ fn is_safe_transient_retry(code: &str, module: &str) -> bool {
                 | "HTTP_502_SERVER_ERROR"
                 | "HTTP_503_SERVER_ERROR"
                 | "HTTP_504_SERVER_ERROR"
-        )
+        ) || is_parity_item_retryable_code(code))
+}
+
+/// Stored code of a financial or shift item the server refused "for now"
+/// inside a 2xx batch answer: a remote-handover lock, a serialization or
+/// deadlock retry, a parent not on the server yet, or no per-item result at
+/// all. It takes the transport path: rescheduled with backoff, never a dead
+/// letter (`is_safe_transient_retry`). An optional `:<SERVER_CODE>` suffix
+/// names the server's own machine code.
+const PARITY_ITEM_RETRYABLE: &str = "PARITY_ITEM_RETRYABLE";
+
+/// Leading code of the stored reason of a financial or shift item the server
+/// refused inside a 2xx batch answer. The row stops as `failed` with the
+/// server's sentence after it, so Sync health and the Z say why.
+const PARITY_ITEM_REJECTED: &str = "PARITY_ITEM_REJECTED";
+
+/// The server's machine code for a money write against a shift whose figures
+/// a remote close froze (`20261006120100_remote_shift_movement_freeze.sql`,
+/// SQLSTATE 23514). Retrying never helps: the row parks as a conflict.
+pub(crate) const REMOTE_HANDOVER_SNAPSHOT_FROZEN: &str = "REMOTE_HANDOVER_SNAPSHOT_FROZEN";
+
+/// The server's machine code for remote-handover lock contention (55P03).
+const REMOTE_HANDOVER_RETRY_CODE: &str = "REMOTE_HANDOVER_RETRY";
+
+fn is_parity_item_retryable_code(code: &str) -> bool {
+    code == PARITY_ITEM_RETRYABLE
+        || code
+            .strip_prefix(PARITY_ITEM_RETRYABLE)
+            .is_some_and(|rest| rest.starts_with(':'))
 }
 
 fn audit_transient_schedule(conn: &Connection, id: &str, outcome: &str) -> Result<(), String> {
@@ -198,6 +226,17 @@ fn audit_transient_schedule(conn: &Connection, id: &str, outcome: &str) -> Resul
         SELECT id,organization_id,?2,?3,?4 FROM parity_sync_queue WHERE id=?1",params![id,before,outcome,Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
     conn.execute("DELETE FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 AND id NOT IN (SELECT id FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 ORDER BY id DESC LIMIT 32)",[id]).map_err(|e|e.to_string())?;
     Ok(())
+}
+
+/// Audit the revival of a payment row a parent-order deferral escalated to a
+/// conflict (`sync::reconcile_deferred_payments`): the scheduling metadata it
+/// had, before it returns to the queue.
+pub(crate) fn audit_parent_wait_revival(
+    conn: &Connection,
+    queue_id: &str,
+    outcome: &str,
+) -> Result<(), String> {
+    audit_transient_schedule(conn, queue_id, outcome)
 }
 
 fn resume_exhausted_transport_items(conn: &Connection) -> Result<(), String> {
@@ -1189,10 +1228,28 @@ pub struct ConflictAuditEntry {
 #[derive(Debug)]
 enum RequestPreparation {
     Ready(RequestSpec),
-    Consumed { reason: String },
-    Deferred { reason: String },
-    Failed { reason: String },
-    ManualResolution { reason_code: String },
+    Consumed {
+        reason: String,
+    },
+    Deferred {
+        reason: String,
+    },
+    /// The row waits for a parent whose own write is still queued here: it
+    /// is rescheduled without spending its budget ([`mark_waiting_for_parent`]).
+    WaitingForParent {
+        reason: String,
+    },
+    Failed {
+        reason: String,
+    },
+    ManualResolution {
+        reason_code: String,
+    },
+    /// The row cannot be sent and retrying will not change that: it parks as
+    /// a conflict with this reason, for a manager to see and resolve.
+    Conflict {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -7316,6 +7373,97 @@ pub fn mark_deferred(
     Ok(())
 }
 
+/// How long a payment or refund waits before it looks at its parent again
+/// while that parent's own write is still queued here (Android:
+/// `PARENT_WAIT_RECHECK_MS`).
+pub(crate) const PARENT_WAIT_RECHECK_SECS: i64 = 15;
+
+/// Park a payment or refund that waits for a parent (its order, or its
+/// original payment) whose own write is still queued on this till.
+///
+/// Unlike [`mark_deferred`], this never spends `attempts`: a payment of an
+/// order created offline used to burn one attempt per 5 s deferral and turn
+/// into a `conflict` after 50 (about 13 minutes offline), and
+/// `sync::reconcile_deferred_payments` never revived it once the order did
+/// sync. Waiting is not a failure (Android: `deferQueueItemAsync`, rows that
+/// wait for an earlier write of their order). The parent's own row stays the
+/// visible one: it is pending, failed or a conflict in Sync health.
+pub(crate) fn mark_waiting_for_parent(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    let next_retry = Utc::now() + ChronoDuration::seconds(PARENT_WAIT_RECHECK_SECS);
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 next_retry_at = ?2
+             WHERE id = ?3 AND claim_generation = ?4",
+            params![
+                reason,
+                next_retry.to_rfc3339(),
+                item_id,
+                expected_generation
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_waiting_for_parent: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "mark_waiting_for_parent no-op: claim_generation mismatch"
+        );
+        return Ok(());
+    }
+    reconcile_payment_queue_mirrors(conn, Some(item_id))
+}
+
+/// Whether a parent order is still on this till with a write of its own in
+/// the queue (its insert, or an update not yet applied remotely). Only then
+/// does a child wait without spending its budget: a parent that is gone, or
+/// that has nothing queued, leaves the child on the budgeted deferral, which
+/// escalates to a visible conflict.
+fn parent_order_write_in_flight(conn: &Connection, order_ref: &str) -> bool {
+    let order_ref = order_ref.trim();
+    if order_ref.is_empty() {
+        return false;
+    }
+    let local_id: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM orders
+             WHERE (id = ?1 OR supabase_id = ?1)
+               AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
+             LIMIT 1",
+            params![order_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    local_id.is_some_and(|id| sync::has_outstanding_local_order_queue(conn, &id))
+}
+
+/// Whether a parent payment still has its own row in the queue.
+fn parent_payment_write_in_flight(conn: &Connection, payment_id: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM parity_sync_queue
+             WHERE table_name = 'payments'
+               AND record_id = ?1
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND status IN ('pending', 'processing', 'failed', 'conflict')
+         )",
+        params![payment_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
 /// Why a table-session close waits (item D1): its table's payment is still on
 /// this till.
 pub(crate) const TABLE_SESSION_CLOSE_LOCAL_PAYMENT_WAIT_REASON: &str =
@@ -9809,9 +9957,15 @@ fn prepare_payment_request(
              WHERE id = ?1",
             params![item.record_id.as_str()],
         );
-        return Ok(RequestPreparation::Deferred {
-            reason: "Waiting for parent order sync".to_string(),
-        });
+        let reason = "Waiting for parent order sync".to_string();
+        // An order created offline still has its own insert queued: the
+        // payment waits for it without spending its budget. Without a write
+        // of the order in flight the deferral stays budgeted, and a parent
+        // that never syncs still ends as a visible conflict.
+        if parent_order_write_in_flight(conn, local_order_id.as_str()) {
+            return Ok(RequestPreparation::WaitingForParent { reason });
+        }
+        return Ok(RequestPreparation::Deferred { reason });
     };
 
     if sync::has_outstanding_local_order_queue(conn, local_order_id.as_str()) {
@@ -9824,7 +9978,9 @@ fn prepare_payment_request(
              WHERE id = ?1",
             params![item.record_id.as_str()],
         );
-        return Ok(RequestPreparation::Deferred {
+        // The order's own update is still queued here: waiting for it is
+        // not a failed attempt (Android: WAITS_FOR_EARLIER_ORDER_WRITE).
+        return Ok(RequestPreparation::WaitingForParent {
             reason: "Waiting for parent order update sync".to_string(),
         });
     }
@@ -10019,9 +10175,12 @@ fn prepare_adjustment_request(
         .map_err(|e| format!("sync_queue prepare_adjustment_request payment context: {e}"))?;
 
     let Some((payment_sync_state, remote_payment_id, order_id)) = payment_context else {
-        return Ok(RequestPreparation::Failed {
-            reason: "Adjustment parent payment was not found locally".to_string(),
-        });
+        // The parent payment row is gone from this till (an older Z erased
+        // it while this refund was still unsent, 06/10/2026). The refund is
+        // money that left the till: it is sent from its own payload when that
+        // names the server's payment or order, and otherwise parked for a
+        // manager. Never a silent failure loop, and never a guessed payment.
+        return prepare_orphan_adjustment_request(conn, item, payload, terminal_id, &payment_id);
     };
 
     if string_field(payload, &["parentEditEventId", "parent_edit_event_id"]).is_some()
@@ -10029,7 +10188,9 @@ fn prepare_adjustment_request(
             .as_deref()
             .is_some_and(|id| sync::has_outstanding_local_order_queue(conn, id))
     {
-        return Ok(RequestPreparation::Deferred {
+        // The order's own edit is still queued here: waiting for it spends
+        // no attempt.
+        return Ok(RequestPreparation::WaitingForParent {
             reason: "Waiting for atomic order edit settlement sync".to_string(),
         });
     }
@@ -10049,11 +10210,112 @@ fn prepare_adjustment_request(
              WHERE id = ?1",
             params![item.record_id.as_str()],
         );
-        return Ok(RequestPreparation::Deferred {
-            reason: "Waiting for parent payment sync".to_string(),
-        });
+        let reason = "Waiting for parent payment sync".to_string();
+        // The parent payment's own row is still queued here (for example a
+        // payment of an order created offline): the refund waits for it
+        // without spending its budget.
+        if parent_payment_write_in_flight(conn, payment_id.as_str()) {
+            return Ok(RequestPreparation::WaitingForParent { reason });
+        }
+        return Ok(RequestPreparation::Deferred { reason });
     }
 
+    build_adjustment_request(
+        conn,
+        item,
+        payload,
+        terminal_id,
+        payment_id.as_str(),
+        order_id,
+        canonical_payment_id,
+    )
+}
+
+/// Stored reason of a refund or void whose original payment row this till no
+/// longer has, and whose own record does not name the server's payment: it
+/// cannot be sent, so it parks as a conflict for a manager.
+pub(crate) const ADJUSTMENT_PARENT_PAYMENT_MISSING: &str = "ADJUSTMENT_PARENT_PAYMENT_MISSING";
+
+/// A refund or void whose original payment row is gone from this till.
+///
+/// Incident 06/10/2026: a manual cancellation queued a card refund at 01:36;
+/// the Z at 01:38 deleted the refund's local row and its parent payment while
+/// the refund was still unsent, and the row then failed forever with
+/// "Adjustment parent payment was not found locally". The server never got
+/// the refund.
+///
+/// The refund is still money that left the till. When its own payload names
+/// the server's payment (`canonicalPaymentId` / `remotePaymentId`), it is
+/// sent from that payload exactly as it would have been. Otherwise nothing
+/// on this till can say which server payment it reverses: it parks as a
+/// conflict that a manager sees (Sync health, and the Recovery Center's
+/// orphan entry, whose clear action still applies). No payment is guessed.
+fn prepare_orphan_adjustment_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+    payment_id: &str,
+) -> Result<RequestPreparation, String> {
+    let canonical_payment_id = string_field(
+        payload,
+        &[
+            "canonicalPaymentId",
+            "canonical_payment_id",
+            "remotePaymentId",
+            "remote_payment_id",
+        ],
+    )
+    .filter(|value| is_uuid(value));
+    let has_order_reference = string_field(
+        payload,
+        &["orderId", "order_id", "clientOrderId", "client_order_id"],
+    )
+    .is_some();
+    let Some(canonical_payment_id) = canonical_payment_id.filter(|_| has_order_reference) else {
+        let order_reference = string_field(
+            payload,
+            &["clientOrderId", "client_order_id", "orderId", "order_id"],
+        )
+        .unwrap_or_else(|| "unknown".to_string());
+        warn!(
+            adjustment_id = %item.record_id,
+            "Refund parked: its original payment is no longer on this till and the refund does not name the server payment"
+        );
+        return Ok(RequestPreparation::Conflict {
+            reason: format!(
+                "{ADJUSTMENT_PARENT_PAYMENT_MISSING}: the original payment of this refund is no longer on this till and the refund does not name the server payment (order {order_reference}); a manager must record it on the server"
+            ),
+        });
+    };
+    info!(
+        adjustment_id = %item.record_id,
+        "Refund sent from its own record: its original payment is no longer on this till"
+    );
+    build_adjustment_request(
+        conn,
+        item,
+        payload,
+        terminal_id,
+        payment_id,
+        None,
+        Some(canonical_payment_id),
+    )
+}
+
+/// The `/api/pos/payments/adjustments/sync` request of a refund or void.
+/// `local_order_id` is the parent payment's local order (absent for an
+/// orphan, whose payload names its orders itself).
+fn build_adjustment_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+    payment_id: &str,
+    local_order_id: Option<String>,
+    canonical_payment_id: Option<String>,
+) -> Result<RequestPreparation, String> {
+    let order_id = local_order_id;
     let (_, branch_id, _) = resolve_runtime_context(conn, payload);
     let adjustment_type =
         string_field(payload, &["adjustmentType", "adjustment_type"]).unwrap_or_default();
@@ -10072,7 +10334,7 @@ fn prepare_adjustment_request(
     };
     let mut body = sync::build_adjustment_sync_body(
         item.record_id.as_str(),
-        payment_id.as_str(),
+        payment_id,
         order_id_for_sync.as_deref(),
         client_order_id_for_sync.as_deref(),
         if adjustment_type.is_empty() {
@@ -11070,6 +11332,12 @@ fn apply_header_edit_ack(
                 && (a.is_null() || a.is_string())
                 && (b.is_null() || b.is_string()))
     };
+    // Fix 2 (06/10/2026): the server may link a customer the request named
+    // only by name/phone (`customer_id: null`), resolve the address identity
+    // or normalize a contact field. That is the canonical header of the same
+    // correction and is adopted; only a different status or fulfillment is a
+    // different outcome. Requiring byte equality failed every such ACK.
+    let mut adopted: Vec<(&str, Value)> = Vec::new();
     for (camel, snake) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS
         .iter()
         .copied()
@@ -11084,15 +11352,32 @@ fn apply_header_edit_ack(
                 return Ok(true);
             }
             if !equal(&canonical[snake], expected) {
-                return Err("ORDER_HEADER_ACK_SNAPSHOT_REQUIRED".into());
+                if matches!(snake, "status" | "order_type") {
+                    return Err("ORDER_HEADER_ACK_SNAPSHOT_REQUIRED".into());
+                }
+                adopted.push((snake, canonical.get(snake).cloned().unwrap_or(Value::Null)));
             }
         }
     }
-    conn.execute(
-        "UPDATE orders SET remote_version=?1,sync_status='synced',last_synced_at=?2 WHERE id=?3",
-        params![version, now, item.record_id],
-    )
-    .map_err(|e| e.to_string())?;
+    let projected = conn
+        .execute(
+            "UPDATE orders SET remote_version=?1,sync_status='synced',last_synced_at=?2 WHERE id=?3",
+            params![version, now, item.record_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if projected == 1 {
+        let (notes, others): (Vec<_>, Vec<_>) = adopted
+            .into_iter()
+            .partition(|(column, _)| matches!(*column, "notes" | "special_instructions"));
+        adopt_edit_ack_headers(conn, &item.record_id, &scope.organization, &others)?;
+        for (column, value) in notes {
+            conn.execute(
+                &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
+                params![value.as_str(), item.record_id, scope.organization],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
     Ok(true)
 }
 
@@ -11100,6 +11385,17 @@ fn apply_header_edit_ack(
 /// Without this projection a second edit sees transient renderer IDs and cannot
 /// prove its original. This runs inside the same fenced ACK transaction as the
 /// queue deletion, and never rewrites the applied receipt or its local version.
+///
+/// Fix 2 (06/10/2026): the server spreads an order-level discount across the
+/// lines (and prices tax-exclusive lines net plus VAT) and may link a customer
+/// the request named only by contact, so per-line totals and contact headers
+/// are not an identity contract. Requiring them made every ACK of a discounted
+/// paid edit fail, so the difference never uploaded and the order could not be
+/// edited again. The canonical result is accepted when its identity (order,
+/// scope, retained line UUIDs, products, quantities) and its economics (order
+/// total and the journaled settlement receipts) are the confirmed ones; the
+/// server's lines and the headers this edit named are then adopted locally, as
+/// the Android mirror does. A different money outcome is still refused.
 fn apply_edit_settlement_ack(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -11110,6 +11406,17 @@ fn apply_edit_settlement_ack(
         return Ok(false);
     }
     let payload: Value = serde_json::from_str(&item.data).map_err(|error| error.to_string())?;
+    if crate::edit_settlement_recovery::is_legacy_edit_payload(&payload) {
+        // Fix 1: the server adopted the unchanged 1.4.122 edit; its parked
+        // difference rows now sync on their original identity. The generic
+        // order acknowledgement still runs (`Ok(false)`).
+        let live:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND claim_generation=?2 AND data=?3 AND status='processing')",
+            params![item.id,item.claim_generation,item.data],|row|row.get(0)).map_err(|error|error.to_string())?;
+        if live && response.is_some_and(|answer| answer["success"] == true) {
+            crate::edit_settlement_recovery::release_legacy_edit_dependents(conn, &item.record_id)?;
+        }
+        return Ok(false);
+    }
     let context = &payload["settlement_context"];
     if context["kind"] != "pos_edit_settlement" || context["version"] != 1 {
         return Ok(false);
@@ -11215,29 +11522,31 @@ fn apply_edit_settlement_ack(
     if Some(Cents::round_half_even(total).as_i64()) != context["next_total_cents"].as_i64() {
         return Err(invalid());
     }
-    if canonical["notes"].as_str().unwrap_or("")
-        != payload[if explicit_notes {
-            "notes"
-        } else {
-            "orderNotes"
-        }]
-        .as_str()
-        .unwrap_or("")
-        || explicit_notes
-            && canonical["special_instructions"].as_str().unwrap_or("")
-                != payload["special_instructions"].as_str().unwrap_or("")
-    {
+    // The server's own settlement receipts, when it reports them, must be
+    // exactly the journaled ones: a different money outcome is refused.
+    let receipts = canonical.get("edit_settlement").unwrap_or(&Value::Null);
+    if !receipts.is_null() && !edit_ack_receipts_match(context, receipts) {
         return Err(invalid());
     }
     let local_headers =
         crate::edit_settlement_recovery::capture_order_headers(conn, &item.record_id)?;
+    let mut adopted_headers: Vec<(&str, Value)> = Vec::new();
     for (camel, snake) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
         if let Some(expected) = payload.get(*camel).or_else(|| payload.get(*snake)) {
             if local_headers[*snake] != *expected {
                 return Ok(true);
             }
             if canonical[*snake] != *expected {
-                return Err(invalid());
+                // A changed fulfillment is a different outcome; a linked
+                // customer, a normalized phone or a resolved address is the
+                // server's canonical header for the same edit.
+                if *snake == "order_type" {
+                    return Err(invalid());
+                }
+                adopted_headers.push((
+                    *snake,
+                    canonical.get(*snake).cloned().unwrap_or(Value::Null),
+                ));
             }
         }
     }
@@ -11247,81 +11556,8 @@ fn apply_edit_settlement_ack(
         .filter(|rows| rows.len() == submitted.len())
         .ok_or_else(invalid)?;
     crate::edit_settlement_recovery::items(&canonical["items"])?;
-    let identity = |line: &Value| {
-        string_field(
-            line,
-            &[
-                "source_order_item_id",
-                "sourceOrderItemId",
-                "order_item_id",
-                "orderItemId",
-                "id",
-            ],
-        )
-        .filter(|id| Uuid::parse_str(id).is_ok())
-    };
-    let signature = |line: &Value| -> Result<Value, String> {
-        let mut line = line.clone();
-        let object = line.as_object_mut().ok_or_else(invalid)?;
-        for key in [
-            "source_order_item_id",
-            "sourceOrderItemId",
-            "order_item_id",
-            "orderItemId",
-        ] {
-            object.remove(key);
-        }
-        object.insert(
-            "id".into(),
-            Value::String("00000000-0000-4000-8000-000000000001".into()),
-        );
-        Ok(crate::edit_settlement_recovery::items(&serde_json::json!([line]))?.remove(0))
-    };
-    let mut unmatched: Vec<usize> = (0..returned.len()).collect();
-    // Match canonical retained UUIDs first, then UUID-less new lines by their
-    // exact semantic multiset. Response ordering is not an identity contract.
-    let mut candidates: Vec<&Value> = submitted.iter().collect();
-    candidates.sort_by_key(|line| identity(line).is_none());
-    for line in candidates {
-        let original_id = identity(line);
-        let mut expected = signature(line)?;
-        // The canonical editor preserves omitted historical/display metadata
-        // from the retained UUID. Absence is not an instruction to replace it
-        // with the new effective price (or an empty name/note/override flag).
-        let omitted: Vec<&str> = [
-            (
-                "originalUnitCents",
-                &["original_unit_price", "originalUnitPrice"][..],
-            ),
-            (
-                "overridden",
-                &["is_price_overridden", "isPriceOverridden"][..],
-            ),
-            ("name", &["name", "menu_item_name", "menuItemName"][..]),
-            ("notes", &["notes"][..]),
-        ]
-        .into_iter()
-        .filter(|(_, aliases)| !aliases.iter().any(|key| line.get(*key).is_some()))
-        .map(|(normalized, _)| normalized)
-        .collect();
-        for key in &omitted {
-            expected.as_object_mut().unwrap().remove(*key);
-        }
-        let index = unmatched
-            .iter()
-            .position(|index| {
-                original_id
-                    .as_ref()
-                    .is_none_or(|id| identity(&returned[*index]).as_ref() == Some(id))
-                    && signature(&returned[*index]).is_ok_and(|mut actual| {
-                        for key in &omitted {
-                            actual.as_object_mut().unwrap().remove(*key);
-                        }
-                        actual == expected
-                    })
-            })
-            .ok_or_else(invalid)?;
-        unmatched.remove(index);
+    if !edit_ack_lines_match(submitted, returned) {
+        return Err(invalid());
     }
     let number = |key: &str| {
         canonical[key]
@@ -11334,13 +11570,162 @@ fn apply_edit_settlement_ack(
     let discount = number("discount_amount")?;
     let delivery = number("delivery_fee")?;
     let tip = number("tip_amount")?;
-    conn.execute("UPDATE orders SET items=?1,remote_version=?2,subtotal=?3,tax_amount=?4,discount_amount=?5,delivery_fee=?6,tip_amount=?7,
+    let projected = conn.execute("UPDATE orders SET items=?1,remote_version=?2,subtotal=?3,tax_amount=?4,discount_amount=?5,delivery_fee=?6,tip_amount=?7,
         subtotal_cents=?8,tax_amount_cents=?9,discount_amount_cents=?10,delivery_fee_cents=?11,tip_amount_cents=?12,
         sync_status='synced',last_synced_at=?13,notes=?17,special_instructions=?18 WHERE id=?14 AND organization_id=?15 AND items=?16",
         params![canonical["items"].to_string(),version,subtotal,tax,discount,delivery,tip,
             Cents::round_half_even(subtotal).as_i64(),Cents::round_half_even(tax).as_i64(),Cents::round_half_even(discount).as_i64(),Cents::round_half_even(delivery).as_i64(),Cents::round_half_even(tip).as_i64(),
             now,item.record_id,scope.organization,local_items,canonical["notes"].as_str(),canonical["special_instructions"].as_str()]).map_err(|error|error.to_string())?;
+    if projected == 1 {
+        adopt_edit_ack_headers(conn, &item.record_id, &scope.organization, &adopted_headers)?;
+    }
     Ok(true)
+}
+
+/// A canonical line's own UUID (never a renderer transient or menu id).
+fn edit_ack_line_identity(line: &Value) -> Option<String> {
+    string_field(
+        line,
+        &[
+            "source_order_item_id",
+            "sourceOrderItemId",
+            "order_item_id",
+            "orderItemId",
+            "id",
+        ],
+    )
+    .filter(|id| Uuid::parse_str(id).is_ok())
+}
+
+/// What an ACK line must keep: its product and its quantity. Prices and line
+/// totals are the server's (order-level discounts are allocated per line).
+fn edit_ack_line_key(line: &Value) -> (Option<String>, Option<String>, Option<i64>) {
+    let product = |keys: &[&str]| {
+        string_field(line, keys).filter(|id| {
+            let id = id.trim();
+            !id.is_empty() && !id.eq_ignore_ascii_case("manual")
+        })
+    };
+    let quantity = line
+        .get("quantity")
+        .and_then(number_from_value)
+        .filter(|quantity| quantity.is_finite())
+        .map(|quantity| (quantity * 1000.0).round() as i64);
+    (
+        product(&["menu_item_id", "menuItemId"]),
+        product(&["retail_product_id", "retailProductId"]),
+        quantity,
+    )
+}
+
+/// Retained lines match by canonical UUID, product and quantity; new lines
+/// (no UUID yet) match the remaining canonical lines as an exact multiset of
+/// product and quantity. Response ordering is not an identity contract.
+fn edit_ack_lines_match(submitted: &[Value], returned: &[Value]) -> bool {
+    if submitted.len() != returned.len() {
+        return false;
+    }
+    let mut unmatched: Vec<usize> = (0..returned.len()).collect();
+    let mut candidates: Vec<&Value> = submitted.iter().collect();
+    candidates.sort_by_key(|line| edit_ack_line_identity(line).is_none());
+    for line in candidates {
+        let identity = edit_ack_line_identity(line);
+        let key = edit_ack_line_key(line);
+        if key.2.is_none() {
+            return false;
+        }
+        let Some(position) = unmatched.iter().position(|index| {
+            let candidate = &returned[*index];
+            let candidate_identity = edit_ack_line_identity(candidate);
+            let identity_matches = match identity.as_ref() {
+                Some(id) => candidate_identity.as_ref() == Some(id),
+                // A new line takes a canonical line no retained UUID claims.
+                None => !submitted.iter().any(|other| {
+                    edit_ack_line_identity(other)
+                        .is_some_and(|other| candidate_identity.as_ref() == Some(&other))
+                }),
+            };
+            identity_matches && edit_ack_line_key(candidate) == key
+        }) else {
+            return false;
+        };
+        unmatched.remove(position);
+    }
+    unmatched.is_empty()
+}
+
+/// The server's settlement receipts are exactly the journaled ones: the same
+/// local receipt ids, amounts and refunded originals, nothing more.
+fn edit_ack_receipts_match(context: &Value, receipts: &Value) -> bool {
+    let empty = Vec::new();
+    let expected_payments = context["payments"].as_array().unwrap_or(&empty);
+    let expected_refunds = context["refunds"].as_array().unwrap_or(&empty);
+    if receipts.is_null() {
+        return expected_payments.is_empty() && expected_refunds.is_empty();
+    }
+    let (Some(payments), Some(refunds)) = (
+        receipts["payments"].as_array(),
+        receipts["refunds"].as_array(),
+    ) else {
+        return false;
+    };
+    if receipts["version"] != 1
+        || receipts["client_event_id"] != context["client_event_id"]
+        || payments.len() != expected_payments.len()
+        || refunds.len() != expected_refunds.len()
+    {
+        return false;
+    }
+    expected_payments.iter().all(|expected| {
+        payments.iter().any(|row| {
+            row["local_payment_id"] == expected["payment_id"]
+                && row["amount_cents"].as_i64() == expected["amount_cents"].as_i64()
+                && row["payment_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.trim().is_empty())
+        })
+    }) && expected_refunds.iter().all(|expected| {
+        refunds.iter().any(|row| {
+            row["adjustment_id"] == expected["adjustment_id"]
+                && row["payment_id"] == expected["payment_id"]
+                && row["amount_cents"].as_i64() == expected["amount_cents"].as_i64()
+        })
+    })
+}
+
+/// Adopt the canonical value of each header this edit named (a linked
+/// customer, a normalized phone, a resolved address identity).
+fn adopt_edit_ack_headers(
+    conn: &Connection,
+    order: &str,
+    organization: &str,
+    headers: &[(&str, Value)],
+) -> Result<(), String> {
+    for (column, value) in headers {
+        if !crate::edit_settlement_recovery::EDIT_HEADER_FIELDS
+            .iter()
+            .any(|(_, known)| known == column)
+        {
+            continue;
+        }
+        let bound = match value {
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Bool(flag) => rusqlite::types::Value::Integer(i64::from(*flag)),
+            Value::Number(number) => number
+                .as_i64()
+                .map(rusqlite::types::Value::Integer)
+                .or_else(|| number.as_f64().map(rusqlite::types::Value::Real))
+                .unwrap_or(rusqlite::types::Value::Null),
+            Value::String(text) => rusqlite::types::Value::Text(text.clone()),
+            other => rusqlite::types::Value::Text(other.to_string()),
+        };
+        conn.execute(
+            &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
+            params![bound, order, organization],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -11764,6 +12149,252 @@ fn is_replay_conflict_response(status: u16, response_body: &str, item: &SyncQueu
         item.module_type.as_str(),
         "orders" | "catalog" | "settings" | "operations"
     )
+}
+
+/// What a 2xx answer says about the one item a per-item endpoint carried.
+///
+/// `/api/pos/financial/sync` answers `207` with `results[0].success = false`
+/// for every refused item except the remote-handover lock (503), and
+/// `/api/pos/shifts/sync` answers `207` with `results[].status = 'error'`.
+/// Treating the 2xx envelope as the acknowledgement deleted those rows as
+/// synced: the money never reached the server and nobody saw it (06/10/2026).
+/// Android parity: `SyncService.syncFinancialRecordViaAdmin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemAcknowledgement {
+    /// Not a per-item endpoint: the 2xx envelope is the acknowledgement.
+    NotPerItem,
+    /// The item's own result confirms it.
+    Confirmed,
+    /// Refused for now (lock, serialization, a parent not on the server
+    /// yet, no per-item result): `code` is the stored transient code.
+    Retryable { code: String },
+    /// Refused: `reason` is the stored reason. `frozen` names a write against
+    /// a shift a remote close froze, which parks as a conflict.
+    Rejected { reason: String, frozen: bool },
+}
+
+impl ItemAcknowledgement {
+    fn acknowledges(&self) -> bool {
+        matches!(self, Self::NotPerItem | Self::Confirmed)
+    }
+}
+
+fn per_item_acknowledgement(item: &SyncQueueItem, response: Option<&Value>) -> ItemAcknowledgement {
+    match item.table_name.as_str() {
+        "driver_earnings" | "driver_earning" | "shift_expenses" | "staff_payments" => {
+            financial_item_acknowledgement(item, response)
+        }
+        "staff_shifts" => shift_item_acknowledgement(item, response),
+        _ => ItemAcknowledgement::NotPerItem,
+    }
+}
+
+fn missing_item_result() -> ItemAcknowledgement {
+    ItemAcknowledgement::Retryable {
+        code: format!("{PARITY_ITEM_RETRYABLE}:ITEM_RESULT_MISSING"),
+    }
+}
+
+fn response_results(response: Option<&Value>) -> Option<&Vec<Value>> {
+    response
+        .and_then(|body| {
+            body.get("results")
+                .or_else(|| body.pointer("/data/results"))
+        })
+        .and_then(Value::as_array)
+        .filter(|results| !results.is_empty())
+}
+
+fn result_text(result: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| result.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Financial items: the request carries exactly this row, so its own
+/// `results[]` entry must say `success: true`.
+fn financial_item_acknowledgement(
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> ItemAcknowledgement {
+    let Some(results) = response_results(response) else {
+        return missing_item_result();
+    };
+    let own = results
+        .iter()
+        .find(|result| result_text(result, &["entity_id"]).as_deref() == Some(&item.record_id));
+    let Some(result) = own.or_else(|| (results.len() == 1).then(|| &results[0])) else {
+        return missing_item_result();
+    };
+    let status = result_text(result, &["status"]).map(|value| value.to_ascii_lowercase());
+    let confirmed = match result.get("success").and_then(Value::as_bool) {
+        Some(success) => success,
+        // An older answer without `success`: its status decides.
+        None => matches!(status.as_deref(), Some("ok" | "skipped")),
+    };
+    if confirmed {
+        return ItemAcknowledgement::Confirmed;
+    }
+    classify_item_failure(
+        result.get("retryable").and_then(Value::as_bool),
+        result_text(result, &["code"]),
+        result_text(result, &["message", "error"]),
+    )
+}
+
+/// Shift events: every `results[]` entry of this row's shift must be `ok`
+/// or `skipped`.
+fn shift_item_acknowledgement(
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> ItemAcknowledgement {
+    let Some(results) = response_results(response) else {
+        return missing_item_result();
+    };
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+    let shift_id = string_field(&payload, &["shiftId", "shift_id"])
+        .unwrap_or_else(|| item.record_id.trim().to_string());
+    let own: Vec<&Value> = results
+        .iter()
+        .filter(|result| result_text(result, &["shift_id"]).as_deref() == Some(shift_id.as_str()))
+        .collect();
+    if own.is_empty() {
+        return missing_item_result();
+    }
+    let refused = own.into_iter().find(|result| {
+        !matches!(
+            result_text(result, &["status"])
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("ok" | "skipped")
+        )
+    });
+    match refused {
+        None => ItemAcknowledgement::Confirmed,
+        Some(result) => classify_item_failure(
+            result.get("retryable").and_then(Value::as_bool),
+            result_text(result, &["code"]),
+            result_text(result, &["message", "error"]),
+        ),
+    }
+}
+
+/// Classify a refused item the way Android does: the server's own
+/// `retryable` flag first; without one (shift results, older servers) its
+/// code and sentence. A remote-handover lock is always retried; a frozen
+/// remote-close snapshot never is.
+fn classify_item_failure(
+    retryable: Option<bool>,
+    code: Option<String>,
+    message: Option<String>,
+) -> ItemAcknowledgement {
+    let code = code.and_then(|code| bounded_parity_machine_code(&code));
+    let message = message.unwrap_or_default();
+    let frozen = code.as_deref() == Some(REMOTE_HANDOVER_SNAPSHOT_FROZEN)
+        || message.contains(REMOTE_HANDOVER_SNAPSHOT_FROZEN);
+    if frozen {
+        let sentence = if message.trim().is_empty() {
+            "The shift this record belongs to was closed on another device".to_string()
+        } else {
+            message
+        };
+        return ItemAcknowledgement::Rejected {
+            reason: normalize_conflict_reason(&format!(
+                "{SERVER_CONFLICT_PREFIX}_{REMOTE_HANDOVER_SNAPSHOT_FROZEN}: {sentence}"
+            )),
+            frozen: true,
+        };
+    }
+    let lock_contention = code.as_deref() == Some(REMOTE_HANDOVER_RETRY_CODE)
+        || message.contains(REMOTE_HANDOVER_RETRY_CODE);
+    let retry = lock_contention
+        || retryable.unwrap_or_else(|| item_failure_text_is_retryable(code.as_deref(), &message));
+    if retry {
+        return ItemAcknowledgement::Retryable {
+            code: match code {
+                Some(code) => format!("{PARITY_ITEM_RETRYABLE}:{code}"),
+                None => PARITY_ITEM_RETRYABLE.to_string(),
+            },
+        };
+    }
+    let prefix = match code {
+        Some(code) => format!("{PARITY_ITEM_REJECTED}:{code}"),
+        None => PARITY_ITEM_REJECTED.to_string(),
+    };
+    let reason = if message.trim().is_empty() {
+        prefix
+    } else {
+        format!("{prefix}: {message}")
+    };
+    ItemAcknowledgement::Rejected {
+        reason: normalize_conflict_reason(&reason),
+        frozen: false,
+    }
+}
+
+/// Whether a refused item's code or sentence names a temporary condition:
+/// lock contention, a serialization or deadlock retry, a parent not on the
+/// server yet, or a transport or database-availability problem. Used only
+/// when the answer carries no `retryable` flag.
+fn item_failure_text_is_retryable(code: Option<&str>, message: &str) -> bool {
+    if code.is_some_and(|code| {
+        matches!(
+            code,
+            "REMOTE_HANDOVER_RETRY" | "40001" | "40P01" | "55P03" | "57P03" | "53300" | "TIMEOUT"
+        ) || code.starts_with("08")
+    }) {
+        return true;
+    }
+    let lower = message.to_ascii_lowercase();
+    [
+        "remote_handover_retry",
+        "retry later",
+        "not found on backend",
+        "not found on the backend",
+        "could not serialize access",
+        "deadlock detected",
+        "could not obtain lock",
+        "lock not available",
+        "lock_not_available",
+        "canceling statement due to",
+        "timed out",
+        "timeout",
+        "connection refused",
+        "connection reset",
+        "connection terminated",
+        "connection closed",
+        "could not connect",
+        "network error",
+        "fetch failed",
+        "econnreset",
+        "socket hang up",
+        "temporarily unavailable",
+        "too many connections",
+        "the database system is",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// A refusal of a write against a shift whose money a remote close froze
+/// (typed by the server as `REMOTE_HANDOVER_SNAPSHOT_FROZEN`, from SQLSTATE
+/// 23514). It never succeeds on a retry, so it is never retried and never
+/// auto-resolved: it parks as a conflict that names it.
+fn is_remote_handover_frozen_response(status: u16, response_body: &str) -> bool {
+    if (200..300).contains(&status) {
+        return false;
+    }
+    let Ok(body) = serde_json::from_str::<Value>(response_body) else {
+        return false;
+    };
+    body.get("code").and_then(Value::as_str) == Some(REMOTE_HANDOVER_SNAPSHOT_FROZEN)
+        || ["error", "message"].iter().any(|key| {
+            body.get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains(REMOTE_HANDOVER_SNAPSHOT_FROZEN))
+        })
 }
 
 fn is_parent_order_wait_response(status: u16, response_body: &str) -> bool {
@@ -12467,6 +13098,15 @@ where
             resume_exhausted_transport_items(&db)?;
             let _ = cleanup_superseded_synced_order_status_updates(&db)?;
             if visibility == QueueProcessVisibility::InternalAll {
+                // Fix 1 (06/10/2026): identity-less 1.4.122 paid edits go back
+                // in line unchanged (bounded) or are named for a manager.
+                if let Err(error) = crate::edit_settlement_recovery::requeue_legacy_edits(&db)
+                    .and_then(|_| {
+                        crate::edit_settlement_recovery::mark_legacy_edits_for_review(&db)
+                    })
+                {
+                    warn!(error = %error, "Legacy edit recovery deferred");
+                }
                 let mut remaining_requeue_budget = MAX_AUTO_REQUEUE_ITEMS_PER_CYCLE;
 
                 let terminal_context_retries =
@@ -12781,6 +13421,48 @@ where
                 }
                 continue;
             }
+            RequestPreparation::WaitingForParent { reason } => {
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_waiting_for_parent(db, &item.id, &reason, item.claim_generation)
+                    })?
+                };
+                if applied.is_some() {
+                    telemetry.record_deferred(&item, &reason);
+                }
+                continue;
+            }
+            RequestPreparation::Conflict { reason } => {
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        log_conflict(
+                            db,
+                            &item.operation,
+                            &item.record_id,
+                            &item.table_name,
+                            item.version,
+                            item.version,
+                            &item.data,
+                            "manual",
+                            is_monetary_item(&item),
+                            false,
+                        )?;
+                        mark_conflict(db, &item.id, item.claim_generation, &reason)?;
+                        reconcile_payment_queue_mirrors(db, Some(&item.id))
+                    })?
+                };
+                if applied.is_some() {
+                    conflicts += 1;
+                    closeout_exempt.record_conflict(closeout_exempt_row);
+                    let code = bounded_queue_error_code(&reason)
+                        .unwrap_or_else(|| CONFLICT_REASON_UNSPECIFIED.to_string());
+                    telemetry.record_error(&item, "conflict", &code, None);
+                    errors.push(safe_sync_error(&item, &code, None));
+                }
+                continue;
+            }
             RequestPreparation::ManualResolution { reason_code } => {
                 let applied = {
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -12926,7 +13608,18 @@ where
                         .as_ref()
                         .and_then(sync::room_charge_response_applied)
                         .is_some();
-                if is_success && address_acknowledged && room_charge_acknowledged {
+                // A 2xx batch answer acknowledges a financial or shift row
+                // only through that row's own result (06/10/2026).
+                let item_acknowledgement = if is_success {
+                    per_item_acknowledgement(&item, response_json.as_ref())
+                } else {
+                    ItemAcknowledgement::NotPerItem
+                };
+                if is_success
+                    && address_acknowledged
+                    && room_charge_acknowledged
+                    && item_acknowledgement.acknowledges()
+                {
                     // Success -- remove from queue
                     let applied = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -12943,6 +13636,155 @@ where
                     if applied.is_some() {
                         processed += 1;
                         telemetry.record_success(&item);
+                    }
+                } else if let ItemAcknowledgement::Retryable { code } = &item_acknowledgement {
+                    // The server refused this one item for now (a lock, a
+                    // serialization retry, a parent not on the server yet):
+                    // the transport path, which reschedules with backoff and
+                    // never turns the row into a dead letter.
+                    let failure = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_failure_in_transaction(db, &item.id, code, item.claim_generation)
+                        })?
+                    };
+                    let Some(failure) = failure else {
+                        continue;
+                    };
+                    if !failure.applied {
+                        continue;
+                    }
+                    if let Some(dl) = failure.monetary_notice {
+                        monetary_dead_letters.push(dl);
+                    }
+                    if failure.transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
+                    failed += 1;
+                    closeout_exempt
+                        .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
+                    telemetry.record_error(&item, "pending", PARITY_ITEM_RETRYABLE, Some(status));
+                    errors.push(safe_sync_error(&item, PARITY_ITEM_RETRYABLE, Some(status)));
+                } else if let ItemAcknowledgement::Rejected { reason, frozen } =
+                    &item_acknowledgement
+                {
+                    if *frozen {
+                        // A write against a shift a remote close froze: a
+                        // conflict that names it, never retried.
+                        let applied = {
+                            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                            with_live_generic_claim(&db, &item, |db| {
+                                log_conflict(
+                                    db,
+                                    &item.operation,
+                                    &item.record_id,
+                                    &item.table_name,
+                                    item.version,
+                                    item.version,
+                                    &item.data,
+                                    "manual",
+                                    is_monetary_item(&item),
+                                    false,
+                                )?;
+                                mark_conflict(db, &item.id, item.claim_generation, reason)
+                            })?
+                        };
+                        if applied.is_some() {
+                            conflicts += 1;
+                            closeout_exempt.record_conflict(closeout_exempt_row);
+                            telemetry.record_error(
+                                &item,
+                                "conflict",
+                                REMOTE_HANDOVER_SNAPSHOT_FROZEN,
+                                Some(status),
+                            );
+                            errors.push(safe_sync_error(
+                                &item,
+                                REMOTE_HANDOVER_SNAPSHOT_FROZEN,
+                                Some(status),
+                            ));
+                        }
+                        continue;
+                    }
+                    // Refused for good: the row stops as `failed` with the
+                    // server's own sentence, exactly like a 4xx answer.
+                    let failure = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            let failure = mark_failure_in_transaction(
+                                db,
+                                &item.id,
+                                reason,
+                                item.claim_generation,
+                            )?;
+                            if failure.applied {
+                                db.execute(
+                                    "UPDATE parity_sync_queue
+                                     SET status = 'failed', next_retry_at = NULL
+                                     WHERE id = ?1 AND claim_generation = ?2",
+                                    params![item.id, item.claim_generation],
+                                )
+                                .map_err(|e| format!("mark refused item failed: {e}"))?;
+                            }
+                            Ok(failure)
+                        })?
+                    };
+                    let Some(failure) = failure else {
+                        continue;
+                    };
+                    if !failure.applied {
+                        continue;
+                    }
+                    if let Some(dl) = failure.monetary_notice {
+                        monetary_dead_letters.push(dl);
+                    }
+                    if failure.transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
+                    failed += 1;
+                    closeout_exempt
+                        .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
+                    telemetry.record_error(&item, "failed", PARITY_ITEM_REJECTED, Some(status));
+                    errors.push(safe_sync_error(&item, PARITY_ITEM_REJECTED, Some(status)));
+                } else if is_remote_handover_frozen_response(status, &response_body) {
+                    // The server refused a write against a shift whose money a
+                    // remote close froze. A retry can never succeed and the
+                    // write never landed, so it is never auto-resolved: a
+                    // conflict that names it, for a manager.
+                    let reason =
+                        server_conflict_reason(&response_body, &item.table_name, &item.operation);
+                    let applied = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            log_conflict(
+                                db,
+                                &item.operation,
+                                &item.record_id,
+                                &item.table_name,
+                                item.version,
+                                item.version,
+                                &item.data,
+                                "manual",
+                                is_monetary_item(&item),
+                                false,
+                            )?;
+                            mark_conflict(db, &item.id, item.claim_generation, &reason)
+                        })?
+                    };
+                    if applied.is_some() {
+                        conflicts += 1;
+                        closeout_exempt.record_conflict(closeout_exempt_row);
+                        telemetry.record_error(
+                            &item,
+                            "conflict",
+                            REMOTE_HANDOVER_SNAPSHOT_FROZEN,
+                            Some(status),
+                        );
+                        errors.push(safe_sync_error(
+                            &item,
+                            REMOTE_HANDOVER_SNAPSHOT_FROZEN,
+                            Some(status),
+                        ));
                     }
                 } else if item.table_name == "customer_addresses"
                     && ((status == 409 || status >= 500)
@@ -13024,6 +13866,49 @@ where
                     if applied.is_some() {
                         processed += 1;
                         telemetry.record_outcome(&item, "processed", "platform_held_set_aside");
+                    }
+                } else if item.table_name == "payments"
+                    && crate::payment_review::response_reports_reconciliation_required(
+                        status,
+                        &response_body,
+                    )
+                {
+                    // The order changed on the server after this money was
+                    // taken (another till cancelled it, or its total moved):
+                    // the server admits no new receipt for it and asks for a
+                    // reconciliation. The money already moved here, so it is
+                    // set aside for a manager (`payments_need_review`) like a
+                    // platform-held refusal, never retried into a failure.
+                    let applied = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            let now = Utc::now().to_rfc3339();
+                            let outcome =
+                                crate::payment_review::set_aside_reconciliation_required_payment(
+                                    db,
+                                    item.record_id.as_str(),
+                                    &now,
+                                )?;
+                            if let crate::payment_review::SetAsideOutcome::StatusUnavailable {
+                                ..
+                            } = outcome
+                            {
+                                crate::payment_review::hold_payment_unlinked(
+                                    db,
+                                    item.record_id.as_str(),
+                                    &now,
+                                )?;
+                            }
+                            mark_success(db, &item.id, item.claim_generation)
+                        })?
+                    };
+                    if applied.is_some() {
+                        processed += 1;
+                        telemetry.record_outcome(
+                            &item,
+                            "processed",
+                            "reconciliation_required_set_aside",
+                        );
                     }
                 } else if is_parent_order_wait_response(status, &response_body) {
                     let reason = "Waiting for parent order sync";
@@ -21098,7 +21983,7 @@ mod tests {
                     conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,status) VALUES('newer','orders','ack-order','UPDATE','{}','org-1',datetime('now'),'pending')",[]).unwrap();
                 }
                 "foreign" => answer["data"]["branch_id"] = json!("foreign"),
-                "changed_item" => answer["data"]["items"][0]["unit_price"] = json!(1),
+                "changed_item" => answer["data"]["items"][0]["quantity"] = json!(2),
                 "explicit_original" => {
                     let mut payload: Value = serde_json::from_str(&parent.data).unwrap();
                     payload["items"][0]["original_unit_price"] = json!(6);
@@ -21153,32 +22038,33 @@ mod tests {
                 apply_success(c, &parent, Some(&answer))?;
                 mark_success(c, &parent.id, parent.claim_generation)
             });
-            if [
-                "foreign",
-                "changed_item",
-                "explicit_original",
-                "explicit_null_note",
-            ]
-            .contains(&change)
-            {
+            // Fix 2 (06/10/2026): the server's canonical line metadata for the
+            // same line identity, products, quantities and money is adopted
+            // (it allocates discounts and keeps retained history); a changed
+            // quantity or scope is still refused.
+            let adopted = ["explicit_original", "explicit_null_note"].contains(&change);
+            if ["foreign", "changed_item"].contains(&change) {
                 assert!(result.is_err(), "{change}");
             } else {
                 assert!(result.is_ok(), "{change}");
             }
-            assert_eq!(
-                conn.query_row(
+            let after: (String, String, Option<i64>) = conn
+                .query_row(
                     "SELECT items,sync_status,remote_version FROM orders WHERE id='ack-order'",
                     [],
-                    |r| Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<i64>>(2)?
-                    ))
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
-                .unwrap(),
-                before,
-                "{change}"
-            );
+                .unwrap();
+            if adopted {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&after.0).unwrap(),
+                    answer["data"]["items"],
+                    "{change}"
+                );
+                assert_eq!(after.2, Some(4), "{change}");
+            } else {
+                assert_eq!(after, before, "{change}");
+            }
         }
     }
 
@@ -21340,11 +22226,13 @@ mod tests {
         let request = prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID)
             .expect("prepare payment request");
 
+        // The order's own update is queued here: the payment waits for it
+        // without spending its budget (06/10/2026).
         match request {
-            RequestPreparation::Deferred { reason } => {
+            RequestPreparation::WaitingForParent { reason } => {
                 assert_eq!(reason, "Waiting for parent order update sync");
             }
-            other => panic!("expected deferred payment request, got {other:?}"),
+            other => panic!("expected a budget-free parent wait, got {other:?}"),
         }
 
         let (sync_state, sync_error): (String, Option<String>) = conn
@@ -30935,6 +31823,749 @@ mod tests {
                 vec![QUEUE_ID.to_string()],
                 "only the protected close survives the renderer clear"
             );
+        }
+    }
+
+    /// Release 1.4.124 (06/10/2026): money rows are acknowledged only by
+    /// their own result, wait for their parents without spending their
+    /// budget, never fail forever when their parent payment is gone, and the
+    /// server's typed refusals land where a manager can act on them.
+    mod money_sync_regressions {
+        use super::*;
+
+        fn queue_money_row(
+            conn: &Connection,
+            table_name: &str,
+            record_id: &str,
+            operation: &str,
+            module_type: &str,
+            conflict_strategy: &str,
+            data: Value,
+        ) -> String {
+            enqueue(
+                conn,
+                &EnqueueInput {
+                    table_name: table_name.to_string(),
+                    record_id: record_id.to_string(),
+                    operation: operation.to_string(),
+                    data: data.to_string(),
+                    organization_id: "org-1".to_string(),
+                    priority: Some(1),
+                    module_type: Some(module_type.to_string()),
+                    conflict_strategy: Some(conflict_strategy.to_string()),
+                    version: Some(1),
+                },
+            )
+            .expect("enqueue money row")
+        }
+
+        /// `(status, attempts, error_message)`, or `None` once the row left.
+        fn row_state(conn: &Connection, id: &str) -> Option<(String, i64, Option<String>)> {
+            conn.query_row(
+                "SELECT status, attempts, error_message FROM parity_sync_queue WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .expect("read queue row")
+        }
+
+        fn queue_expense(conn: &Connection, id: &str) -> String {
+            queue_money_row(
+                conn,
+                "shift_expenses",
+                id,
+                "INSERT",
+                "financial",
+                "manual",
+                json!({
+                    "id": id,
+                    "staffShiftId": "shift-cashier-1",
+                    "branchId": TEST_BRANCH_ID,
+                    "amount": 12.5,
+                    "expenseType": "supplies",
+                    "description": "Milk"
+                }),
+            )
+        }
+
+        fn queue_shift_close(conn: &Connection, shift_id: &str, strategy: &str) -> String {
+            queue_money_row(
+                conn,
+                "staff_shifts",
+                shift_id,
+                "UPDATE",
+                "shifts",
+                strategy,
+                json!({
+                    "shiftId": shift_id,
+                    "branchId": TEST_BRANCH_ID,
+                    "staffId": "staff-1",
+                    "status": "closed",
+                    "closingCash": 120.0
+                }),
+            )
+        }
+
+        async fn run_once(
+            conn: Connection,
+            responses: Vec<MockResponse>,
+        ) -> (Connection, SyncResult, Vec<CapturedRequest>) {
+            let expected = responses.len();
+            let conn = std::sync::Mutex::new(conn);
+            let (base_url, mut requests, server) = spawn_mock_http_server(responses).await;
+            let result = process_queue(&conn, &base_url, "api-key")
+                .await
+                .expect("process queue");
+            let mut captured = Vec::new();
+            for _ in 0..expected {
+                if let Ok(Some(request)) =
+                    tokio::time::timeout(Duration::from_secs(5), requests.recv()).await
+                {
+                    captured.push(request);
+                }
+            }
+            server.abort();
+            (conn.into_inner().expect("db"), result, captured)
+        }
+
+        /// A `207` whose only item failed for good used to be acknowledged as
+        /// any 2xx: the expense row was deleted as synced and never reached
+        /// the server. It now stops as `failed` with the server's sentence.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_207_with_a_refused_financial_item_is_never_acknowledged() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = queue_expense(&conn, "exp-refused");
+            let (conn, result, requests) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    207,
+                    r#"{"success":false,"results":[{"entity_type":"shift_expense","entity_id":"exp-refused","operation":"create","success":false,"status":"error","retryable":false,"message":"Shift expense does not belong to the authenticated branch"}],"synced_count":0,"failed_count":1}"#,
+                )],
+            )
+            .await;
+
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0]
+                .request_line
+                .starts_with("POST /api/pos/financial/sync"));
+            assert_eq!((result.processed, result.failed), (0, 1));
+            let (status, _, error) = row_state(&conn, &queue_id).expect("the row stays queued");
+            assert_eq!(status, "failed");
+            let error = error.expect("a reason");
+            assert!(
+                error.starts_with("PARITY_ITEM_REJECTED: Shift expense does not belong"),
+                "{error}"
+            );
+        }
+
+        /// A `207` whose item failed for now (`retryable: true`) takes the
+        /// transport path: rescheduled, never a dead letter, even with the
+        /// attempt counter past the ordinary budget.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_207_with_a_retryable_financial_item_stays_pending_without_a_dead_letter() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = queue_money_row(
+                &conn,
+                "staff_payments",
+                "staff-pay-1",
+                "INSERT",
+                "financial",
+                "manual",
+                json!({ "id": "staff-pay-1", "cashierShiftId": "shift-cashier-1", "amount": 30.0 }),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET attempts = ?1 WHERE id = ?2",
+                params![MAX_RETRY_ATTEMPTS - 1, queue_id],
+            )
+            .unwrap();
+            let (conn, result, _) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    207,
+                    r#"{"success":false,"results":[{"entity_type":"staff_payment","entity_id":"staff-pay-1","operation":"create","success":false,"status":"error","retryable":true,"message":"Referenced order 'o-1' was not found in the authenticated organization/branch"}]}"#,
+                )],
+            )
+            .await;
+
+            assert_eq!(
+                (result.processed, result.failed, result.dead_lettered),
+                (0, 1, 0)
+            );
+            let (status, attempts, error) = row_state(&conn, &queue_id).expect("still queued");
+            assert_eq!(status, "pending");
+            assert_eq!(attempts, MAX_RETRY_ATTEMPTS);
+            assert_eq!(error.as_deref(), Some(PARITY_ITEM_RETRYABLE));
+        }
+
+        /// The remote-handover lock code is retried whatever the flag says.
+        #[test]
+        fn the_remote_handover_lock_is_always_retryable_and_a_frozen_snapshot_never_is() {
+            assert_eq!(
+                classify_item_failure(
+                    Some(false),
+                    Some("REMOTE_HANDOVER_RETRY".into()),
+                    Some(
+                        "The shift is being updated; retry later with the original identities"
+                            .into()
+                    )
+                ),
+                ItemAcknowledgement::Retryable {
+                    code: "PARITY_ITEM_RETRYABLE:REMOTE_HANDOVER_RETRY".into()
+                }
+            );
+            // A shift result carries no flag: its sentence decides.
+            assert!(matches!(
+                classify_item_failure(
+                    None,
+                    None,
+                    Some("Update drawer closing_amount failed: could not serialize access due to concurrent update".into())
+                ),
+                ItemAcknowledgement::Retryable { .. }
+            ));
+            assert!(matches!(
+                classify_item_failure(
+                    None,
+                    None,
+                    Some("Transfer target cashier shift not found on backend yet".into())
+                ),
+                ItemAcknowledgement::Retryable { .. }
+            ));
+            let frozen = classify_item_failure(
+                Some(true),
+                None,
+                Some("Update drawer closing_amount failed: REMOTE_HANDOVER_SNAPSHOT_FROZEN".into()),
+            );
+            assert!(
+                matches!(&frozen, ItemAcknowledgement::Rejected { frozen: true, reason }
+                    if reason.starts_with("SERVER_CONFLICT_REMOTE_HANDOVER_SNAPSHOT_FROZEN")),
+                "{frozen:?}"
+            );
+            assert!(matches!(
+                classify_item_failure(None, None, Some("Shift currency does not match".into())),
+                ItemAcknowledgement::Rejected { frozen: false, .. }
+            ));
+            assert!(is_safe_transient_retry(
+                "PARITY_ITEM_RETRYABLE",
+                "financial"
+            ));
+            assert!(is_safe_transient_retry(
+                "PARITY_ITEM_RETRYABLE:REMOTE_HANDOVER_RETRY",
+                "shifts"
+            ));
+            assert!(!is_safe_transient_retry(
+                "PARITY_ITEM_RETRYABLE_X",
+                "shifts"
+            ));
+            assert!(!is_safe_transient_retry(
+                "PARITY_ITEM_REJECTED",
+                "financial"
+            ));
+        }
+
+        /// A financial item refused because a remote close froze its shift
+        /// parks as a conflict that names it, instead of being deleted.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_frozen_financial_item_parks_as_a_conflict() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = queue_expense(&conn, "exp-frozen");
+            let (conn, result, _) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    207,
+                    r#"{"success":false,"results":[{"entity_type":"shift_expense","entity_id":"exp-frozen","success":false,"status":"error","retryable":false,"code":"REMOTE_HANDOVER_SNAPSHOT_FROZEN","message":"The shift was closed remotely"}]}"#,
+                )],
+            )
+            .await;
+
+            assert_eq!((result.processed, result.conflicts), (0, 1));
+            let (status, attempts, error) = row_state(&conn, &queue_id).expect("still queued");
+            assert_eq!(status, "conflict");
+            assert_eq!(attempts, 0, "a conflict spends no attempt");
+            assert_eq!(
+                error.as_deref(),
+                Some("SERVER_CONFLICT_REMOTE_HANDOVER_SNAPSHOT_FROZEN: The shift was closed remotely")
+            );
+        }
+
+        /// The success of a financial item is still acknowledged.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_confirmed_financial_item_is_acknowledged() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = queue_expense(&conn, "exp-ok");
+            let (conn, result, _) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    200,
+                    r#"{"success":true,"results":[{"entity_type":"shift_expense","entity_id":"exp-ok","success":true,"status":"ok","server_id":"exp-ok"}],"synced_count":1,"failed_count":0}"#,
+                )],
+            )
+            .await;
+
+            assert_eq!((result.processed, result.failed), (1, 0));
+            assert!(row_state(&conn, &queue_id).is_none());
+        }
+
+        /// `/api/pos/shifts/sync` answers 207 with `status: 'error'` for a
+        /// refused close; the parity path had no shift branch and marked the
+        /// close synced. A refusal now keeps the row; a lock waits.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_207_shift_error_is_never_acknowledged() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let refused = queue_shift_close(&conn, "shift-refused", "manual");
+            let (conn, result, requests) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    207,
+                    r#"{"success":false,"results":[{"shift_id":"shift-refused","status":"error","message":"Shift currency does not match the recorded currency"}],"synced_count":0,"skipped_count":0}"#,
+                )],
+            )
+            .await;
+            assert!(requests[0]
+                .request_line
+                .starts_with("POST /api/pos/shifts/sync"));
+            assert_eq!((result.processed, result.failed), (0, 1));
+            let (status, _, error) = row_state(&conn, &refused).expect("the close stays");
+            assert_eq!(status, "failed");
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("PARITY_ITEM_REJECTED: Shift currency")),
+                "{error:?}"
+            );
+
+            let waiting = queue_shift_close(&conn, "shift-locked", "manual");
+            let (conn, result, _) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    207,
+                    r#"{"success":false,"results":[{"shift_id":"shift-locked","status":"error","message":"Update drawer closing_amount failed: REMOTE_HANDOVER_RETRY"}]}"#,
+                )],
+            )
+            .await;
+            assert_eq!(
+                (result.processed, result.failed, result.dead_lettered),
+                (0, 1, 0)
+            );
+            let (status, _, error) = row_state(&conn, &waiting).expect("the close waits");
+            assert_eq!(status, "pending");
+            assert_eq!(
+                error.as_deref(),
+                Some("PARITY_ITEM_RETRYABLE"),
+                "a lock is retried with backoff"
+            );
+        }
+
+        /// A 2xx without this shift's own result is no acknowledgement; a
+        /// result of `ok` or `skipped` is.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_shift_close_needs_its_own_ok_or_skipped_result() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let unanswered = queue_shift_close(&conn, "shift-unanswered", "manual");
+            let (conn, result, _) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    200,
+                    r#"{"success":true,"results":[{"shift_id":"another-shift","status":"ok"}]}"#,
+                )],
+            )
+            .await;
+            assert_eq!(result.processed, 0);
+            let (status, _, error) = row_state(&conn, &unanswered).expect("kept");
+            assert_eq!(status, "pending");
+            assert_eq!(
+                error.as_deref(),
+                Some("PARITY_ITEM_RETRYABLE:ITEM_RESULT_MISSING")
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = NULL WHERE id = ?1",
+                params![unanswered],
+            )
+            .unwrap();
+
+            let (conn, result, _) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    200,
+                    r#"{"success":true,"results":[{"shift_id":"shift-unanswered","status":"skipped","message":"Shift already closed"}]}"#,
+                )],
+            )
+            .await;
+            assert_eq!(result.processed, 1);
+            assert!(row_state(&conn, &unanswered).is_none());
+        }
+
+        /// A typed `REMOTE_HANDOVER_SNAPSHOT_FROZEN` refusal is a conflict
+        /// that names it, sent once (no server lookup), and never resolved
+        /// automatically, even for a row whose strategy would otherwise let
+        /// the server win silently.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_frozen_refusal_is_never_auto_resolved_or_retried() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = queue_shift_close(&conn, "shift-frozen", "server-wins");
+            let (conn, result, requests) = run_once(
+                conn,
+                vec![
+                    MockResponse::json(
+                        409,
+                        r#"{"success":false,"code":"REMOTE_HANDOVER_SNAPSHOT_FROZEN","error":"The shift was closed on another device"}"#,
+                    ),
+                    MockResponse::json(200, r#"{"success":true,"data":{"id":"shift-frozen"}}"#),
+                ],
+            )
+            .await;
+
+            assert_eq!(requests.len(), 1, "no follow-up lookup: {requests:?}");
+            assert_eq!((result.processed, result.conflicts), (0, 1));
+            let (status, attempts, error) = row_state(&conn, &queue_id).expect("kept");
+            assert_eq!(status, "conflict");
+            assert_eq!(attempts, 0);
+            assert_eq!(
+                error.as_deref(),
+                Some("SERVER_CONFLICT_REMOTE_HANDOVER_SNAPSHOT_FROZEN: The shift was closed on another device")
+            );
+        }
+
+        fn seed_order(conn: &Connection, id: &str, supabase_id: Option<&str>) {
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, items, total_amount, total_amount_cents, status,
+                     payment_status, sync_status, created_at, updated_at
+                 ) VALUES (?1, ?2, '[]', 13.0, 1300, 'completed', 'paid', 'pending',
+                           datetime('now'), datetime('now'))",
+                params![id, supabase_id],
+            )
+            .expect("seed order");
+        }
+
+        fn seed_payment(conn: &Connection, id: &str, order_id: &str) {
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, currency, status,
+                     sync_status, sync_state, created_at, updated_at
+                 ) VALUES (?1, ?2, 'cash', 13.0, 1300, 'EUR', 'completed',
+                           'pending', 'pending', datetime('now'), datetime('now'))",
+                params![id, order_id],
+            )
+            .expect("seed payment");
+        }
+
+        fn queue_payment(conn: &Connection, id: &str, order_id: &str) -> String {
+            queue_money_row(
+                conn,
+                "payments",
+                id,
+                "INSERT",
+                "payment",
+                "manual",
+                json!({ "paymentId": id, "orderId": order_id, "method": "cash", "amount": 13.0 }),
+            )
+        }
+
+        /// A payment of an order created offline waited with one attempt per
+        /// 5 s deferral and turned into a conflict after 50 (about 13 minutes
+        /// offline). While the order's own write is queued it now waits
+        /// without spending its budget.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_payment_waiting_for_its_offline_order_never_spends_its_budget() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_order(&conn, "order-offline", None);
+            seed_payment(&conn, "pay-offline", "order-offline");
+            // The order's own insert is still queued (failed for now, so this
+            // pass does not send it): it stays the visible row.
+            let order_row = queue_money_row(
+                &conn,
+                "orders",
+                "order-offline",
+                "INSERT",
+                "orders",
+                "server-wins",
+                json!({ "orderId": "order-offline", "totalAmount": 13.0 }),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', error_message = 'NETWORK_ERROR' WHERE id = ?1",
+                params![order_row],
+            )
+            .unwrap();
+            let payment_row = queue_payment(&conn, "pay-offline", "order-offline");
+            conn.execute(
+                "UPDATE parity_sync_queue SET attempts = ?1 WHERE id = ?2",
+                params![MAX_DEFERRAL_CYCLES - 1, payment_row],
+            )
+            .unwrap();
+
+            let conn = std::sync::Mutex::new(conn);
+            let result = process_queue(&conn, "http://127.0.0.1:9", "api-key")
+                .await
+                .expect("process queue");
+            let conn = conn.into_inner().unwrap();
+            assert_eq!((result.processed, result.conflicts), (0, 0));
+            let (status, attempts, error) = row_state(&conn, &payment_row).expect("queued");
+            assert_eq!(status, "pending", "never escalated to a conflict");
+            assert_eq!(attempts, MAX_DEFERRAL_CYCLES - 1, "no attempt spent");
+            assert_eq!(error.as_deref(), Some("Waiting for parent order sync"));
+            let sync_state: String = conn
+                .query_row(
+                    "SELECT sync_state FROM order_payments WHERE id = 'pay-offline'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(sync_state, "waiting_parent");
+        }
+
+        /// Without a write of its order in flight, the deferral stays
+        /// budgeted: a parent that never syncs still ends visibly.
+        #[test]
+        fn a_payment_whose_order_has_nothing_queued_keeps_the_budgeted_deferral() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_order(&conn, "order-stuck", None);
+            seed_payment(&conn, "pay-stuck", "order-stuck");
+            let payload =
+                json!({ "paymentId": "pay-stuck", "orderId": "order-stuck", "amount": 13.0 });
+            let item = queue_item("payments", "INSERT", "pay-stuck", payload.clone());
+            match prepare_payment_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap() {
+                RequestPreparation::Deferred { reason } => {
+                    assert_eq!(reason, "Waiting for parent order sync")
+                }
+                other => panic!("expected the budgeted deferral, got {other:?}"),
+            }
+        }
+
+        fn seed_refund_without_parent(conn: &Connection, payload: Value) -> String {
+            queue_money_row(
+                conn,
+                "payment_adjustments",
+                "adj-orphan",
+                "INSERT",
+                "financial",
+                "manual",
+                payload,
+            )
+        }
+
+        /// Incident 06/10/2026: the Z deleted a refund's parent payment while
+        /// the refund was unsent, and the row failed forever with "Adjustment
+        /// parent payment was not found locally". Without the server payment
+        /// in its record it now parks as a conflict a manager sees, and the
+        /// orphan clear action still applies.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_orphan_refund_without_a_server_payment_parks_as_a_conflict() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = seed_refund_without_parent(
+                &conn,
+                json!({
+                    "adjustmentId": "adj-orphan",
+                    "paymentId": "pay-gone",
+                    "orderId": "33333333-3333-4333-8333-333333333333",
+                    "clientOrderId": "order-gone",
+                    "adjustmentType": "refund",
+                    "amount": 6.5,
+                    "reason": "Customer cancelled",
+                    "refundMethod": "card",
+                    "idempotencyKey": "manual-cancel:k:pay-gone"
+                }),
+            );
+            let conn = std::sync::Mutex::new(conn);
+            let result = process_queue(&conn, "http://127.0.0.1:9", "api-key")
+                .await
+                .expect("process queue");
+            let conn = conn.into_inner().unwrap();
+            assert_eq!((result.conflicts, result.failed), (1, 0));
+            let (status, attempts, error) = row_state(&conn, &queue_id).expect("kept");
+            assert_eq!(status, "conflict");
+            assert_eq!(attempts, 0);
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with(ADJUSTMENT_PARENT_PAYMENT_MISSING)
+                        && error.contains("order-gone")),
+                "{error:?}"
+            );
+
+            let db = crate::db::DbState {
+                conn: std::sync::Mutex::new(conn),
+                db_path: std::path::PathBuf::from(":memory:"),
+            };
+            assert_eq!(
+                crate::sync::count_legacy_financial_parity_orphan_rows(
+                    &db,
+                    "payment_adjustment",
+                    "adj-orphan"
+                )
+                .unwrap(),
+                1
+            );
+            let cleared = crate::sync::clear_legacy_financial_parity_orphan(
+                &db,
+                "payment_adjustment",
+                "adj-orphan",
+            )
+            .unwrap();
+            assert_eq!(cleared.cleared, 1);
+        }
+
+        /// An orphan refund whose record names the server payment is sent
+        /// from that record, exactly as it would have been.
+        #[test]
+        fn an_orphan_refund_naming_the_server_payment_is_sent_from_its_record() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let payload = json!({
+                "adjustmentId": "adj-orphan",
+                "paymentId": "pay-gone",
+                "canonicalPaymentId": "44444444-4444-4444-8444-444444444444",
+                "orderId": "33333333-3333-4333-8333-333333333333",
+                "clientOrderId": "order-gone",
+                "adjustmentType": "refund",
+                "amount": 6.5,
+                "reason": "Customer cancelled",
+                "refundMethod": "card",
+                "cashHandler": "cashier_drawer"
+            });
+            let item = queue_item(
+                "payment_adjustments",
+                "INSERT",
+                "adj-orphan",
+                payload.clone(),
+            );
+            let RequestPreparation::Ready(spec) =
+                prepare_adjustment_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+            else {
+                panic!("an orphan naming its server payment is sent");
+            };
+            assert_eq!(spec.endpoint, "/api/pos/payments/adjustments/sync");
+            let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["payment_id"], "pay-gone");
+            assert_eq!(
+                body["canonical_payment_id"],
+                "44444444-4444-4444-8444-444444444444"
+            );
+            assert_eq!(
+                body["remote_payment_id"],
+                "44444444-4444-4444-8444-444444444444"
+            );
+            assert_eq!(body["order_id"], "33333333-3333-4333-8333-333333333333");
+            assert_eq!(body["client_order_id"], "order-gone");
+            assert_eq!(body["refund_method"], "card");
+            assert_eq!(body["cash_handler"], "cashier_drawer");
+            assert_eq!(body["idempotency_key"], "adjustment:adj-orphan");
+        }
+
+        const ADMISSION_CONFLICT: &str = r#"{"success":false,"code":"PAYMENT_ADMISSION_CONFLICT","error":"The canonical order changed; reconcile the original payment attempt","reconciliation_required":true,"retry_same_identity":true}"#;
+
+        /// An offline cash receipt for an order another till cancelled: the
+        /// server answers `409 PAYMENT_ADMISSION_CONFLICT` with
+        /// `reconciliation_required`. The money moved here, so it is set
+        /// aside for a manager (`payments_need_review`, its own sentence),
+        /// never parked as a conflict that holds every Z.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_reconciliation_refusal_sets_the_payment_aside_for_review() {
+            for (code, payment_id) in [
+                ("PAYMENT_ADMISSION_CONFLICT", "pay-admission"),
+                ("PAYMENT_REPLAY_CONFLICT", "pay-replay"),
+            ] {
+                clear_terminal_identity();
+                let conn = test_connection();
+                seed_terminal_context(&conn);
+                let queue_id = seed_queued_platform_payment(&conn, payment_id);
+                let body = ADMISSION_CONFLICT.replace("PAYMENT_ADMISSION_CONFLICT", code);
+                let (conn, result, requests) =
+                    run_once(conn, vec![MockResponse::json(409, body)]).await;
+                assert_eq!(requests.len(), 1);
+                assert_eq!(
+                    (result.processed, result.failed, result.conflicts),
+                    (1, 0, 0),
+                    "{code}"
+                );
+                let (status, reason): (String, Option<String>) = conn
+                    .query_row(
+                        "SELECT status, json_extract(metadata, '$.duplicate_review.reason')
+                         FROM order_payments WHERE id = ?1",
+                        params![payment_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(status, "duplicate_review");
+                assert_eq!(reason.as_deref(), Some("reconciliation_required"));
+                assert!(
+                    row_state(&conn, &queue_id).is_none(),
+                    "its queue row closed"
+                );
+                let blockers =
+                    crate::payment_integrity::load_payments_need_review_blockers(&conn, "", None)
+                        .unwrap();
+                assert_eq!(blockers.len(), 1);
+                assert_eq!(blockers[0].reason_code, "payments_need_review");
+                assert_eq!(
+                    blockers[0].reason_variant.as_deref(),
+                    Some("reconciliation_required")
+                );
+                assert!(blockers[0]
+                    .reason_text
+                    .contains("order changed on the server"));
+            }
+        }
+
+        /// The same 409 without `reconciliation_required` keeps today's
+        /// conflict handling: only the typed reconciliation sets money aside.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_admission_conflict_without_reconciliation_keeps_the_conflict_path() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_queued_platform_payment(&conn, "pay-plain-409");
+            let body = ADMISSION_CONFLICT.replace(
+                r#""reconciliation_required":true"#,
+                r#""reconciliation_required":false"#,
+            );
+            let (conn, result, _) = run_once(
+                conn,
+                vec![
+                    MockResponse::json(409, body),
+                    MockResponse::json(404, r#"{"success":false}"#),
+                ],
+            )
+            .await;
+            assert_eq!(result.conflicts, 1);
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM order_payments WHERE id = 'pay-plain-409'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "completed");
         }
     }
 }

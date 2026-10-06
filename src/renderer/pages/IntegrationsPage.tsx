@@ -520,6 +520,14 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
   pending: integrations.filter(i => i.status === 'pending').length,
 });
 
+/**
+ * A card from the copy of the list this till saved (the office was not
+ * reached): its status now is not known, so it claims none. Caller ID keeps
+ * its terminal-local status.
+ */
+const asSavedCopyCard = (integration: IntegrationWithStatus): IntegrationWithStatus =>
+  integration.id === 'caller_id' ? integration : { ...integration, status: 'unknown', lastSyncedAt: undefined };
+
 const normalizeProviderId = (value: string) =>
   value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
@@ -1283,14 +1291,18 @@ const IntegrationCard = memo<IntegrationCardProps>(({
   const StatusIcon = isLocked ? AlertCircle : callerIdVisual ? callerIdVisual.icon : getStatusIcon(integration.status);
   const statusColor = isLocked ? '#f59e0b' : callerIdVisual ? callerIdVisual.color : getStatusColor(integration.status);
   const isAdminDashboardSetup = usesAdminDashboardSetup(integration.id, integration.readOnlyAdminSetup);
+  // A card from the till's saved copy of the list: no status, readiness or
+  // switch is claimed from it (see asSavedCopyCard).
+  const statusUnknown = integration.status === 'unknown' && !callerIdCard;
   const paymentSetup = integration.paymentSetup;
-  const paymentSetupLabel = paymentSetup
+  const paymentSetupLabel = paymentSetup && !statusUnknown
     ? t(`integrations.paymentSetup.state.${paymentSetup.state}`, PAYMENT_SETUP_COPY[paymentSetup.state].label)
     : null;
   const isToggleDisabled =
     isLocked ||
     integration.readOnlyAdminSetup === true ||
     integration.status === 'pending' ||
+    statusUnknown ||
     Boolean(toggleDisabledMessage);
   const isEnabled = integration.status === 'connected';
   // "Set up" only when this terminal is known to have no line; "Manage" once a
@@ -1312,6 +1324,8 @@ const IntegrationCard = memo<IntegrationCardProps>(({
     ? t('integrations.partnerRequired', 'Partner Required')
     : callerIdCard
     ? callerIdShortLabel(t, callerIdCard.state)
+    : statusUnknown
+    ? t('integrations.status.unknownShort', 'Unknown')
     : isAdminDashboardSetup
     ? paymentSetupLabel || (integration.status === 'connected'
       ? t('integrations.status.connected', 'Connected')
@@ -1370,6 +1384,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
                     : t('integrations.status.pending', 'Pending')
                 )}
                 {!isLocked && !callerIdCard && !paymentSetup && integration.status === 'disconnected' && t('integrations.status.disconnected', 'Not Connected')}
+                {!isLocked && statusUnknown && t('integrations.status.unknown', 'Status unknown')}
               </span>
             </div>
             {integration.lastSyncedAt && integration.status === 'connected' && (
@@ -1380,7 +1395,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
           </div>
 
           {callerIdCard && <CallerIdCardDetails view={callerIdCard} isDark={isDark} />}
-          {paymentSetup && (
+          {paymentSetup && paymentSetupLabel && (
             <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
               {t(`integrations.paymentSetup.detail.${paymentSetup.state}`, PAYMENT_SETUP_COPY[paymentSetup.state].detail)}
             </p>
@@ -1400,7 +1415,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               sentence only renders when BOTH are true. While the flag is still unknown (null,
               e.g. offline or fetch failed) on a connected card, no line renders at all rather
               than claiming either way. */}
-          {integration.id === 'mydata' && (
+          {!statusUnknown && integration.id === 'mydata' && (
             integration.status !== 'connected' || myDataReportingEnabled !== null
           ) && (
             <p
@@ -1678,6 +1693,9 @@ export const IntegrationsPage: React.FC = () => {
   const [hasLoadedIntegrations, setHasLoadedIntegrations] = useState(false);
   const hasLoadedIntegrationsRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  // Set while the list shown is the copy this till saved (the office was not
+  // reached); `cachedAt` is when it was saved, null when unknown.
+  const [savedCopy, setSavedCopy] = useState<{ cachedAt: string | null } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [myDataConfig, setMyDataConfig] = useState<Record<string, any> | null>(null);
@@ -1893,6 +1911,7 @@ export const IntegrationsPage: React.FC = () => {
         // nothing, and no configuration form opened from the previous list
         // stays open or keeps its values.
         setIntegrations([]);
+        setSavedCopy(null);
         closeConfigForms();
         throw new Error('Failed to fetch integrations');
       }
@@ -1908,6 +1927,16 @@ export const IntegrationsPage: React.FC = () => {
           return true;
         });
 
+      // The office was not reached (offline, timeout, 5xx) and the bridge
+      // answered with the copy this till saved. It is shown as that copy,
+      // never as current — desktop 1.4.123 showed a lapsed Wolt licence as
+      // "Connected" — and a refresh that only got the copy is not "refreshed".
+      if (integrationsResult.stale === true) {
+        setIntegrations(integrationsWithStatus.map(asSavedCopyCard));
+        setSavedCopy({ cachedAt: integrationsResult.cachedAt ?? null });
+        return false;
+      }
+      setSavedCopy(null);
       setIntegrations(integrationsWithStatus);
       return true;
     } catch (err) {
@@ -1987,6 +2016,7 @@ export const IntegrationsPage: React.FC = () => {
     // A plugin form opened for the previous terminal identity never survives it.
     closeConfigForms();
     setIntegrations([]);
+    setSavedCopy(null);
     setMyDataReportingEnabled(null);
     setMyDataConfig(null);
     hasLoadedIntegrationsRef.current = false;
@@ -2625,6 +2655,7 @@ export const IntegrationsPage: React.FC = () => {
 
   // Calculate stats
   const stats = useMemo(() => calculateStats(displayedIntegrations), [displayedIntegrations]);
+  const savedCopyTime = savedCopy ? formatCallerIdLastCall(savedCopy.cachedAt) : null;
   const isInitialPageLoading = !hasLoadedIntegrations && (loading || modulesLoading);
 
   // Loading state
@@ -2742,6 +2773,30 @@ export const IntegrationsPage: React.FC = () => {
                 </p>
                 <p className={`text-sm ${isDark ? 'text-red-400/70' : 'text-red-600'}`}>
                   {error}
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Saved copy: the office was not reached, so no status below is current */}
+        {savedCopy && (
+          <motion.div
+            variants={pageMotionItem}
+            role="status"
+            data-testid="integrations-saved-copy"
+            className={`p-4 rounded-2xl mb-6 ${isDark ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-amber-50 border border-amber-200'}`}
+          >
+            <div className="flex items-center gap-3">
+              <AlertCircle className="shrink-0 text-amber-500" size={20} />
+              <div>
+                <p className={`font-medium ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
+                  {t('integrations.savedCopy.title', 'Saved copy — not up to date')}
+                </p>
+                <p className={`text-sm ${isDark ? 'text-amber-200/80' : 'text-amber-700'}`}>
+                  {savedCopyTime
+                    ? t('integrations.savedCopy.bodyAt', 'The office could not be reached, so this is the plugin list this till saved at {{time}}. Statuses may have changed and are not shown until the list refreshes.', { time: savedCopyTime })
+                    : t('integrations.savedCopy.body', 'The office could not be reached, so this is the plugin list this till saved earlier. Statuses may have changed and are not shown until the list refreshes.')}
                 </p>
               </div>
             </div>

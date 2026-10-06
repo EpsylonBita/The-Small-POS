@@ -12,7 +12,33 @@
     "skip": "Passer — confirmer la réception",
     "receiptRecovery": "Un encaissement TWINT est confirmé, mais son paiement n’est pas enregistré. Enregistrez l’encaissement initial avant d’accepter un autre paiement.",
     "receiptSaved": "L’encaissement TWINT initial a été enregistré.",
-    "saveOriginal": "Enregistrer l’encaissement TWINT initial"
+    "saveOriginal": "Enregistrer l’encaissement TWINT initial",
+    "returned": {
+      "button": "Remboursé via TWINT hors de la caisse",
+      "title": "Encaissement TWINT remboursé hors de la caisse",
+      "body": "Uniquement si le client a récupéré les {{amount}} via TWINT hors de la caisse. Rien n'est débité ni remboursé ici. Un responsable le confirme et le montant reste hors des ventes et des espèces de la caisse.",
+      "referenceLabel": "Référence (obligatoire)",
+      "referencePlaceholder": "Référence du remboursement TWINT ou note",
+      "confirm": "Confirmer le remboursement",
+      "success": "Enregistré comme remboursé via TWINT hors de la caisse. Le montant reste hors des ventes et des espèces de la caisse.",
+      "managerRequired": "Un responsable le confirme avec son propre PIN une fois que tout le monde a terminé son service sur cette caisse.",
+      "zLine": "Encaissements TWINT remboursés hors de la caisse",
+      "zNote": "Non compté dans les ventes ni dans les espèces de la caisse.",
+      "notRetained": "Le caissier a confirmé l'encaissement TWINT, mais cette caisse n'a pas pu le conserver. N'encaissez pas une seconde fois. Gardez le justificatif et prévenez un responsable avant de fermer ou de redémarrer la caisse.",
+      "referenceRequired": "Saisissez la référence du remboursement TWINT ou une note (3 à 200 caractères).",
+      "saveFirst": "Cet encaissement TWINT peut encore être enregistré. Enregistrez d'abord l'encaissement initial.",
+      "managerPin": "Code PIN du responsable",
+      "pinRequired": "Un responsable saisit son propre PIN pour le confirmer.",
+      "wrongPin": "Ce PIN ne permet pas de le confirmer. Un responsable autorisé à l'approuver saisit son propre PIN. Rien n'a été enregistré."
+    },
+    "confirmNotSaved": "L'encaissement TWINT n'est pas encore enregistré. N'encaissez pas une seconde fois. Un responsable le vérifie avant la fermeture de la caisse.",
+    "admission": {
+      "notSaved": "Un paiement de cette commande n'est pas encore enregistré. Enregistrez-le à nouveau avant d'accepter TWINT. Rien n'a été débité.",
+      "reconcile": "Une étape de paiement antérieure de cette commande doit d'abord être vérifiée. Rien n'a été débité.",
+      "platformHeld": "La plateforme de livraison détient l'argent de cette commande. Rien n'est encaissé à la caisse.",
+      "amountChanged": "Le montant restant à payer sur cette commande a changé. Vérifiez la commande et réessayez. Rien n'a été débité.",
+      "unavailable": "TWINT ne peut pas être accepté pour le moment. Vérifiez la connexion ou choisissez un autre moyen de paiement. Rien n'a été débité."
+    }
   },
   "displayPurchase": {
     "beforePurchase": "Avant l'achat",
@@ -1623,7 +1649,8 @@
       "receiptPrinted": "Reçu imprimé",
       "receiptEmailed": "Reçu envoyé à {{email}}",
       "invalidCard": "Détails de carte invalides",
-      "expiredCard": "Carte expirée"
+      "expiredCard": "Carte expirée",
+      "cardDeclinedNothingCharged": "La carte a été refusée. Rien n'a été débité."
     },
     "receipt": {
       "title": "Reçu",
@@ -1701,6 +1728,18 @@
       "unavailableTitle": "Encaissement suspendu",
       "unavailableMessage": "Le taux de TVA et la limite de remise du magasin n'ont pas pu être lus : rien n'est tarifé sur une supposition. Réessayez ; si l'échec continue, redémarrez l'application.",
       "retry": "Réessayer"
+    },
+    "manualCard": {
+      "terminalNotReady": "Le terminal de paiement est occupé ou non connecté. Rien n'a été débité. Attendez qu'il soit libre ou reconnectez-le, puis réessayez.",
+      "terminalCheckFailed": "Impossible de vérifier le terminal de paiement de cette caisse. Rien n'a été débité. Réessayez.",
+      "terminalConfigured": "Un terminal de paiement est configuré sur cette caisse. Encaissez la carte sur le terminal. Rien n'a été enregistré.",
+      "providerConnected": "Un prestataire de paiement par carte est connecté pour ce magasin, cette caisse ne peut donc pas enregistrer de paiement par carte manuel. Encaissez la carte sur le terminal de paiement. Rien n'a été enregistré.",
+      "unavailable": "Impossible de confirmer qu'un paiement par carte manuel est autorisé sur cette caisse. Rien n'a été enregistré. Vérifiez la connexion Internet et réessayez.",
+      "alreadyTakenWarning": "Si la carte a déjà été débitée sur le TPE du magasin, ne la débitez pas à nouveau.",
+      "confirmTitle": "Enregistrer un paiement par carte manuel ?",
+      "confirmBody": "Aucun terminal de paiement n'est connecté à cette caisse. N'enregistrez {{amount}} que si la carte a déjà été débitée sur le TPE du magasin.",
+      "confirmAction": "Confirmer la carte manuelle",
+      "portionNotice": "Aucun terminal de paiement n'est connecté à cette caisse. Encaissez ce montant sur le TPE du magasin ; à la confirmation, il est enregistré comme paiement par carte manuel."
     }
   },
   "paymentPrintPrompt": {
@@ -2386,7 +2425,9 @@
       "issue": {
         "hardwareProfileMissing": "Choisissez une imprimante pour cette tâche, puis réessayez.",
         "needsAttention": "Cette tâche d'impression doit être configurée avant l'impression.",
-        "genericAttention": "Cette tâche d'impression POS nécessite votre attention."
+        "genericAttention": "Cette tâche d'impression POS nécessite votre attention.",
+        "foodOrderItemsPending": "En attente des articles de cette commande depuis la plateforme de livraison. L'impression se lance d'elle-même dès leur arrivée. Si la tâche reste ici, ouvrez la commande pour actualiser ses articles.",
+        "foodOrderItemsUnavailable": "Les articles de cette commande ne sont pas arrivés de la plateforme de livraison, elle n'a donc pas été imprimée. Ouvrez la commande pour actualiser ses articles, puis appuyez sur Réessayer."
       },
       "unknown": "Inconnu",
       "cancel": "Annuler",
@@ -3459,11 +3500,13 @@
       "ambiguous_canonical_remote_payment": "le paiement parent correspond à plusieurs paiements admin",
       "Payment not yet synced": "le paiement parent n'est pas encore synchronisé",
       "Parent payment missing canonical remote id": "l'identifiant admin du paiement parent est manquant",
-      "Ambiguous canonical remote payment": "le paiement parent correspond à plusieurs paiements admin"
+      "Ambiguous canonical remote payment": "le paiement parent correspond à plusieurs paiements admin",
+      "money_not_synced": "un paiement ou un remboursement enregistré sur cette caisse n'a pas encore atteint le serveur"
     },
     "closeoutBlocked": {
       "single": "Impossible de clôturer la journée pendant {{stage}} car {{orderReference}} est encore bloqué : {{reason}}.",
-      "multiple": "Impossible de clôturer la journée pendant {{stage}} car {{count}} éléments de synchronisation sont encore bloqués."
+      "multiple": "Impossible de clôturer la journée pendant {{stage}} car {{count}} éléments de synchronisation sont encore bloqués.",
+      "moneyNotSynced": "La journée ne peut pas encore être clôturée : {{count}} enregistrement(s) de paiement ou de remboursement de cette journée n'ont pas atteint le serveur. Vérifiez que la caisse est en ligne, appuyez sur Synchroniser maintenant, puis clôturez à nouveau la journée."
     },
     "time": {
       "never": "Jamais",
@@ -4085,6 +4128,8 @@
       "refundCash": "Rembourser en espèces",
       "refundCard": "Rembourser sur carte",
       "refundNote": "Les remboursements par carte sont enregistrés comme une correction comptable. Effectuez l'annulation de carte séparément si nécessaire.",
+      "cashDisabled": "Les espèces sont désactivées pour ce terminal et ne peuvent pas être enregistrées ici.",
+      "cardDisabled": "La carte est désactivée pour ce terminal et ne peut pas être enregistrée ici.",
       "cancel": "Annuler",
       "failed": "Impossible de finaliser le règlement"
     },
@@ -4191,6 +4236,17 @@
       "loadItemsFailed": "Échec du chargement des articles de la commande",
       "editServerUpdate": "Les corrections sont temporairement indisponibles. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
       "editSyncRequired": "La modification du paiement ou de la commande n’est pas encore synchronisée. Votre panier est conservé. Réessayez dans un instant.",
+      "editNotApplied": "Cette correction n’a pas été enregistrée : sa différence n’a été consignée nulle part. Si de l’argent a déjà changé de mains, préparez à nouveau la correction et enregistrez ce même montant une seule fois ; ne l’encaissez ni ne le remboursez jamais deux fois. Sinon, un responsable peut la clôturer sans enregistrer d’argent.",
+      "editRequote": "Préparer à nouveau la correction",
+      "editRequoteReady": "Vérifiez le panier et enregistrez à nouveau la correction. N’enregistrez que l’argent déjà reçu ; ne l’encaissez ni ne le remboursez deux fois.",
+      "editCloseWithoutMoney": "Clôturer sans enregistrer d’argent (responsable)",
+      "editCloseWithoutMoneyReason": "Correction non enregistrée ; clôturée par un responsable sans enregistrer d’argent",
+      "editClosedWithoutMoney": "La correction non enregistrée a été clôturée. Aucun argent n’a été enregistré ; comptez la caisse pour confirmer.",
+      "editCloseWithoutMoneyFailed": "La correction n’a pas pu être clôturée. Elle reste bloquée ; rien n’a été enregistré.",
+      "legacyEditReview": "Une modification de cette commande enregistrée par une ancienne version de cette caisse a été refusée par le serveur. Le serveur conserve la commande et les paiements d’origine ; cette caisse conserve la modification et son reçu. Rien n’a été encaissé à nouveau. Un responsable doit examiner cette commande avant le Z.",
+      "editTooManyLines": "Une correction peut comporter au plus {{maxLines}} lignes. Supprimez des lignes, ou annulez la commande et créez-en une nouvelle. Aucun argent n’a été encaissé.",
+      "editMethodUnavailable": "Ce terminal ne peut enregistrer ni espèces ni carte pour la différence. Demandez à un responsable d’activer un moyen de paiement pour ce terminal. Aucun argent n’a été encaissé.",
+      "editPreviousNotSaved": "Une correction antérieure de cette commande a été confirmée mais pas enregistrée. Rouvrez-la depuis le panier enregistré pour la préparer à nouveau, ou demandez à un responsable de la clôturer. N’encaissez ni ne remboursez d’argent à nouveau.",
       "emptyEditHint": "Pour retirer tous les articles, fermez l’éditeur et annulez la commande.",
       "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement."
     },
@@ -4771,7 +4827,35 @@
         "pending": "La remise est enregistrée sur cette caisse et attend confirmation. Elle sera réessayée automatiquement ; ne saisissez pas les espèces une seconde fois.",
         "retry": "Réessayer la remise enregistrée"
       },
-      "currencySettlementRequired": "Régularisez et fermez les services du personnel dans leur devise d’origine avant de fermer ce service de caisse."
+      "currencySettlementRequired": "Régularisez et fermez les services du personnel dans leur devise d’origine avant de fermer ce service de caisse.",
+      "satelliteHandover": {
+        "reasons": {
+          "giftClose": "Une clôture cartes cadeaux reste à terminer sur cette caisse secondaire. Clôturez ce service sur la caisse secondaire elle-même.",
+          "staffCustody": "Des livreurs ou des serveurs de ce service de la caisse secondaire détiennent encore des espèces. Clôturez d'abord leur service, puis recevez les espèces.",
+          "movements": "Les mouvements d'espèces de la caisse secondaire ne sont pas encore arrivés sur le serveur. Attendez la synchronisation, puis réessayez.",
+          "role": "Ce service ne peut pas être clôturé depuis la caisse principale. Clôturez-le sur la caisse secondaire.",
+          "retry": "Le serveur traite ce service en ce moment. Réessayez dans un instant.",
+          "closedElsewhere": "La caisse secondaire a déjà clôturé ce service elle-même, ses espèces ne peuvent donc pas être reçues ici.",
+          "currency": "L'argent de ce service de la caisse secondaire est dans une autre devise que ce tiroir-caisse. Il ne peut pas être reçu ici.",
+          "sourceDrawer": "Le tiroir-caisse de la caisse secondaire est introuvable ou déjà fermé.",
+          "receiver": "Ce tiroir-caisse ne peut pas recevoir les espèces : il est fermé, ou ce n'est pas le tiroir caissier ouvert de cette caisse.",
+          "conflict": "Le serveur a déjà enregistré une autre remise pour ce service. Demandez à un responsable de la vérifier.",
+          "mainOnly": "Seule la caisse principale peut recevoir les espèces de ses caisses secondaires.",
+          "figures": "Impossible de charger les chiffres du service depuis le serveur. Vérifiez la connexion et réessayez.",
+          "pending": "Les espèces d'une caisse secondaire sont encore en cours de réception. Reconnectez-vous à Internet pour que la réception se termine avant la clôture de ce service.",
+          "refused": "Le serveur a refusé définitivement cette remise d'espèces de la caisse secondaire.",
+          "unknown": "La remise d'espèces de la caisse secondaire n'a pas pu être terminée. Réessayez ou demandez à un responsable.",
+          "staffCustodyRefused": "Des livreurs ou des serveurs de ce service de la caisse secondaire détenaient encore des espèces lors de l'envoi, le serveur l'a donc refusée. Clôturez ce service sur la caisse secondaire elle-même.",
+          "movementsRefused": "Les mouvements d'espèces de la caisse secondaire n'étaient pas sur le serveur lors de l'envoi, le serveur l'a donc refusée. Clôturez ce service sur la caisse secondaire elle-même."
+        },
+        "releaseHint": "Un responsable peut la libérer pour que ce service puisse être clôturé. Les espèces de la caisse secondaire ne sont pas ajoutées à ce tiroir-caisse.",
+        "releaseTitle": "Remise d'espèces de la caisse secondaire refusée",
+        "releasePin": "Code PIN du responsable",
+        "releaseAction": "Libérer sans ajouter les espèces à ce tiroir-caisse",
+        "releaseWrongPin": "Ce PIN ne permet pas de la libérer. Un responsable autorisé à annuler des commandes saisit son propre PIN.",
+        "releaseFailed": "La remise n'a pas pu être libérée. Rien n'a changé ; réessayez.",
+        "released": "Libérée. Les espèces de la caisse secondaire n'ont pas été ajoutées à ce tiroir-caisse. Vous pouvez maintenant clôturer le service."
+      }
     },
     "zReport": {
       "title": "Rapport Z - {{date}}",
@@ -5205,6 +5289,16 @@
     },
     "orderCancellation": {
       "staffCashAmbiguous": "La détention des espèces par le personnel ne peut pas être vérifiée. Vérifiez le remboursement initial avant l’annulation.",
+      "platformOrderReturn": "Cette commande provient d'une plateforme de livraison. Son argent est remboursé par la plateforme, la caisse n'enregistre donc aucun remboursement.",
+      "receiptCheckUnavailable": "Ce paiement a été encaissé sur une autre caisse. Connectez-vous à Internet pour que cette caisse vérifie le paiement d'origine, puis réessayez. Rien n'a été remboursé.",
+      "refusedByServer": "Le serveur a refusé cette annulation. Aucun argent n'a été remboursé et rien n'a été annulé. Un responsable peut effacer la tentative refusée, puis vous pourrez annuler à nouveau.",
+      "releaseWait": "Cette annulation a été envoyée il y a moins de 15 minutes et peut encore être enregistrée. Réessayez de l'effacer dans {{minutes}} min.",
+      "releaseCommitted": "Le serveur a déjà enregistré cette annulation. Synchronisez cette caisse pour la terminer. Rien n'a été effacé.",
+      "cancellationPending": "Une annulation enregistrée de cette commande attend le serveur. Reprenez-la avec son motif et son approbateur d'origine, ou demandez à un responsable de l'effacer.",
+      "refusedAttemptNotice": "Le serveur a refusé la dernière annulation de cette commande. Aucun argent n'a été remboursé. Un responsable peut l'effacer avant une nouvelle annulation.",
+      "pendingAttemptNotice": "Cette commande a une annulation enregistrée qui attend le serveur. Confirmez pour la reprendre telle qu'enregistrée. Si elle ne peut pas aboutir, un responsable peut l'effacer.",
+      "clearRefusedAttempt": "Effacer l'annulation enregistrée",
+      "attemptCleared": "L'annulation enregistrée a été effacée. Aucun argent n'a été remboursé. Vous pouvez annuler la commande à nouveau.",
       "staffCashUnavailable": "L’annulation avec remise d’espèces est temporairement indisponible. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
       "connectionUnavailable": "L’état de connexion des paiements est indisponible. Actualisez les intégrations et réessayez.",
       "permissionRequired": "Ce compte ne peut pas annuler les commandes payées.",
@@ -6222,6 +6316,10 @@
     "printFailed": "Échec de l'impression du reçu",
     "printAlreadyQueued": "Ce reçu est déjà en file d'attente ou en cours d'impression — il n'a pas été réimprimé.",
     "printSkipped": "L'impression du reçu est désactivée pour cette action.",
+    "printSent": "Reçu envoyé à l'imprimante.",
+    "printQueued": "Reçu en file d'attente mais pas encore imprimé. Vérifiez la file d'impression s'il ne sort pas.",
+    "printWaitingForItems": "Pas encore imprimé : les articles de cette commande ne sont pas encore arrivés de la plateforme de livraison. Le reçu s'imprimera de lui-même dès leur arrivée.",
+    "printNotPrinted": "Le reçu n'a pas été imprimé. Vérifiez la file d'impression dans Paramètres > File d'impression.",
     "guestCustomer": "Client de passage",
     "loadingItems": "Chargement des articles...",
     "loadItemsFailed": "Échec du chargement des articles",
@@ -6557,7 +6655,9 @@
         "poorTitle": "Ce scan est difficile à lire",
         "poorDescription": "Vous pouvez le scanner à nouveau, ou simplement taper ce qui est écrit.",
         "queued": "Enregistrée ici. Elle arrivera au bureau dès que vous serez de nouveau en ligne.",
-        "saved": "Facture enregistrée."
+        "saved": "Facture enregistrée.",
+        "amountInvalid": "Saisissez le montant de la facture avec ses centimes, par exemple 1234,50 ou 1 234,50. Rien n'a été enregistré.",
+        "amountHasPayments": "Cette facture a déjà des paiements, son montant ne peut donc plus changer. Rien n'a été enregistré — remettez le montant d'origine pour enregistrer vos autres modifications."
       },
       "scan": {
         "open": "Scanner une facture",
@@ -8590,7 +8690,14 @@
       "partnerRequired": "Identifiants partenaire requis",
       "connected": "Connecté",
       "pending": "En attente",
-      "disconnected": "Non connecté"
+      "disconnected": "Non connecté",
+      "unknown": "État inconnu",
+      "unknownShort": "Inconnu"
+    },
+    "savedCopy": {
+      "title": "Copie enregistrée — pas à jour",
+      "bodyAt": "Le bureau n'a pas pu être joint : voici la liste des plugins enregistrée par cette caisse ({{time}}). Les états ont pu changer et ne sont pas affichés tant que la liste n'est pas actualisée.",
+      "body": "Le bureau n'a pas pu être joint : voici la liste des plugins enregistrée plus tôt par cette caisse. Les états ont pu changer et ne sont pas affichés tant que la liste n'est pas actualisée."
     },
     "mydata": {
       "title": "Configuration MyData",
@@ -9182,6 +9289,16 @@
         "summary": "Le serveur n’a pas confirmé le changement d’adresse par défaut. La modification reste enregistrée sur cette caisse.",
         "guidance": "Réessayez cette adresse une fois. Si elle est encore refusée, demandez de l’aide via les détails d’assistance."
       },
+      "remoteHandoverSnapshotFrozen": {
+        "title": "Un service a déjà été clôturé sur un autre appareil",
+        "summary": "{{count}} enregistrement(s) d'argent appartiennent à un service clôturé sur un autre appareil. Le serveur fige les montants de ce service et refuse la modification ; elle ne sera pas renvoyée.",
+        "guidance": "Demandez à un responsable de vérifier ce service dans le tableau de bord d'administration et d'y enregistrer la différence. N'encaissez et ne rendez pas d'argent une nouvelle fois à la caisse."
+      },
+      "legacyEditReview": {
+        "title": "Une correction de commande d'une ancienne version nécessite un responsable",
+        "summary": "{{count}} correction(s) de commande enregistrée(s) par une ancienne version de cette caisse ont été refusées par le serveur. Le serveur conserve la commande d'origine et ses paiements ; cette caisse conserve la correction et son reçu. Rien n'a été encaissé deux fois et elle ne sera pas renvoyée.",
+        "guidance": "Demandez à un responsable d'ouvrir cette commande, de la comparer avec le reçu et de la corriger une seule fois, avant le Z. N'encaissez et ne rendez pas d'argent une nouvelle fois pour cette correction."
+      },
       "duplicateCustomerConflict": {
         "title": "Ce client existe déjà au bureau",
         "summary": "Un client enregistré sur cette caisse porte le même numéro de téléphone qu’un client déjà détenu par le bureau : la modification ne peut donc pas être envoyée. Elle n’empêche pas la clôture de la journée, mais le bureau n’aura ce client qu’une fois la fiche liée.",
@@ -9735,7 +9852,9 @@
     "cancelRefusedNotRecorded": "Cette commande est marquée payée, mais son paiement n'est pas enregistré sur cette caisse. Restaurez-le depuis le serveur avec « Synchroniser maintenant », ou enregistrez le paiement depuis le Rapport Z, puis annulez.",
     "notRecordedTitle": "Table {{table}} : paiement non enregistré",
     "notRecordedMessage": "Sa commande est marquée payée, mais son paiement n'est pas enregistré sur cette caisse. Ne l'encaissez pas une seconde fois : restaurez-le depuis le serveur avec « Synchroniser maintenant », ou enregistrez le paiement depuis le Rapport Z.",
-    "keepOpenNotRecordedHint": "La table est libérée ; la commande reste telle quelle jusqu'à ce que son paiement soit restauré ou enregistré."
+    "keepOpenNotRecordedHint": "La table est libérée ; la commande reste telle quelle jusqu'à ce que son paiement soit restauré ou enregistré.",
+    "clearAttemptTitle": "Approuver l'effacement de l'annulation enregistrée",
+    "clearAttemptSubtitle": "Un responsable saisit son propre PIN. Rien n'est encaissé ni remboursé."
   },
   "reservationForm": {
     "toasts": {
@@ -9909,8 +10028,10 @@
     },
     "reasonCodes": {
       "table_cancellation_not_saved": "Le remboursement initial pour l’annulation de la table n’a pas encore été enregistré.",
+      "table_cancellation_not_saved__refused": "Le serveur a refusé cette annulation de table. Aucun argent n'a été rendu et rien n'a été annulé.",
       "payments_need_review": "Un paiement de {{paymentAmount}} ({{paymentMethod}}) a été encaissé sur la commande {{orderNumber}} alors qu'elle était déjà payée. Il est mis de côté et n'est pas compté : le client a peut-être payé deux fois.",
       "payments_need_review__platform_held": "Un paiement de {{paymentAmount}} ({{paymentMethod}}) a été encaissé sur la commande {{orderNumber}}, mais la plateforme de livraison détient déjà l'argent de cette commande. Il est mis de côté et n'est pas compté : le client a peut-être payé deux fois.",
+      "payments_need_review__reconciliation_required": "Un paiement de {{paymentAmount}} ({{paymentMethod}}) a été encaissé sur la commande {{orderNumber}}, mais la commande a ensuite changé sur le serveur, par exemple une autre caisse l'a annulée. Il est mis de côté et n'est pas compté.",
       "payments_not_saved": "Un paiement par carte de {{paymentAmount}} a été débité pour la commande {{orderNumber}} mais n'est pas encore enregistré sur cette caisse. Le client a été débité : ne débitez pas à nouveau.",
       "payments_not_saved__new_order": "Un paiement par carte de {{paymentAmount}} a été débité pour une nouvelle commande qui n'est pas encore enregistrée sur cette caisse : la commande et son paiement sont conservés jusqu'à leur enregistrement. Le client a été débité : ne débitez pas à nouveau.",
       "payments_not_saved__new_order_cannot_save": "Un paiement par carte de {{paymentAmount}} a été débité pour une nouvelle commande qui n'est pas encore enregistrée sur cette caisse : la commande et son paiement sont conservés jusqu'à leur enregistrement. Le client a été débité : ne débitez pas à nouveau.",
@@ -9919,8 +10040,10 @@
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Récupérez l’annulation initiale de la table. Ne remettez et ne remboursez pas l’argent une seconde fois.",
+      "table_cancellation_not_saved__refused": "Un responsable efface la tentative refusée depuis l'addition de la table, puis annule à nouveau. Ne rendez pas d'argent une nouvelle fois.",
       "payments_need_review": "Rendez l'argent au client, puis confirmez-le ici. Si c'est le paiement enregistré sur le serveur qui est erroné, contactez le support avant de clôturer la journée.",
       "payments_need_review__platform_held": "Rendez l'argent au client, puis confirmez-le ici. La plateforme reverse cette commande au magasin par son propre règlement.",
+      "payments_need_review__reconciliation_required": "Vérifiez la commande avec le client. Si elle est annulée, rendez l'argent, puis confirmez-le ici. Si le client doit encore ce montant, contactez le support avant de clôturer la journée.",
       "payments_not_saved": "Enregistrez de nouveau le paiement. S'il ne peut pas être enregistré, rendez l'argent au client et confirmez-le ici.",
       "payments_not_saved__cannot_save": "Ce paiement ne peut pas être enregistré sur cette caisse. Rendez l'argent au client, puis confirmez-le ici.",
       "payments_not_saved__new_order": "Enregistrez de nouveau le paiement : cela enregistre la commande et son paiement, sans nouveau débit. S'il ne peut pas être enregistré, rendez l'argent au client et confirmez-le ici.",

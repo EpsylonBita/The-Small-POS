@@ -14,7 +14,26 @@ import {
   cancelRefusalFromSnapshot,
   findCancelRefusals,
   findOrdersWithMoneyTaken,
+  hasTableServiceEvidence,
 } from '../orderCancelGuard';
+
+// Review 06/10/2026: a kiosk eat-in order is dine-in with no table. Treating
+// every dine-in order as a table check refused its cancellation with
+// TABLE_CANCEL_SYNC_REQUIRED (offline TABLE_MANUAL_CANCELLATION_UNAVAILABLE).
+describe('hasTableServiceEvidence', () => {
+  it('decides by table evidence, never by the dine-in label alone', () => {
+    expect(hasTableServiceEvidence({ orderType: 'dine-in' })).toBe(false);
+    expect(hasTableServiceEvidence({ order_type: 'dine_in', table_number: '  ' })).toBe(false);
+    expect(hasTableServiceEvidence({ orderType: 'dine-in', tableSessionId: 'session' })).toBe(true);
+    expect(hasTableServiceEvidence({ order_type: 'dine-in', table_session_id: 'session' })).toBe(true);
+    expect(hasTableServiceEvidence({ orderType: 'dine-in', table_id: 'table' })).toBe(true);
+    expect(hasTableServiceEvidence({ orderType: 'dine-in', tableNumber: '7' })).toBe(true);
+    expect(hasTableServiceEvidence({ order_type: 'dine-in', table_number: 7 })).toBe(true);
+    // A detached pickup keeps ordinary cancellation ownership.
+    expect(hasTableServiceEvidence({ orderType: 'pickup', tableNumber: '7' })).toBe(false);
+    expect(hasTableServiceEvidence(undefined)).toBe(false);
+  });
+});
 
 describe('findOrdersWithMoneyTaken', () => {
   beforeEach(() => {

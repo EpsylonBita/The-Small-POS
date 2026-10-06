@@ -263,6 +263,41 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  // Review 06/10/2026: a refused attempt is never sent again, and the check
+  // manager had no way to clear it, so the table and the Z stayed held.
+  it('lets a manager clear a refused attempt from the check, then offers a fresh cancellation', async () => {
+    let prepared = 0;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command !== 'order_prepare_manual_cancel') return { success: true };
+      prepared += 1;
+      return prepared === 1
+        ? { success: true, ...args, requiresReturn: false, requiresHandback: false, amountCents: 0, currency: 'EUR',
+            generation: 'generation-1', requestId: 'refused-event', pending: true, refused: true, reason: 'No show' }
+        : { success: true, ...args, requiresReturn: false, requiresHandback: false, amountCents: 0, currency: 'EUR',
+            generation: 'generation-2', requestId: 'fresh-event' };
+    });
+    mocks.cancelWithApproval.mockReset().mockResolvedValue({ success: true, released: true });
+    render(<TableCheckManagerModal isOpen tables={[table]} table={table} localOrders={[order] as any}
+      onClose={onClose} onAddItems={vi.fn()} onRefreshOrders={refresh} onRefreshTables={refresh} />);
+    await waitFor(() => expect(screen.queryByText('Loading table check...')).not.toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Cancel the order' })); });
+
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    expect(within(sheet).getByTestId('order-cancellation-saved-attempt')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(within(sheet).getByRole('button', { name: 'modals.orderCancellation.clearRefusedAttempt' }));
+    });
+
+    await waitFor(() => expect(mocks.cancelWithApproval).toHaveBeenCalledWith(expect.objectContaining({
+      orderId: 'remote-order', tableSessionId: sessionId,
+      releaseRefusedCancellation: { clientEventId: 'refused-event' },
+    })));
+    await waitFor(() => expect(prepared).toBe(2));
+    await waitFor(() => expect(screen.queryByTestId('order-cancellation-saved-attempt')).toBeNull());
+    expect(mocks.cancelWithApproval).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   // Round 2 review (01/10/2026; founder rule: a refusal comes before any
   // reason or PIN). An order labelled paid with no payment record here is
   // refused when "Cancel the order" is pressed: no reason is asked.

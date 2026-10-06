@@ -702,6 +702,22 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         isSpecialAddress ? undefined : editedAddress.longitude
       );
       const currentAddress = userAddresses.find((addr) => addr.id === addressId);
+      // A changed destination (street, city or postal code differ from the
+      // saved row) owns its whole point: an unknown point or place id is sent
+      // as an explicit null, so the native save, its offline cache merge and
+      // the queued PATCH clear the stored pin and the next order's delivery
+      // zone and fee are recomputed. `undefined` vanishes from the IPC payload
+      // and reads as "unchanged" — desktop 1.4.123 kept the old pin for a text
+      // edit saved offline. An unchanged destination (floor, notes, default, or
+      // the original text typed back) still omits an unknown point.
+      const sameText = (left: unknown, right: unknown) =>
+        String(left ?? '').trim() === String(right ?? '').trim();
+      const destinationChanged = !currentAddress
+        || !sameText(streetAddress, currentAddress.street_address)
+        || !sameText(city, currentAddress.city)
+        || !sameText(editedAddress.postal_code, currentAddress.postal_code);
+      const pointField = <T,>(value: T | undefined): T | null | undefined =>
+        value ?? (destinationChanged ? null : undefined);
       const addressUpdatePayload: any = {
         customer_id: selectedUser.id,
         address: combinedAddress,
@@ -713,9 +729,9 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
         is_default: editedAddress.is_default || false,
         notes: editedAddress.delivery_notes,
         coordinates: isSpecialAddress ? null : undefined,
-        latitude: isSpecialAddress ? null : editedAddress.latitude,
-        longitude: isSpecialAddress ? null : editedAddress.longitude,
-        place_id: isSpecialAddress ? null : editedAddress.place_id,
+        latitude: isSpecialAddress ? null : pointField(editedAddress.latitude),
+        longitude: isSpecialAddress ? null : pointField(editedAddress.longitude),
+        place_id: isSpecialAddress ? null : pointField(editedAddress.place_id),
         formatted_address: isSpecialAddress ? combinedAddress : editedAddress.formatted_address || combinedAddress,
         resolved_street_number: isSpecialAddress ? null : editedAddress.resolved_street_number,
         address_fingerprint: editedAddress.address_fingerprint || fallbackFingerprint,

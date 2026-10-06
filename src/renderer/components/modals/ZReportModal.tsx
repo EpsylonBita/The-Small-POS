@@ -36,6 +36,11 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
 import { setAsideResolvingKey } from '../../utils/paymentSetAside';
 import { unsavedResolvingKey, unsavedSavingKey } from '../../utils/unsavedPayments';
+import {
+  listTwintReturnedOutsidePos,
+  resolveReturnedTwintReceipt,
+  type TwintReturnedReceipt,
+} from '../../services/TwintReceiptRecoveryService';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
   useRecordPaymentBlocker,
@@ -230,6 +235,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // confirm it was given back (always asked, then authorized: 30/09/2026).
   const [setAsideConfirmation, setSetAsideConfirmation] = useState<UnsettledPaymentBlocker | null>(null);
   const [unsavedConfirmation, setUnsavedConfirmation] = useState<UnsettledPaymentBlocker | null>(null);
+  // A cashier-confirmed TWINT receipt that can never be saved, waiting for a
+  // manager to record it as returned through TWINT outside the POS, with a
+  // reference (fix review 06/10/2026).
+  const [twintReturn, setTwintReturn] = useState<UnsettledPaymentBlocker | null>(null);
+  const [twintReturnReference, setTwintReturnReference] = useState('');
+  const [twintReturnPin, setTwintReturnPin] = useState('');
+  const [twintReturnError, setTwintReturnError] = useState<string | null>(null);
+  const [twintReturned, setTwintReturned] = useState<TwintReturnedReceipt[]>([]);
   const [retryingFiscalQueue, setRetryingFiscalQueue] = useState(false);
   const [reportReloadVersion, setReportReloadVersion] = useState(0);
   const wasOpenRef = useRef(false);
@@ -737,10 +750,110 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     }
   }, [activeShift?.staff_id, bridge, runWithPrivilegedConfirmation, staff, t, unsavedConfirmation]);
 
+  const closeTwintReturn = useCallback(() => {
+    setTwintReturn(null);
+    setTwintReturnReference('');
+    setTwintReturnPin('');
+    setTwintReturnError(null);
+  }, []);
+
+  // "Returned via TWINT outside the POS" for a TWINT receipt that can never be
+  // saved: a manager's own PIN and a reference, also while a cashier is still
+  // on shift (an order it left unpaid holds that checkout). Nothing is charged
+  // or refunded here; the audit is written before the receipt goes, and it
+  // counts nowhere.
+  const handleConfirmTwintReturned = useCallback(async () => {
+    const blocker = twintReturn;
+    const idempotencyKey = blocker?.unsavedPayment?.idempotencyKey;
+    if (!blocker || !idempotencyKey) {
+      closeTwintReturn();
+      return;
+    }
+    const reference = twintReturnReference.trim();
+    if (reference.length < 3 || reference.length > 200) {
+      setTwintReturnError(t('twintPayment.returned.referenceRequired', {
+        defaultValue: 'Enter the TWINT refund reference or a note (3 to 200 characters).',
+      }));
+      return;
+    }
+    const managerPin = twintReturnPin.trim();
+    if (managerPin.length < 4) {
+      setTwintReturnError(t('twintPayment.returned.pinRequired', {
+        defaultValue: 'A manager enters their own PIN to confirm it.',
+      }));
+      return;
+    }
+    closeTwintReturn();
+    setResolvingBlockerKey(unsavedResolvingKey(idempotencyKey));
+    setSubmitResult(null);
+    try {
+      const resolvedBy =
+        (staff as { databaseStaffId?: string } | null | undefined)?.databaseStaffId
+        || activeShift?.staff_id
+        || null;
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () => resolveReturnedTwintReceipt({ idempotencyKey, reference, resolvedBy, managerPin }),
+        title: t('twintPayment.returned.title', { defaultValue: 'TWINT receipt returned outside the POS' }),
+      });
+      setSubmitResult(
+        result?.result === 'saved'
+          ? t('modals.zReport.unsavedSavedAfterAll', {
+            defaultValue: 'This payment was saved after all: there is nothing to give back.',
+          })
+          : t('twintPayment.returned.success', {
+            defaultValue: 'Recorded as returned through TWINT outside the POS. It stays out of sales and drawer cash.',
+          }),
+      );
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (message === 'Privileged action confirmation cancelled') {
+        // The manager closed the PIN prompt: nothing was recorded.
+      } else if (message.includes('TWINT_RETURN_MANAGER_APPROVAL_REQUIRED') || /Invalid PIN/i.test(message)) {
+        setSubmitResult(t('twintPayment.returned.wrongPin', {
+          defaultValue: "That PIN can't confirm it. A manager with the right to approve it enters their own PIN. Nothing was recorded.",
+        }));
+      } else if (message.includes('TWINT_RECEIPT_SAVE_STILL_POSSIBLE')) {
+        setSubmitResult(t('twintPayment.returned.saveFirst', {
+          defaultValue: 'This TWINT receipt can still be saved. Save the original receipt first.',
+        }));
+      } else if (message.includes('TWINT_RETURN_REFERENCE_REQUIRED')) {
+        setSubmitResult(t('twintPayment.returned.referenceRequired', {
+          defaultValue: 'Enter the TWINT refund reference or a note (3 to 200 characters).',
+        }));
+      } else {
+        setSubmitResult(
+          t('modals.zReport.unsavedResolveFailed', {
+            error: extractErrorMessage(e, t('modals.zReport.unknownError'), t),
+            defaultValue: 'Could not record it: {{error}}',
+          }),
+        );
+      }
+    } finally {
+      setResolvingBlockerKey(null);
+      setReportReloadVersion((current) => current + 1);
+    }
+  }, [activeShift?.staff_id, closeTwintReturn, runWithPrivilegedConfirmation, staff, t, twintReturn, twintReturnPin, twintReturnReference]);
+
   const title = useMemo(() => t('modals.zReport.title', { date: selectedDate }), [selectedDate, t]);
   const submitButtonLabel = t('modals.zReport.commitZReport');
   const resolvedBusinessDate = zReport?.date || selectedDate;
   const resolvedPeriod = useMemo(() => resolveZReportPeriod(zReport), [zReport]);
+  // TWINT receipts a manager recorded as returned outside the POS during this
+  // Z's window: shown for what they are, never in sales, TWINT or drawer cash.
+  useEffect(() => {
+    let current = true;
+    setTwintReturned([]);
+    if (!isOpen || !resolvedPeriod.start) return () => { current = false; };
+    void listTwintReturnedOutsidePos(resolvedPeriod.start)
+      .then((rows) => { if (current) setTwintReturned(rows); })
+      .catch(() => { /* Informational only: an unreadable list shows nothing. */ });
+    return () => { current = false; };
+  }, [isOpen, resolvedPeriod.start, reportReloadVersion]);
+  const twintReturnedCents = useMemo(
+    () => twintReturned.reduce((sum, row) => sum + (Number.isSafeInteger(row.amountCents) ? row.amountCents : 0), 0),
+    [twintReturned],
+  );
   // Gift card close (native gift_close_report_v1) is read from the frozen report only; nothing here
   // recomputes a drawer. Pending, missing or unreadable proof keeps the day not final.
   const giftCloseBlocksFinal = !giftClose.allowsFinal;
@@ -2342,8 +2455,26 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           onResolveSetAsidePayment={setSetAsideConfirmation}
                           onSaveUnsavedPayment={(blocker) => { void handleSaveUnsavedAgain(blocker); }}
                           onResolveUnsavedPayment={setUnsavedConfirmation}
+                          onResolveTwintReturned={(blocker) => { setTwintReturnReference(''); setTwintReturnPin(''); setTwintReturnError(null); setTwintReturn(blocker); }}
                           resolvingKey={resolvingBlockerKey}
                         />
+                      )}
+
+                      {twintReturned.length > 0 && (
+                        <div
+                          data-testid="z-twint-returned-outside-pos"
+                          className={`rounded-2xl border px-4 py-3 text-sm ${modalInsetClassName}`}
+                        >
+                          <div className={`flex items-center justify-between gap-3 font-bold ${strongTextClass}`}>
+                            <span>{t('twintPayment.returned.zLine', { defaultValue: 'TWINT receipts returned outside the POS' })}</span>
+                            <span className="tabular-nums">
+                              {twintReturned.length} · {formatCurrency(twintReturnedCents / 100, 'CHF')}
+                            </span>
+                          </div>
+                          <p className={`mt-1 text-xs ${softTextClass}`}>
+                            {t('twintPayment.returned.zNote', { defaultValue: 'Not counted in sales or drawer cash.' })}
+                          </p>
+                        </div>
                       )}
 
                       {closeoutReady && (
@@ -2397,6 +2528,57 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             'Confirm that the {{amount}} charged for order {{order}} was given back to the customer. The payment will not be saved, and the order stays as it is.',
         })}
       confirmText={t('modals.zReport.unsavedConfirmAction', { defaultValue: 'Confirm' })}
+      cancelText={t('common.actions.cancel', { defaultValue: 'Cancel' })}
+    />
+    )}
+    {twintReturn && (
+    <ConfirmDialog
+      isOpen
+      onClose={closeTwintReturn}
+      onConfirm={() => { void handleConfirmTwintReturned(); }}
+      variant="warning"
+      title={t('twintPayment.returned.title', { defaultValue: 'TWINT receipt returned outside the POS' })}
+      message={t('twintPayment.returned.body', {
+        amount: formatCurrency((twintReturn.unsavedPayment?.amountCents ?? 0) / 100, twintReturn.unsavedPayment?.currency || 'CHF'),
+        defaultValue:
+          'Only if the customer got the {{amount}} back through TWINT outside the POS. Nothing is charged or refunded here. A manager confirms it and it is kept out of sales and drawer cash.',
+      })}
+      details={(
+        <div className="space-y-3">
+          <label className="block space-y-2">
+            <span className="block font-semibold">
+              {t('twintPayment.returned.referenceLabel', { defaultValue: 'Reference (required)' })}
+            </span>
+            <input
+              type="text"
+              value={twintReturnReference}
+              maxLength={200}
+              autoComplete="off"
+              data-testid="twint-return-reference"
+              onChange={(event) => { setTwintReturnReference(event.target.value); setTwintReturnError(null); }}
+              placeholder={t('twintPayment.returned.referencePlaceholder', { defaultValue: 'TWINT refund reference or note' })}
+              className="liquid-glass-modal-input w-full rounded-lg px-3 py-2"
+            />
+          </label>
+          <label className="block space-y-2">
+            <span className="block font-semibold">
+              {t('twintPayment.returned.managerPin', { defaultValue: 'Manager PIN' })}
+            </span>
+            <input
+              type="password"
+              inputMode="numeric"
+              value={twintReturnPin}
+              maxLength={8}
+              autoComplete="off"
+              data-testid="twint-return-manager-pin"
+              onChange={(event) => { setTwintReturnPin(event.target.value.replace(/\D/g, '')); setTwintReturnError(null); }}
+              className="liquid-glass-modal-input w-full rounded-lg px-3 py-2"
+            />
+          </label>
+          {twintReturnError && <span role="alert" className="block text-red-600 dark:text-red-300">{twintReturnError}</span>}
+        </div>
+      )}
+      confirmText={t('twintPayment.returned.confirm', { defaultValue: 'Confirm return' })}
       cancelText={t('common.actions.cancel', { defaultValue: 'Cancel' })}
     />
     )}

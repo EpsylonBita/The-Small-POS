@@ -4,6 +4,12 @@ export interface ManualCancellationPlan {
   orderId: string;
   tableSessionId?: string;
   pending?: boolean;
+  /**
+   * The server refused this saved table cancellation and it is never sent
+   * again: nothing was returned. A manager clears it before a new attempt.
+   */
+  refused?: boolean;
+  refusalCode?: string | null;
   reason?: string;
   returnChannel?: "cash_drawer" | "bank";
   requiresReturn: boolean;
@@ -34,9 +40,22 @@ export async function commitManualOrderCancellation(bridge: Pick<PlatformBridge,
   if (result?.success !== true) throw new Error(result?.error || 'ORDER_CANCELLATION_FAILED');
 }
 
+const errorCode = (error: unknown): string => {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' ? message : String(error);
+};
+
 export function manualCancellationFailureKey(error: unknown): string {
-  const code = error instanceof Error ? error.message : String(error);
-  const key = code.includes('STAFF_CASH_CUSTODY_AMBIGUOUS') ? 'staffCashAmbiguous'
+  const code = errorCode(error);
+  const key = code.includes('TABLE_CANCELLATION_REFUSED') ? 'refusedByServer'
+    : code.includes('TABLE_CANCELLATION_RELEASE_WAIT') ? 'releaseWait'
+    : code.includes('TABLE_CANCELLATION_COMMITTED') ? 'releaseCommitted'
+    : code.includes('TABLE_CANCELLATION_PENDING') ? 'cancellationPending'
+    : code.includes('PLATFORM_ORDER_RETURN_REQUIRED') ? 'platformOrderReturn'
+    : code.includes('ORIGINAL_RECEIPT_CHECK_UNAVAILABLE') ? 'receiptCheckUnavailable'
+    : code.includes('STAFF_CASH_CUSTODY_AMBIGUOUS') ? 'staffCashAmbiguous'
     : code.includes('STAFF_CASH_RETURN_UNAVAILABLE') || code.includes('TABLE_MANUAL_CANCELLATION_UNAVAILABLE') ? 'staffCashUnavailable'
     : code.includes('ORIGINAL_PROVIDER_RETURN_REQUIRED') ? 'originalReturnRequired'
     : code.includes('PAYMENT_CONNECTION_STATUS_UNAVAILABLE') ? 'connectionUnavailable'
@@ -47,4 +66,10 @@ export function manualCancellationFailureKey(error: unknown): string {
     : code.includes('CASHIER_DRAWER_UNAVAILABLE') ? 'drawerUnavailable' : undefined;
   if (code.includes('ORDER_PAYMENT_NOT_RECORDED')) return 'orderDashboard.cancelRefusedNotRecorded';
   return key ? `modals.orderCancellation.${key}` : 'orderDashboard.cancelFailed';
+}
+
+/** Interpolation values a failure text needs (the minutes left to wait). */
+export function manualCancellationFailureOptions(error: unknown): Record<string, string | number> {
+  const wait = /TABLE_CANCELLATION_RELEASE_WAIT:(\d+)/.exec(errorCode(error));
+  return wait ? { minutes: Number(wait[1]) } : {};
 }

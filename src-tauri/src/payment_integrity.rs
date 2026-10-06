@@ -42,7 +42,8 @@ pub struct UnsettledPaymentBlocker {
     #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
     pub total_amount: Cents,
     #[serde(serialize_with = "serialize_cents_as_f64_dp2")]
-    /// Completed merchandise principal, excluding each receipt's own tip.
+    /// Completed coverage: each receipt's principal, plus receipt tips up to
+    /// the tip the order total contains (`payments::load_principal_paid_for_order`).
     pub settled_amount: Cents,
     pub payment_status: String,
     pub payment_method: String,
@@ -181,7 +182,8 @@ struct RawBlockerRow {
     total_amount: Cents,
     /// Gross receipt money, retained for duplicate/tender evidence.
     gross_settled_amount: Cents,
-    /// Merchandise principal on completed receipts, excluding each own tip.
+    /// Completed coverage: each receipt's principal, plus receipt tips up to
+    /// the tip inside the order total (`payments::load_principal_paid_for_order`).
     settled_amount: Cents,
     payment_status: String,
     payment_method: String,
@@ -189,7 +191,7 @@ struct RawBlockerRow {
     invalid_completed_method_count: i64,
     /// Gross received money NET of effective refunds, retained as evidence.
     net_settled_amount: Cents,
-    /// Retained principal, netting each receipt's own refunds and tips.
+    /// Retained coverage, netting each receipt's own refunds (principal first).
     net_principal_amount: Cents,
     /// Completed rows sharing one non-empty `transaction_ref`. One real
     /// transaction cannot settle twice, so >0 is an unambiguous replay.
@@ -317,7 +319,22 @@ pub fn load_payments_need_review_blockers(
             // platform already holds this order's money; said plainly.
             let platform_held =
                 payment.reason == crate::payment_review::SetAsideReason::PlatformHeld.as_str();
-            let (reason_text, suggested_fix) = if platform_held {
+            // 06/10/2026: the server refused it because the order changed on
+            // the server after the money was taken (for example another till
+            // cancelled it); a reconciliation, not a duplicate.
+            let reconciliation_required = payment.reason
+                == crate::payment_review::SetAsideReason::ReconciliationRequired.as_str();
+            let (reason_text, suggested_fix) = if reconciliation_required {
+                (
+                    format!(
+                        "A {} {} payment taken at {} was set aside: the order changed on the server after the money was taken (for example another till cancelled it). It is not counted.",
+                        format_money(amount),
+                        normalize_payment_method(&payment.method),
+                        payment.taken_at
+                    ),
+                    "Check the order with the customer. If the order is cancelled, give the money back, then confirm it here. If the customer still owes it, contact support before closing the day.".to_string(),
+                )
+            } else if platform_held {
                 (
                     format!(
                         "A {} {} payment taken at {} was set aside: the delivery platform already holds this order's money. It is not counted.",
@@ -351,11 +368,19 @@ pub fn load_payments_need_review_blockers(
                 severity: IntegritySeverity::Blocking.as_str().to_string(),
                 difference_cents: 0,
                 reason_amounts,
-                reason_variant: platform_held.then(|| {
-                    crate::payment_review::SetAsideReason::PlatformHeld
-                        .as_str()
-                        .to_string()
-                }),
+                reason_variant: if reconciliation_required {
+                    Some(
+                        crate::payment_review::SetAsideReason::ReconciliationRequired
+                            .as_str()
+                            .to_string(),
+                    )
+                } else {
+                    platform_held.then(|| {
+                        crate::payment_review::SetAsideReason::PlatformHeld
+                            .as_str()
+                            .to_string()
+                    })
+                },
                 review_payment: Some(ReviewPaymentSummary {
                     payment_id: payment.payment_id,
                     method: normalize_payment_method(&payment.method),
@@ -399,15 +424,42 @@ pub fn load_payments_not_saved_blockers(
             reason_variant:None,review_payment:None,unsaved_payment:None,platform_held:false,
         });
     }
+    // A proven refusal is told as such (review 06/10/2026): it never awaits a
+    // receipt, and a manager clears it from the table check.
+    let refused_only = crate::table_manual_cancellation::refused_only(conn, branch_id)?;
     for order_id in crate::table_manual_cancellation::pending(conn, branch_id)? {
         let (number,total,status):(String,f64,String)=conn.query_row("SELECT COALESCE(order_number,id),COALESCE(total_amount,0),COALESCE(payment_status,'pending') FROM orders WHERE id=?1",[&order_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
+        let refused = refused_only.contains(&order_id);
+        let (reason_text, suggested_fix, reason_variant) = if refused {
+            (
+                "The server refused this table cancellation. No money was returned and nothing was cancelled.",
+                "A manager clears the refused attempt from the table check, then cancels again. Do not hand back or refund the money again.",
+                Some("refused".to_string()),
+            )
+        } else {
+            (
+                "The original table cancellation return is awaiting its canonical receipt.",
+                "Recover the original table cancellation. Do not hand back or refund the money again.",
+                None,
+            )
+        };
         blockers.push(UnsettledPaymentBlocker {
-            order_id,order_number:number,total_amount:Cents::round_half_even(total),settled_amount:Cents::new(0),
-            payment_status:status,payment_method:"pending".into(),reason_code:"table_cancellation_not_saved".into(),
-            reason_text:"The original table cancellation return is awaiting its canonical receipt.".into(),
-            suggested_fix:"Recover the original table cancellation. Do not hand back or refund the money again.".into(),
-            severity:IntegritySeverity::Blocking.as_str().into(),difference_cents:0,reason_amounts:BTreeMap::new(),
-            reason_variant:None,review_payment:None,unsaved_payment:None,platform_held:false,
+            order_id,
+            order_number: number,
+            total_amount: Cents::round_half_even(total),
+            settled_amount: Cents::new(0),
+            payment_status: status,
+            payment_method: "pending".into(),
+            reason_code: "table_cancellation_not_saved".into(),
+            reason_text: reason_text.into(),
+            suggested_fix: suggested_fix.into(),
+            severity: IntegritySeverity::Blocking.as_str().into(),
+            difference_cents: 0,
+            reason_amounts: BTreeMap::new(),
+            reason_variant,
+            review_payment: None,
+            unsaved_payment: None,
+            platform_held: false,
         });
     }
     for record in records {
@@ -549,8 +601,8 @@ fn with_reason_variant(
 /// wrong tender. Returns the most serious one, or `None` when the ledger's
 /// shape is sound (it may still be short — that is the caller's job).
 fn classify_settlement_shape(row: &RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
-    // Each receipt's own tip belongs only to that receipt. A refunded tip
-    // cannot enlarge the principal another receipt may collect.
+    // Receipt tips count only up to the tip inside the order total, and a
+    // refunded tip cannot enlarge the principal another receipt may collect.
     let ceiling = row.total_amount;
 
     // 1. One real transaction settled twice. `transaction_ref` identifies a
@@ -1009,30 +1061,44 @@ fn order_blocker_row_select() -> String {
             ) THEN 1
             ELSE 0
         END,
-        -- 18: completed merchandise principal. Ordinary refunds keep the
-        -- historical coverage policy; each receipt's own tip covers none.
+        -- 18: completed coverage under the tip-inclusive rule
+        -- (`payments::load_principal_paid_for_order`): each receipt's
+        -- principal, plus receipt tips up to the tip the order total itself
+        -- contains (orders.tip_amount). Ordinary refunds keep the historical
+        -- coverage policy here.
         COALESCE((
             SELECT SUM(MAX(
                 COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
                 - MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0),
                 0
-            )) FROM order_payments op
+            )) + MIN(SUM(MIN(
+                MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0),
+                MAX(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0), 0)
+            )), $ORDER_TIP)
+            FROM order_payments op
             WHERE op.order_id = o.id AND $COUNTED_OP
         ), 0),
-        -- 19: retained principal per receipt for overpayment. A gift row
-        -- nets max(refunds, proven return floor), retaining its proof checks.
+        -- 19: retained coverage for overpayment, each receipt net of its
+        -- returns (principal first, then its tip). A gift row nets
+        -- max(refunds, proven return floor), retaining its proof checks.
         COALESCE((
-            SELECT SUM(MAX(
-                COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                - MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)
-                - MAX(COALESCE((
-                    SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
-                    FROM payment_adjustments pa
-                    WHERE pa.payment_id = op.id AND pa.adjustment_type = 'refund'
-                ), 0), $GIFT_RETURN_FLOOR),
-                0
-            )) FROM order_payments op
-            WHERE op.order_id = o.id AND $COUNTED_OP
+            SELECT SUM(MAX(retained.kept_cents - retained.tip_cents, 0))
+                 + MIN(SUM(MIN(retained.tip_cents, retained.kept_cents)), $ORDER_TIP)
+            FROM (
+                SELECT MAX(
+                           COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
+                           - MAX(COALESCE((
+                               SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                               FROM payment_adjustments pa
+                               WHERE pa.payment_id = op.id AND pa.adjustment_type = 'refund'
+                           ), 0), $GIFT_RETURN_FLOOR),
+                           0
+                       ) AS kept_cents,
+                       MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)
+                           AS tip_cents
+                FROM order_payments op
+                WHERE op.order_id = o.id AND $COUNTED_OP
+            ) retained
         ), 0)"
         .replace(
             "$EXTERNAL_PLATFORM_PREDICATE",
@@ -1041,6 +1107,13 @@ fn order_blocker_row_select() -> String {
         .replace(
             "$GIFT_RETURN_FLOOR",
             crate::commands::gift_card_returns::PROVEN_RETURN_FLOOR_SQL,
+        )
+        // `orders.tip_amount`: the tip the order total contains, never below
+        // zero nor above the total (`payments::load_order_tip_inside_total_cents`).
+        .replace(
+            "$ORDER_TIP",
+            "MAX(0, MIN(COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0), \
+             COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)))",
         )
         // A 1.4.119 placeholder row (`payments::placeholder_payment_sql`) is
         // no record of money: never coverage, never drawer tender. An order
@@ -1109,6 +1182,27 @@ where
     Ok(blockers)
 }
 
+/// A pending BOX order whose decision the server closed (06/10/2026; shared
+/// `boxClosureExemptFromPendingBlockersSql`, Android `ReportService`
+/// `pendingWhere`): BOX expired or refused it, or its outcome is unknown and
+/// staff check it with BOX. It takes no accept/decline any more, so it is not
+/// open work for the day close, unless it holds money to reconcile
+/// (`BOX_CLOSURE_PAYMENT_RECONCILIATION`). Closures where BOX did not accept
+/// are already `cancelled` and excluded by the status filter. `alias` is the
+/// orders alias; `ghost_metadata` is JSON text.
+pub(crate) fn box_closure_exempt_from_blockers_expr(alias: &str) -> String {
+    let field = |path: &str| {
+        format!(
+            "COALESCE(CASE WHEN json_valid({alias}.ghost_metadata) THEN json_extract({alias}.ghost_metadata, '$._the_small_box_decision.{path}') END, '')"
+        )
+    };
+    format!(
+        "({} = 'closed' AND {} <> 'BOX_CLOSURE_PAYMENT_RECONCILIATION')",
+        field("state"),
+        field("closure.code")
+    )
+}
+
 pub fn load_order_payment_blockers(
     conn: &Connection,
     order_id: &str,
@@ -1118,8 +1212,10 @@ pub fn load_order_payment_blockers(
          WHERE o.id = ?1
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.folio_charged, 0) = 0
-           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')",
-        order_blocker_row_select()
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           AND NOT {}",
+        order_blocker_row_select(),
+        box_closure_exempt_from_blockers_expr("o")
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -1149,6 +1245,7 @@ pub fn load_branch_window_payment_blockers(
     // design, so they are excluded here no matter what bumped their updated_at
     // into this window (see business_day::paid_order_swept_by_last_z_expr).
     let swept_by_last_z_expr = business_day::paid_order_swept_by_last_z_expr("o", "?4");
+    let box_closure_exempt_expr = box_closure_exempt_from_blockers_expr("o");
     let last_z_anchor = business_day::last_z_anchor_utc(conn);
     // Population parity with the Z aggregates (review item E, 16/09/2026).
     // This loader feeds the day-close gate AND `integrity.findings`, so it must
@@ -1183,6 +1280,7 @@ pub fn load_branch_window_payment_blockers(
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            AND NOT {open_table_tab_expr}
            AND NOT {swept_by_last_z_expr}
+           AND NOT {box_closure_exempt_expr}
          ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
         order_blocker_row_select()
     );
@@ -1905,6 +2003,78 @@ mod tests {
             .map(|blocker| blocker.reason_code.clone())
     }
 
+    /// A BOX order whose decision the server closed (06/10/2026) takes no
+    /// accept/decline any more: it never holds the day close, unless it
+    /// carries money to reconcile. A BOX order still waiting does.
+    #[test]
+    fn closed_box_decision_is_no_day_close_blocker_unless_money_needs_reconciling() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let closed = |code: &str| {
+            format!(
+                r#"{{"_the_small_box_decision":{{"version":1,"state":"closed","closure":{{"outcome":"unknown","manual_check":true,"code":"{code}"}}}}}}"#
+            )
+        };
+        let manual_check = closed("BOX_DECISION_MANUAL_CHECK");
+        let money = closed("BOX_CLOSURE_PAYMENT_RECONCILIATION");
+        seed_order(&conn, "box-open", 1200, "pending", Some("box"), None);
+        seed_order(
+            &conn,
+            "box-closed",
+            1200,
+            "pending",
+            Some("box"),
+            Some(&manual_check),
+        );
+        seed_order(
+            &conn,
+            "box-money",
+            1200,
+            "pending",
+            Some("box"),
+            Some(&money),
+        );
+        seed_order(
+            &conn,
+            "box-bad-json",
+            1200,
+            "pending",
+            Some("box"),
+            Some("{not json"),
+        );
+        conn.execute("UPDATE orders SET status='pending'", [])
+            .unwrap();
+
+        assert_eq!(
+            order_reason(&conn, "box-open").as_deref(),
+            Some("no_persisted_payment")
+        );
+        assert_eq!(order_reason(&conn, "box-closed"), None);
+        assert_eq!(
+            order_reason(&conn, "box-money").as_deref(),
+            Some("no_persisted_payment")
+        );
+        assert_eq!(
+            order_reason(&conn, "box-bad-json").as_deref(),
+            Some("no_persisted_payment")
+        );
+
+        let window = load_branch_window_payment_blockers(
+            &conn,
+            "branch-1",
+            "2026-03-26T00:00:00Z",
+            Some("2026-03-27T00:00:00Z"),
+            true,
+        )
+        .expect("branch blockers");
+        let mut ids: Vec<&str> = window
+            .iter()
+            .map(|blocker| blocker.order_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["box-bad-json", "box-money", "box-open"]);
+    }
+
     #[test]
     fn payment_principal_tip_z_blocks_tip_heavy_paid_claim_until_topup() {
         let db = test_db();
@@ -1943,6 +2113,112 @@ mod tests {
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].reason_code, "overpaid_order");
         assert_eq!(blockers[0].reason_amounts["overpaidAmount"], 200);
+    }
+
+    /// Tip-inclusive coverage (06/10/2026): a desktop checkout puts the 2.00
+    /// tip inside the 22.00 total (`orders.tip_amount`) and on its receipt.
+    /// Before, the Z read it as "Cash payments only cover EUR 20.00 of EUR
+    /// 22.00" and asked to record the tip again.
+    fn tipped_checkout(conn: &Connection, order_id: &str) {
+        seed_order(conn, order_id, 2200, "paid", None, None);
+        conn.execute(
+            "UPDATE orders SET tip_amount = 2, tip_amount_cents = 200 WHERE id = ?1",
+            params![order_id],
+        )
+        .unwrap();
+    }
+
+    fn with_receipt_tip(conn: &Connection, payment_id: &str, tip_cents: i64) {
+        conn.execute(
+            "UPDATE order_payments SET tip_amount = ?2 / 100.0, tip_amount_cents = ?2 WHERE id = ?1",
+            params![payment_id, tip_cents],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn tip_inside_total_checkout_holds_no_z_and_a_second_tip_is_an_overpayment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        tipped_checkout(&conn, "tip-inside-z");
+        seed_payment(
+            &conn,
+            "tip-inside-z-pay",
+            "tip-inside-z",
+            "cash",
+            2200,
+            None,
+        );
+        with_receipt_tip(&conn, "tip-inside-z-pay", 200);
+        assert_eq!(order_reason(&conn, "tip-inside-z"), None);
+
+        seed_payment(
+            &conn,
+            "tip-inside-z-again",
+            "tip-inside-z",
+            "cash",
+            200,
+            None,
+        );
+        let blockers = load_order_payment_blockers(&conn, "tip-inside-z").unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "overpaid_order");
+        assert_eq!(blockers[0].reason_amounts["overpaidAmount"], 200);
+    }
+
+    #[test]
+    fn tip_inside_total_split_and_table_tips_follow_the_order_tip() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // Untipped split portions that add up to the tipped total.
+        tipped_checkout(&conn, "tip-inside-split");
+        seed_payment(
+            &conn,
+            "tip-inside-split-a",
+            "tip-inside-split",
+            "cash",
+            1000,
+            None,
+        );
+        seed_payment(
+            &conn,
+            "tip-inside-split-b",
+            "tip-inside-split",
+            "card",
+            1200,
+            None,
+        );
+        assert_eq!(order_reason(&conn, "tip-inside-split"), None);
+
+        // A table check: order tip 0, the tip on top of the receipt.
+        seed_order(&conn, "tip-on-table", 2000, "paid", None, None);
+        seed_payment(
+            &conn,
+            "tip-on-table-pay",
+            "tip-on-table",
+            "card",
+            2200,
+            None,
+        );
+        with_receipt_tip(&conn, "tip-on-table-pay", 200);
+        assert_eq!(order_reason(&conn, "tip-on-table"), None);
+
+        // A receipt tip beyond the order tip covers nothing more.
+        tipped_checkout(&conn, "tip-inside-short");
+        seed_payment(
+            &conn,
+            "tip-inside-short-pay",
+            "tip-inside-short",
+            "cash",
+            2100,
+            None,
+        );
+        with_receipt_tip(&conn, "tip-inside-short-pay", 500);
+        let blockers = load_order_payment_blockers(&conn, "tip-inside-short").unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "partial_cash_payment");
+        assert_eq!(blockers[0].settled_amount, Cents::new(1800));
+        assert_eq!(blockers[0].difference_cents, 400);
     }
 
     /// Founder's rule, 30/09/2026: no order is registered as paid without a

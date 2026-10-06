@@ -290,3 +290,25 @@ describe('staged fulfillment and header corrections', () => {
     expect(bridge.previewEditSettlement).toHaveBeenCalledWith(expect.objectContaining({ financials: { totalAmount:12.5, deliveryFee:2 }, orderUpdates: changes.orderUpdates }));
   });
 });
+
+describe('paid edit corrections (06/10/2026)', () => {
+  it('carries the server tender policy and line limit to the picker before any confirmation', async () => {
+    const bridge = orders();
+    vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, allowedMethods: ['card', 'voucher'], maxLines: 50 } as any);
+    const { preflight } = await previewMenuOrderEdit(bridge, { ...data, expected_local_version: undefined });
+    expect(preflight).toMatchObject({ kind: 'settlement', allowedMethods: ['card'], maxLines: 50 });
+    expect(bridge.applyEditSettlement).not.toHaveBeenCalled();
+  });
+
+  it('names the refused attempt a re-quote replaces in its preview and commit', async () => {
+    const bridge = orders();
+    const requote = { ...data, client_event_id: 'requote-event', supersedes_client_event_id: 'refused-event' };
+    expect(menuEditRequest(requote)).toMatchObject({ client_event_id: 'requote-event', supersedes_client_event_id: 'refused-event' });
+    await previewMenuOrderEdit(bridge, { ...requote, expected_local_version: undefined });
+    expect(bridge.previewEditSettlement).toHaveBeenLastCalledWith(expect.objectContaining({ supersedes_client_event_id: 'refused-event' }));
+    const lifecycle = { beforeCommit: vi.fn(async () => undefined) };
+    await commitMenuOrderEdit(bridge, requote, action, lifecycle);
+    expect(bridge.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({ client_event_id: 'requote-event', supersedes_client_event_id: 'refused-event', action }));
+    expect(menuEditRequest(data)).not.toHaveProperty('supersedes_client_event_id');
+  });
+});

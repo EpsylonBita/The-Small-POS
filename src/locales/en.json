@@ -12,7 +12,33 @@
     "skip": "Skip — confirm receipt",
     "receiptRecovery": "A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.",
     "receiptSaved": "The original TWINT receipt was saved.",
-    "saveOriginal": "Save original TWINT receipt"
+    "saveOriginal": "Save original TWINT receipt",
+    "returned": {
+      "button": "Returned via TWINT outside the POS",
+      "title": "TWINT receipt returned outside the POS",
+      "body": "Only if the customer got the {{amount}} back through TWINT outside the POS. Nothing is charged or refunded here. A manager confirms it and it is kept out of sales and drawer cash.",
+      "referenceLabel": "Reference (required)",
+      "referencePlaceholder": "TWINT refund reference or note",
+      "confirm": "Confirm return",
+      "success": "Recorded as returned through TWINT outside the POS. It stays out of sales and drawer cash.",
+      "managerRequired": "A manager confirms this with their own PIN once everyone has checked out of this till.",
+      "zLine": "TWINT receipts returned outside the POS",
+      "zNote": "Not counted in sales or drawer cash.",
+      "notRetained": "The cashier confirmed TWINT receipt, but this till could not retain it. Do not collect again. Keep the receipt and contact a manager before closing or restarting the POS.",
+      "referenceRequired": "Enter the TWINT refund reference or a note (3 to 200 characters).",
+      "saveFirst": "This TWINT receipt can still be saved. Save the original receipt first.",
+      "managerPin": "Manager PIN",
+      "pinRequired": "A manager enters their own PIN to confirm it.",
+      "wrongPin": "That PIN can't confirm it. A manager with the right to approve it enters their own PIN. Nothing was recorded."
+    },
+    "confirmNotSaved": "The TWINT receipt is not saved yet. Do not collect again. A manager checks it before the POS is closed.",
+    "admission": {
+      "notSaved": "A payment of this order is not saved yet. Save it again before taking TWINT. Nothing was charged.",
+      "reconcile": "An earlier payment step of this order must be checked first. Nothing was charged.",
+      "platformHeld": "The delivery platform holds this order's money. Nothing is collected at the till.",
+      "amountChanged": "The amount left to pay on this order changed. Check the order and try again. Nothing was charged.",
+      "unavailable": "TWINT can't be taken right now. Check the connection or choose another payment. Nothing was charged."
+    }
   },
   "displayPurchase": {
     "beforePurchase": "Before you buy",
@@ -1623,7 +1649,8 @@
       "receiptPrinted": "Receipt printed",
       "receiptEmailed": "Receipt sent to {{email}}",
       "invalidCard": "Invalid card details",
-      "expiredCard": "Card has expired"
+      "expiredCard": "Card has expired",
+      "cardDeclinedNothingCharged": "The card was declined. Nothing was charged."
     },
     "receipt": {
       "title": "Receipt",
@@ -1701,6 +1728,18 @@
       "unavailableTitle": "Checkout paused",
       "unavailableMessage": "The store's tax rate and discount limit could not be read, so nothing is priced on a guess. Try again; if it keeps failing, restart the app.",
       "retry": "Try again"
+    },
+    "manualCard": {
+      "terminalNotReady": "The card terminal is busy or not connected. Nothing was charged. Wait until it is free or reconnect it, then try again.",
+      "terminalCheckFailed": "Could not check the card terminal on this till. Nothing was charged. Try again.",
+      "terminalConfigured": "A card terminal is set up on this till. Take the card on the terminal. Nothing was recorded.",
+      "providerConnected": "A card payment provider is connected for this store, so this till cannot record a manual card. Take the card on the card terminal. Nothing was recorded.",
+      "unavailable": "Could not confirm that a manual card is allowed on this till. Nothing was recorded. Check the internet connection and try again.",
+      "alreadyTakenWarning": "If the card was already taken on the shop's own card machine, do not charge it again.",
+      "confirmTitle": "Record a manual card payment?",
+      "confirmBody": "No card terminal is connected to this till. Record {{amount}} only if the card was already taken on the shop's own card machine.",
+      "confirmAction": "Confirm manual card",
+      "portionNotice": "No card terminal is connected to this till. Take this amount on the shop's own card machine; on confirm it is recorded as a manual card payment."
     }
   },
   "paymentPrintPrompt": {
@@ -2386,7 +2425,9 @@
       "issue": {
         "hardwareProfileMissing": "Choose a printer for this job, then retry.",
         "needsAttention": "This print job needs printer setup before it can print.",
-        "genericAttention": "This POS print job needs attention."
+        "genericAttention": "This POS print job needs attention.",
+        "foodOrderItemsPending": "Waiting for this order's items from the delivery platform. It prints by itself once they arrive. If it stays here, open the order to refresh its items.",
+        "foodOrderItemsUnavailable": "This order's items did not arrive from the delivery platform, so it was not printed. Open the order to refresh its items, then press Retry."
       },
       "unknown": "Unknown",
       "cancel": "Cancel",
@@ -3459,11 +3500,13 @@
       "ambiguous_canonical_remote_payment": "parent payment matched more than one admin payment",
       "Payment not yet synced": "parent payment is not synced yet",
       "Parent payment missing canonical remote id": "parent payment is missing its admin id",
-      "Ambiguous canonical remote payment": "parent payment matched more than one admin payment"
+      "Ambiguous canonical remote payment": "parent payment matched more than one admin payment",
+      "money_not_synced": "a payment or refund recorded on this till has not reached the server yet"
     },
     "closeoutBlocked": {
       "single": "Cannot close the day during {{stage}} because {{orderReference}} is still blocked: {{reason}}.",
-      "multiple": "Cannot close the day during {{stage}} because {{count}} sync items are still blocked."
+      "multiple": "Cannot close the day during {{stage}} because {{count}} sync items are still blocked.",
+      "moneyNotSynced": "The day cannot be closed yet: {{count}} payment or refund record(s) of this day have not reached the server. Make sure the till is online, press Sync Now and close the day again."
     },
     "time": {
       "never": "Never",
@@ -4099,6 +4142,8 @@
       "refundCash": "Refund in Cash",
       "refundCard": "Refund to Card",
       "refundNote": "Card refunds are recorded as a ledger adjustment. Process the actual card reversal separately if required.",
+      "cashDisabled": "Cash is turned off for this terminal, so it cannot be recorded here.",
+      "cardDisabled": "Card is turned off for this terminal, so it cannot be recorded here.",
       "cancel": "Cancel",
       "failed": "Could not complete the settlement"
     },
@@ -4191,6 +4236,17 @@
       "loadItemsFailed": "Failed to load order items",
       "editServerUpdate": "Order corrections are temporarily unavailable. Check your connection and retry after the server update.",
       "editSyncRequired": "The payment or order change has not synced yet. Your cart is saved. Try again shortly.",
+      "editNotApplied": "This correction was not saved, so its difference was not recorded anywhere. If money already changed hands, prepare the correction again and record that same money once; never collect or return it twice. Otherwise a manager can close it without recording money.",
+      "editRequote": "Prepare the correction again",
+      "editRequoteReady": "Review the cart and save the correction again. Record only the money already received; do not collect or return it twice.",
+      "editCloseWithoutMoney": "Close without recording money (manager)",
+      "editCloseWithoutMoneyReason": "Correction not saved; closed by a manager without recording money",
+      "editClosedWithoutMoney": "The unsaved correction was closed. No money was recorded; count the drawer to confirm.",
+      "editCloseWithoutMoneyFailed": "The correction could not be closed. It stays held; nothing was recorded.",
+      "legacyEditReview": "An edit of this order saved by an older version of this till was refused by the server. The server keeps the original order and payments; this till holds the edit and its receipt. Nothing was collected again. A manager must review this order before the Z.",
+      "editTooManyLines": "A correction can have at most {{maxLines}} lines. Remove lines, or cancel the order and create a new one. No money was taken.",
+      "editMethodUnavailable": "This terminal may not record cash or card for the difference. Ask a manager to enable a payment method for this terminal. No money was taken.",
+      "editPreviousNotSaved": "An earlier correction of this order was confirmed but not saved. Reopen it from the saved cart to prepare it again, or ask a manager to close it. Do not collect or return money again.",
       "emptyEditHint": "To remove every item, close the editor and cancel the order.",
       "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund."
     },
@@ -4771,7 +4827,35 @@
         "pending": "The handover is saved on this register and awaits confirmation. It will retry automatically; do not record the cash again.",
         "retry": "Retry saved handover"
       },
-      "currencySettlementRequired": "Settle and close the staff shifts in their original currency before closing this cashier shift."
+      "currencySettlementRequired": "Settle and close the staff shifts in their original currency before closing this cashier shift.",
+      "satelliteHandover": {
+        "reasons": {
+          "giftClose": "This satellite till has a gift card close to finish. Close that shift on the satellite till itself.",
+          "staffCustody": "Drivers or waiters of this satellite shift still hold cash. Check them out first, then receive the cash.",
+          "movements": "The satellite till's cash movements have not reached the server yet. Wait until it syncs, then try again.",
+          "role": "This shift can't be closed from the main till. Close it on the satellite till.",
+          "retry": "The server is busy with this shift right now. Try again in a moment.",
+          "closedElsewhere": "The satellite till already closed this shift itself, so its cash can't be received here.",
+          "currency": "This satellite shift's money is in another currency than this drawer. It can't be received here.",
+          "sourceDrawer": "The satellite till's cash drawer was not found or is already closed.",
+          "receiver": "This drawer can't receive the cash: it is closed, or it is not this till's open cashier drawer.",
+          "conflict": "The server already recorded a different handover for this shift. Ask a manager to check it.",
+          "mainOnly": "Only this register's main till can receive cash from its satellite tills.",
+          "figures": "The shift figures couldn't be loaded from the server. Check the connection and try again.",
+          "pending": "Satellite cash is still being received. Reconnect to the internet so it can finish before this shift closes.",
+          "refused": "The server refused this satellite cash handover for good.",
+          "unknown": "The satellite cash handover couldn't be completed. Try again or ask a manager.",
+          "staffCustodyRefused": "Drivers or waiters of this satellite shift still held cash when it was sent, so the server refused it. Close that shift on the satellite till itself.",
+          "movementsRefused": "The satellite till's cash movements were not on the server when it was sent, so the server refused it. Close that shift on the satellite till itself."
+        },
+        "releaseHint": "A manager can release it so this shift can close. The satellite cash is not added to this drawer.",
+        "releaseTitle": "Satellite cash handover refused",
+        "releasePin": "Manager PIN",
+        "releaseAction": "Release without adding the cash to this drawer",
+        "releaseWrongPin": "That PIN can't release it. A manager with the right to cancel orders enters their own PIN.",
+        "releaseFailed": "The handover couldn't be released. Nothing changed; try again.",
+        "released": "Released. The satellite cash was not added to this drawer. You can close the shift now."
+      }
     },
     "zReport": {
       "title": "Z Report - {{date}}",
@@ -5205,6 +5289,16 @@
     },
     "orderCancellation": {
       "staffCashAmbiguous": "Staff cash custody cannot be verified. Review the original cash return before cancelling.",
+      "platformOrderReturn": "This order came from a delivery platform. Its money is returned through the platform, so the till does not record a return for it.",
+      "receiptCheckUnavailable": "This payment was taken on another till. Connect to the internet so this till can check the original payment, then try again. Nothing was returned.",
+      "refusedByServer": "The server refused this cancellation. No money was returned and nothing was cancelled. A manager can clear the refused attempt, then cancel again.",
+      "releaseWait": "This cancellation was sent less than 15 minutes ago and may still be recorded. Try clearing it again in {{minutes}} min.",
+      "releaseCommitted": "The server already recorded this cancellation. Sync this till to finish it. Nothing was cleared.",
+      "cancellationPending": "A saved cancellation of this order is waiting for the server. Resume it with its original reason and approver, or ask a manager to clear it.",
+      "refusedAttemptNotice": "The server refused the last cancellation of this order. No money was returned. A manager can clear it before the order is cancelled again.",
+      "pendingAttemptNotice": "This order has a saved cancellation waiting for the server. Confirm to resume it as it was saved. If it cannot be completed, a manager can clear it.",
+      "clearRefusedAttempt": "Clear the saved cancellation",
+      "attemptCleared": "The saved cancellation was cleared. No money was returned. You can cancel the order again.",
       "staffCashUnavailable": "Cash handover cancellation is temporarily unavailable. Check your connection and retry after the server update.",
       "connectionUnavailable": "Payment connection status is unavailable. Refresh Integrations and try again.",
       "permissionRequired": "This account does not have permission to cancel paid orders.",
@@ -6222,6 +6316,10 @@
     "printFailed": "Failed to print receipt",
     "printAlreadyQueued": "This receipt is already queued or printing — not reprinted.",
     "printSkipped": "Receipt printing is turned off for this action.",
+    "printSent": "Receipt sent to the printer.",
+    "printQueued": "Receipt queued but not printed yet. Check the print queue if it does not come out.",
+    "printWaitingForItems": "Not printed yet: this order's items have not arrived from the delivery platform. The receipt prints by itself once they do.",
+    "printNotPrinted": "The receipt was not printed. Check the print queue in Settings > Print Queue.",
     "guestCustomer": "Guest",
     "loadingItems": "Loading items...",
     "loadItemsFailed": "Failed to load items",
@@ -6557,7 +6655,9 @@
         "poorTitle": "This scan is hard to read",
         "poorDescription": "You can scan it again, or just type in what it says.",
         "queued": "Saved here. It will reach the office as soon as you are back online.",
-        "saved": "Invoice saved."
+        "saved": "Invoice saved.",
+        "amountInvalid": "Enter the invoice amount with its cents, for example 1234.50 or 1,234.50. Nothing was saved.",
+        "amountHasPayments": "This invoice already has payments, so its amount can no longer change. Nothing was saved — put the amount back to save your other changes."
       },
       "scan": {
         "open": "Scan invoice",
@@ -8590,7 +8690,14 @@
       "partnerRequired": "Partner credentials required",
       "connected": "Connected",
       "pending": "Pending",
-      "disconnected": "Not Connected"
+      "disconnected": "Not Connected",
+      "unknown": "Status unknown",
+      "unknownShort": "Unknown"
+    },
+    "savedCopy": {
+      "title": "Saved copy — not up to date",
+      "bodyAt": "The office could not be reached, so this is the plugin list this till saved at {{time}}. Statuses may have changed and are not shown until the list refreshes.",
+      "body": "The office could not be reached, so this is the plugin list this till saved earlier. Statuses may have changed and are not shown until the list refreshes."
     },
     "mydata": {
       "title": "MyData Configuration",
@@ -9172,6 +9279,16 @@
         "summary": "Sync backlog is visible, but there is no guided fix mapped for this exact failure yet.",
         "guidance": "Contact Dev and include the diagnostics bundle so the next occurrence can be mapped to a guided fix."
       },
+      "remoteHandoverSnapshotFrozen": {
+        "title": "A shift was already closed on another device",
+        "summary": "{{count}} money record(s) belong to a shift that was closed on another device. The server keeps that shift's figures fixed and refuses the change, so it is not sent again.",
+        "guidance": "Ask a manager to check this shift in the admin dashboard and record the difference there. Do not take or give back money again at the till."
+      },
+      "legacyEditReview": {
+        "title": "An order edit from an older version needs a manager",
+        "summary": "{{count}} order edit(s) saved by an older version of this till were refused by the server. The server keeps the original order and its payments; this till keeps the edit and its receipt. Nothing was charged twice and it is not sent again.",
+        "guidance": "Ask a manager to open this order, compare it with the receipt and correct it once, before the Z. Do not charge or give back money again for this edit."
+      },
       "duplicateCustomerConflict": {
         "title": "This customer already exists at the office",
         "summary": "A customer saved on this terminal has the same phone number as one the office already holds, so the change cannot be sent. It does not stop the end of day, but the office does not have this customer until you link it.",
@@ -9735,7 +9852,9 @@
     "cancelRefusedNotRecorded": "This order is marked paid, but its payment is not recorded on this till. Restore it from the server with Sync Now, or record the payment from the Z Report, then cancel.",
     "notRecordedTitle": "Table {{table}}: its payment is not recorded",
     "notRecordedMessage": "Its order is marked paid, but its payment is not recorded on this till. Do not charge it again: restore it from the server with Sync Now, or record the payment from the Z Report.",
-    "keepOpenNotRecordedHint": "The table is freed; the order stays as it is until its payment is restored or recorded."
+    "keepOpenNotRecordedHint": "The table is freed; the order stays as it is until its payment is restored or recorded.",
+    "clearAttemptTitle": "Approve clearing the saved cancellation",
+    "clearAttemptSubtitle": "A manager enters their own PIN. Nothing is charged or returned."
   },
   "reservationForm": {
     "toasts": {
@@ -9909,8 +10028,10 @@
     },
     "reasonCodes": {
       "table_cancellation_not_saved": "The original table cancellation return has not been saved yet.",
+      "table_cancellation_not_saved__refused": "The server refused this table cancellation. No money was returned and nothing was cancelled.",
       "payments_need_review": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}} after it was already paid. It is set aside and not counted: the customer may have paid twice.",
       "payments_need_review__platform_held": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}}, but the delivery platform already holds this order's money. It is set aside and not counted: the customer may have paid twice.",
+      "payments_need_review__reconciliation_required": "A payment of {{paymentAmount}} ({{paymentMethod}}) was taken on order {{orderNumber}}, but the order changed on the server after that, for example another till cancelled it. It is set aside and not counted.",
       "payments_not_saved": "A card payment of {{paymentAmount}} was charged on order {{orderNumber}} but is not saved on this till yet. The customer was charged: do not charge again.",
       "payments_not_saved__new_order": "A card payment of {{paymentAmount}} was charged for a new order that is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged: do not charge again.",
       "payments_not_saved__new_order_cannot_save": "A card payment of {{paymentAmount}} was charged for a new order that is not saved on this till yet: the order and its payment are held until they are saved. The customer was charged: do not charge again.",
@@ -9919,8 +10040,10 @@
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Recover the original table cancellation. Do not hand back or refund the money again.",
+      "table_cancellation_not_saved__refused": "A manager clears the refused attempt from the table check, then cancels again. Do not hand back or refund the money again.",
       "payments_need_review": "Give the money back to the customer, then confirm it here. If the payment on the server is the wrong one, contact support before closing the day.",
       "payments_need_review__platform_held": "Give the money back to the customer, then confirm it here. The platform pays this order to the store through its own settlement.",
+      "payments_need_review__reconciliation_required": "Check the order with the customer. If it is cancelled, give the money back, then confirm it here. If the customer still owes this amount, contact support before closing the day.",
       "payments_not_saved": "Save the payment again. If it cannot be saved, give the money back to the customer and confirm it here.",
       "payments_not_saved__cannot_save": "This payment cannot be saved on this till. Give the money back to the customer, then confirm it here.",
       "payments_not_saved__new_order": "Save the payment again: it saves the order and its payment, with no new charge. If it cannot be saved, give the money back to the customer and confirm it here.",

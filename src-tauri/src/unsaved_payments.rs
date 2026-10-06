@@ -365,7 +365,13 @@ impl UnsavedChargedPayment {
             return Err("TWINT_MANUAL_CONFIRMATION_REQUIRED".into());
         }
         entry.kind = KIND_MANUAL_TWINT_CHECKOUT.into();
-        entry.manual_scope = Some(manual_twint_scope(db)?);
+        // The scope is this terminal's own, never the renderer's: the order
+        // payload `OrderService.createOrder` sends names none, so the check
+        // below refused every new-order TWINT checkout before (fix review
+        // 06/10/2026). Stamped into the original the replay writes.
+        let scope = manual_twint_scope(db)?;
+        stamp_manual_twint_scope_value(&mut entry.request, &scope)?;
+        entry.manual_scope = Some(scope);
         validate_manual_twint_entry(db, &entry)?;
         Ok(entry)
     }
@@ -375,6 +381,132 @@ fn manual_twint_scope(db: &DbState) -> Result<String, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     manual_twint_scope_in_connection(&conn)
 }
+
+/// Stamp this terminal's TWINT scope (organization, branch, terminal) into a
+/// new-order checkout payload, from the terminal settings
+/// ([`manual_twint_scope_in_connection`]), as [`for_manual_twint_payment`]
+/// does for an existing order. A scope the renderer sent is overwritten:
+/// it is never an authority for the receipt.
+///
+/// [`for_manual_twint_payment`]: UnsavedChargedPayment::for_manual_twint_payment
+pub(crate) fn stamp_manual_twint_scope(
+    db: &DbState,
+    order_payload: &mut Value,
+) -> Result<(), String> {
+    let scope = manual_twint_scope(db)?;
+    stamp_manual_twint_scope_value(order_payload, &scope)
+}
+
+fn stamp_manual_twint_scope_value(order_payload: &mut Value, scope: &str) -> Result<(), String> {
+    let parts: Vec<&str> = scope.split('|').collect();
+    let [organization, branch, terminal] = parts.as_slice() else {
+        return Err("TWINT_RECEIPT_SCOPE_UNAVAILABLE".into());
+    };
+    let order = order_payload
+        .as_object_mut()
+        .ok_or("TWINT_MANUAL_CONFIRMATION_REQUIRED")?;
+    for (camel, snake, value) in [
+        ("organizationId", "organization_id", organization),
+        ("branchId", "branch_id", branch),
+        ("terminalId", "terminal_id", terminal),
+    ] {
+        order.insert(camel.to_string(), json!(value));
+        // A renderer alias never stands beside the native value.
+        if order.contains_key(snake) {
+            order.insert(snake.to_string(), json!(value));
+        }
+    }
+    Ok(())
+}
+
+/// The answer when the cashier confirmed a TWINT receipt this till could not
+/// retain at all (no terminal scope to hold it under, or an original that
+/// does not describe a cashier-confirmed TWINT receipt). Never a plain
+/// failure a caller may turn into a retry save: it says the receipt is not
+/// kept and that nothing may be collected again.
+pub(crate) fn manual_twint_receipt_unretained_response(error: &str) -> Value {
+    let code = error
+        .split(':')
+        .next()
+        .map(str::trim)
+        .filter(|code| code.starts_with("TWINT_"))
+        .unwrap_or("TWINT_RECEIPT_NOT_RETAINED");
+    let message = "The cashier confirmed TWINT receipt, but this till could not retain it. Do not collect again. Keep the receipt and contact a manager before closing or restarting the POS.";
+    json!({
+        "success": false,
+        "errorCode": code,
+        "manualReceiptConfirmed": true,
+        "manualReceiptRetained": false,
+        "paymentApproved": Value::Null,
+        "paymentPersisted": false,
+        "orderPersisted": false,
+        "requiresReconciliation": true,
+        "journalError": error,
+        "error": message,
+        "message": message,
+    })
+}
+
+/// Why a retained cashier-confirmed TWINT checkout cannot be written as its
+/// new order now, if anything: its order was saved meanwhile without this
+/// receipt (a card of the same checkout booked it), or an earlier card
+/// attempt of the same checkout is unresolved (a charged card held as not
+/// saved, a SALE or fiscal receipt not given back, an approved fiscal
+/// receipt). The receipt stays retained either way; nothing is written.
+/// Both are lasting: the manager can give the TWINT money back
+/// (`twint_returned_to_customer`), and a save still succeeds once the
+/// earlier attempt is resolved.
+fn manual_twint_checkout_refusal(
+    conn: &Connection,
+    entry: &UnsavedChargedPayment,
+) -> Result<Option<String>, String> {
+    let client_request_id = entry.order_id.as_str();
+    let order_saved: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE client_request_id = ?1)",
+            params![client_request_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("inspect the checkout order before saving a TWINT receipt: {e}"))?;
+    if order_saved {
+        return Ok(Some(format!(
+            "{TWINT_RECEIPT_ORDER_CONTEXT_CHANGED}: the order of this checkout was saved without this TWINT receipt"
+        )));
+    }
+    let held_card = list(conn, Some(client_request_id))?.iter().any(|other| {
+        other.idempotency_key != entry.idempotency_key
+            && other.is_new_order_checkout()
+            && !other.is_manual_twint()
+    });
+    let prior: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM ecr_transactions WHERE order_id = ?1
+             AND lower(trim(transaction_type)) IN ('sale', 'fiscal_receipt')
+             AND lower(trim(status)) NOT IN ('declined', 'error', 'cancelled')
+             AND (CASE WHEN json_valid(receipt_data)
+                       THEN json_extract(receipt_data, '$.returnedToCustomer') END) IS NULL",
+            params![client_request_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("inspect prior checkout before TWINT: {e}"))?;
+    if held_card
+        || prior != 0
+        || crate::commands::ecr::find_approved_fiscal_transaction(conn, client_request_id)?
+            .is_some()
+    {
+        return Ok(Some(format!(
+            "{TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED}: an earlier card attempt of this checkout must be checked first"
+        )));
+    }
+    Ok(None)
+}
+
+/// The order of a retained TWINT checkout was saved without its receipt, or
+/// the order of an existing-order receipt changed.
+pub(crate) const TWINT_RECEIPT_ORDER_CONTEXT_CHANGED: &str = "TWINT_RECEIPT_ORDER_CONTEXT_CHANGED";
+/// An earlier card attempt of the same new-order checkout is unresolved.
+pub(crate) const TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED: &str =
+    "TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED";
 
 fn manual_twint_scope_in_connection(conn: &Connection) -> Result<String, String> {
     let terminal = crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn)
@@ -424,6 +556,143 @@ pub(crate) fn validate_manual_payment_context_in_connection(
         }
     }
     Ok(())
+}
+
+/// The order's own payment unit, resolved as for any new collection (the
+/// order, its ledger, its owning shift and the branch), must be CHF for a
+/// cashier-confirmed TWINT receipt. Resolved without the receipt's key: its
+/// retained journal would otherwise answer for itself. A different unit is a
+/// lasting refusal; a missing shift unit stays retryable.
+fn require_manual_twint_order_currency(
+    conn: &Connection,
+    order_id: &str,
+    amount: f64,
+) -> Result<(), String> {
+    let probe = json!({
+        "orderId": order_id,
+        "method": "twint",
+        "amount": amount,
+        "currency": "CHF",
+        "paymentOrigin": "manual",
+    });
+    let input = crate::payments::build_payment_record_input(&probe)?;
+    match crate::payments::resolve_local_payment_currency(conn, &input) {
+        Ok(currency) if currency == "CHF" => Ok(()),
+        Ok(_) => Err(format!(
+            "{TWINT_RECEIPT_ORDER_CURRENCY_MISMATCH}: the order is not in CHF"
+        )),
+        Err(error)
+            if error.contains("ORDER_CURRENCY_MISMATCH")
+                || error.contains("PAYMENT_CURRENCY_MISMATCH") =>
+        {
+            Err(format!("{TWINT_RECEIPT_ORDER_CURRENCY_MISMATCH}: {error}"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The order's unit is not CHF: a TWINT receipt can never be saved on it.
+pub(crate) const TWINT_RECEIPT_ORDER_CURRENCY_MISMATCH: &str =
+    "TWINT_RECEIPT_ORDER_CURRENCY_MISMATCH";
+
+/// Can this existing order take a cashier-confirmed TWINT receipt for its
+/// whole outstanding balance right now? Asked BEFORE the QR is shown (fix
+/// review 06/10/2026: the QR came first, so every refusal of the receipt's
+/// save came after the customer had paid; Android asks first too,
+/// `PaymentScreen.handleMethodSelect`). Read-only: the same checks the
+/// receipt's save runs ([`UnsavedChargedPayment::for_manual_twint_payment`],
+/// [`write_recorded_payment`], `payments::record_payment_in_connection`).
+/// A receipt the cashier then confirms is retained whatever changed meanwhile.
+pub(crate) fn manual_twint_existing_admission(conn: &Connection, order_id: &str) -> Value {
+    match manual_twint_existing_admission_checks(conn, order_id) {
+        Ok(outstanding_cents) => json!({
+            "admitted": true,
+            "code": Value::Null,
+            "outstandingCents": outstanding_cents,
+            "currency": "CHF",
+        }),
+        Err(error) => {
+            let code = error
+                .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .next()
+                .filter(|code| code.len() > 2 && code.contains('_'))
+                .unwrap_or("TWINT_ADMISSION_UNAVAILABLE")
+                .to_string();
+            json!({
+                "admitted": false,
+                "code": code,
+                "outstandingCents": Value::Null,
+                "error": error,
+            })
+        }
+    }
+}
+
+fn manual_twint_existing_admission_checks(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<i64, String> {
+    if !crate::db::order_payments_support_twint(conn)? {
+        return Err("TWINT_PAYMENT_CAPABILITY_UNAVAILABLE".into());
+    }
+    let scope = manual_twint_scope_in_connection(conn)?;
+    let branch = scope.split('|').nth(1).unwrap_or_default().to_string();
+    let context = manual_order_context(conn, order_id)?;
+    if context.get("branchId").and_then(Value::as_str) != Some(branch.as_str()) {
+        return Err(TWINT_RECEIPT_ORDER_CONTEXT_CHANGED.into());
+    }
+    let (status, ghost): (String, bool) = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(status, ''))), COALESCE(is_ghost, 0) != 0
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("TWINT_RECEIPT_ORDER_CONTEXT_UNAVAILABLE: {e}"))?;
+    if ghost || matches!(status.as_str(), "cancelled" | "canceled" | "refunded") {
+        return Err(TWINT_RECEIPT_ORDER_CONTEXT_CHANGED.into());
+    }
+    if crate::fiscal::payload_builder::resolve_store_currency_code(conn).as_deref() != Some("CHF") {
+        return Err("TWINT_CURRENCY_UNAVAILABLE".into());
+    }
+    // A payment of this order not saved yet (a charged split card portion,
+    // another receipt): it is reconciled first, never covered twice.
+    if !list(conn, Some(order_id))?.is_empty() {
+        return Err(PAYMENT_NOT_SAVED_PENDING_ERROR_CODE.into());
+    }
+    crate::commands::ecr::direct_sale_admission(conn, order_id, None).map_err(|error| {
+        if error.starts_with("FOLIO_CHARGE_RECONCILIATION_REQUIRED") {
+            error
+        } else {
+            format!("DIRECT_SALE_RECONCILIATION_REQUIRED: {error}")
+        }
+    })?;
+    if crate::payment_review::table_exists(conn, "gift_card_redemption_attempts")? {
+        let unresolved: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM gift_card_redemption_attempts
+                 WHERE local_order_id = ?1 AND status IN ('pending', 'remote_applied')",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("inspect gift debit before TWINT: {e}"))?;
+        if unresolved != 0 {
+            return Err("GIFT_CARD_RECOVERY_REQUIRED".into());
+        }
+    }
+    crate::edit_settlement_recovery::require_original_financial_attempt(conn, order_id, None)?;
+    if crate::payments::platform_settlement_kind(conn, order_id).is_some()
+        || crate::payments::order_has_platform_held_set_aside(conn, order_id)
+    {
+        return Err(crate::payments::PLATFORM_HELD_COLLECTION_ERROR.into());
+    }
+    let balance = crate::payments::load_order_payment_balance_snapshot(conn, order_id)?;
+    let outstanding_cents = Cents::round_half_even(balance.outstanding_amount).as_i64();
+    if outstanding_cents <= 0 {
+        return Err("TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED".into());
+    }
+    require_manual_twint_order_currency(conn, order_id, balance.outstanding_amount)?;
+    Ok(outstanding_cents)
 }
 
 /// A fresh collection must wait for the retained cashier-confirmed receipt.
@@ -820,10 +1089,12 @@ pub(crate) fn is_lasting_payment_refusal(error: &str) -> bool {
         "outstanding payment collection is active",
         "Cashier-collected payments require a cashier shift context",
         "is not a cashier or manager drawer",
-        "TWINT_RECEIPT_ORDER_CONTEXT_CHANGED",
+        TWINT_RECEIPT_ORDER_CONTEXT_CHANGED,
         "TWINT_RECEIPT_SCOPE_CHANGED",
         "TWINT_RECEIPT_ORIGINAL_CONFLICT",
         "TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED",
+        TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED,
+        TWINT_RECEIPT_ORDER_CURRENCY_MISMATCH,
     ];
     LASTING.iter().any(|marker| error.contains(marker))
 }
@@ -1194,7 +1465,13 @@ pub(crate) fn write_recorded_payment(
         if matches!(status.as_str(), "cancelled" | "canceled" | "refunded") {
             return Err("TWINT_RECEIPT_ORDER_CONTEXT_CHANGED".into());
         }
+        // The receipt is retained before this unit is resolved (`payment_record`
+        // journals it first), so the order's own unit is checked here.
+        require_manual_twint_order_currency(&conn, &entry.order_id, entry.amount)?;
         if crate::payments::payload_collects_outstanding_balance(&entry.request) {
+            // The receipt is pinned to the ledger generation it was confirmed
+            // against, and a generation never comes back: lasting, so the
+            // manager's TWINT return is offered (fix review 06/10/2026).
             crate::commands::payments::validate_manual_twint_outstanding_context(
                 &conn,
                 &entry.order_id,
@@ -1252,6 +1529,12 @@ pub(crate) fn write_recorded_entry(
 ) -> Result<Value, String> {
     if entry.is_new_order_checkout() {
         validate_manual_twint_entry(db, entry)?;
+        if entry.is_manual_twint() {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            if let Some(refusal) = manual_twint_checkout_refusal(&conn, entry)? {
+                return Err(refusal);
+            }
+        }
         return write_new_order_checkout(db, &entry.request, invalidator);
     }
     write_recorded_payment(db, entry)
@@ -1410,6 +1693,224 @@ pub(crate) fn resolve_in_connection(
             amount_cents: entry.amount_cents,
         })
     })
+}
+
+/// The only outcome a manager can record for a retained cashier-confirmed
+/// TWINT receipt that can never be saved: the customer got the money back
+/// through TWINT, outside the POS (fix review 06/10/2026; Android uses the
+/// same code). Nothing is charged or refunded here and no row is written: the
+/// receipt is kept out of sales and drawer cash, and its audit is the record.
+pub(crate) const TWINT_RETURNED_TO_CUSTOMER_OUTCOME: &str = "twint_returned_to_customer";
+/// The recovery log action of [`TWINT_RETURNED_TO_CUSTOMER_OUTCOME`].
+pub(crate) const TWINT_RETURNED_ACTION_ID: &str = "twint_receipt_returned_outside_pos";
+
+/// The manager's reference for a TWINT return (the TWINT refund reference or
+/// a note): required, 3 to 200 characters once trimmed.
+pub(crate) fn twint_return_reference(raw: Option<&str>) -> Result<String, String> {
+    let reference = raw.map(str::trim).unwrap_or_default();
+    let length = reference.chars().count();
+    if !(3..=200).contains(&length) || reference.chars().any(char::is_control) {
+        return Err("TWINT_RETURN_REFERENCE_REQUIRED".into());
+    }
+    Ok(reference.to_string())
+}
+
+/// Whether the retained receipt under `idempotency_key` may be recorded as
+/// returned through TWINT: a cashier-confirmed TWINT receipt whose last save
+/// met a lasting refusal. Read before any approval is asked.
+pub(crate) fn twint_return_eligibility(
+    conn: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<UnsavedChargedPayment>, String> {
+    let Some(entry) = load(conn, idempotency_key.trim())? else {
+        return Ok(None);
+    };
+    if !entry.is_manual_twint() {
+        return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: only a cashier-confirmed TWINT receipt can be recorded as returned through TWINT".into());
+    }
+    if saved_row_for(conn, &entry)?.is_none() && can_save_again(&entry) {
+        return Err(
+            "TWINT_RECEIPT_SAVE_STILL_POSSIBLE: save the original TWINT receipt again first".into(),
+        );
+    }
+    Ok(Some(entry))
+}
+
+/// "Returned via TWINT outside the POS" for a retained TWINT receipt that can
+/// never be saved. The audit goes first (the record as it was, the outcome,
+/// the manager, the reference, the lasting refusal; in `recovery_action_log`
+/// and in [`UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY`]), then the record,
+/// which releases the Z. One savepoint: both or neither. The order is left
+/// as it is; nothing counts as sales, TWINT tender or drawer cash.
+pub(crate) fn resolve_twint_returned_in_connection(
+    conn: &Connection,
+    idempotency_key: &str,
+    reference: &str,
+    resolved_by: &str,
+    approved_via: &str,
+    resolved_at: &str,
+) -> Result<ResolveOutcome, String> {
+    let key = idempotency_key.trim();
+    if key.is_empty() {
+        return Ok(ResolveOutcome::NotFound);
+    }
+    let reference = twint_return_reference(Some(reference))?;
+    crate::payment_review::with_savepoint(conn, "twint_receipt_returned", || {
+        let Some(entry) = twint_return_eligibility(conn, key)? else {
+            let resolved =
+                crate::db::get_setting(conn, UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY, key)
+                    .is_some();
+            return Ok(if resolved {
+                ResolveOutcome::AlreadyResolved
+            } else {
+                ResolveOutcome::NotFound
+            });
+        };
+        // Its exact canonical row exists after all: nothing goes back.
+        if saved_row_for(conn, &entry)?.is_some() {
+            clear(conn, key)?;
+            return Ok(ResolveOutcome::Saved);
+        }
+        let resolution = json!({
+            "outcome": TWINT_RETURNED_TO_CUSTOMER_OUTCOME,
+            "resolved_by": resolved_by,
+            "resolved_at": resolved_at,
+            "approved_via": approved_via,
+            "reference": reference,
+            "last_error": entry.last_error,
+        });
+        let mut audit = serde_json::to_value(&entry)
+            .map_err(|e| format!("serialize the returned TWINT receipt: {e}"))?;
+        if let Some(object) = audit.as_object_mut() {
+            object.insert("resolution".to_string(), resolution.clone());
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO local_settings (setting_category, setting_key, setting_value, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY,
+                key,
+                audit.to_string(),
+                resolved_at
+            ],
+        )
+        .map_err(|e| format!("write the TWINT return of a retained receipt: {e}"))?;
+        if !crate::payment_review::table_exists(conn, "recovery_action_log")? {
+            return Err("recovery_action_log is missing; the audit entry cannot be written".into());
+        }
+        let order_number: Option<String> = conn
+            .query_row(
+                "SELECT NULLIF(TRIM(COALESCE(order_number, '')), '') FROM orders WHERE id = ?1",
+                params![entry.order_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("load the order number for the TWINT return audit: {e}"))?
+            .flatten();
+        conn.execute(
+            "INSERT INTO recovery_action_log (
+                 id, action_id, issue_code, entity_type, entity_id, order_id, order_number,
+                 success, message, actor_staff_id, payload_json, created_at
+             ) VALUES (?1, ?2, ?3, 'unsaved_charged_payment', ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                TWINT_RETURNED_ACTION_ID,
+                PAYMENTS_NOT_SAVED_REASON_CODE,
+                entry.idempotency_key,
+                entry.order_id,
+                order_number,
+                format!(
+                    "A {} CHF TWINT receipt confirmed on this till and never saved was returned to the customer through TWINT outside the POS",
+                    amount_text(entry.amount_cents)
+                ),
+                resolved_by,
+                json!({ "record": summary_json(&entry), "resolution": resolution }).to_string(),
+                resolved_at,
+            ],
+        )
+        .map_err(|e| format!("write the TWINT return audit entry: {e}"))?;
+        clear(conn, key)?;
+        info!(
+            order_id = %entry.order_id,
+            amount_cents = entry.amount_cents,
+            resolved_by = resolved_by,
+            "A retained TWINT receipt was recorded as returned through TWINT outside the POS"
+        );
+        Ok(ResolveOutcome::Resolved {
+            order_id: entry.order_id,
+            method: entry.method,
+            amount_cents: entry.amount_cents,
+        })
+    })
+}
+
+/// The TWINT receipts recorded as returned through TWINT outside the POS,
+/// resolved at or after `since` (RFC 3339; all when `None`): shown on the Z
+/// for what they are, never counted as sales, TWINT tender or drawer cash.
+pub(crate) fn twint_returned_outside_pos(
+    conn: &Connection,
+    since: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let since = since
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .or_else(|_| {
+                    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                        })
+                        .map(|naive| naive.and_utc().fixed_offset())
+                })
+                .map_err(|e| format!("TWINT_RETURNED_SINCE_INVALID: {e}"))
+        })
+        .transpose()?;
+    let mut statement = conn
+        .prepare(
+            "SELECT setting_value FROM local_settings
+             WHERE setting_category = ?1
+               AND json_valid(setting_value)
+               AND json_extract(setting_value, '$.resolution.outcome') = ?2
+             ORDER BY json_extract(setting_value, '$.resolution.resolved_at') ASC",
+        )
+        .map_err(|e| format!("prepare the returned TWINT receipts: {e}"))?;
+    let rows = statement
+        .query_map(
+            params![
+                UNSAVED_CHARGED_PAYMENT_RESOLVED_CATEGORY,
+                TWINT_RETURNED_TO_CUSTOMER_OUTCOME
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("read the returned TWINT receipts: {e}"))?;
+    let mut returned = Vec::new();
+    for raw in rows {
+        let raw = raw.map_err(|e| format!("read a returned TWINT receipt: {e}"))?;
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let resolution = &value["resolution"];
+        let resolved_at = resolution["resolved_at"].as_str().unwrap_or_default();
+        if let Some(since) = since {
+            match chrono::DateTime::parse_from_rfc3339(resolved_at) {
+                Ok(at) if at >= since => {}
+                _ => continue,
+            }
+        }
+        returned.push(json!({
+            "idempotencyKey": value["idempotencyKey"],
+            "orderId": value["orderId"],
+            "kind": value["kind"],
+            "amountCents": value["amountCents"],
+            "currency": value["currency"],
+            "capturedAt": value["capturedAt"],
+            "resolvedAt": resolved_at,
+            "resolvedBy": resolution["resolved_by"],
+            "reference": resolution["reference"],
+        }));
+    }
+    Ok(returned)
 }
 
 fn write_resolution_audit(

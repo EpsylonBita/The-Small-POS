@@ -27,6 +27,14 @@ import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
 import { AddCustomerModal } from './AddCustomerModal';
 import { isGiftCardPayment } from '../../lib/gift-card-returns';
+import {
+  boxClosedReasonLabelKey,
+  isBoxDecisionClosed,
+  isBoxManualCheckRequired,
+  isBoxOrder,
+  readBoxDisplayItems,
+} from '../order/box-order-decision';
+import { isExternalDeliveryPlatform } from '../../../../../shared/platforms/order-platforms';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -58,6 +66,46 @@ function unwrapBridgeArray<T>(result: any): T[] {
 /** True only when the bridge answered with rows `unwrapBridgeArray` can read. */
 function isBridgeArray(result: any): boolean {
   return Array.isArray(result) || Array.isArray(result?.data);
+}
+
+/**
+ * A delivery-platform order whose structured items are missing, by the same rule
+ * the native food print readiness uses (`has_usable_food_order_items`): at least
+ * one row, and every row has a name and a positive quantity.
+ */
+function platformOrderItemsMissing(order: any): boolean {
+  if (!isExternalDeliveryPlatform(order?.plugin ?? order?.platform)) {
+    return false;
+  }
+  let rows: unknown = order?.items;
+  if (typeof rows === 'string') {
+    try {
+      rows = JSON.parse(rows);
+    } catch {
+      return true;
+    }
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return true;
+  }
+  return !rows.every((row) => {
+    if (!row || typeof row !== 'object') {
+      return false;
+    }
+    const item = row as Record<string, unknown>;
+    const nameKey = ['name', 'itemName', 'menu_item_name', 'title'].find((key) => item[key] !== undefined);
+    const name = nameKey ? item[nameKey] : undefined;
+    const rawQuantity = item.quantity;
+    const quantity =
+      typeof rawQuantity === 'string' && rawQuantity.trim() ? Number(rawQuantity.trim()) : rawQuantity;
+    return (
+      typeof name === 'string' &&
+      name.trim().length > 0 &&
+      typeof quantity === 'number' &&
+      Number.isFinite(quantity) &&
+      quantity > 0
+    );
+  });
 }
 
 function isSystemGeneratedServiceNote(note: string): boolean {
@@ -397,6 +445,28 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     return read;
   };
 
+  // Opening a delivery-platform order whose items never arrived asks the native
+  // item fetch once per open view. Native persists them under the order's own
+  // identity and releases a food print waiting for them; this view then shows
+  // them from a fresh local read, never from the fetch reply alone.
+  const platformItemRefreshEpochRef = useRef(-1);
+  const refreshMissingPlatformItems = async (targetOrderId: string, epoch: number) => {
+    if (platformItemRefreshEpochRef.current === epoch) {
+      return;
+    }
+    platformItemRefreshEpochRef.current = epoch;
+    try {
+      const fetched = unwrapBridgeArray<unknown>(
+        await bridge.orders.fetchItemsFromSupabase(targetOrderId),
+      );
+      if (fetched.length > 0 && isCurrentView(epoch, targetOrderId)) {
+        await loadOrderData(targetOrderId);
+      }
+    } catch (error) {
+      console.warn('[OrderDetailsModal] Refreshing missing platform order items failed:', error);
+    }
+  };
+
   const readOrderData = async (targetOrderId: string): Promise<boolean> => {
     if (!targetOrderId) {
       return false;
@@ -417,6 +487,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         result?.success === false ? null : result?.order ?? result?.data ?? result;
       if (hydratedOrder) {
         setOrderData(hydratedOrder);
+        if (platformOrderItemsMissing(hydratedOrder)) {
+          void refreshMissingPlatformItems(targetOrderId, epoch);
+        }
         const hydratedPhone =
           hydratedOrder.customer_phone ||
           hydratedOrder.customerPhone ||
@@ -662,6 +735,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   // Use real data or fallback to default values
   const displayOrder = orderData || order || {};
   const items = displayOrder.items || displayOrder.order_items || [];
+  // A pending BOX order has no order items until BOX confirms the accept; the
+  // provider's lines are shown display-only instead: never paid, split or
+  // totalled here (the totals stay the order's own).
+  const isBox = isBoxOrder(displayOrder);
+  const boxDisplayItems = isBox && items.length === 0 ? readBoxDisplayItems(displayOrder) : [];
   const customer = displayOrder.customer || {};
   const orderType = normalizeOrderTypeForDisplay(
     displayOrder.order_type || displayOrder.orderType || 'delivery',
@@ -791,9 +869,20 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     || displayOrder.cancellationReason
     || '',
   ).trim();
+  // A closed BOX decision is recorded as a code (BOX expired or refused it,
+  // or staff closed it here after checking with BOX): staff read its label.
+  const boxClosedReasonKey = boxClosedReasonLabelKey(cancellationReason);
+  const cancellationReasonLabel = boxClosedReasonKey
+    ? t(boxClosedReasonKey, { defaultValue: cancellationReason })
+    : cancellationReason;
   const cancellationReasonDisplay =
-    cancellationReason ||
+    cancellationReasonLabel ||
     t('modals.orderDetails.reasonNotRecorded', { defaultValue: 'Reason not recorded' });
+  // The server closed this pending BOX order's decision: it takes no accept
+  // or decline any more, and with an unknown outcome staff check it with BOX.
+  const isBoxDecisionClosedPending =
+    isBox && normalizedOrderStatus === 'pending' && isBoxDecisionClosed(displayOrder);
+  const isBoxManualCheck = isBoxDecisionClosedPending && isBoxManualCheckRequired(displayOrder);
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
   const paymentStatus = String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
   const cancelledAt =
@@ -949,7 +1038,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   );
   const createdDateTimeLabel = `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`;
   const primaryAddressLine = deliveryAddress.address || t('modals.orderDetails.noAddress', { defaultValue: 'No address' });
-  const totalItemCount = items.reduce((sum: number, item: any) => sum + Number(item?.quantity || 1), 0);
+  const totalItemCount = (items.length > 0 ? items : boxDisplayItems)
+    .reduce((sum: number, item: any) => sum + Number(item?.quantity || 1), 0);
+  // A BOX order with no lines to render keeps the ingest's item text: it is
+  // all staff have of what was ordered.
+  const keepsItemsTextFallback = isBox && items.length === 0 && boxDisplayItems.length === 0;
   const serviceNotes = [
     displayOrder.notes,
     displayOrder.customer_notes,
@@ -963,7 +1056,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     // customer's own words belong in the notes panel.
     .map((note) => {
       const marker = note.indexOf('--- Order Items ---');
-      return marker >= 0 ? note.slice(0, marker).trim() : note;
+      return marker >= 0 && !keepsItemsTextFallback ? note.slice(0, marker).trim() : note;
     })
     .filter(
       (note, index, array) =>
@@ -1437,6 +1530,33 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 </div>
               ) : null}
 
+              {isBoxDecisionClosedPending ? (
+                <div
+                  role="status"
+                  data-testid="order-details-box-decision-closed"
+                  className="mb-5 rounded-2xl border border-amber-300/70 bg-amber-50/90 px-5 py-4 dark:border-amber-500/30 dark:bg-amber-500/10"
+                >
+                  {isBoxManualCheck ? (
+                    <>
+                      <div className="text-sm font-bold text-amber-800 dark:text-amber-200">
+                        {t('boxOrder.manualCheckTitle', { defaultValue: 'Check this order with BOX' })}
+                      </div>
+                      <p className="mt-1 text-sm text-amber-900 dark:text-amber-100">
+                        {t('boxOrder.manualCheck', {
+                          defaultValue: 'BOX did not confirm this order in time and may still have accepted it. Check with BOX before you prepare it or close it here.',
+                        })}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                      {t('boxOrder.decisionClosed', {
+                        defaultValue: 'BOX has closed this order. It can no longer be accepted or declined here.',
+                      })}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <div className={`${insetPanelClass} px-4 py-3`}>
                   <div className="flex items-center gap-3">
@@ -1824,6 +1944,64 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                           </div>
                         );
                       })
+                    ) : boxDisplayItems.length > 0 ? (
+                      boxDisplayItems.map((line, index) => {
+                        const added = line.modifiers.filter((modifier) => !modifier.without);
+                        const removed = line.modifiers.filter((modifier) => modifier.without);
+                        return (
+                          <div
+                            key={`box-line-${index}`}
+                            data-testid="order-details-box-display-line"
+                            className="rounded-[24px] border border-zinc-200/70 bg-white/70 px-4 py-4 dark:border-white/10 dark:bg-white/[0.04]"
+                          >
+                            <div className="flex items-start justify-between mb-2">
+                              <div className="flex items-start gap-3 flex-1">
+                                <div className="min-w-8 shrink-0 pt-0.5 text-sm font-bold text-orange-600 dark:text-orange-200">
+                                  {line.quantity}x
+                                </div>
+                                <div className="flex-1 text-lg font-semibold liquid-glass-modal-text">
+                                  {line.name}
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-lg font-semibold liquid-glass-modal-text">
+                                  {formatCurrency(line.total_price)}
+                                </div>
+                                <div className="text-xs liquid-glass-modal-text-muted">
+                                  {formatCurrency(line.unit_price)}
+                                </div>
+                              </div>
+                            </div>
+                            {added.length > 0 || removed.length > 0 ? (
+                              <div className="ml-11 mt-3 space-y-1 text-xs">
+                                {added.map((modifier, modifierIndex) => (
+                                  <div key={`add-${modifierIndex}`} className="flex justify-between liquid-glass-modal-text-muted">
+                                    <span>
+                                      <span className="text-emerald-500">+</span> {modifier.name}
+                                    </span>
+                                    {modifier.price > 0 ? (
+                                      <span className="font-medium text-emerald-600 dark:text-emerald-300">
+                                        +{formatCurrency(modifier.price)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                ))}
+                                {removed.map((modifier, modifierIndex) => (
+                                  <div key={`without-${modifierIndex}`} className="text-red-600 dark:text-red-300">
+                                    <span className="line-through">- {modifier.name}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                            {line.notes ? (
+                              <div className="ml-11 mt-3 flex items-center gap-1 text-xs italic liquid-glass-modal-text-muted">
+                                <FileText className="w-3 h-3" />
+                                <span>{line.notes}</span>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })
                     ) : (
                       <div className="text-center py-8 liquid-glass-modal-text-muted">
                         {t('modals.orderDetails.noItems') || 'No items in order'}
@@ -1966,7 +2144,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
               <span className="font-medium">
                 {t('modals.orderDetails.cancellation.reasonLabel', { defaultValue: 'Reason' })}:
               </span>{' '}
-              {cancellationReason ||
+              {cancellationReasonLabel ||
                 t('modals.orderDetails.cancellation.reasonMissing', {
                   defaultValue: 'Reason not recorded',
                 })}

@@ -120,7 +120,40 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     return resumed;
   }, []);
 
-  return { status, restored, error, markHydrated, persist, freeze, clear, failedSave, resumeDeclined,
+  /**
+   * Fix 4 (06/10/2026): a frozen order correction whose confirmed attempt the
+   * native journal proved never applied must not leave the menu disabled
+   * forever (also after a restart). Retire that frozen draft and open a fresh
+   * editing draft with the same cart, a new identity (a new edit event) and
+   * the refused event it replaces. Native re-proves non-application before
+   * the new event may supersede it; nothing is collected or returned here.
+   */
+  const renewRefusedEdit = useCallback(async (supersedesEvent: string) => {
+    const previous = current.current;
+    if (!active.current || !store.current || previous.phase !== 'checkout_pending' ||
+      previous.context?.editMode !== true || previous.submission?.action !== 'edit_settlement' ||
+      previous.submission?.client_event_id !== supersedesEvent) {
+      throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    }
+    const owner = store.current;
+    const generation = epoch.current;
+    const fresh = createCheckoutDraft();
+    const context = { ...previous.context, supersedesEditEvent: supersedesEvent };
+    if ('checkoutRequestId' in context) context.checkoutRequestId = fresh.checkoutRequestId;
+    const renewed: CheckoutDraft = { ...fresh, cartItems: previous.cartItems, context, state: previous.state };
+    await owner.clear(previous.draftId, true);
+    await owner.save(renewed);
+    if (generation !== epoch.current || owner !== store.current) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    current.current = renewed;
+    lastSaved.current = JSON.stringify(renewed);
+    active.current = false;
+    setError(null);
+    setRestored(renewed);
+    setStatus('loaded');
+    return renewed;
+  }, []);
+
+  return { status, restored, error, markHydrated, persist, freeze, clear, failedSave, resumeDeclined, renewRefusedEdit,
     checkAdmission: async (context: { orderId?: string } = {}) => {
       if (!active.current || !store.current || current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_NOT_READY');
       return store.current.checkAdmission(context);

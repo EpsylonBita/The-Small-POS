@@ -17,11 +17,13 @@ import type {
   PrintQueueCancelJobResult,
   PrintQueueCounts,
   PrintQueueJob,
+  PrintQueueListOptions,
   PrintQueuePagination,
   PrintQueuePauseResult,
   PrintQueueReprintResult,
   PrintQueueResumeResult,
   PrintQueueRetryResult,
+  PrintQueueSnapshot,
 } from './print-queue-contract'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
 
@@ -93,6 +95,109 @@ type Label = (
   defaultValue: string,
   values?: Record<string, unknown>,
 ) => string
+
+/**
+ * Stable native reason codes (`print_jobs.warning_code`, pos-tauri print.rs).
+ * The native English `warning_message`/`last_error` stays support evidence;
+ * operators read the renderer's translated copy for these codes.
+ */
+export const FOOD_ORDER_ITEMS_PENDING = 'food_order_items_pending'
+export const FOOD_ORDER_ITEMS_UNAVAILABLE = 'food_order_items_unavailable'
+
+const PRINT_QUEUE_REASON_COPY = new Map<string, { key: string; defaultValue: string }>([
+  [FOOD_ORDER_ITEMS_PENDING, {
+    key: 'settings.printQueue.issue.foodOrderItemsPending',
+    defaultValue:
+      "Waiting for this order's items from the delivery platform. It prints by itself once they arrive. If it stays here, open the order to refresh its items.",
+  }],
+  [FOOD_ORDER_ITEMS_UNAVAILABLE, {
+    key: 'settings.printQueue.issue.foodOrderItemsUnavailable',
+    defaultValue:
+      "This order's items did not arrive from the delivery platform, so it was not printed. Open the order to refresh its items, then press Retry.",
+  }],
+])
+
+/**
+ * Operator copy for a native reason code, or null for a code the renderer does
+ * not know (its sanitized native message stays the fallback).
+ */
+export function printQueueReasonText(
+  reasonCode: string | null | undefined,
+  translate: (key: string, defaultValue: string) => string,
+): string | null {
+  const copy = reasonCode ? PRINT_QUEUE_REASON_COPY.get(reasonCode) : undefined
+  return copy ? translate(copy.key, copy.defaultValue) : null
+}
+
+/** What one queued job became, as far as the queue can prove it. */
+export type QueuedPrintOutcome =
+  | { kind: 'sent' }
+  | { kind: 'waiting'; reasonCode: string }
+  | { kind: 'not_printed'; reasonCode: string | null }
+  | { kind: 'queued' }
+
+/** Native reasons that hold a pending job on purpose (it is waiting, not slow). */
+const WAITING_REASON_CODES = new Set<string>([FOOD_ORDER_ITEMS_PENDING])
+
+/**
+ * The settled or explained outcome of one queued job, or null while it is
+ * still plain queued work. A transport hand-off (`dispatched`, `printed`) is
+ * "sent", never proof of paper.
+ */
+export function classifyQueuedPrintJob(job: PrintQueueJob | undefined): QueuedPrintOutcome | null {
+  if (!job) return null
+  switch (job.status) {
+    case 'printed':
+    case 'dispatched':
+      return { kind: 'sent' }
+    case 'failed':
+    case 'cancelled':
+      return { kind: 'not_printed', reasonCode: job.warningCode }
+    case 'pending':
+      return job.warningCode && WAITING_REASON_CODES.has(job.warningCode)
+        ? { kind: 'waiting', reasonCode: job.warningCode }
+        : null
+    default:
+      return null
+  }
+}
+
+export interface ObserveQueuedPrintJobOptions {
+  attempts?: number
+  intervalMs?: number
+  wait?: (ms: number) => Promise<void>
+}
+
+const OBSERVE_ATTEMPTS = 12
+const OBSERVE_INTERVAL_MS = 500
+const OBSERVE_PAGE_LIMIT = 10
+
+/**
+ * Watch a just-queued job for a few seconds. The reply that queued it is not
+ * a print: anything not settled or explained in the window, including an
+ * unreadable queue, stays "queued".
+ */
+export async function observeQueuedPrintJob(
+  listJobs: (options?: PrintQueueListOptions) => Promise<PrintQueueSnapshot>,
+  jobId: string,
+  options: ObserveQueuedPrintJobOptions = {},
+): Promise<QueuedPrintOutcome> {
+  const attempts = Math.max(1, Math.floor(options.attempts ?? OBSERVE_ATTEMPTS))
+  const intervalMs = options.intervalMs ?? OBSERVE_INTERVAL_MS
+  const wait = options.wait
+    ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) }))
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await wait(intervalMs)
+    try {
+      const snapshot = await listJobs({ limit: OBSERVE_PAGE_LIMIT, offset: 0 })
+      const outcome = classifyQueuedPrintJob(snapshot.jobs.find((job) => job.id === jobId))
+      if (outcome) return outcome
+    } catch {
+      // An unreadable queue is not an outcome; the job stays "queued".
+    }
+  }
+  return { kind: 'queued' }
+}
 
 interface PrintQueueIssueProps {
   summary: string
@@ -788,11 +893,17 @@ const PrintQueuePanel: React.FC = () => {
                 `POS print job: ${rowContext}`,
                 { context: rowContext },
               )
-              const issueSummary = job.warningMessage
+              // A known native reason code reads in the operator's language;
+              // its English native text is not repeated as "details".
+              const knownReason = printQueueReasonText(job.warningCode, label)
+              const issueSummary = knownReason ?? (job.warningMessage
                 ? operatorSafeDetail(job.warningMessage)
                 : job.lastError
                   ? label('settings.printQueue.issue.genericAttention', 'This POS print job needs attention.')
-                  : null
+                  : null)
+              const issueDetails = !knownReason && job.lastError
+                ? operatorSafeDetail(job.lastError)
+                : null
               const printerPaused = Boolean(
                 job.printerProfileId
                 && displayPausedPrinterProfileIds.includes(job.printerProfileId),
@@ -859,7 +970,7 @@ const PrintQueuePanel: React.FC = () => {
                       {issueSummary && (
                         <PrintQueueIssue
                           summary={issueSummary}
-                          details={job.lastError ? operatorSafeDetail(job.lastError) : null}
+                          details={issueDetails}
                           actionContext={actionContext}
                           label={label}
                         />

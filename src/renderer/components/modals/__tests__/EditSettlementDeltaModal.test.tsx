@@ -35,3 +35,24 @@ describe('EditSettlementDeltaModal confirmation', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 });
+
+describe('EditSettlementDeltaModal tender policy', () => {
+  afterEach(cleanup);
+  it('never offers a tender this terminal may not record', () => {
+    const onConfirm = vi.fn();
+    render(<EditSettlementDeltaModal isOpen mode="collect" amount={4.7} allowedMethods={['card']} onConfirm={onConfirm} onCancel={vi.fn()} />);
+    expect(screen.getByTestId('edit-settlement-delta-cash')).toBeDisabled();
+    expect(screen.getByTestId('edit-settlement-delta-method-policy').textContent).toContain('Cash is turned off for this terminal');
+    fireEvent.click(screen.getByTestId('edit-settlement-delta-cash'));
+    expect(onConfirm).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('edit-settlement-delta-card'));
+    expect(onConfirm).toHaveBeenCalledWith('card');
+  });
+
+  it('keeps both tenders when no policy is known', () => {
+    render(<EditSettlementDeltaModal isOpen mode="refund" amount={1} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByTestId('edit-settlement-delta-cash')).not.toBeDisabled();
+    expect(screen.getByTestId('edit-settlement-delta-card')).not.toBeDisabled();
+    expect(screen.queryByTestId('edit-settlement-delta-method-policy')).toBeNull();
+  });
+});

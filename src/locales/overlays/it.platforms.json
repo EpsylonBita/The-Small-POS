@@ -158,6 +158,17 @@
       "wrongProductPrice": "Prezzo del prodotto errato",
       "closingSoon": "Chiudiamo a breve",
       "badWeather": "A causa del maltempo"
+    },
+    "decisionClosed": "BOX ha chiuso questo ordine. Non può più essere accettato o rifiutato da qui.",
+    "manualCheckTitle": "Verifica questo ordine con BOX",
+    "manualCheck": "BOX non ha confermato questo ordine in tempo e potrebbe averlo comunque accettato. Verifica con BOX prima di prepararlo o di chiuderlo qui.",
+    "closeOrder": "Chiudi ordine",
+    "closingOrder": "Chiusura…",
+    "closeOrderFailed": "Non è stato possibile chiudere l’ordine. Controlla la connessione e riprova.",
+    "closedReasons": {
+      "box_decision_expired": "Chiuso da BOX: nessuna decisione in tempo",
+      "box_decision_refused": "Chiuso da BOX: la decisione è stata rifiutata",
+      "box_manual_check_closed": "Chiuso qui dopo la verifica con BOX"
     }
   }
 }

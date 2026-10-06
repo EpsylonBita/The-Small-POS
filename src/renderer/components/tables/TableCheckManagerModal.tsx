@@ -1,5 +1,5 @@
 import { OrderCancellationModal, type CancellationReturnChannel } from '../modals/OrderCancellationModal';
-import { prepareTableCancellation, tableCancellationFields, type TableCancellationPlan } from '../../services/TableManualCancellation';
+import { prepareTableCancellation, releaseRefusedTableCancellation, tableCancellationFields, type TableCancellationPlan } from '../../services/TableManualCancellation';
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import {
@@ -2435,6 +2435,44 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     ]).catch(() => undefined);
   };
 
+  // A manager clears a saved cancellation that never applied money (refused by
+  // the server, never sent, or proven uncommitted), then the check is read
+  // again for a new attempt. Nothing is charged or returned (06/10/2026: the
+  // check manager had no way out of a refused attempt, which held the Z).
+  const releaseSavedCancelAttempt = async () => {
+    const orderId = session?.active_order_id;
+    const plan = cancelPlan;
+    if (isSavedSession || !orderId || !plan) return;
+    setIsSaving(true);
+    try {
+      await runCancelApproval({
+        scope: 'cash_drawer_control',
+        action: (managerPin) => releaseRefusedTableCancellation(plan, managerPin),
+        title: String(t('tableRelease.clearAttemptTitle', {
+          defaultValue: 'Approve clearing the saved cancellation',
+        })),
+        subtitle: String(t('tableRelease.clearAttemptSubtitle', {
+          defaultValue: 'A manager enters their own PIN. Nothing is charged or returned.',
+        })),
+      });
+      toast.success(String(t('modals.orderCancellation.attemptCleared', {
+        defaultValue: 'The saved cancellation was cleared. No money was returned. You can cancel the order again.',
+      })));
+      cancelOriginalRef.current = null;
+      try {
+        setCancelPlan(await prepareTableCancellation(orderId, plan.tableSessionId));
+      } catch (error) {
+        setCancelPlan(null);
+        closeSecondaryModal();
+        toast.error(owingCancelFailureMessage(error, t));
+      }
+    } catch (error) {
+      if (!isOwingCancelDismissed(error)) toast.error(owingCancelFailureMessage(error, t));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const linkedTableLabels = (session?.tables || [])
     .filter(link => !link.released_at)
     .map(link => {
@@ -3367,9 +3405,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
           {secondaryModal === 'cancel-order' && cancelPlan ? (
             <OrderCancellationModal
+              key={cancelPlan.requestId}
               recovery={cancelPlan.pending ? { reason: cancelPlan.reason!, returnChannel: cancelPlan.returnChannel } : undefined}
               isOpen orderCount={1}
               manualReturn={cancelPlan.requiresReturn ? { amountCents: cancelPlan.amountCents, currency: cancelPlan.currency } : undefined}
+              savedAttempt={cancelPlan.pending ? { refused: Boolean(cancelPlan.refused), onRelease: releaseSavedCancelAttempt } : undefined}
               onConfirmCancel={cancelOrderFromCheck}
               onClose={closeSecondaryModal}
             />

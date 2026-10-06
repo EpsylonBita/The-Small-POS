@@ -39,6 +39,13 @@ interface UnsettledPaymentBlockersPanelProps {
    * The caller confirms and authorizes.
    */
   onResolveUnsavedPayment?: (blocker: UnsettledPaymentBlocker) => void;
+  /**
+   * "Returned via TWINT outside the POS" for a cashier-confirmed TWINT receipt
+   * that can never be saved (fix review 06/10/2026). Offered only when its
+   * last save met a lasting refusal; the caller asks a manager and a
+   * reference. Never a charge or a refund here.
+   */
+  onResolveTwintReturned?: (blocker: UnsettledPaymentBlocker) => void;
   resolvingKey?: string | null;
 }
 
@@ -86,6 +93,7 @@ export function UnsettledPaymentBlockersPanel({
   onResolveSetAsidePayment,
   onSaveUnsavedPayment,
   onResolveUnsavedPayment,
+  onResolveTwintReturned,
   resolvingKey = null,
 }: UnsettledPaymentBlockersPanelProps) {
   const { t } = useTranslation();
@@ -421,6 +429,27 @@ export function UnsettledPaymentBlockersPanel({
                           })
                         : t("paymentIntegrity.unsavedReturnedAction", {
                             defaultValue: "Money given back to the customer",
+                          })}
+                    </button>
+                  )}
+                  {typeof onResolveTwintReturned === "function" && isManualTwintRecord(unsavedPayment) && !unsavedPayment.canSaveAgain && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingKey)}
+                      onClick={() => onResolveTwintReturned(blocker)}
+                      data-testid={`twint-returned-${unsavedPayment.idempotencyKey}`}
+                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                        resolvingKey ? "cursor-not-allowed opacity-60" : ""
+                      }`}
+                      aria-busy={resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)}
+                    >
+                      <Undo2 className="h-4 w-4" />
+                      {resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)
+                        ? t("paymentIntegrity.unsavedResolving", {
+                            defaultValue: "Recording...",
+                          })
+                        : t("twintPayment.returned.button", {
+                            defaultValue: "Returned via TWINT outside the POS",
                           })}
                     </button>
                   )}

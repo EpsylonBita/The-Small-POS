@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import { acquireCustomerTwintQr } from '../../services/CustomerDisplayQrOverlay';
-import { currentTwintScope, loadTwintManualConfiguration, type TwintManualConfiguration, type TwintConfirmationAction } from '../../services/TwintManualQrService';
+import { currentTwintScope, type TwintManualConfiguration, type TwintConfirmationAction } from '../../services/TwintManualQrService';
 import { formatCurrency } from '../../utils/format';
 import { getBridge } from '../../../lib';
 import { liveExternalPresentation } from '../../services/ExternalDisplayOwnership';
@@ -55,8 +55,9 @@ export function TwintManualQrTender({ configuration, amount, externalEnabled, on
     if (!active.current || sending.current || currentTwintScope() !== original.current.scope || amount !== original.current.amount) return;
     sending.current = true; setBusy(true); setError(false);
     try {
-      const fresh = await loadTwintManualConfiguration();
-      if (!active.current || !fresh || fresh.scope !== original.current.scope || fresh.qrImageData !== configuration.qrImageData) { setError(true); return; }
+      // Fix review 06/10/2026: the configuration was read fresh, online, when
+      // this QR was admitted (before the customer paid). Re-reading it here
+      // could only refuse a receipt the customer already paid, and keep nothing.
       originalAction.current ??= action;
       const saved = await onConfirm(originalAction.current, original.current.key);
       if (saved) { active.current = false; release.current(); }
@@ -71,7 +72,7 @@ export function TwintManualQrTender({ configuration, amount, externalEnabled, on
     <p className="font-semibold">{t('twintPayment.manualConfirmation', 'Check that the payment was received before confirming. There is no automatic payment notification.')}</p>
     {external && <p>{t('twintPayment.customerDisplay', 'The QR is shown on the customer display.')}</p>}
     <img src={configuration.qrImageData} alt={t('twintPayment.qrAlt', 'Official shop TWINT QR')} className="max-h-64 max-w-full bg-white p-3" onError={() => setExternal(false)} />
-    {error && <p role="alert">{t('twintPayment.saveFailed', 'The payment could not be saved. Check its status before trying again.')}</p>}
+    {error && <p role="alert">{t('twintPayment.confirmNotSaved', 'The TWINT receipt is not saved yet. Do not collect again. A manager checks it before the POS is closed.')}</p>}
     <button type="button" disabled={busy} onClick={() => void confirm('confirm')} className="liquid-glass-modal-button">{t('twintPayment.confirm', 'Confirm payment received')}</button>
     <button type="button" disabled={busy} onClick={() => void confirm('skip')} className="liquid-glass-modal-button">{t('twintPayment.skip', 'Skip — confirm receipt')}</button>
     <button type="button" disabled={busy} onClick={onCancel}>{t('common.cancel', 'Cancel')}</button>

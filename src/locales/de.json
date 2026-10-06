@@ -12,7 +12,33 @@
     "skip": "Überspringen — Eingang bestätigen",
     "receiptRecovery": "Der TWINT-Zahlungseingang wurde bestätigt, aber die Zahlung ist nicht gespeichert. Speichern Sie den ursprünglichen Zahlungseingang, bevor Sie eine weitere Zahlung annehmen.",
     "receiptSaved": "Der ursprüngliche TWINT-Zahlungseingang wurde gespeichert.",
-    "saveOriginal": "Ursprünglichen TWINT-Zahlungseingang speichern"
+    "saveOriginal": "Ursprünglichen TWINT-Zahlungseingang speichern",
+    "returned": {
+      "button": "Über TWINT außerhalb der Kasse zurückgezahlt",
+      "title": "TWINT-Zahlung außerhalb der Kasse zurückgezahlt",
+      "body": "Nur wenn der Kunde die {{amount}} außerhalb der Kasse über TWINT zurückbekommen hat. Hier wird nichts belastet oder erstattet. Eine Führungskraft bestätigt es; der Betrag zählt weder zum Umsatz noch zum Kassenbestand.",
+      "referenceLabel": "Referenz (Pflichtfeld)",
+      "referencePlaceholder": "TWINT-Rückzahlungsreferenz oder Notiz",
+      "confirm": "Rückzahlung bestätigen",
+      "success": "Als außerhalb der Kasse über TWINT zurückgezahlt erfasst. Der Betrag zählt weder zum Umsatz noch zum Kassenbestand.",
+      "managerRequired": "Eine Führungskraft bestätigt das mit der eigenen PIN, sobald sich alle an dieser Kasse abgemeldet haben.",
+      "zLine": "Außerhalb der Kasse zurückgezahlte TWINT-Zahlungen",
+      "zNote": "Zählt weder zum Umsatz noch zum Kassenbestand.",
+      "notRetained": "Die TWINT-Zahlung wurde an der Kasse bestätigt, konnte aber nicht gespeichert werden. Nicht erneut kassieren. Beleg aufbewahren und vor dem Schließen oder Neustart der Kasse eine Führungskraft informieren.",
+      "referenceRequired": "Geben Sie die TWINT-Rückzahlungsreferenz oder eine Notiz ein (3 bis 200 Zeichen).",
+      "saveFirst": "Dieser TWINT-Zahlungseingang kann noch gespeichert werden. Speichern Sie zuerst den ursprünglichen Zahlungseingang.",
+      "managerPin": "PIN der Leitung",
+      "pinRequired": "Eine Führungskraft gibt zur Bestätigung ihre eigene PIN ein.",
+      "wrongPin": "Mit dieser PIN kann es nicht bestätigt werden. Eine Führungskraft mit Freigaberecht gibt ihre eigene PIN ein. Es wurde nichts erfasst."
+    },
+    "confirmNotSaved": "Der TWINT-Zahlungseingang ist noch nicht gespeichert. Kassieren Sie nicht erneut. Eine Führungskraft prüft ihn, bevor die Kasse geschlossen wird.",
+    "admission": {
+      "notSaved": "Eine Zahlung dieser Bestellung ist noch nicht gespeichert. Speichern Sie sie erneut, bevor Sie TWINT annehmen. Es wurde nichts belastet.",
+      "reconcile": "Ein früherer Zahlungsschritt dieser Bestellung muss zuerst geprüft werden. Es wurde nichts belastet.",
+      "platformHeld": "Das Geld dieser Bestellung liegt bei der Lieferplattform. An der Kasse wird nichts kassiert.",
+      "amountChanged": "Der offene Betrag dieser Bestellung hat sich geändert. Prüfen Sie die Bestellung und versuchen Sie es erneut. Es wurde nichts belastet.",
+      "unavailable": "TWINT kann gerade nicht angenommen werden. Prüfen Sie die Verbindung oder wählen Sie eine andere Zahlungsart. Es wurde nichts belastet."
+    }
   },
   "displayPurchase": {
     "beforePurchase": "Vor dem Kauf",
@@ -1623,7 +1649,8 @@
       "receiptPrinted": "Kassenbon gedruckt",
       "receiptEmailed": "Kassenbon an {{email}} gesendet",
       "invalidCard": "Ungültige Kartendaten",
-      "expiredCard": "Karte ist abgelaufen"
+      "expiredCard": "Karte ist abgelaufen",
+      "cardDeclinedNothingCharged": "Die Karte wurde abgelehnt. Es wurde nichts belastet."
     },
     "receipt": {
       "title": "Kassenbon",
@@ -1701,6 +1728,18 @@
       "unavailableTitle": "Kassiervorgang angehalten",
       "unavailableMessage": "Der Steuersatz und das Rabattlimit des Geschäfts konnten nicht gelesen werden, daher wird nichts auf Vermutung berechnet. Versuchen Sie es erneut; wenn es weiter fehlschlägt, starten Sie die App neu.",
       "retry": "Erneut versuchen"
+    },
+    "manualCard": {
+      "terminalNotReady": "Das Kartenterminal ist belegt oder nicht verbunden. Es wurde nichts belastet. Warten Sie, bis es frei ist, oder verbinden Sie es neu und versuchen Sie es dann erneut.",
+      "terminalCheckFailed": "Das Kartenterminal dieser Kasse konnte nicht geprüft werden. Es wurde nichts belastet. Versuchen Sie es erneut.",
+      "terminalConfigured": "An dieser Kasse ist ein Kartenterminal eingerichtet. Belasten Sie die Karte über das Terminal. Es wurde nichts erfasst.",
+      "providerConnected": "Für dieses Geschäft ist ein Kartenzahlungsanbieter verbunden, daher kann diese Kasse keine manuelle Kartenzahlung erfassen. Belasten Sie die Karte über das Kartenterminal. Es wurde nichts erfasst.",
+      "unavailable": "Es konnte nicht bestätigt werden, dass an dieser Kasse eine manuelle Kartenzahlung erlaubt ist. Es wurde nichts erfasst. Prüfen Sie die Internetverbindung und versuchen Sie es erneut.",
+      "alreadyTakenWarning": "Wenn die Karte bereits am eigenen Kartengerät des Geschäfts belastet wurde, belasten Sie sie nicht erneut.",
+      "confirmTitle": "Manuelle Kartenzahlung erfassen?",
+      "confirmBody": "An dieser Kasse ist kein Kartenterminal angeschlossen. Erfassen Sie {{amount}} nur, wenn die Karte bereits am eigenen Kartengerät des Geschäfts belastet wurde.",
+      "confirmAction": "Manuelle Karte bestätigen",
+      "portionNotice": "An dieser Kasse ist kein Kartenterminal angeschlossen. Belasten Sie diesen Betrag am eigenen Kartengerät des Geschäfts; bei der Bestätigung wird er als manuelle Kartenzahlung erfasst."
     }
   },
   "paymentPrintPrompt": {
@@ -2386,7 +2425,9 @@
       "issue": {
         "hardwareProfileMissing": "Wählen Sie einen Drucker für diesen Auftrag und versuchen Sie es erneut.",
         "needsAttention": "Dieser Druckauftrag benötigt zuerst eine Druckereinrichtung.",
-        "genericAttention": "Dieser POS-Druckauftrag muss geprüft werden."
+        "genericAttention": "Dieser POS-Druckauftrag muss geprüft werden.",
+        "foodOrderItemsPending": "Warten auf die Artikel dieser Bestellung von der Lieferplattform. Der Druck startet automatisch, sobald sie da sind. Bleibt der Auftrag hier stehen, öffnen Sie die Bestellung, um ihre Artikel neu zu laden.",
+        "foodOrderItemsUnavailable": "Die Artikel dieser Bestellung sind von der Lieferplattform nicht angekommen, daher wurde nicht gedruckt. Öffnen Sie die Bestellung, um ihre Artikel neu zu laden, und tippen Sie dann auf Erneut versuchen."
       },
       "unknown": "Unbekannt",
       "cancel": "Abbrechen",
@@ -3459,11 +3500,13 @@
       "ambiguous_canonical_remote_payment": "übergeordnete Zahlung passt zu mehr als einer Admin-Zahlung",
       "Payment not yet synced": "übergeordnete Zahlung ist noch nicht synchronisiert",
       "Parent payment missing canonical remote id": "der Admin-Bezug der übergeordneten Zahlung fehlt",
-      "Ambiguous canonical remote payment": "übergeordnete Zahlung passt zu mehr als einer Admin-Zahlung"
+      "Ambiguous canonical remote payment": "übergeordnete Zahlung passt zu mehr als einer Admin-Zahlung",
+      "money_not_synced": "eine an dieser Kasse erfasste Zahlung oder Rückzahlung hat den Server noch nicht erreicht"
     },
     "closeoutBlocked": {
       "single": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{orderReference}} noch blockiert ist: {{reason}}.",
-      "multiple": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{count}} Synchronisationselemente noch blockiert sind."
+      "multiple": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{count}} Synchronisationselemente noch blockiert sind.",
+      "moneyNotSynced": "Der Tag kann noch nicht geschlossen werden: {{count}} Zahlungs- oder Rückzahlungsdatensätze dieses Tages haben den Server nicht erreicht. Stellen Sie sicher, dass die Kasse online ist, tippen Sie auf Jetzt synchronisieren und schließen Sie den Tag erneut."
     },
     "time": {
       "never": "Nie",
@@ -4085,6 +4128,8 @@
       "refundCash": "In Bar erstatten",
       "refundCard": "Auf Karte erstatten",
       "refundNote": "Kartenerstattungen werden als Buchhaltungskorrektur erfasst. Führen Sie die eigentliche Kartenstornierung bei Bedarf separat durch.",
+      "cashDisabled": "Bargeld ist für dieses Terminal deaktiviert und kann hier nicht erfasst werden.",
+      "cardDisabled": "Karte ist für dieses Terminal deaktiviert und kann hier nicht erfasst werden.",
       "cancel": "Abbrechen",
       "failed": "Die Abrechnung konnte nicht abgeschlossen werden"
     },
@@ -4191,6 +4236,17 @@
       "loadItemsFailed": "Bestellpositionen konnten nicht geladen werden",
       "editServerUpdate": "Bestellkorrekturen sind vorübergehend nicht verfügbar. Prüfen Sie die Verbindung und versuchen Sie es nach dem Serverupdate erneut.",
       "editSyncRequired": "Die Zahlungs- oder Bestelländerung wurde noch nicht synchronisiert. Ihr Warenkorb ist gespeichert. Versuchen Sie es gleich erneut.",
+      "editNotApplied": "Diese Korrektur wurde nicht gespeichert, ihre Differenz ist also nirgends erfasst. Falls bereits Geld geflossen ist, bereiten Sie die Korrektur erneut vor und erfassen Sie dasselbe Geld einmal; kassieren oder erstatten Sie es nie doppelt. Andernfalls kann eine Führungskraft sie ohne Geldbuchung schließen.",
+      "editRequote": "Korrektur erneut vorbereiten",
+      "editRequoteReady": "Prüfen Sie den Warenkorb und speichern Sie die Korrektur erneut. Erfassen Sie nur das bereits erhaltene Geld; kassieren oder erstatten Sie es nicht doppelt.",
+      "editCloseWithoutMoney": "Ohne Geldbuchung schließen (Führungskraft)",
+      "editCloseWithoutMoneyReason": "Korrektur nicht gespeichert; von einer Führungskraft ohne Geldbuchung geschlossen",
+      "editClosedWithoutMoney": "Die nicht gespeicherte Korrektur wurde geschlossen. Es wurde kein Geld erfasst; zählen Sie die Kasse zur Bestätigung.",
+      "editCloseWithoutMoneyFailed": "Die Korrektur konnte nicht geschlossen werden. Sie bleibt gesperrt; es wurde nichts erfasst.",
+      "legacyEditReview": "Eine Änderung dieser Bestellung, die von einer älteren Version dieser Kasse gespeichert wurde, hat der Server abgelehnt. Der Server behält die ursprüngliche Bestellung und Zahlungen; diese Kasse hält die Änderung und ihren Beleg. Es wurde nichts erneut kassiert. Eine Führungskraft muss diese Bestellung vor dem Z prüfen.",
+      "editTooManyLines": "Eine Korrektur darf höchstens {{maxLines}} Positionen haben. Entfernen Sie Positionen oder stornieren Sie die Bestellung und legen Sie eine neue an. Es wurde kein Geld kassiert.",
+      "editMethodUnavailable": "Dieses Terminal darf für die Differenz weder Bargeld noch Karte erfassen. Bitten Sie eine Führungskraft, für dieses Terminal eine Zahlungsart zu aktivieren. Es wurde kein Geld kassiert.",
+      "editPreviousNotSaved": "Eine frühere Korrektur dieser Bestellung wurde bestätigt, aber nicht gespeichert. Öffnen Sie sie aus dem gespeicherten Warenkorb, um sie erneut vorzubereiten, oder bitten Sie eine Führungskraft, sie zu schließen. Kassieren oder erstatten Sie kein Geld erneut.",
       "emptyEditHint": "Um alle Artikel zu entfernen, schließen Sie den Editor und stornieren Sie die Bestellung.",
       "editCanonicalChanged": "Die Bestelldaten müssen aktualisiert werden. Aktualisieren Sie die Bestellung, bevor Sie eine Zahlung oder Rückerstattung bestätigen."
     },
@@ -4771,7 +4827,35 @@
         "pending": "Die Übergabe ist auf dieser Kasse gespeichert und wartet auf Bestätigung. Sie wird automatisch wiederholt; erfassen Sie das Bargeld nicht erneut.",
         "retry": "Gespeicherte Übergabe wiederholen"
       },
-      "currencySettlementRequired": "Rechnen Sie die Mitarbeiterschichten in ihrer ursprünglichen Währung ab und schließen Sie sie vor dieser Kassenschicht."
+      "currencySettlementRequired": "Rechnen Sie die Mitarbeiterschichten in ihrer ursprünglichen Währung ab und schließen Sie sie vor dieser Kassenschicht.",
+      "satelliteHandover": {
+        "reasons": {
+          "giftClose": "An dieser Nebenkasse ist noch ein Geschenkkarten-Abschluss offen. Schließen Sie die Schicht an der Nebenkasse selbst.",
+          "staffCustody": "Fahrer oder Kellner dieser Schicht der Nebenkasse haben noch Bargeld. Schließen Sie zuerst deren Schichten ab und nehmen Sie dann das Bargeld an.",
+          "movements": "Die Bargeldbewegungen der Nebenkasse sind noch nicht beim Server angekommen. Warten Sie die Synchronisierung ab und versuchen Sie es dann erneut.",
+          "role": "Diese Schicht kann nicht an der Hauptkasse geschlossen werden. Schließen Sie sie an der Nebenkasse.",
+          "retry": "Der Server bearbeitet diese Schicht gerade. Versuchen Sie es gleich noch einmal.",
+          "closedElsewhere": "Die Nebenkasse hat diese Schicht bereits selbst geschlossen, daher kann ihr Bargeld hier nicht angenommen werden.",
+          "currency": "Das Geld dieser Schicht der Nebenkasse ist in einer anderen Währung als diese Kassenlade. Es kann hier nicht angenommen werden.",
+          "sourceDrawer": "Die Kassenlade der Nebenkasse wurde nicht gefunden oder ist bereits geschlossen.",
+          "receiver": "Diese Kassenlade kann das Bargeld nicht annehmen: Sie ist geschlossen oder nicht die offene Kassiererlade dieser Kasse.",
+          "conflict": "Der Server hat für diese Schicht bereits eine andere Übergabe erfasst. Bitten Sie eine Führungskraft, sie zu prüfen.",
+          "mainOnly": "Nur die Hauptkasse kann Bargeld von ihren Nebenkassen annehmen.",
+          "figures": "Die Schichtdaten konnten nicht vom Server geladen werden. Prüfen Sie die Verbindung und versuchen Sie es erneut.",
+          "pending": "Das Bargeld einer Nebenkasse wird noch angenommen. Stellen Sie die Internetverbindung wieder her, damit dies vor dem Schließen dieser Schicht abgeschlossen wird.",
+          "refused": "Der Server hat diese Bargeldübergabe der Nebenkasse endgültig abgelehnt.",
+          "unknown": "Die Bargeldübergabe der Nebenkasse konnte nicht abgeschlossen werden. Versuchen Sie es erneut oder fragen Sie eine Führungskraft.",
+          "staffCustodyRefused": "Fahrer oder Kellner dieser Schicht der Nebenkasse hatten beim Senden noch Bargeld, daher hat der Server sie abgelehnt. Schließen Sie diese Schicht an der Nebenkasse selbst.",
+          "movementsRefused": "Die Bargeldbewegungen der Nebenkasse waren beim Senden nicht auf dem Server, daher hat der Server sie abgelehnt. Schließen Sie diese Schicht an der Nebenkasse selbst."
+        },
+        "releaseHint": "Eine Führungskraft kann sie freigeben, damit diese Schicht geschlossen werden kann. Das Bargeld der Nebenkasse wird dieser Kassenlade nicht gutgeschrieben.",
+        "releaseTitle": "Bargeldübergabe der Nebenkasse abgelehnt",
+        "releasePin": "PIN der Leitung",
+        "releaseAction": "Freigeben, ohne das Bargeld dieser Kassenlade gutzuschreiben",
+        "releaseWrongPin": "Mit dieser PIN kann sie nicht freigegeben werden. Eine Führungskraft mit dem Recht, Bestellungen zu stornieren, gibt ihre eigene PIN ein.",
+        "releaseFailed": "Die Übergabe konnte nicht freigegeben werden. Es wurde nichts geändert; versuchen Sie es erneut.",
+        "released": "Freigegeben. Das Bargeld der Nebenkasse wurde dieser Kassenlade nicht gutgeschrieben. Sie können die Schicht jetzt schließen."
+      }
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -5205,6 +5289,16 @@
     },
     "orderCancellation": {
       "staffCashAmbiguous": "Der Bargeldbestand des Mitarbeiters kann nicht bestätigt werden. Prüfen Sie die ursprüngliche Rückzahlung vor der Stornierung.",
+      "platformOrderReturn": "Diese Bestellung kam über eine Lieferplattform. Ihr Geld wird über die Plattform zurückgegeben, deshalb erfasst die Kasse keine Rückgabe.",
+      "receiptCheckUnavailable": "Diese Zahlung wurde an einer anderen Kasse erfasst. Stellen Sie eine Internetverbindung her, damit diese Kasse die ursprüngliche Zahlung prüfen kann, und versuchen Sie es erneut. Es wurde nichts zurückgegeben.",
+      "refusedByServer": "Der Server hat diese Stornierung abgelehnt. Es wurde kein Geld zurückgegeben und nichts storniert. Eine Führungskraft kann den abgelehnten Versuch löschen, danach können Sie erneut stornieren.",
+      "releaseWait": "Diese Stornierung wurde vor weniger als 15 Minuten gesendet und kann noch erfasst werden. Versuchen Sie das Löschen in {{minutes}} Min. erneut.",
+      "releaseCommitted": "Der Server hat diese Stornierung bereits erfasst. Synchronisieren Sie diese Kasse, um sie abzuschließen. Es wurde nichts gelöscht.",
+      "cancellationPending": "Eine gespeicherte Stornierung dieser Bestellung wartet auf den Server. Setzen Sie sie mit dem ursprünglichen Grund und derselben freigebenden Person fort oder lassen Sie sie von einer Führungskraft löschen.",
+      "refusedAttemptNotice": "Der Server hat die letzte Stornierung dieser Bestellung abgelehnt. Es wurde kein Geld zurückgegeben. Eine Führungskraft kann sie löschen, bevor die Bestellung erneut storniert wird.",
+      "pendingAttemptNotice": "Für diese Bestellung wartet eine gespeicherte Stornierung auf den Server. Bestätigen Sie, um sie wie gespeichert fortzusetzen. Lässt sie sich nicht abschließen, kann eine Führungskraft sie löschen.",
+      "clearRefusedAttempt": "Gespeicherte Stornierung löschen",
+      "attemptCleared": "Die gespeicherte Stornierung wurde gelöscht. Es wurde kein Geld zurückgegeben. Sie können die Bestellung erneut stornieren.",
       "staffCashUnavailable": "Die Stornierung mit Bargeldübergabe ist vorübergehend nicht verfügbar. Prüfen Sie die Verbindung und versuchen Sie es nach dem Serverupdate erneut.",
       "connectionUnavailable": "Der Zahlungs-Verbindungsstatus ist nicht verfügbar. Aktualisieren Sie Integrationen und versuchen Sie es erneut.",
       "permissionRequired": "Dieses Konto darf bezahlte Bestellungen nicht stornieren.",
@@ -6222,6 +6316,10 @@
     "printFailed": "Kassenbon konnte nicht gedruckt werden",
     "printAlreadyQueued": "Dieser Kassenbon ist bereits in der Warteschlange oder wird gerade gedruckt — kein erneuter Druck.",
     "printSkipped": "Der Bondruck ist für diese Aktion ausgeschaltet.",
+    "printSent": "Kassenbon an den Drucker gesendet.",
+    "printQueued": "Kassenbon in der Warteschlange, aber noch nicht gedruckt. Prüfen Sie die Druckwarteschlange, falls er nicht herauskommt.",
+    "printWaitingForItems": "Noch nicht gedruckt: Die Artikel dieser Bestellung sind von der Lieferplattform noch nicht angekommen. Der Kassenbon wird automatisch gedruckt, sobald sie da sind.",
+    "printNotPrinted": "Der Kassenbon wurde nicht gedruckt. Prüfen Sie die Druckwarteschlange unter Einstellungen > Druckwarteschlange.",
     "guestCustomer": "Gast",
     "loadingItems": "Artikel werden geladen...",
     "loadItemsFailed": "Artikel konnten nicht geladen werden",
@@ -6557,7 +6655,9 @@
         "poorTitle": "Dieser Scan ist schwer zu lesen",
         "poorDescription": "Sie können ihn nochmal scannen oder einfach eintippen, was darauf steht.",
         "queued": "Hier gespeichert. Sobald Sie wieder online sind, geht sie ins Büro.",
-        "saved": "Rechnung gespeichert."
+        "saved": "Rechnung gespeichert.",
+        "amountInvalid": "Geben Sie den Rechnungsbetrag mit Cent ein, z. B. 1234,50 oder 1.234,50. Es wurde nichts gespeichert.",
+        "amountHasPayments": "Für diese Rechnung sind bereits Zahlungen erfasst, daher kann der Betrag nicht mehr geändert werden. Es wurde nichts gespeichert – setzen Sie den Betrag zurück, um Ihre anderen Änderungen zu speichern."
       },
       "scan": {
         "open": "Rechnung scannen",
@@ -8590,7 +8690,14 @@
       "partnerRequired": "Partner-Zugangsdaten erforderlich",
       "connected": "Verbunden",
       "pending": "Ausstehend",
-      "disconnected": "Nicht verbunden"
+      "disconnected": "Nicht verbunden",
+      "unknown": "Status unbekannt",
+      "unknownShort": "Unbekannt"
+    },
+    "savedCopy": {
+      "title": "Gespeicherte Kopie – nicht aktuell",
+      "bodyAt": "Das Büro war nicht erreichbar. Das ist die zuletzt auf dieser Kasse gespeicherte Plugin-Liste (Stand: {{time}}). Die Status können sich geändert haben und werden erst angezeigt, wenn die Liste aktualisiert ist.",
+      "body": "Das Büro war nicht erreichbar. Das ist die zuletzt auf dieser Kasse gespeicherte Plugin-Liste. Die Status können sich geändert haben und werden erst angezeigt, wenn die Liste aktualisiert ist."
     },
     "mydata": {
       "title": "MyData-Konfiguration",
@@ -9182,6 +9289,16 @@
         "summary": "Der Server konnte die Änderung der Standardadresse nicht bestätigen. Die gespeicherte Änderung bleibt auf dieser Kasse.",
         "guidance": "Diese Adresse einmal erneut versuchen. Bei erneuter Ablehnung über die Supportdetails Hilfe anfordern."
       },
+      "remoteHandoverSnapshotFrozen": {
+        "title": "Eine Schicht wurde bereits auf einem anderen Gerät geschlossen",
+        "summary": "{{count}} Geldbuchung(en) gehören zu einer Schicht, die auf einem anderen Gerät geschlossen wurde. Der Server hält die Beträge dieser Schicht fest und lehnt die Änderung ab; sie wird nicht erneut gesendet.",
+        "guidance": "Bitten Sie einen Manager, diese Schicht im Admin-Dashboard zu prüfen und die Differenz dort zu erfassen. Kassieren oder erstatten Sie an der Kasse kein Geld erneut."
+      },
+      "legacyEditReview": {
+        "title": "Eine Bestellkorrektur einer älteren Version braucht einen Manager",
+        "summary": "{{count}} Bestellkorrektur(en), die eine ältere Version dieser Kasse gespeichert hat, wurden vom Server abgelehnt. Der Server behält die ursprüngliche Bestellung und ihre Zahlungen; diese Kasse behält die Korrektur und ihren Beleg. Nichts wurde doppelt kassiert, und sie wird nicht erneut gesendet.",
+        "guidance": "Bitten Sie einen Manager, diese Bestellung zu öffnen, mit dem Beleg zu vergleichen und vor dem Z einmal zu korrigieren. Kassieren oder erstatten Sie für diese Korrektur kein Geld erneut."
+      },
       "duplicateCustomerConflict": {
         "title": "Diesen Kundensatz führt das Büro bereits",
         "summary": "Ein an dieser Kasse gespeicherter Kundensatz hat dieselbe Telefonnummer wie einer, den das Büro bereits führt; die Änderung lässt sich deshalb nicht senden. Sie verhindert den Tagesabschluss nicht, aber das Büro kennt diesen Kunden erst, wenn Sie ihn verknüpfen.",
@@ -9735,7 +9852,9 @@
     "cancelRefusedNotRecorded": "Diese Bestellung ist als bezahlt markiert, aber ihre Zahlung ist an dieser Kasse nicht erfasst. Stellen Sie sie mit „Jetzt synchronisieren“ vom Server wieder her oder erfassen Sie die Zahlung im Z-Report, und stornieren Sie dann.",
     "notRecordedTitle": "Tisch {{table}}: Zahlung nicht erfasst",
     "notRecordedMessage": "Seine Bestellung ist als bezahlt markiert, aber ihre Zahlung ist an dieser Kasse nicht erfasst. Kassieren Sie sie nicht erneut: Stellen Sie sie mit „Jetzt synchronisieren“ vom Server wieder her oder erfassen Sie die Zahlung im Z-Report.",
-    "keepOpenNotRecordedHint": "Der Tisch wird frei; die Bestellung bleibt unverändert, bis ihre Zahlung wiederhergestellt oder erfasst ist."
+    "keepOpenNotRecordedHint": "Der Tisch wird frei; die Bestellung bleibt unverändert, bis ihre Zahlung wiederhergestellt oder erfasst ist.",
+    "clearAttemptTitle": "Löschen der gespeicherten Stornierung freigeben",
+    "clearAttemptSubtitle": "Eine Führungskraft gibt ihre eigene PIN ein. Es wird nichts belastet oder zurückgegeben."
   },
   "reservationForm": {
     "toasts": {
@@ -9909,8 +10028,10 @@
     },
     "reasonCodes": {
       "table_cancellation_not_saved": "Die ursprüngliche Rückzahlung zur Tischstornierung wurde noch nicht gespeichert.",
+      "table_cancellation_not_saved__refused": "Der Server hat diese Tischstornierung abgelehnt. Es wurde kein Geld zurückgegeben und nichts storniert.",
       "payments_need_review": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, obwohl sie bereits bezahlt war. Sie ist zurückgestellt und wird nicht gezählt: Der Kunde hat möglicherweise doppelt bezahlt.",
       "payments_need_review__platform_held": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, aber die Lieferplattform hält das Geld dieser Bestellung bereits. Sie ist zurückgestellt und wird nicht gezählt: Der Kunde hat möglicherweise doppelt bezahlt.",
+      "payments_need_review__reconciliation_required": "Auf Bestellung {{orderNumber}} wurde eine Zahlung über {{paymentAmount}} ({{paymentMethod}}) angenommen, aber die Bestellung wurde danach auf dem Server geändert, zum Beispiel von einer anderen Kasse storniert. Sie ist zurückgestellt und wird nicht gezählt.",
       "payments_not_saved": "Eine Kartenzahlung von {{paymentAmount}} wurde für Bestellung {{orderNumber}} belastet, ist an dieser Kasse aber noch nicht gespeichert. Der Kunde wurde belastet: nicht erneut belasten.",
       "payments_not_saved__new_order": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
       "payments_not_saved__new_order_cannot_save": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
@@ -9919,8 +10040,10 @@
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Stellen Sie die ursprüngliche Tischstornierung wieder her. Übergeben oder erstatten Sie das Geld nicht erneut.",
+      "table_cancellation_not_saved__refused": "Ein Manager löscht den abgelehnten Versuch in der Tischrechnung und storniert dann erneut. Geben Sie kein Geld erneut zurück.",
       "payments_need_review": "Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier. Wenn die Zahlung auf dem Server die falsche ist, wenden Sie sich vor dem Tagesabschluss an den Support.",
       "payments_need_review__platform_held": "Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier. Die Plattform zahlt diese Bestellung über ihre eigene Abrechnung an das Geschäft aus.",
+      "payments_need_review__reconciliation_required": "Klären Sie die Bestellung mit dem Kunden. Ist sie storniert, geben Sie das Geld zurück und bestätigen Sie es dann hier. Schuldet der Kunde den Betrag noch, wenden Sie sich vor dem Tagesabschluss an den Support.",
       "payments_not_saved": "Speichern Sie die Zahlung erneut. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
       "payments_not_saved__cannot_save": "Diese Zahlung kann an dieser Kasse nicht gespeichert werden. Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier.",
       "payments_not_saved__new_order": "Speichern Sie die Zahlung erneut: Das speichert die Bestellung und ihre Zahlung, ohne neue Belastung. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",

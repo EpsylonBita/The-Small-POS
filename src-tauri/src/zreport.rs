@@ -792,6 +792,171 @@ pub(crate) fn unsettled_payment_blockers(
     load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)
 }
 
+/// The Z blocker for money this till recorded that has not reached the
+/// server yet (sync blocker reason; the renderer localizes it).
+pub(crate) const MONEY_NOT_SYNCED_REASON: &str = "money_not_synced";
+
+/// Parity tables whose rows are money: payments, refunds/voids, staff cash
+/// handbacks, driver earnings, shift expenses and staff payments.
+const MONEY_PARITY_TABLES_SQL: &str = "('payments', 'order_payments', 'payment_adjustments', \
+     'staff_order_cash_returns', 'driver_earnings', 'driver_earning', 'shift_expenses', \
+     'staff_payments')";
+
+/// One unsent money row whose local record the Z at `cutoff_at` closes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnsyncedMoneyRow {
+    pub queue_id: String,
+    pub table_name: String,
+    pub record_id: String,
+    pub operation: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub order_id: Option<String>,
+    pub order_number: Option<String>,
+}
+
+/// Every money row still in the parity queue (pending, processing, failed or
+/// a conflict: a synced row leaves the queue) whose local record belongs to
+/// the business window a Z at `cutoff_at` closes: an order the rollover
+/// deletes (the same selector as `finalize_end_of_day_counts`), or a shift
+/// expense / staff payment it deletes by its own timestamp.
+///
+/// Incident 06/10/2026: a refund queued at 01:36 was still unsent when the Z
+/// ran at 01:38; the rollover deleted the refund and its payment, and the
+/// server never got the refund. Repair-owned rows are excluded (repair
+/// settlement orders are never rolled over), and so are rows whose local
+/// record is already gone: nothing is left for this Z to delete, and the
+/// queue's own failed or conflict state shows them.
+pub(crate) fn load_unsynced_money_for_cutoff(
+    conn: &Connection,
+    cutoff_at: &str,
+) -> Result<Vec<UnsyncedMoneyRow>, String> {
+    let table_present = |table: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("inspect {table} for unsent money: {e}"))
+    };
+    if !table_present("parity_sync_queue")? || !table_present("orders")? {
+        return Ok(Vec::new());
+    }
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    let columns = "live.id, live.table_name, live.record_id, live.operation, live.status, \
+                   live.error_message";
+    let mut branches = Vec::new();
+    if table_present("order_payments")? {
+        branches.push(format!(
+            "SELECT {columns}, w.id, w.order_number, live.created_at
+             FROM live
+             JOIN order_payments op ON op.id = live.record_id
+             JOIN window_orders w ON w.id = op.order_id
+             WHERE live.table_name IN ('payments', 'order_payments')"
+        ));
+    }
+    if table_present("payment_adjustments")? && table_present("order_payments")? {
+        branches.push(format!(
+            "SELECT {columns}, w.id, w.order_number, live.created_at
+             FROM live
+             JOIN payment_adjustments pa ON pa.id = live.record_id
+             LEFT JOIN order_payments pop ON pop.id = pa.payment_id
+             JOIN window_orders w ON w.id = COALESCE(NULLIF(pa.order_id, ''), pop.order_id)
+             WHERE live.table_name = 'payment_adjustments'"
+        ));
+    }
+    if table_present("driver_earnings")? {
+        branches.push(format!(
+            "SELECT {columns}, w.id, w.order_number, live.created_at
+             FROM live
+             JOIN driver_earnings de ON de.id = live.record_id
+             JOIN window_orders w ON w.id = de.order_id
+             WHERE live.table_name IN ('driver_earnings', 'driver_earning')"
+        ));
+    }
+    if table_present("staff_order_cash_returns")? {
+        branches.push(format!(
+            "SELECT {columns}, w.id, w.order_number, live.created_at
+             FROM live
+             JOIN staff_order_cash_returns cash_return ON cash_return.id = live.record_id
+             JOIN window_orders w ON w.id = cash_return.order_id
+             WHERE live.table_name = 'staff_order_cash_returns'"
+        ));
+    }
+    if table_present("shift_expenses")? {
+        branches.push(format!(
+            "SELECT {columns}, NULL, NULL, live.created_at
+             FROM live
+             JOIN shift_expenses se ON se.id = live.record_id
+             WHERE live.table_name = 'shift_expenses'
+               AND datetime(se.created_at) <= datetime(?1)"
+        ));
+    }
+    if table_present("staff_payments")? {
+        branches.push(format!(
+            "SELECT {columns}, NULL, NULL, live.created_at
+             FROM live
+             JOIN staff_payments sp ON sp.id = live.record_id
+             WHERE live.table_name = 'staff_payments'
+               AND datetime(sp.created_at) <= datetime(?1)"
+        ));
+    }
+    if branches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "WITH window_orders AS (
+             SELECT o.id AS id, NULLIF(TRIM(COALESCE(o.order_number, '')), '') AS order_number
+             FROM orders o
+             WHERE datetime({financial_expr}) <= datetime(?1)
+               AND COALESCE(o.order_context, '') <> 'repair_settlement'
+               AND NOT {open_table_tab}
+         ),
+         live AS (
+             SELECT q.id, q.table_name, q.record_id, q.operation, q.status, q.error_message,
+                    q.created_at
+             FROM parity_sync_queue q
+             WHERE q.table_name IN {MONEY_PARITY_TABLES_SQL}
+               AND COALESCE(q.module_type, '') <> 'repairs'
+         )
+         {}
+         ORDER BY 9, 1",
+        branches.join("\n UNION ALL \n")
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare unsent money selector: {e}"))?;
+    let rows = statement
+        .query_map(params![cutoff_at], |row| {
+            Ok(UnsyncedMoneyRow {
+                queue_id: row.get(0)?,
+                table_name: row.get(1)?,
+                record_id: row.get(2)?,
+                operation: row.get(3)?,
+                status: row.get(4)?,
+                error_message: row.get(5)?,
+                order_id: row.get(6)?,
+                order_number: row.get(7)?,
+            })
+        })
+        .map_err(|e| format!("query unsent money: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read unsent money: {e}"))
+}
+
+/// The unsent money of the window the next Z closes on `branch_id` (its
+/// frozen cutoff, or now for the live window). The pre-Z sync gate refuses
+/// the close while this is not empty (`sync::capture_unsynced_sync_queue_snapshot`).
+pub(crate) fn unsynced_money_in_closing_window(
+    conn: &Connection,
+    branch_id: &str,
+) -> Result<Vec<UnsyncedMoneyRow>, String> {
+    let window = resolve_current_z_report_window(conn, branch_id);
+    let cutoff_at = window.cutoff_at.unwrap_or_else(|| Utc::now().to_rfc3339());
+    load_unsynced_money_for_cutoff(conn, &cutoff_at)
+}
+
 fn load_active_staff_closeout_blockers(
     conn: &Connection,
     branch_id: &str,
@@ -7123,6 +7288,18 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
             crate::unsaved_payments::PAYMENTS_NOT_SAVED_REASON_CODE
         ));
     }
+    // Nor while a payment, refund or other money record this step would
+    // delete is still waiting to reach the server: its local row is what the
+    // queued sync reads (06/10/2026: a refund deleted here never reached the
+    // server). The pre-Z sync gate refuses first; this covers a record
+    // queued after that check.
+    let unsent_money = load_unsynced_money_for_cutoff(conn, cutoff_at)?;
+    if !unsent_money.is_empty() {
+        return Err(format!(
+            "Cannot close the day: {} payment, refund or staff money record(s) of this day have not reached the server yet ({MONEY_NOT_SYNCED_REASON})",
+            unsent_money.len()
+        ));
+    }
 
     let mut cleared = serde_json::Map::new();
 
@@ -7201,6 +7378,10 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     cleared.insert(
         "print_jobs_kept_live".into(),
         serde_json::json!(print_cleanup.kept),
+    );
+    cleared.insert(
+        "print_jobs_kept_evidence".into(),
+        serde_json::json!(print_cleanup.retained_evidence),
     );
 
     // 8. cash_drawer_sessions by close/open timestamp.
@@ -7354,7 +7535,18 @@ struct PrintJobCleanup {
     /// Jobs from before the cutoff that stay: printing, holding a printer, or
     /// the source of a reprint that stays.
     kept: i64,
+    /// Finished jobs from before the cutoff kept, with their attempts, as
+    /// print evidence (`PRINT_EVIDENCE_RETENTION_DAYS`, `PRINT_EVIDENCE_MAX_JOBS`).
+    retained_evidence: i64,
 }
+
+/// Days of finished print jobs (with their attempts) a day close keeps as
+/// support evidence. Android: `PrintAttemptJournal` `RETENTION_DAYS`.
+const PRINT_EVIDENCE_RETENTION_DAYS: i64 = 7;
+
+/// Most finished print jobs a day close keeps as evidence. Android:
+/// `PrintAttemptJournal` `MAX_ROWS`.
+const PRINT_EVIDENCE_MAX_JOBS: i64 = 1000;
 
 /// The day close's print-queue step: delete the print jobs of the closed day,
 /// together with their attempts, and never one that holds a printer.
@@ -7380,7 +7572,10 @@ struct PrintJobCleanup {
 /// - none of its attempts matches the dispatcher's printer-blocker predicate
 ///   (`print_dispatch::shared_attempt_blocker_predicate_sql`);
 /// - no reprint that stays points at it (a reprint deleted in this same step
-///   does not hold its source back).
+///   does not hold its source back);
+/// - it is not among the newest finished jobs of the last 7 days (at most
+///   1,000), kept with their attempts as print evidence for support exports
+///   (06/10/2026; Android `PrintAttemptJournal` keeps 7 days or 1,000 rows).
 ///
 /// Pending jobs go, as they did before 1.4.120: this same rollover deletes
 /// the closed day's orders and shifts they would print, so a pending job kept
@@ -7454,6 +7649,7 @@ fn clear_closed_day_print_jobs(
          WHERE datetime(job.created_at) <= datetime(?1)
            AND job.status IN ('pending', 'printed', 'dispatched', 'failed', 'cancelled')
            AND job.id NOT IN (SELECT id FROM temp_z_report_print_job_ids)
+           AND job.id NOT IN (SELECT id FROM temp_z_report_print_evidence_ids)
            {no_blocking_attempt}
            {no_kept_reprint}"
     );
@@ -7462,9 +7658,35 @@ fn clear_closed_day_print_jobs(
         "DROP TABLE IF EXISTS temp_z_report_print_job_ids;
          CREATE TEMP TABLE temp_z_report_print_job_ids (
              id TEXT PRIMARY KEY
+         );
+         DROP TABLE IF EXISTS temp_z_report_print_evidence_ids;
+         CREATE TEMP TABLE temp_z_report_print_evidence_ids (
+             id TEXT PRIMARY KEY
          );",
     )
     .map_err(|e| format!("prepare print cleanup temp table: {e}"))?;
+
+    // Print-attempt evidence outlives the day close (06/10/2026): a support
+    // export the next morning had nothing, because every Z deleted the day's
+    // finished jobs and their attempts. The newest finished jobs of the last
+    // `PRINT_EVIDENCE_RETENTION_DAYS` days, at most `PRINT_EVIDENCE_MAX_JOBS`,
+    // stay with their attempts, as Android keeps 7 days or 1,000 rows
+    // (`PrintAttemptJournal`). A finished job never prints again, so keeping
+    // it raises no printer incident; pending jobs still go (see above).
+    let evidence_since = (Utc::now() - chrono::Duration::days(PRINT_EVIDENCE_RETENTION_DAYS))
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    let retained = conn
+        .execute(
+            "INSERT INTO temp_z_report_print_evidence_ids (id)
+             SELECT id
+             FROM print_jobs
+             WHERE status IN ('printed', 'dispatched', 'failed', 'cancelled')
+               AND julianday(created_at) >= julianday(?1)
+             ORDER BY julianday(created_at) DESC, id DESC
+             LIMIT ?2",
+            params![evidence_since, PRINT_EVIDENCE_MAX_JOBS],
+        )
+        .map_err(|e| format!("stage print evidence kept at day close: {e}"))?;
 
     // Leaves first: a reprint's source becomes deletable once the reprint is
     // staged. Every pass stages at least one new row or ends the loop.
@@ -7514,21 +7736,36 @@ fn clear_closed_day_print_jobs(
             .map_err(|e| format!("cleanup delete orphaned print_job_attempts: {e}"))?;
         attempts += finished_orphan_attempts;
     }
-    let kept: i64 = conn
+    // Live jobs only: the finished evidence kept above is counted apart.
+    let (kept, retained_evidence): (i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*) FROM print_jobs WHERE datetime(created_at) <= datetime(?1)",
+            "SELECT
+                 COALESCE(SUM(CASE WHEN id NOT IN (SELECT id FROM temp_z_report_print_evidence_ids)
+                                   THEN 1 ELSE 0 END), 0),
+                 COALESCE(SUM(CASE WHEN id IN (SELECT id FROM temp_z_report_print_evidence_ids)
+                                   THEN 1 ELSE 0 END), 0)
+             FROM print_jobs WHERE datetime(created_at) <= datetime(?1)",
             params![cutoff_at],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| format!("count print jobs kept at day close: {e}"))?;
 
-    conn.execute_batch("DROP TABLE IF EXISTS temp_z_report_print_job_ids;")
-        .map_err(|e| format!("cleanup print temp table: {e}"))?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp_z_report_print_job_ids;
+         DROP TABLE IF EXISTS temp_z_report_print_evidence_ids;",
+    )
+    .map_err(|e| format!("cleanup print temp table: {e}"))?;
 
     if kept > 0 {
         info!(
             kept,
             "Z-report: kept print jobs that are printing, hold a printer, or are the source of a kept reprint"
+        );
+    }
+    if retained > 0 {
+        info!(
+            retained_evidence,
+            "Z-report: kept recent finished print jobs and their attempts as support evidence"
         );
     }
     if finished_orphan_attempts > 0 {
@@ -7542,6 +7779,7 @@ fn clear_closed_day_print_jobs(
         jobs: jobs as i64,
         attempts: attempts as i64,
         kept,
+        retained_evidence,
     })
 }
 
@@ -14259,5 +14497,347 @@ mod fiscal_closeout_tests {
         assert_eq!(after["lastCloseoutAttempt"]["stage"], "fiscal_guard");
         assert_eq!(after["lastCloseoutAttempt"]["at"], "2026-09-29T16:38:14Z");
         active_cache::reset_for_tests();
+    }
+}
+
+/// Release 1.4.124 (06/10/2026): a Z never erases money that has not reached
+/// the server, and the day close keeps recent print evidence.
+#[cfg(test)]
+mod money_closeout_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn test_db() -> DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("set pragmas");
+        db::run_migrations_for_test(&conn);
+        crate::sync_queue::create_tables(&conn).expect("parity queue");
+        // The closeout gate resolves the branch through the credential
+        // store; never the real keyring of this machine.
+        db::set_setting(&conn, "terminal", "__ignore_keyring", "1").expect("hermetic keyring");
+        DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn hours_ago(hours: i64) -> String {
+        (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339_opts(SecondsFormat::Millis, true)
+    }
+
+    /// The 06/10/2026 incident shape: a card payment, then a manual
+    /// cancellation's refund of it whose sync is still queued.
+    fn seed_cancelled_order_with_queued_refund(conn: &Connection) -> String {
+        let at = hours_ago(2);
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, order_number, items, total_amount,
+                                 total_amount_cents, status, payment_status, sync_status,
+                                 created_at, updated_at)
+             VALUES ('order-refunded', '33333333-3333-4333-8333-333333333333', 'A-17', '[]',
+                     6.5, 650, 'cancelled', 'pending', 'synced', ?1, ?1)",
+            params![at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency,
+                                         status, sync_status, sync_state, remote_payment_id,
+                                         created_at, updated_at)
+             VALUES ('pay-refunded', 'order-refunded', 'card', 6.5, 650, 'EUR', 'refunded',
+                     'synced', 'applied', '44444444-4444-4444-8444-444444444444', ?1, ?1)",
+            params![at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount,
+                                              reason, sync_state, refund_method,
+                                              created_at, updated_at)
+             VALUES ('adj-refund', 'pay-refunded', 'order-refunded', 'refund', 6.5,
+                     'Customer cancelled', 'pending', 'card', ?1, ?1)",
+            params![at],
+        )
+        .unwrap();
+        crate::sync_queue::enqueue_payload_item(
+            conn,
+            "payment_adjustments",
+            "adj-refund",
+            "INSERT",
+            &serde_json::json!({
+                "adjustmentId": "adj-refund",
+                "paymentId": "pay-refunded",
+                "orderId": "33333333-3333-4333-8333-333333333333",
+                "clientOrderId": "order-refunded",
+                "adjustmentType": "refund",
+                "amount": 6.5,
+                "reason": "Customer cancelled",
+                "refundMethod": "card"
+            }),
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
+        )
+        .unwrap()
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    /// A refund queued at 01:36 and its payment were deleted by the 01:38 Z
+    /// while the refund was unsent. The rollover now refuses, and every
+    /// record stays.
+    #[test]
+    fn the_rollover_never_deletes_a_payment_or_refund_still_waiting_to_sync() {
+        let db = test_db();
+        let queue_id = {
+            let conn = db.conn.lock().unwrap();
+            seed_cancelled_order_with_queued_refund(&conn)
+        };
+        let now = Utc::now().to_rfc3339();
+        let error = apply_local_day_rollover(&db, "2026-10-06", &now)
+            .expect_err("the close refuses while the refund is unsent");
+        assert!(error.contains(MONEY_NOT_SYNCED_REASON), "{error}");
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT COUNT(*) FROM orders WHERE id = 'order-refunded'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT COUNT(*) FROM order_payments WHERE id = 'pay-refunded'"
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT COUNT(*) FROM payment_adjustments WHERE id = 'adj-refund'"
+                ),
+                1
+            );
+            // Once the refund reached the server, the day closes as before.
+            conn.execute(
+                "DELETE FROM parity_sync_queue WHERE id = ?1",
+                params![queue_id],
+            )
+            .unwrap();
+        }
+        apply_local_day_rollover(&db, "2026-10-06", &Utc::now().to_rfc3339())
+            .expect("the close proceeds once the money is synced");
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM payment_adjustments"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 0);
+    }
+
+    /// The pre-Z sync gate names unsent money of the window as a blocker
+    /// before anything is generated, in the operator's terms.
+    #[test]
+    fn the_pre_z_gate_refuses_while_money_of_the_window_is_unsent() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_cancelled_order_with_queued_refund(&conn);
+        }
+        let snapshot = crate::sync::capture_unsynced_sync_queue_snapshot(&db).unwrap();
+        assert_eq!(snapshot.count, 1, "{snapshot:?}");
+        assert_eq!(
+            snapshot.blockers_summary,
+            "money_not_synced:payment_adjustment:pending x1"
+        );
+        let detail = &snapshot.blocker_details[0];
+        assert_eq!(detail.blocker_reason, MONEY_NOT_SYNCED_REASON);
+        assert_eq!(detail.entity_type, "payment_adjustment");
+        assert_eq!(detail.adjustment_id.as_deref(), Some("adj-refund"));
+        assert_eq!(detail.order_number.as_deref(), Some("A-17"));
+        let blocked =
+            crate::sync::build_sync_closeout_blocked_response_for_stage(&db, "pre-Z-report sync")
+                .unwrap()
+                .expect("the close is refused");
+        assert_eq!(blocked["errorCode"], "SYNC_CLOSEOUT_BLOCKED");
+        assert_eq!(
+            blocked["syncBlockerDetails"][0]["blockerReason"],
+            "money_not_synced"
+        );
+    }
+
+    /// Only money whose record this Z closes holds it: a record of the next
+    /// period is outside the window, and a row whose record is already gone
+    /// is the queue's own failure or conflict to show.
+    #[test]
+    fn the_gate_reads_only_the_money_of_the_closing_window() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let cutoff = hours_ago(1);
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, status,
+                                 payment_status, sync_status, created_at, updated_at)
+             VALUES ('order-later', '[]', 5.0, 500, 'completed', 'paid', 'pending', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                                         sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-later', 'order-later', 'cash', 5.0, 500, 'completed', 'pending',
+                     'pending', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "payments",
+            "pay-later",
+            "INSERT",
+            &serde_json::json!({ "paymentId": "pay-later", "orderId": "order-later", "amount": 5.0 }),
+            Some(1),
+            Some("payment"),
+            Some("manual"),
+            Some(1),
+        )
+        .unwrap();
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "payment_adjustments",
+            "adj-record-gone",
+            "INSERT",
+            &serde_json::json!({ "paymentId": "pay-gone", "amount": 1.0 }),
+            Some(1),
+            Some("financial"),
+            Some("manual"),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            load_unsynced_money_for_cutoff(&conn, &cutoff).unwrap(),
+            Vec::new(),
+            "a payment after the cutoff and a row without its record do not hold this Z"
+        );
+        let later = load_unsynced_money_for_cutoff(&conn, &Utc::now().to_rfc3339()).unwrap();
+        assert_eq!(later.len(), 1, "{later:?}");
+        assert_eq!(later[0].record_id, "pay-later");
+        assert_eq!(later[0].order_id.as_deref(), Some("order-later"));
+    }
+
+    fn seed_job(conn: &Connection, id: &str, status: &str, created_at: &str) {
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+             VALUES (?1, 'order_receipt', ?1, ?2, ?3, ?3)",
+            params![id, status, created_at],
+        )
+        .expect("insert print job");
+    }
+
+    fn seed_attempt(conn: &Connection, id: &str, job_id: &str, state: &str, at: &str) {
+        conn.execute(
+            "INSERT INTO print_job_attempts
+             (id, print_job_id, attempt_number, transport, resolved_target, document_name,
+              state, bytes_requested, bytes_written, started_at, last_seen_at)
+             VALUES (?1, ?2, 1, 'raw_tcp', 'host:12:192.168.1.19:9100', 'receipt', ?3,
+                     100, 100, ?4, ?4)",
+            params![id, job_id, state, at],
+        )
+        .expect("insert print attempt");
+    }
+
+    /// Each Z deleted the closed day's finished print jobs and attempts, so a
+    /// support export the next morning had no print evidence at all. The
+    /// recent finished ones now stay with their attempts (7 days, at most
+    /// 1,000, as Android); older ones and pending jobs still go.
+    #[test]
+    fn the_day_close_keeps_recent_print_evidence() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            let recent = hours_ago(3);
+            let old = (Utc::now() - chrono::Duration::days(9)).to_rfc3339();
+            seed_job(&conn, "pj-printed-today", "printed", &recent);
+            seed_attempt(
+                &conn,
+                "pa-printed-today",
+                "pj-printed-today",
+                "sent",
+                &recent,
+            );
+            seed_job(&conn, "pj-failed-today", "failed", &recent);
+            seed_attempt(
+                &conn,
+                "pa-failed-today",
+                "pj-failed-today",
+                "transport_error",
+                &recent,
+            );
+            seed_job(&conn, "pj-cancelled-today", "cancelled", &recent);
+            seed_job(&conn, "pj-pending-today", "pending", &recent);
+            seed_job(&conn, "pj-printed-old", "printed", &old);
+            seed_attempt(&conn, "pa-printed-old", "pj-printed-old", "sent", &old);
+        }
+
+        let result = apply_local_day_rollover(&db, "2026-10-06", &Utc::now().to_rfc3339())
+            .expect("rollover");
+
+        let conn = db.conn.lock().unwrap();
+        let ids = |sql: &str| -> Vec<String> {
+            conn.prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            ids("SELECT id FROM print_jobs ORDER BY id"),
+            vec!["pj-cancelled-today", "pj-failed-today", "pj-printed-today"]
+        );
+        assert_eq!(
+            ids("SELECT id FROM print_job_attempts ORDER BY id"),
+            vec!["pa-failed-today", "pa-printed-today"]
+        );
+        assert_eq!(result["print_jobs_kept_evidence"], 3);
+        assert_eq!(result["print_jobs_kept_live"], 0);
+        assert_eq!(
+            result["print_jobs"], 2,
+            "the old finished job and the pending one"
+        );
+    }
+
+    /// At most 1,000 finished jobs stay: the oldest beyond that goes.
+    #[test]
+    fn the_print_evidence_kept_at_day_close_is_bounded() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for index in 0..(PRINT_EVIDENCE_MAX_JOBS + 2) {
+                let at = (Utc::now() - chrono::Duration::minutes(index + 1))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true);
+                seed_job(&conn, &format!("pj-{index:05}"), "printed", &at);
+            }
+        }
+        let result = apply_local_day_rollover(&db, "2026-10-06", &Utc::now().to_rfc3339())
+            .expect("rollover");
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM print_jobs"),
+            PRINT_EVIDENCE_MAX_JOBS
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM print_jobs WHERE id IN ('pj-01000', 'pj-01001')"
+            ),
+            0,
+            "the two oldest go"
+        );
+        assert_eq!(result["print_jobs_kept_evidence"], PRINT_EVIDENCE_MAX_JOBS);
     }
 }

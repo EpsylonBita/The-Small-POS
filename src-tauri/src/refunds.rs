@@ -263,6 +263,23 @@ fn load_adjustment_remote_order_id(conn: &Connection, local_order_id: &str) -> O
     })
 }
 
+/// Names the server payment a refund or void reverses in its own queue
+/// record (review 06/10/2026). Should the parent payment row ever leave this
+/// till before the adjustment is sent, the sync still sends it from this
+/// record (`sync_queue::prepare_orphan_adjustment_request`) instead of
+/// parking it as ADJUSTMENT_PARENT_PAYMENT_MISSING. Not yet synced: nothing.
+fn stamp_canonical_payment_id(payload: &mut Value, remote_payment_id: Option<&str>) {
+    let Some(id) = remote_payment_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return;
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "canonicalPaymentId".to_string(),
+            Value::String(id.to_string()),
+        );
+    }
+}
+
 fn build_adjustment_queue_payload(
     adjustment_id: &str,
     payment_id: &str,
@@ -366,26 +383,47 @@ fn build_adjustment_queue_payload(
 // at :170) stay — they have other live callers at :463, :569, :737, :883
 // inside the refund-path entry points.
 
+/// Who records a refund. The atomic manual cancellation is the only caller
+/// that may name the cashier drawer itself and that names its actor exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefundCaller {
+    /// Ordinary refunds: the courier-custody rule names the cash handler, and
+    /// a staff member is read from the refund's shift when none is named.
+    Ordinary,
+    /// The atomic manual cancellation (`manual_order_cancellation::commit`).
+    ManualCancellation,
+}
+
 pub(crate) fn refund_payment_in_connection(
     conn: &Connection,
     payload: &Value,
 ) -> Result<Value, String> {
-    refund_payment_with_cash_handler(conn, payload, false)
+    refund_payment_with_cash_handler(conn, payload, RefundCaller::Ordinary)
 }
 
 /// Only the atomic manual-cancellation service may use the explicitly selected
 /// cashier drawer. Ordinary refunds retain the existing courier-custody rule.
+///
+/// Two rules differ from an ordinary refund (review 06/10/2026):
+/// - A Bank (`card`) return linked to a staff cash handback names
+///   `cashHandler: "cashier_drawer"`: the cashier received the staff cash and
+///   the server's atomic handback (`record_staff_order_cash_return`) refuses
+///   any other handler. It records who is accountable only; a non-cash return
+///   never debits the drawer.
+/// - The actor is the approving staff member exactly, or nobody (the
+///   terminal's own admin session). It is never replaced by the shift owner:
+///   the server checks the named actor's cancellation right.
 pub(crate) fn refund_manual_cancellation_in_connection(
     conn: &Connection,
     payload: &Value,
 ) -> Result<Value, String> {
-    refund_payment_with_cash_handler(conn, payload, true)
+    refund_payment_with_cash_handler(conn, payload, RefundCaller::ManualCancellation)
 }
 
 fn refund_payment_with_cash_handler(
     conn: &Connection,
     payload: &Value,
-    explicit_cashier_drawer: bool,
+    caller: RefundCaller,
 ) -> Result<Value, String> {
     let payment_id = str_field(payload, "paymentId")
         .or_else(|| str_field(payload, "payment_id"))
@@ -529,8 +567,18 @@ fn refund_payment_with_cash_handler(
     // R2: every new cash refund records who handed the money back, by the
     // rule only: the courier while they still hold the order's cash, else
     // the drawer. A caller's answer never overrides it.
+    let manual_cancellation = caller == RefundCaller::ManualCancellation;
     let cash_handler = match refund_method {
-        RefundMethod::Cash if explicit_cashier_drawer => Some(CashHandler::CashierDrawer),
+        RefundMethod::Cash if manual_cancellation => Some(CashHandler::CashierDrawer),
+        // A Bank return of a payment whose staff cash the cashier received in
+        // the same cancellation: the handback's accountable drawer. Never a
+        // drawer debit (see the movements below).
+        RefundMethod::Card | RefundMethod::Other
+            if manual_cancellation
+                && requested_cash_handler == Some(CashHandler::CashierDrawer) =>
+        {
+            Some(CashHandler::CashierDrawer)
+        }
         RefundMethod::Cash => {
             let by_rule = cash_handler_by_rule(conn, &order_id)?;
             if let Some(requested) = requested_cash_handler.filter(|handler| *handler != by_rule) {
@@ -609,14 +657,29 @@ fn refund_payment_with_cash_handler(
         .ok()
         .flatten();
 
-    let (resolved_staff_id, resolved_staff_shift_id) = resolve_adjustment_staff_context(
-        conn,
-        requested_staff_id.as_deref(),
-        requested_staff_shift_id
-            .as_deref()
-            .or(payment_shift_id.as_deref())
-            .or(order_shift_id.as_deref()),
-    );
+    let (resolved_staff_id, resolved_staff_shift_id) = if manual_cancellation {
+        // The approving actor exactly, or nobody for the terminal's admin
+        // session; never the shift owner, whose cancellation right the
+        // server would otherwise check (review 06/10/2026).
+        (
+            normalize_uuid_text(requested_staff_id.as_deref()),
+            normalize_uuid_text(
+                requested_staff_shift_id
+                    .as_deref()
+                    .or(payment_shift_id.as_deref())
+                    .or(order_shift_id.as_deref()),
+            ),
+        )
+    } else {
+        resolve_adjustment_staff_context(
+            conn,
+            requested_staff_id.as_deref(),
+            requested_staff_shift_id
+                .as_deref()
+                .or(payment_shift_id.as_deref())
+                .or(order_shift_id.as_deref()),
+        )
+    };
     let remote_order_id = load_adjustment_remote_order_id(conn, &order_id);
 
     // W4c dual-write: populate `amount_cents` alongside REAL `amount`.
@@ -654,8 +717,12 @@ fn refund_payment_with_cash_handler(
         .map_err(|e| format!("update payment status: {e}"))?;
     }
 
-    match cash_handler {
-        Some(CashHandler::CashierDrawer) => {
+    // The money that moves follows the refund's tender first: only a cash
+    // refund pays cash out of a drawer or a courier's pocket. A Bank return
+    // that names the cashier drawer (a handback-linked manual cancellation)
+    // moves no drawer cash.
+    match (refund_method, cash_handler) {
+        (RefundMethod::Cash, Some(CashHandler::CashierDrawer)) => {
             let target_shift_id = normalize_non_empty_text(requested_staff_shift_id.as_deref())
                 .or(payment_shift_id.clone())
                 .or(order_shift_id.clone());
@@ -672,7 +739,7 @@ fn refund_payment_with_cash_handler(
                 .map_err(|e| format!("update drawer refunds: {e}"))?;
             }
         }
-        Some(CashHandler::DriverShift) => {
+        (RefundMethod::Cash, Some(CashHandler::DriverShift)) => {
             // W4c dual-write: mirror `cash_collected`/`cash_to_return` updates
             // onto their `_cents` siblings. The legacy REAL columns keep their
             // `payment_method` derivation read-source unchanged.
@@ -720,7 +787,9 @@ fn refund_payment_with_cash_handler(
         // (`order_ownership::courier_order_tender_cents`). A card refund of a
         // cash row leaves the courier's cash and card alone (no cash left
         // anyone's hands; the recount agrees), so it writes nothing here.
-        None if payment_method.trim().eq_ignore_ascii_case("card") => {
+        (RefundMethod::Card | RefundMethod::Other, _)
+            if payment_method.trim().eq_ignore_ascii_case("card") =>
+        {
             // W4c dual-write: mirror `card_amount` clamp onto `card_amount_cents`.
             let _ = conn.execute(
                 "UPDATE driver_earnings
@@ -747,7 +816,7 @@ fn refund_payment_with_cash_handler(
             );
         }
         // Any other refund (R5): no drawer, courier or card money here.
-        None => {}
+        _ => {}
     }
 
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
@@ -772,8 +841,9 @@ fn refund_payment_with_cash_handler(
 
     payments::recompute_order_payment_state(conn, &order_id, &now, &payment_id)?;
 
-    let sync_payload_value = serde_json::from_str::<Value>(&sync_payload)
+    let mut sync_payload_value = serde_json::from_str::<Value>(&sync_payload)
         .map_err(|e| format!("parse adjustment payload: {e}"))?;
+    stamp_canonical_payment_id(&mut sync_payload_value, remote_payment_id.as_deref());
     crate::sync_queue::enqueue_payload_item(
         conn,
         "payment_adjustments",
@@ -879,12 +949,18 @@ pub fn void_payment_with_adjustment(
     // Fetch the payment in any state so we can return a precise, typed error
     // rather than a misleading "not found". A completed payment is the only
     // voidable state; other states each surface their own error message.
-    let (order_id, amount, pay_method, pay_status): (String, f64, String, String) = conn
+    let (order_id, amount, pay_method, pay_status, remote_payment_id): (
+        String,
+        f64,
+        String,
+        String,
+        Option<String>,
+    ) = conn
         .query_row(
             // W4b: cents-with-real-fallback shim (removed in 4e).
             "SELECT order_id,
                     COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER), 0),
-                    method, status
+                    method, status, remote_payment_id
              FROM order_payments WHERE id = ?1",
             params![payment_id],
             |row| {
@@ -894,6 +970,7 @@ pub fn void_payment_with_adjustment(
                     Cents::new(row.get::<_, i64>(1)?).to_f64_dp2(),
                     row.get(2)?,
                     row.get(3)?,
+                    row.get(4)?,
                 ))
             },
         )
@@ -1140,8 +1217,9 @@ pub fn void_payment_with_adjustment(
             None,
         );
 
-        let adj_payload_value = serde_json::from_str::<Value>(&adj_payload)
+        let mut adj_payload_value = serde_json::from_str::<Value>(&adj_payload)
             .map_err(|e| format!("parse void adjustment payload: {e}"))?;
+        stamp_canonical_payment_id(&mut adj_payload_value, remote_payment_id.as_deref());
         crate::sync_queue::enqueue_payload_item(
             &conn,
             "payment_adjustments",
@@ -1476,6 +1554,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sq_count, 1);
+    }
+
+    /// Review 06/10/2026: an orphaned refund (its parent payment row gone
+    /// before it was sent) could only park, because its own record never
+    /// named the server payment. Refunds and voids now carry it when known.
+    #[test]
+    fn refund_and_void_records_name_the_server_payment_they_reverse() {
+        let db = test_db();
+        let refunded = seed_order_and_payment(&db, "ord-canon-r", 20.0);
+        let voided = seed_order_and_payment(&db, "ord-canon-v", 9.0);
+        let unsynced = seed_order_and_payment(&db, "ord-canon-u", 7.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE order_payments SET remote_payment_id='44444444-4444-4444-8444-444444444444' WHERE id='pay-ord-canon-r';
+                 UPDATE order_payments SET remote_payment_id='55555555-5555-4555-8555-555555555555' WHERE id='pay-ord-canon-v';",
+            )
+            .unwrap();
+        }
+        refund_payment(
+            &db,
+            &serde_json::json!({ "paymentId": refunded, "amount": 5.0, "reason": "Item returned" }),
+        )
+        .unwrap();
+        void_payment_with_adjustment(&db, &voided, "Duplicate", None, None).unwrap();
+        refund_payment(
+            &db,
+            &serde_json::json!({ "paymentId": unsynced, "amount": 1.0, "reason": "Item returned" }),
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let named = |payment_id: &str| -> Option<String> {
+            let raw: String = conn
+                .query_row(
+                    "SELECT q.data FROM parity_sync_queue q JOIN payment_adjustments a ON a.id = q.record_id
+                     WHERE q.table_name = 'payment_adjustments' AND a.payment_id = ?1",
+                    params![payment_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str::<Value>(&raw).unwrap()["canonicalPaymentId"]
+                .as_str()
+                .map(str::to_string)
+        };
+        assert_eq!(
+            named(&refunded).as_deref(),
+            Some("44444444-4444-4444-8444-444444444444")
+        );
+        assert_eq!(
+            named(&voided).as_deref(),
+            Some("55555555-5555-4555-8555-555555555555")
+        );
+        assert_eq!(
+            named(&unsynced),
+            None,
+            "not synced yet: no server payment to name"
+        );
     }
 
     #[test]

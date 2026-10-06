@@ -34,6 +34,13 @@ interface OrderCancellationModalProps {
   platformOrder?: boolean;
   manualReturn?: { amountCents: number; currency: string };
   recovery?: { reason: string; returnChannel?: CancellationReturnChannel };
+  /**
+   * A saved table cancellation that a manager may clear: refused by the
+   * server (never sent again, nothing returned), or waiting for its server
+   * outcome. Clearing never charges, returns or cancels anything; the till
+   * refuses it while money may still have been recorded.
+   */
+  savedAttempt?: { refused: boolean; onRelease: () => void | Promise<void> };
   onConfirmCancel: (reason: string, returnChannel?: CancellationReturnChannel) => void | Promise<void>;
   onClose: () => void;
 }
@@ -44,6 +51,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
   platformOrder = false,
   manualReturn,
   recovery,
+  savedAttempt,
   onConfirmCancel,
   onClose
 }) => {
@@ -105,8 +113,21 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
     setReturnChannel(undefined);
   };
 
-  const needsChannel = Boolean(manualReturn) && !returnChannel;
-  const canConfirm = !submitting && !needsChannel && (platformOrder ? platformCode !== null : Boolean(cancelReason.trim()));
+  const needsChannel = Boolean(manualReturn) && !returnChannel && !savedAttempt?.refused;
+  const canConfirm = !submitting && !needsChannel && !savedAttempt?.refused
+    && (platformOrder ? platformCode !== null : Boolean(cancelReason.trim()));
+
+  const handleRelease = async () => {
+    if (submittingRef.current || !savedAttempt) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await savedAttempt.onRelease();
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
 
   const handleConfirm = async () => {
     if (submittingRef.current || needsChannel) return;
@@ -180,6 +201,28 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         {t('modals.orderCancellation.message', { count: orderCount })}
       </p>
 
+      {savedAttempt && (
+        <div
+          data-testid="order-cancellation-saved-attempt"
+          role={savedAttempt.refused ? 'alert' : 'status'}
+          className="mb-6 rounded-xl border border-amber-400/40 bg-amber-500/10 p-3 text-sm liquid-glass-modal-text"
+        >
+          <p className="mb-3">
+            {t(savedAttempt.refused
+              ? 'modals.orderCancellation.refusedAttemptNotice'
+              : 'modals.orderCancellation.pendingAttemptNotice')}
+          </p>
+          <button
+            type="button"
+            onClick={() => { void handleRelease(); }}
+            disabled={submitting}
+            className="liquid-glass-modal-button liquid-glass-modal-secondary min-h-[44px] w-full rounded-xl disabled:opacity-50"
+          >
+            {t('modals.orderCancellation.clearRefusedAttempt')}
+          </button>
+        </div>
+      )}
+
       {manualReturn && !recovery && (
         <fieldset className="mb-6" disabled={submitting}>
           <legend className="mb-2 font-medium liquid-glass-modal-text">{t('modals.orderCancellation.returnChannel')}</legend>
@@ -198,7 +241,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
         </fieldset>
       )}
 
-      {!needsChannel && <>
+      {!needsChannel && !savedAttempt?.refused && <>
       {platformOrder && (
         <div className="mb-6">
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">

@@ -6,96 +6,463 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use tauri::Emitter;
 
 const ACTION: &str = "manual_order_cancel_v1";
 const PROVIDER_REQUIRED: &str = "ORIGINAL_PROVIDER_RETURN_REQUIRED";
 const SETUP_UNKNOWN: &str = "PAYMENT_CONNECTION_STATUS_UNAVAILABLE";
+/// A receipt this till mirrored from another till has no local provenance:
+/// its canonical server row decides, and reading it needs a connection.
+pub(crate) const RECEIPT_CHECK_UNAVAILABLE: &str = "ORIGINAL_RECEIPT_CHECK_UNAVAILABLE";
+/// An efood/Wolt (or other external) order returns its money through the
+/// platform; the till never records a manual return for it (Android
+/// `readManualCancellationState`).
+pub(crate) const PLATFORM_ORDER_RETURN_REQUIRED: &str = "PLATFORM_ORDER_RETURN_REQUIRED";
+const PERMISSION_REQUIRED: &str = "ORDER_CANCELLATION_PERMISSION_REQUIRED";
+/// The store-role permission that lets a staff member cancel a paid order
+/// (THE-448 catalogue name; Android `CATALOGUE_PERMISSIONS_BY_ACTION.void_orders`).
+const STORE_CANCEL_PERMISSION: &str = "pos.orders.cancel";
+/// `order_payments.payment_origin` of a receipt mirrored from the server.
+const MIRRORED_RECEIPT_ORIGIN: &str = "sync_reconstructed";
 
-fn actor(auth: &auth::AuthState) -> Result<String, String> {
-    if !["delete_order", "pos.orders.cancel", "void_orders"]
+/// Who authorizes a paid-order cancellation (review 06/10/2026). The same
+/// order of authority as Android's `resolvePrivilegedStaffId(['void_orders'])`:
+/// the terminal's own session when it carries the right (the desktop admin
+/// session today), else the cashier or manager checked in at this till when
+/// their store role grants `pos.orders.cancel`. Ordinary manual cancellation
+/// asks no manager PIN on either app; the canonical table lifecycle keeps its
+/// own staff-PIN approval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CancellationActor {
+    /// The identity kept in this till's audit rows.
+    pub(crate) audit_id: String,
+    /// The identity the server checks: the approving staff member, or `None`
+    /// for the terminal's own admin session (terminal authority). Never the
+    /// shift owner by substitution.
+    pub(crate) staff_id: Option<String>,
+}
+
+fn uuid_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|candidate| uuid::Uuid::parse_str(candidate).is_ok())
+        .map(str::to_owned)
+}
+
+/// A flag of a staff-directory entry under any of its spellings: an explicit
+/// false wins, an absent flag is unknown (default-deny, as the check-in).
+fn directory_flag(entry: &Value, keys: &[&str]) -> Option<bool> {
+    let mut seen = None;
+    for key in keys {
+        match entry.get(*key).and_then(Value::as_bool) {
+            Some(false) => return Some(false),
+            Some(true) => seen = Some(true),
+            None => {}
+        }
+    }
+    seen
+}
+
+/// Whether the staff directory this till keeps for its branch (the same data
+/// the check-in and the manager PIN trust) grants `permission` to `staff_id`.
+fn staff_holds_store_permission(
+    conn: &Connection,
+    branch_id: &str,
+    staff_id: &str,
+    permission: &str,
+) -> bool {
+    let Some(raw) = db::get_setting(
+        conn,
+        "staff_auth_cache",
+        &format!("branch_{}", branch_id.trim()),
+    ) else {
+        return false;
+    };
+    let Ok(cache) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    let cached_branch = cache
+        .get("branch_id")
+        .or_else(|| cache.get("branchId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !cached_branch.is_empty() && cached_branch != branch_id.trim() {
+        return false;
+    }
+    cache["staff"].as_array().is_some_and(|staff| {
+        staff.iter().any(|entry| {
+            entry["id"].as_str().map(str::trim) == Some(staff_id)
+                && directory_flag(entry, &["isActive", "is_active"]) == Some(true)
+                && directory_flag(entry, &["canLoginPos", "can_login_pos", "canLoginPOS"])
+                    == Some(true)
+                && entry["permissions"].as_array().is_some_and(|names| {
+                    names
+                        .iter()
+                        .any(|name| name.as_str().map(str::trim) == Some(permission))
+                })
+        })
+    })
+}
+
+pub(crate) fn cancellation_actor(
+    conn: &Connection,
+    auth: &auth::AuthState,
+) -> Result<CancellationActor, String> {
+    let session = auth::get_session_json(auth);
+    let session_staff = session["staffId"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or("AUTHENTICATION_REQUIRED")?
+        .to_owned();
+    if ["delete_order", "pos.orders.cancel", "void_orders"]
         .iter()
         .any(|permission| auth::has_permission(auth, Some(permission)))
     {
-        return Err("ORDER_CANCELLATION_PERMISSION_REQUIRED".into());
+        let staff_id = uuid_text(session["databaseStaffId"].as_str());
+        return Ok(CancellationActor {
+            audit_id: staff_id.clone().unwrap_or(session_staff),
+            staff_id,
+        });
     }
-    auth::get_session_json(auth)["staffId"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| "AUTHENTICATION_REQUIRED".into())
-}
-
-fn no_connected_bank(conn: &Connection, scope: &OpeningScope) -> Result<(), String> {
-    let connected: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM ecr_devices WHERE device_type='payment_terminal' AND enabled=1 AND status='connected')", [], |r| r.get(0)).map_err(|e|e.to_string())?;
-    if connected {
-        return Err(PROVIDER_REQUIRED.into());
-    }
-    let raw = db::get_setting(conn, "local", "admin_api_get::/api/pos/integrations")
-        .ok_or(SETUP_UNKNOWN)?;
-    let envelope: Value = serde_json::from_str(&raw).map_err(|_| SETUP_UNKNOWN)?;
-    let data = envelope.get("data").unwrap_or(&envelope);
-    let items = data["integrations"].as_array().ok_or(SETUP_UNKNOWN)?;
-    if data["success"] != true {
-        return Err(SETUP_UNKNOWN.into());
-    }
-    // Older deployed servers echo the branch on every row instead of the envelope.
-    if let Some(branch) = data["branch_id"].as_str() {
-        if branch != scope.branch_id {
-            return Err(SETUP_UNKNOWN.into());
-        }
-    } else if items.is_empty()
-        || items
-            .iter()
-            .any(|row| row["branch_id"].as_str() != Some(scope.branch_id.as_str()))
-    {
-        return Err(SETUP_UNKNOWN.into());
-    }
-    for row in items {
-        if row["branch_id"]
-            .as_str()
-            .is_some_and(|branch| branch != scope.branch_id)
-        {
-            return Err(SETUP_UNKNOWN.into());
-        }
-        let provider = row["provider"]
-            .as_str()
-            .or_else(|| row["plugin_id"].as_str())
-            .unwrap_or("");
-        let payment = row["category"]
-            .as_str()
-            .is_some_and(|v| matches!(v, "payment" | "payments"))
-            || matches!(
-                provider,
-                "stripe" | "viva" | "twint" | "worldline_terminals"
-            );
-        if !payment || row["is_purchased"] == false || row["is_enabled"] == false {
-            continue;
-        }
-        if row["is_purchased"] != true || row["is_enabled"] != true {
-            return Err(SETUP_UNKNOWN.into());
-        }
-        if matches!(provider, "twint" | "worldline_terminals") {
-            match row["payment_setup"]["transport_ready"].as_bool() {
-                Some(false) => continue,
-                Some(true) => return Err(PROVIDER_REQUIRED.into()),
-                None => return Err(SETUP_UNKNOWN.into()),
+    let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
+    if let Some((_, cashier)) = crate::order_ownership::resolve_active_cashier_assignment(
+        conn,
+        &scope.branch_id,
+        &scope.terminal_id,
+    )? {
+        if let Some(cashier) = uuid_text(Some(&cashier)) {
+            if staff_holds_store_permission(
+                conn,
+                &scope.branch_id,
+                &cashier,
+                STORE_CANCEL_PERMISSION,
+            ) {
+                return Ok(CancellationActor {
+                    audit_id: cashier.clone(),
+                    staff_id: Some(cashier),
+                });
             }
         }
-        match row["status"].as_str() {
-            Some("connected" | "active" | "verified") => return Err(PROVIDER_REQUIRED.into()),
-            Some(
-                "inactive"
-                | "disconnected"
-                | "not_configured"
-                | "pending"
-                | "pending_verification"
-                | "error",
-            ) => {}
-            _ => return Err(SETUP_UNKNOWN.into()),
+    }
+    Err(PERMISSION_REQUIRED.into())
+}
+
+/// The fresh, terminal-authenticated answer to "is a bank transport
+/// connected for this branch" (`GET /api/pos/payments/manual-admission`, the
+/// check Android's `requireNoConnectedPaymentProvider` makes). A cached or
+/// module-gated integrations list is not evidence; errors never mean "off".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProviderAdmission {
+    #[default]
+    NotChecked,
+    Unavailable,
+    Connected,
+    NotConnected,
+}
+
+/// Read one manual-admission answer for exactly this terminal scope.
+pub(crate) fn admission_from_response(scope: &OpeningScope, response: &Value) -> ProviderAdmission {
+    let body = if response.get("admission_version").is_some() {
+        response
+    } else {
+        response.get("data").unwrap_or(response)
+    };
+    if body["success"] != true
+        || body["admission_version"] != 1
+        || body["organization_id"].as_str() != Some(scope.organization_id.as_str())
+        || body["branch_id"].as_str() != Some(scope.branch_id.as_str())
+        || body["terminal_id"].as_str() != Some(scope.terminal_id.as_str())
+    {
+        return ProviderAdmission::Unavailable;
+    }
+    match body["provider_connected"].as_bool() {
+        Some(true) => ProviderAdmission::Connected,
+        Some(false) => ProviderAdmission::NotConnected,
+        None => ProviderAdmission::Unavailable,
+    }
+}
+
+/// Receipts this till mirrored from another till (`sync_reconstructed`, no
+/// local provenance), judged by their canonical server rows with the server's
+/// own classifier (`is_manual_pos_cancellation_receipt`, mirrored by
+/// [`crate::table_manual_cancellation::canonical_manual_receipt`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CanonicalReceipts {
+    #[default]
+    NotChecked,
+    Unavailable,
+    /// Local payment ids whose canonical row matches this till's mirror and
+    /// proves an ordinary manual original.
+    Verified(BTreeSet<String>),
+}
+
+/// The remote evidence a return needs, gathered before the local write and
+/// bound to the terminal scope it was read for.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ReturnEvidence {
+    pub(crate) scope: Option<OpeningScope>,
+    pub(crate) admission: ProviderAdmission,
+    pub(crate) receipts: CanonicalReceipts,
+}
+
+/// What a cancellation of `order_id` needs from the server, read locally.
+pub(crate) struct EvidenceNeeds {
+    admission: bool,
+    mirrored_receipts: bool,
+    canonical_order: Option<String>,
+}
+
+pub(crate) fn evidence_needs(conn: &Connection, order_id: &str) -> Result<EvidenceNeeds, String> {
+    let mirrored_receipts: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id=?1 AND status IN ('completed','refunded')
+               AND LOWER(TRIM(COALESCE(payment_origin,'')))=?2 AND LOWER(TRIM(COALESCE(method,''))) IN ('cash','card'))",
+            params![order_id, MIRRORED_RECEIPT_ORIGIN],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let canonical_order: Option<String> = conn
+        .query_row(
+            "SELECT supabase_id FROM orders WHERE id=?1",
+            [order_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    Ok(EvidenceNeeds {
+        admission: payments::load_store_taken_net_paid_cents(conn, order_id)? > 0,
+        mirrored_receipts,
+        canonical_order: uuid_text(canonical_order.as_deref()),
+    })
+}
+
+fn canonical_amount_cents(row: &Value) -> Option<i64> {
+    row["amount_cents"].as_i64().or_else(|| {
+        row["amount"]
+            .as_f64()
+            .map(|amount| Cents::round_half_even(amount).as_i64())
+    })
+}
+
+/// Classify this order's mirrored receipts from a canonical cancellation
+/// snapshot (`GET /api/pos/staff-cash-returns/sync?order_id=`). A row whose
+/// identity, tender, status, currency or amount differs from the local mirror
+/// proves nothing.
+pub(crate) fn canonical_receipts_from_snapshot(
+    conn: &Connection,
+    order_id: &str,
+    snapshot: &Value,
+) -> Result<CanonicalReceipts, String> {
+    let data = snapshot.get("data").unwrap_or(snapshot);
+    let Some(rows) = data["payments"].as_array() else {
+        return Ok(CanonicalReceipts::Unavailable);
+    };
+    let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
+    let remote: Option<String> = conn
+        .query_row(
+            "SELECT supabase_id FROM orders WHERE id=?1",
+            [order_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let Some(remote) = uuid_text(remote.as_deref()) else {
+        return Ok(CanonicalReceipts::Unavailable);
+    };
+    if data["order"]["id"].as_str().is_some_and(|id| id != remote) {
+        return Ok(CanonicalReceipts::Unavailable);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT id,COALESCE(remote_payment_id,''),LOWER(TRIM(method)),status,COALESCE(currency,''),
+               COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0)
+             FROM order_payments WHERE order_id=?1 AND status IN ('completed','refunded')
+               AND LOWER(TRIM(COALESCE(payment_origin,'')))=?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let mirrors = statement
+        .query_map(params![order_id, MIRRORED_RECEIPT_ORIGIN], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut verified = BTreeSet::new();
+    for (local, canonical_id, method, status, currency, cents) in mirrors {
+        let Some(row) = rows
+            .iter()
+            .find(|row| !canonical_id.is_empty() && row["id"].as_str() == Some(&canonical_id))
+        else {
+            continue;
+        };
+        if row["order_id"].as_str() == Some(remote.as_str())
+            && row["organization_id"].as_str() == Some(scope.organization_id.as_str())
+            && row["branch_id"].as_str() == Some(scope.branch_id.as_str())
+            && row["payment_method"].as_str() == Some(method.as_str())
+            && row["status"].as_str() == Some(status.as_str())
+            && row["currency"].as_str() == Some(currency.as_str())
+            && canonical_amount_cents(row) == Some(cents)
+            && crate::table_manual_cancellation::canonical_manual_receipt(row)
+        {
+            verified.insert(local);
         }
     }
-    Ok(())
+    Ok(CanonicalReceipts::Verified(verified))
+}
+
+/// Gather the remote evidence for `order_id`: a fresh provider admission when
+/// money is to be returned, and the canonical rows of mirrored receipts.
+/// `snapshot` is a canonical cancellation snapshot the caller already tried
+/// to read (table checks): `Some(None)` when that read failed. Read failures
+/// are recorded as unavailable, never as approval.
+pub(crate) async fn fetch_return_evidence(
+    db: &db::DbState,
+    order_id: &str,
+    snapshot: Option<Option<&Value>>,
+) -> Result<ReturnEvidence, String> {
+    let (needs, scope) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        (
+            evidence_needs(&conn, order_id)?,
+            OpeningScope::resolve(&conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?,
+        )
+    };
+    let admission = if needs.admission {
+        match crate::admin_fetch_detailed(
+            Some(db),
+            "/api/pos/payments/manual-admission",
+            "GET",
+            None,
+        )
+        .await
+        {
+            Ok(body) => admission_from_response(&scope, &body),
+            Err(_) => ProviderAdmission::Unavailable,
+        }
+    } else {
+        ProviderAdmission::NotChecked
+    };
+    let receipts = if !needs.mirrored_receipts {
+        CanonicalReceipts::NotChecked
+    } else {
+        let fetched = match (snapshot, needs.canonical_order.as_deref()) {
+            (Some(_), _) | (None, None) => None,
+            (None, Some(remote)) => crate::admin_fetch_detailed(
+                Some(db),
+                &format!("/api/pos/staff-cash-returns/sync?order_id={remote}"),
+                "GET",
+                None,
+            )
+            .await
+            .ok(),
+        };
+        match snapshot.flatten().or(fetched.as_ref()) {
+            Some(snapshot) => {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                canonical_receipts_from_snapshot(&conn, order_id, snapshot)?
+            }
+            None => CanonicalReceipts::Unavailable,
+        }
+    };
+    Ok(ReturnEvidence {
+        scope: Some(scope),
+        admission,
+        receipts,
+    })
+}
+
+/// No bank transport may own the return. A card terminal configured on this
+/// till blocks it whether or not it is connected right now (Android blocks
+/// any enabled ECR device; its only kind is the card terminal, while a
+/// desktop `cash_register` is a fiscal register, not a bank transport). The
+/// branch's providers are judged by the fresh admission only.
+fn no_connected_bank(conn: &Connection, admission: ProviderAdmission) -> Result<(), String> {
+    let configured: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ecr_devices WHERE device_type='payment_terminal' AND enabled=1)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if configured {
+        return Err(PROVIDER_REQUIRED.into());
+    }
+    match admission {
+        ProviderAdmission::NotConnected => Ok(()),
+        ProviderAdmission::Connected => Err(PROVIDER_REQUIRED.into()),
+        ProviderAdmission::NotChecked | ProviderAdmission::Unavailable => Err(SETUP_UNKNOWN.into()),
+    }
+}
+
+/// Our own channels (`pos`, `kiosk`, `web`, `android-ios`) or no recorded
+/// source. An external order id or any other source returns money through its
+/// platform (`crate::platforms`, the shared closed classification).
+fn order_source_allows_manual_return(conn: &Connection, id: &str) -> Result<bool, String> {
+    let (plugin, external): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT plugin,external_plugin_order_id FROM orders WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    if external.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+        return Ok(false);
+    }
+    Ok(
+        match plugin
+            .as_deref()
+            .and_then(crate::platforms::normalize_platform_slug)
+        {
+            None => true,
+            Some(slug) => crate::platforms::INTERNAL_ORDER_PLATFORMS.contains(&slug.as_str()),
+        },
+    )
+}
+
+/// One receipt's manual provenance. A receipt recorded on this till keeps the
+/// native column rule; a mirrored receipt is judged by its canonical row.
+fn receipt_is_manual(
+    conn: &Connection,
+    payment_id: &str,
+    receipts: &CanonicalReceipts,
+) -> Result<bool, String> {
+    let (method, origin, device, reference, metadata): (String, String, String, String, Option<String>) = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(method,''))),LOWER(TRIM(COALESCE(payment_origin,''))),TRIM(COALESCE(terminal_device_id,'')),TRIM(COALESCE(transaction_ref,'')),metadata FROM order_payments WHERE id=?1",
+            [payment_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    if origin == MIRRORED_RECEIPT_ORIGIN {
+        if !matches!(method.as_str(), "cash" | "card") || !device.is_empty() {
+            return Ok(false);
+        }
+        return match receipts {
+            CanonicalReceipts::Verified(ids) => Ok(ids.contains(payment_id)),
+            CanonicalReceipts::NotChecked | CanonicalReceipts::Unavailable => {
+                Err(RECEIPT_CHECK_UNAVAILABLE.into())
+            }
+        };
+    }
+    Ok(original_is_manual_with_metadata(
+        &method,
+        &origin,
+        &device,
+        &reference,
+        metadata.as_deref(),
+    ))
 }
 
 pub(crate) fn original_is_manual(
@@ -143,13 +510,24 @@ pub(crate) fn original_is_manual_with_metadata(
     }))
 }
 
-fn prepare(conn: &Connection, raw_id: &str) -> Result<Value, String> {
+fn prepare(conn: &Connection, raw_id: &str, evidence: &ReturnEvidence) -> Result<Value, String> {
     let id = orders::validate_manual_cancel_target(conn, raw_id)?;
-    prepare_validated(conn, &id)
+    prepare_validated(conn, &id, evidence)
 }
 
-pub(crate) fn prepare_validated(conn: &Connection, id: &str) -> Result<Value, String> {
+pub(crate) fn prepare_validated(
+    conn: &Connection,
+    id: &str,
+    evidence: &ReturnEvidence,
+) -> Result<Value, String> {
     let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
+    // Evidence read for another terminal scope (a rebind mid-request) proves
+    // nothing here.
+    let (admission, receipts) = if evidence.scope.as_ref() == Some(&scope) {
+        (evidence.admission, evidence.receipts.clone())
+    } else {
+        (ProviderAdmission::NotChecked, CanonicalReceipts::NotChecked)
+    };
     let branch: String = conn
         .query_row(
             "SELECT COALESCE(branch_id,'') FROM orders WHERE id=?1",
@@ -161,6 +539,16 @@ pub(crate) fn prepare_validated(conn: &Connection, id: &str) -> Result<Value, St
         return Err("ORDER_BRANCH_MISMATCH".into());
     }
     let cash_returns = crate::staff_cash_returns::plan(conn, &id)?;
+    // Staff-held cash is handed back only from a proven manual original; a
+    // receipt mirrored from another till is judged by its canonical row.
+    for source in &cash_returns {
+        let payment = source["paymentId"]
+            .as_str()
+            .ok_or("STAFF_CASH_CUSTODY_INVALID")?;
+        if !receipt_is_manual(conn, payment, &receipts)? {
+            return Err(PROVIDER_REQUIRED.into());
+        }
+    }
     let refusal = orders::cancel_refusal_code(conn, &id)?;
     if refusal.is_some_and(|code| {
         code != orders::ORDER_HAS_PAYMENTS && code != "STAFF_CASH_RETURN_REQUIRED"
@@ -187,32 +575,35 @@ pub(crate) fn prepare_validated(conn: &Connection, id: &str) -> Result<Value, St
     if claimed_paid {
         // Returning the rows we do have must not hide missing original money.
         // Prior refunded originals still prove received principal; voids and
-        // placeholders do not. Tips are not principal coverage.
-        let principal: i64 = conn.query_row(&format!("SELECT COALESCE(SUM(MAX(COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0)-COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),0)),0) FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') AND NOT {}",payments::placeholder_payment_sql("p")),[&id],|r|r.get(0)).map_err(|e|e.to_string())?;
-        if principal < total_cents {
+        // placeholders do not. A receipt tip covers only the tip the order
+        // total contains (tip-inclusive rule, `payments::load_principal_paid_for_order`):
+        // a 22.00 order with its 2.00 tip, paid by one 22.00 receipt, is paid.
+        let (principal, receipt_tips): (i64, i64) = conn.query_row(&format!("SELECT COALESCE(SUM(MAX(gross-tip,0)),0),COALESCE(SUM(MIN(tip,gross)),0) FROM (SELECT MAX(COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0),0) AS gross,MAX(COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),0) AS tip FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') AND NOT {})",payments::placeholder_payment_sql("p")),[&id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        let covered =
+            principal + receipt_tips.min(payments::load_order_tip_inside_total_cents(conn, id)?);
+        if covered < total_cents {
             return Err(orders::ORDER_PAYMENT_NOT_RECORDED.into());
         }
     }
-    no_connected_bank(conn, &scope)?;
+    // The order's own source first: an efood/Wolt order's money is the
+    // platform's to return, whatever its payment row says (Android parity).
+    if !order_source_allows_manual_return(conn, id)? {
+        return Err(PLATFORM_ORDER_RETURN_REQUIRED.into());
+    }
+    no_connected_bank(conn, admission)?;
     let provider_attempt: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM ecr_transactions WHERE order_id=?1 AND LOWER(transaction_type)='sale' )",[&id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if provider_attempt {
         return Err(PROVIDER_REQUIRED.into());
     }
-    let mut stmt = conn.prepare("SELECT id,LOWER(TRIM(method)),LOWER(TRIM(COALESCE(payment_origin,''))),TRIM(COALESCE(terminal_device_id,'')),TRIM(COALESCE(transaction_ref,'')),currency,
+    let mut stmt = conn.prepare("SELECT id,currency,
         COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0) - COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER))) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type='refund'),0)
-        ,metadata
         FROM order_payments p WHERE order_id=?1 AND status='completed' ORDER BY id").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([&id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -221,7 +612,7 @@ pub(crate) fn prepare_validated(conn: &Connection, id: &str) -> Result<Value, St
     let mut portions = Vec::new();
     let mut currency: Option<String> = None;
     let mut cents = 0_i64;
-    for (payment_id, method, origin, device, reference, unit, remaining, metadata) in rows {
+    for (payment_id, unit, remaining) in rows {
         if payments::payment_is_platform_settlement(conn, &payment_id)? {
             continue;
         }
@@ -230,13 +621,7 @@ pub(crate) fn prepare_validated(conn: &Connection, id: &str) -> Result<Value, St
             return Err("PAYMENT_SYNC_REQUIRED".into());
         }
         if payments::payment_is_placeholder(conn, &payment_id)?
-            || !original_is_manual_with_metadata(
-                &method,
-                &origin,
-                &device,
-                &reference,
-                metadata.as_deref(),
-            )
+            || !receipt_is_manual(conn, &payment_id, &receipts)?
         {
             return Err(PROVIDER_REQUIRED.into());
         }
@@ -274,7 +659,38 @@ pub(crate) fn prepare_validated(conn: &Connection, id: &str) -> Result<Value, St
     )
 }
 
-fn commit(conn: &Connection, input: &Value, actor_id: &str) -> Result<Value, String> {
+/// The local order a manual cancellation request names (local or canonical id).
+fn requested_order(conn: &Connection, input: &Value) -> Result<String, String> {
+    let raw = input["orderId"].as_str().ok_or("Missing orderId")?;
+    conn.query_row(
+        "SELECT id FROM orders WHERE id=?1 OR supabase_id=?1",
+        [raw],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Whether this exact request was already committed (its audit row exists);
+/// its replay needs no fresh evidence and never returns money again.
+fn already_committed(conn: &Connection, input: &Value) -> Result<bool, String> {
+    let Some(key) = input["requestId"].as_str().filter(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM recovery_action_log WHERE id=?1 AND action_id=?2)",
+        params![format!("manual-cancel:{key}"), ACTION],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn commit(
+    conn: &Connection,
+    input: &Value,
+    actor: &CancellationActor,
+    evidence: &ReturnEvidence,
+) -> Result<Value, String> {
+    let actor_id = actor.audit_id.as_str();
     let order_id = input["orderId"].as_str().ok_or("Missing orderId")?;
     let reason = input["reason"]
         .as_str()
@@ -328,7 +744,7 @@ fn commit(conn: &Connection, input: &Value, actor_id: &str) -> Result<Value, Str
                 }
                 return Ok(json!({"success":true,"orderId":order_id,"duplicate":true}));
             }
-            let plan = prepare(conn, order_id)?;
+            let plan = prepare(conn, order_id, evidence)?;
             if (plan["requiresReturn"] != true && plan["requiresHandback"] != true)
                 || plan["generation"] != input["generation"]
             {
@@ -417,6 +833,12 @@ fn commit(conn: &Connection, input: &Value, actor_id: &str) -> Result<Value, Str
                 )?;
                 receipts.push((source.clone(), receipt));
             }
+            // Payments whose staff-held cash the cashier receives in this
+            // cancellation: their customer return is linked to that handback.
+            let handback_payments: BTreeSet<&str> = receipts
+                .iter()
+                .filter_map(|(source, _)| source["paymentId"].as_str())
+                .collect();
             let mut adjustments = std::collections::HashMap::new();
             for portion in plan["payments"]
                 .as_array()
@@ -425,13 +847,19 @@ fn commit(conn: &Connection, input: &Value, actor_id: &str) -> Result<Value, Str
                 let payment_id = portion["paymentId"]
                     .as_str()
                     .ok_or("PAYMENT_BALANCE_INVALID")?;
+                // A Bank return linked to a handback still names the
+                // receiving cashier drawer: the server's atomic handback
+                // requires it. It never debits the drawer (refunds.rs).
+                let cash_handler = (channel == "cash_drawer"
+                    || handback_payments.contains(payment_id))
+                .then_some("cashier_drawer");
                 let refund = crate::refunds::refund_manual_cancellation_in_connection(
                     conn,
                     &json!({
                         "paymentId":payment_id,"amount":Cents::new(portion["amountCents"].as_i64().ok_or("PAYMENT_BALANCE_INVALID")?).to_f64_dp2(),
-                        "reason":reason,"staffId":actor_id,"staffShiftId":shift_id,
+                        "reason":reason,"staffId":actor.staff_id,"staffShiftId":shift_id,
                         "idempotencyKey":format!("manual-cancel:{key}:{payment_id}"),
-                        "refundMethod":if channel=="cash_drawer" {"cash"} else {"card"},"cashHandler":"cashier_drawer"
+                        "refundMethod":if channel=="cash_drawer" {"cash"} else {"card"},"cashHandler":cash_handler
                     }),
                 )?;
                 adjustments.insert(
@@ -472,8 +900,8 @@ fn commit(conn: &Connection, input: &Value, actor_id: &str) -> Result<Value, Str
                     return Err("ORDER_CANCELLATION_BLOCKED".into())
                 }
             }
-            let evidence = json!({"organizationId":scope.organization_id,"branchId":scope.branch_id,"terminalId":scope.terminal_id,"orderId":order_id,"reason":reason,"returnChannel":channel,"plan":plan,"actorStaffId":actor_id,"staffShiftId":shift_id,"charged":false,"operatorConfirmedReturned":true});
-            conn.execute("INSERT INTO recovery_action_log(id,action_id,issue_code,entity_type,entity_id,order_id,shift_id,success,actor_staff_id,payload_json,created_at) VALUES(?1,?2,'MANUAL_RETURN_AND_CANCEL','order',?3,?3,?4,1,?5,?6,?7)",params![audit_id,ACTION,order_id,shift_id,actor_id,evidence.to_string(),now]).map_err(|e|e.to_string())?;
+            let audit = json!({"organizationId":scope.organization_id,"branchId":scope.branch_id,"terminalId":scope.terminal_id,"orderId":order_id,"reason":reason,"returnChannel":channel,"plan":plan,"actorStaffId":actor_id,"authorizingStaffId":actor.staff_id,"staffShiftId":shift_id,"charged":false,"operatorConfirmedReturned":true});
+            conn.execute("INSERT INTO recovery_action_log(id,action_id,issue_code,entity_type,entity_id,order_id,shift_id,success,actor_staff_id,payload_json,created_at) VALUES(?1,?2,'MANUAL_RETURN_AND_CANCEL','order',?3,?3,?4,1,?5,?6,?7)",params![audit_id,ACTION,order_id,shift_id,actor_id,audit.to_string(),now]).map_err(|e|e.to_string())?;
             Ok(
                 json!({"success":true,"orderId":order_id,"amountCents":plan["amountCents"],"currency":currency}),
             )
@@ -501,10 +929,10 @@ pub async fn order_prepare_manual_cancel(
     auth: tauri::State<'_, auth::AuthState>,
 ) -> Result<Value, String> {
     let _binding = crate::repairs::acquire_terminal_binding_lease()?;
-    actor(&auth)?;
-    let (mut plan, table_session, table_candidate) = {
+    let raw = arg0["orderId"].as_str().ok_or("Missing orderId")?;
+    let (id, table_session, table_candidate) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let raw = arg0["orderId"].as_str().ok_or("Missing orderId")?;
+        cancellation_actor(&conn, &auth)?;
         if let Some(pending) = crate::table_manual_cancellation::pending_plan(&conn, raw)? {
             return Ok(pending);
         }
@@ -521,29 +949,42 @@ pub async fn order_prepare_manual_cancel(
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
-        let plan = if candidate {
-            prepare_validated(&conn, &id)?
-        } else {
-            prepare(&conn, &id)?
-        };
-        (plan, table, candidate)
+        (id, table, candidate)
     };
-    if table_candidate {
+    // A table check reads its canonical snapshot (payments with their
+    // canonical metadata) once; the same rows classify mirrored receipts.
+    // A failed read is reported after the local refusals below.
+    let snapshot = if table_candidate {
         let remote = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            crate::table_manual_cancellation::canonical_order(
-                &conn,
-                plan["orderId"].as_str().ok_or("Missing order")?,
-            )?
+            crate::table_manual_cancellation::canonical_order(&conn, &id)
         };
-        let snapshot = crate::admin_fetch_detailed(
-            Some(&db),
-            &format!("/api/pos/staff-cash-returns/sync?order_id={remote}"),
-            "GET",
-            None,
-        )
-        .await
-        .map_err(|_| "TABLE_MANUAL_CANCELLATION_UNAVAILABLE")?;
+        Some(match remote {
+            Ok(remote) => crate::admin_fetch_detailed(
+                Some(&db),
+                &format!("/api/pos/staff-cash-returns/sync?order_id={remote}"),
+                "GET",
+                None,
+            )
+            .await
+            .map_err(|_| "TABLE_MANUAL_CANCELLATION_UNAVAILABLE".to_string()),
+            Err(error) => Err(error),
+        })
+    } else {
+        None
+    };
+    let evidence =
+        fetch_return_evidence(&db, &id, snapshot.as_ref().map(|read| read.as_ref().ok())).await?;
+    let mut plan = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if table_candidate {
+            prepare_validated(&conn, &id, &evidence)?
+        } else {
+            prepare(&conn, &id, &evidence)?
+        }
+    };
+    if let Some(snapshot) = snapshot {
+        let snapshot = snapshot?;
         let session = crate::table_manual_cancellation::snapshot_session(
             &snapshot,
             table_session.as_deref(),
@@ -583,17 +1024,32 @@ pub async fn order_prepare_manual_cancel(
     Ok(plan)
 }
 #[tauri::command]
-pub fn order_cancel_manual_refund(
+pub async fn order_cancel_manual_refund(
     arg0: Value,
     db: tauri::State<'_, db::DbState>,
     auth: tauri::State<'_, auth::AuthState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
     let _binding = crate::repairs::acquire_terminal_binding_lease()?;
-    let actor_id = actor(&auth)?;
+    let (actor, order_id, replay) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        (
+            cancellation_actor(&conn, &auth)?,
+            requested_order(&conn, &arg0)?,
+            already_committed(&conn, &arg0)?,
+        )
+    };
+    // The same fresh evidence as the preview, read again for the write: a
+    // provider connected meanwhile, or a mirrored receipt's canonical row,
+    // still decides. A committed request replays without new evidence.
+    let evidence = if replay {
+        ReturnEvidence::default()
+    } else {
+        fetch_return_evidence(&db, &order_id, None).await?
+    };
     let result = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        commit(&conn, &arg0, &actor_id)?
+        commit(&conn, &arg0, &actor, &evidence)?
     };
     let event = json!({"orderId":result["orderId"],"status":"cancelled","cancellationReason":arg0["reason"]});
     let _ = app.emit("order_status_updated", event.clone());
@@ -604,6 +1060,33 @@ pub fn order_cancel_manual_refund(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A fresh manual-admission answer for the test terminal: no provider.
+    pub(crate) fn admitted(conn: &Connection) -> ReturnEvidence {
+        ReturnEvidence {
+            scope: OpeningScope::resolve(conn),
+            admission: ProviderAdmission::NotConnected,
+            receipts: CanonicalReceipts::NotChecked,
+        }
+    }
+
+    /// The legacy test actors: a staff UUID is sent to the server, any other
+    /// identity is the terminal's own session.
+    pub(crate) fn test_actor(id: &str) -> CancellationActor {
+        CancellationActor {
+            audit_id: id.to_string(),
+            staff_id: uuid_text(Some(id)),
+        }
+    }
+
+    // The planning and commit paths with a fresh, provider-free admission.
+    fn prepare(conn: &Connection, raw_id: &str) -> Result<Value, String> {
+        super::prepare(conn, raw_id, &admitted(conn))
+    }
+    fn commit(conn: &Connection, input: &Value, actor: &str) -> Result<Value, String> {
+        super::commit(conn, input, &test_actor(actor), &admitted(conn))
+    }
+
     #[test]
     fn shipped_manual_card_reference_preserves_provenance() {
         for origin in ["manual", "manual_card", "manual_recovery"] {
@@ -640,6 +1123,28 @@ pub(crate) mod tests {
         assert_eq!(prepare(&conn, "order").unwrap()["amountCents"], 600);
         commit(&conn, &request(&conn, "bank"), "operator").unwrap();
         assert_eq!(count(&conn, "payment_adjustments"), 1);
+    }
+
+    #[test]
+    fn tipped_checkout_receipt_covers_the_tip_inside_the_order_total() {
+        // A 6.00 order whose total holds a 1.00 tip, paid by one 6.00 receipt
+        // carrying that tip, is paid (tip-inclusive rule, 06/10/2026). Before,
+        // the receipt tip was subtracted and the cancel answered
+        // ORDER_PAYMENT_NOT_RECORDED for every tipped checkout.
+        let conn = setup();
+        conn.execute_batch(
+            "UPDATE order_payments SET transaction_ref='CARD-1791226924826',tip_amount=1,tip_amount_cents=100;
+             UPDATE orders SET tip_amount=1,tip_amount_cents=100;",
+        )
+        .unwrap();
+        assert_eq!(prepare(&conn, "order").unwrap()["amountCents"], 600);
+        // A receipt tip the total does not contain covers none of it.
+        conn.execute("UPDATE orders SET tip_amount=0,tip_amount_cents=0", [])
+            .unwrap();
+        assert_eq!(
+            prepare(&conn, "order").unwrap_err(),
+            orders::ORDER_PAYMENT_NOT_RECORDED
+        );
     }
 
     pub(crate) fn setup() -> Connection {
@@ -1299,21 +1804,108 @@ pub(crate) mod tests {
             assert_eq!(count(&conn, "payment_adjustments"), 0);
         }
     }
-    #[test]
-    fn connected_bank_blocks_manual_path_but_pending_twint_does_not() {
-        for (provider, setup, expected) in [
-            ("stripe", Value::Null, true),
-            ("worldline_terminals", json!({"transport_ready":true}), true),
-            ("twint", json!({"transport_ready":false}), false),
-        ] {
-            let conn = setup_connection();
-            db::set_setting(&conn,"local","admin_api_get::/api/pos/integrations",&json!({"data":{"success":true,"branch_id":"branch","integrations":[{"provider":provider,"category":"payment","branch_id":"branch","is_purchased":true,"is_enabled":true,"status":"connected","payment_setup":setup}]}}).to_string()).unwrap();
-            assert_eq!(prepare(&conn, "order").is_err(), expected);
+    fn admission(conn: &Connection, body: Value) -> ReturnEvidence {
+        let scope = OpeningScope::resolve(conn).unwrap();
+        ReturnEvidence {
+            admission: admission_from_response(&scope, &body),
+            scope: Some(scope),
+            receipts: CanonicalReceipts::NotChecked,
         }
     }
-    fn setup_connection() -> Connection {
-        setup()
+
+    #[test]
+    fn connected_bank_blocks_manual_path_from_the_fresh_admission_only() {
+        // The branch's providers are judged by the fresh terminal-authenticated
+        // manual-admission answer (Android parity), never by a cached,
+        // module-gated integrations list: a stale cache says nothing.
+        let fresh = |connected: Value| json!({"success":true,"admission_version":1,"organization_id":"org","branch_id":"branch","terminal_id":"terminal","provider_connected":connected});
+        let conn = setup();
+        db::set_setting(&conn,"local","admin_api_get::/api/pos/integrations",&json!({"data":{"success":true,"branch_id":"branch","integrations":[{"provider":"stripe","category":"payment","branch_id":"branch","is_purchased":true,"is_enabled":true,"status":"connected"}]}}).to_string()).unwrap();
+        assert_eq!(
+            super::prepare(&conn, "order", &admission(&conn, fresh(json!(false)))).unwrap()
+                ["amountCents"],
+            600
+        );
+        assert_eq!(
+            super::prepare(&conn, "order", &admission(&conn, fresh(json!(true)))).unwrap_err(),
+            PROVIDER_REQUIRED
+        );
+        // Envelope-wrapped answers read the same.
+        assert_eq!(
+            super::prepare(
+                &conn,
+                "order",
+                &admission(&conn, json!({"success":true,"data":fresh(json!(false))}))
+            )
+            .unwrap()["amountCents"],
+            600
+        );
+        assert_eq!(count(&conn, "payment_adjustments"), 0);
     }
+
+    #[test]
+    fn unknown_or_foreign_admission_never_authorizes_a_manual_return() {
+        let conn = setup();
+        // The module-gated integrations cache was the old (and only) evidence;
+        // without a fresh answer the status is unknown.
+        conn.execute_batch(
+            "DELETE FROM local_settings WHERE setting_key='admin_api_get::/api/pos/integrations'",
+        )
+        .unwrap();
+        assert_eq!(
+            super::prepare(&conn, "order", &ReturnEvidence::default()).unwrap_err(),
+            SETUP_UNKNOWN
+        );
+        for body in [
+            json!({"success":false,"code":"PAYMENT_ADMISSION_UNAVAILABLE"}),
+            json!({"success":true,"admission_version":2,"organization_id":"org","branch_id":"branch","terminal_id":"terminal","provider_connected":false}),
+            json!({"success":true,"admission_version":1,"organization_id":"org","branch_id":"foreign","terminal_id":"terminal","provider_connected":false}),
+            json!({"success":true,"admission_version":1,"organization_id":"org","branch_id":"branch","terminal_id":"other-till","provider_connected":false}),
+            json!({"success":true,"admission_version":1,"organization_id":"org","branch_id":"branch","terminal_id":"terminal"}),
+        ] {
+            assert_eq!(
+                super::prepare(&conn, "order", &admission(&conn, body.clone())).unwrap_err(),
+                SETUP_UNKNOWN,
+                "{body}"
+            );
+        }
+        // Evidence read for another terminal scope proves nothing here.
+        let mut moved = admitted(&conn);
+        moved.scope.as_mut().unwrap().terminal_id = "other-till".into();
+        assert_eq!(
+            super::prepare(&conn, "order", &moved).unwrap_err(),
+            SETUP_UNKNOWN
+        );
+        assert_eq!(count(&conn, "payment_adjustments"), 0);
+    }
+
+    #[test]
+    fn any_enabled_card_terminal_blocks_like_android_but_a_fiscal_register_does_not() {
+        for (device_type, enabled, status, blocks) in [
+            ("payment_terminal", 1, "disconnected", true),
+            ("payment_terminal", 1, "connected", true),
+            ("payment_terminal", 0, "connected", false),
+            ("cash_register", 1, "connected", false),
+        ] {
+            let conn = setup();
+            conn.execute("INSERT INTO ecr_devices(id,name,device_type,connection_type,status,enabled) VALUES('device','Device',?1,'network',?2,?3)",params![device_type,status,enabled]).unwrap();
+            let result = prepare(&conn, "order");
+            if blocks {
+                assert_eq!(
+                    result.unwrap_err(),
+                    PROVIDER_REQUIRED,
+                    "{device_type} {status}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap()["amountCents"],
+                    600,
+                    "{device_type} {enabled}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn stale_or_unknown_scope_and_changed_ledger_fail_without_writes() {
         let conn = setup();
@@ -1325,14 +1917,18 @@ pub(crate) mod tests {
             "CANCELLATION_PAYMENT_CHANGED"
         );
         assert_eq!(count(&conn, "payment_adjustments"), 0);
-        db::set_setting(
-            &conn,
-            "local",
-            "admin_api_get::/api/pos/integrations",
-            &json!({"data":{"success":true,"integrations":[{"branch_id":"foreign"}]}}).to_string(),
-        )
-        .unwrap();
-        assert_eq!(prepare(&conn, "order").unwrap_err(), SETUP_UNKNOWN);
+        assert_eq!(
+            super::prepare(
+                &conn,
+                "order",
+                &admission(
+                    &conn,
+                    json!({"success":true,"admission_version":1,"organization_id":"org","branch_id":"foreign","terminal_id":"terminal","provider_connected":false})
+                )
+            )
+            .unwrap_err(),
+            SETUP_UNKNOWN
+        );
     }
     #[test]
     fn failed_cancel_write_rolls_back_refund_drawer_and_outbox_then_retries_once() {
@@ -1384,7 +1980,10 @@ pub(crate) mod tests {
             prepare(&conn, "order").unwrap_err(),
             orders::ORDER_PAYMENT_NOT_RECORDED
         );
-        assert!(actor(&auth::AuthState::new()).is_err());
+        assert_eq!(
+            cancellation_actor(&conn, &auth::AuthState::new()).unwrap_err(),
+            "AUTHENTICATION_REQUIRED"
+        );
     }
     #[test]
     fn retry_survives_restart_and_cannot_cross_terminal_scope() {
@@ -1450,12 +2049,22 @@ pub(crate) mod tests {
             auth::login(Some(json!({"pin":"1234"})), &db, &auth).unwrap()["success"],
             true
         );
-        assert!(!actor(&auth).unwrap().is_empty());
+        // The terminal's own admin session authorizes; it names no staff
+        // member to the server (terminal authority), never the shift owner.
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            cancellation_actor(&conn, &auth).unwrap(),
+            CancellationActor {
+                audit_id: "admin-user".into(),
+                staff_id: None
+            }
+        );
     }
     #[test]
     fn historical_ecr_sale_attempt_refuses_even_when_device_is_disconnected_and_attempt_failed() {
         let conn = setup();
-        conn.execute_batch("INSERT INTO ecr_devices(id,name,device_type,connection_type,status) VALUES('device','Bank terminal','payment_terminal','network','disconnected');
+        // A removed (disabled) terminal: its historical SALE attempt alone refuses.
+        conn.execute_batch("INSERT INTO ecr_devices(id,name,device_type,connection_type,status,enabled) VALUES('device','Bank terminal','payment_terminal','network','disconnected',0);
             INSERT INTO ecr_transactions(id,device_id,order_id,transaction_type,amount,currency,status,started_at) VALUES('sale','device','order','sale',600,'EUR','failed','now')").unwrap();
         assert_eq!(prepare(&conn, "order").unwrap_err(), PROVIDER_REQUIRED);
         assert_eq!(count(&conn, "payment_adjustments"), 0);
@@ -1677,5 +2286,392 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(final_status, "cancelled");
         }
+    }
+
+    // ---- Review 06/10/2026 -------------------------------------------------
+
+    const CASHIER_SHIFT: &str = "6d3f2a10-7c4b-4e5a-9b1c-2f3e4d5a6b7c";
+    const CASHIER: &str = "0b8e7c6d-5a4f-4b3c-8d2e-1f0a9b8c7d6e";
+    const APPROVER: &str = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+    const REMOTE_ORDER: &str = "727dfed5-af5b-4491-a258-41d8659a5ce4";
+    const REMOTE_PAYMENT: &str = "8238ddd9-5e52-47b6-ac6d-3e398b14ae08";
+
+    /// The receiving cashier's shift and identity as the server knows them.
+    fn canonical_cashier(conn: &Connection) {
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys=OFF;
+             UPDATE staff_shifts SET id='{CASHIER_SHIFT}',staff_id='{CASHIER}' WHERE id='shift';
+             UPDATE cash_drawer_sessions SET staff_shift_id='{CASHIER_SHIFT}',cashier_id='{CASHIER}' WHERE staff_shift_id='shift';
+             UPDATE order_payments SET staff_shift_id='{CASHIER_SHIFT}' WHERE staff_shift_id='shift';
+             UPDATE orders SET staff_shift_id='{CASHIER_SHIFT}' WHERE staff_shift_id='shift';"
+        ))
+        .unwrap();
+    }
+
+    fn linked_handback(conn: &Connection) -> (String, String) {
+        conn.query_row(
+            "SELECT id,adjustment_id FROM staff_order_cash_returns",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bank_return_of_staff_held_cash_is_sent_with_the_cashier_drawer_and_never_debits_it() {
+        // Symptom: a Bank return of cash a driver or waiter held queued
+        // `cashHandler: null`; the server's atomic handback requires
+        // `cashier_drawer`, so it was refused forever (409
+        // STAFF_CASH_RETURN_REJECTED): a cancelled order with an unrefunded
+        // receipt and the driver still shown holding the cash.
+        for role in ["driver", "server"] {
+            let conn = setup();
+            staff_custody_fixture(&conn, role);
+            commit(&conn, &request(&conn, "bank"), "admin-user").unwrap();
+            let mut statement = conn
+                .prepare("SELECT payment_id,refund_method,cash_handler FROM payment_adjustments ORDER BY payment_id")
+                .unwrap();
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        "cash-payment".into(),
+                        "card".into(),
+                        Some("cashier_drawer".into())
+                    ),
+                    ("payment".into(), "card".into(), None),
+                ],
+                "{role}"
+            );
+            // A Bank return pays no drawer cash; the staff cash entered once.
+            let (refunds, intake): (i64, i64) = conn
+                .query_row(
+                    "SELECT total_refunds_cents,driver_cash_returned_cents FROM cash_drawer_sessions WHERE id='drawer'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((refunds, intake), (0, 450), "{role}");
+            // The exact body sent to /api/pos/payments/adjustments/sync.
+            let (receipt, adjustment) = linked_handback(&conn);
+            let body = crate::sync_queue::apply_ack_for_test(
+                &conn,
+                "payment_adjustments",
+                &adjustment,
+                &json!({"success":true,"id":receipt,"adjustment_id":adjustment}),
+            )
+            .unwrap();
+            assert_eq!(body["adjustment_type"], "refund", "{body}");
+            assert_eq!(body["refund_method"], "card", "{body}");
+            assert_eq!(body["cash_handler"], "cashier_drawer", "{body}");
+            assert_eq!(body["amount"], 4.5, "{body}");
+            assert_eq!(
+                body["idempotency_key"],
+                "manual-cancel:request-1:cash-payment"
+            );
+            assert_eq!(body["staff_cash_return"]["amount_cents"], 450);
+            assert_eq!(body["staff_cash_return"]["source_role"], role);
+            assert_eq!(body["staff_cash_return"]["receiving_drawer_id"], "drawer");
+            // The terminal's admin session names no staff member.
+            assert!(body.get("staff_id").is_none(), "{body}");
+            // An unlinked Bank return names no handler, as before.
+            let unlinked: String = conn
+                .query_row(
+                    "SELECT id FROM payment_adjustments WHERE payment_id='payment'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let plain = crate::sync_queue::apply_ack_for_test(
+                &conn,
+                "payment_adjustments",
+                &unlinked,
+                &json!({"success":true,"adjustment_id":unlinked}),
+            )
+            .unwrap();
+            assert!(plain.get("cash_handler").is_none(), "{plain}");
+            assert!(plain.get("staff_cash_return").is_none(), "{plain}");
+            assert_eq!(plain["refund_method"], "card");
+        }
+    }
+
+    #[test]
+    fn manual_cancellation_names_the_authorizing_actor_never_the_shift_owner() {
+        // Symptom: the desktop actor `admin-user` is not a UUID, so the refund
+        // fell back to the shift owner; the server then required that
+        // cashier's own `pos.orders.cancel` and could refuse it forever.
+        for (actor, expected) in [("admin-user", None), (APPROVER, Some(APPROVER))] {
+            let conn = setup();
+            staff_custody_fixture(&conn, "driver");
+            canonical_cashier(&conn);
+            commit(&conn, &request(&conn, "bank"), actor).unwrap();
+            let mut statement = conn
+                .prepare("SELECT staff_id,staff_shift_id FROM payment_adjustments")
+                .unwrap();
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            for (staff, shift) in rows {
+                assert_eq!(staff.as_deref(), expected, "{actor}");
+                assert_eq!(shift.as_deref(), Some(CASHIER_SHIFT), "{actor}");
+            }
+            let (receipt, adjustment) = linked_handback(&conn);
+            let body = crate::sync_queue::apply_ack_for_test(
+                &conn,
+                "payment_adjustments",
+                &adjustment,
+                &json!({"success":true,"id":receipt,"adjustment_id":adjustment}),
+            )
+            .unwrap();
+            assert_eq!(
+                body.get("staff_id").and_then(Value::as_str),
+                expected,
+                "{body}"
+            );
+            assert_eq!(body["staff_shift_id"], CASHIER_SHIFT);
+        }
+    }
+
+    #[test]
+    fn a_cashier_whose_store_role_may_cancel_authorizes_without_the_admin_session() {
+        // Android lets any staff member whose store role has
+        // `pos.orders.cancel` cancel a paid order; the desktop accepted only
+        // its admin session (the hardcoded `delete_order`).
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = setup();
+        canonical_cashier(&conn);
+        db::set_setting(
+            &conn,
+            "staff",
+            "staff_pin_hash",
+            &bcrypt::hash("2468", 4).unwrap(),
+        )
+        .unwrap();
+        let directory = |id: &str, permissions: Value, active: bool, branch: &str| {
+            json!({"version":1,"branch_id":branch,"staff":[{"id":id,"isActive":active,"canLoginPos":true,"hasPin":true,"permissions":permissions}]}).to_string()
+        };
+        db::set_setting(
+            &conn,
+            "staff_auth_cache",
+            "branch_branch",
+            &directory(CASHIER, json!(["pos.orders.cancel"]), true, "branch"),
+        )
+        .unwrap();
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+        let auth = auth::AuthState::new();
+        assert_eq!(
+            cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap_err(),
+            "AUTHENTICATION_REQUIRED"
+        );
+        assert_eq!(
+            auth::login(Some(json!({"pin":"2468"})), &db, &auth).unwrap()["success"],
+            true
+        );
+        assert_eq!(
+            cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap(),
+            CancellationActor {
+                audit_id: CASHIER.into(),
+                staff_id: Some(CASHIER.into())
+            }
+        );
+        for refused in [
+            directory(CASHIER, json!(["pos.orders.view"]), true, "branch"),
+            directory(CASHIER, json!(["pos.orders.cancel"]), false, "branch"),
+            directory(APPROVER, json!(["pos.orders.cancel"]), true, "branch"),
+            directory(CASHIER, json!(["pos.orders.cancel"]), true, "other-branch"),
+        ] {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "staff_auth_cache", "branch_branch", &refused).unwrap();
+            assert_eq!(
+                cancellation_actor(&conn, &auth).unwrap_err(),
+                PERMISSION_REQUIRED,
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_delivery_platform_order_never_records_a_manual_return_like_android() {
+        // Android refuses `external_plugin_order_id` and non-internal sources;
+        // the desktop accepted an efood/Wolt order whose payment row was manual.
+        for (plugin, external, refused) in [
+            (Some("efood"), None, true),
+            (Some("Wolt"), Some("W-77"), true),
+            (None, Some("EXT-1"), true),
+            (Some("unknown_market"), None, true),
+            (Some("pos"), None, false),
+            (Some("kiosk"), None, false),
+            (Some("android-ios"), None, false),
+            (None, None, false),
+        ] {
+            let conn = setup();
+            conn.execute(
+                "UPDATE orders SET plugin=?1,external_plugin_order_id=?2",
+                params![plugin, external],
+            )
+            .unwrap();
+            let result = prepare(&conn, "order");
+            if refused {
+                assert_eq!(
+                    result.unwrap_err(),
+                    PLATFORM_ORDER_RETURN_REQUIRED,
+                    "{plugin:?} {external:?}"
+                );
+            } else {
+                assert_eq!(result.unwrap()["amountCents"], 600, "{plugin:?}");
+            }
+            assert_eq!(count(&conn, "payment_adjustments"), 0);
+        }
+    }
+
+    fn canonical_snapshot(payment: Value) -> Value {
+        json!({"success":true,"data":{"order":{"id":REMOTE_ORDER},"payments":[payment],"adjustments":[],"staff_cash_returns":[]}})
+    }
+
+    fn canonical_cash_row() -> Value {
+        json!({"id":REMOTE_PAYMENT,"order_id":REMOTE_ORDER,"organization_id":"org","branch_id":"branch",
+            "payment_method":"cash","status":"completed","currency":"EUR","amount":6,"amount_cents":600,
+            "external_transaction_id":null,"metadata":{"payment_origin":"cash_checkout_reconciled","source":"mobile_cart_checkout"}})
+    }
+
+    fn mirrored_cash_order() -> Connection {
+        let conn = setup();
+        conn.execute_batch(&format!(
+            "UPDATE orders SET supabase_id='{REMOTE_ORDER}';
+             UPDATE order_payments SET method='cash',payment_origin='sync_reconstructed',transaction_ref=NULL,metadata=NULL;"
+        ))
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn a_receipt_taken_on_another_till_is_judged_by_its_canonical_row() {
+        // Symptom: in a desktop-main + Android-satellite store, a plain cash
+        // order paid on Android was mirrored here (`sync_reconstructed`, no
+        // metadata) and refused as a provider original with a misleading
+        // "originalReturnRequired"; Android and the server accept it.
+        let conn = mirrored_cash_order();
+        assert!(!original_is_manual_with_metadata(
+            "cash",
+            "sync_reconstructed",
+            "",
+            "",
+            None
+        ));
+        // Without its canonical row the till cannot judge it.
+        assert_eq!(
+            prepare(&conn, "order").unwrap_err(),
+            RECEIPT_CHECK_UNAVAILABLE
+        );
+        let mut evidence = admitted(&conn);
+        evidence.receipts = CanonicalReceipts::Unavailable;
+        assert_eq!(
+            super::prepare(&conn, "order", &evidence).unwrap_err(),
+            RECEIPT_CHECK_UNAVAILABLE
+        );
+        // The server's own classifier over its canonical row decides.
+        evidence.receipts = canonical_receipts_from_snapshot(
+            &conn,
+            "order",
+            &canonical_snapshot(canonical_cash_row()),
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.receipts,
+            CanonicalReceipts::Verified(BTreeSet::from(["payment".to_string()]))
+        );
+        let plan = super::prepare(&conn, "order", &evidence).unwrap();
+        assert_eq!(plan["amountCents"], 600);
+        let input = json!({"orderId":"order","reason":"Customer cancelled","returnChannel":"cash_drawer","requestId":"request-1","generation":plan["generation"]});
+        super::commit(&conn, &input, &test_actor("admin-user"), &evidence).unwrap();
+        assert_eq!(count(&conn, "payment_adjustments"), 1);
+        // Provider evidence, or a canonical row that differs from the mirror,
+        // never passes.
+        let mut provider = canonical_cash_row();
+        provider["metadata"] = json!({"provider":"viva"});
+        let mut processed = canonical_cash_row();
+        processed["metadata"] = json!({"terminal_processed":true});
+        let mut amount = canonical_cash_row();
+        amount["amount_cents"] = json!(500);
+        let mut status = canonical_cash_row();
+        status["status"] = json!("refunded");
+        let mut branch = canonical_cash_row();
+        branch["branch_id"] = json!("other-branch");
+        let mut tender = canonical_cash_row();
+        tender["payment_method"] = json!("card");
+        for row in [provider, processed, amount, status, branch, tender] {
+            let conn = mirrored_cash_order();
+            let mut evidence = admitted(&conn);
+            evidence.receipts =
+                canonical_receipts_from_snapshot(&conn, "order", &canonical_snapshot(row.clone()))
+                    .unwrap();
+            assert_eq!(
+                super::prepare(&conn, "order", &evidence).unwrap_err(),
+                PROVIDER_REQUIRED,
+                "{row}"
+            );
+            assert_eq!(count(&conn, "payment_adjustments"), 0);
+        }
+        // A snapshot of another order proves nothing.
+        let conn = mirrored_cash_order();
+        let mut other = canonical_snapshot(canonical_cash_row());
+        other["data"]["order"]["id"] = json!("11111111-2222-4333-8444-555555555555");
+        assert_eq!(
+            canonical_receipts_from_snapshot(&conn, "order", &other).unwrap(),
+            CanonicalReceipts::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_waiter_cash_handback_of_a_mirrored_receipt_needs_its_canonical_row() {
+        let conn = setup();
+        staff_custody_fixture(&conn, "server");
+        conn.execute(
+            "UPDATE order_payments SET payment_origin='sync_reconstructed',metadata=NULL WHERE id='cash-payment'",
+            [],
+        )
+        .unwrap();
+        // The custody plan itself no longer refuses (it only lists receipts).
+        assert_eq!(
+            crate::staff_cash_returns::plan(&conn, "order").unwrap()[0]["amount_cents"],
+            450
+        );
+        assert_eq!(
+            prepare(&conn, "order").unwrap_err(),
+            RECEIPT_CHECK_UNAVAILABLE
+        );
+        let mut evidence = admitted(&conn);
+        evidence.receipts =
+            CanonicalReceipts::Verified(BTreeSet::from(["cash-payment".to_string()]));
+        let plan = super::prepare(&conn, "order", &evidence).unwrap();
+        assert_eq!(plan["requiresHandback"], true);
+        assert_eq!(plan["cashReturns"][0]["amount_cents"], 450);
+        evidence.receipts = CanonicalReceipts::Verified(BTreeSet::new());
+        assert_eq!(
+            super::prepare(&conn, "order", &evidence).unwrap_err(),
+            PROVIDER_REQUIRED
+        );
     }
 }

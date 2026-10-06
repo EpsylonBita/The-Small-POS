@@ -156,3 +156,38 @@ describe('restored editing-phase money protection', () => {
     expect(native.mock.calls.map(call => call[0])).toEqual(['checkout_draft_get', 'checkout_draft_inspect']);
   });
 });
+
+describe('a refused order correction (06/10/2026)', () => {
+  const frozenEdit = () => {
+    const draft = { ...createCheckoutDraft(), ...snapshot, phase: 'checkout_pending' as const,
+      context: { editMode: true, editOrderId: 'paid-order', orderType: 'pickup' },
+      submission: { action: 'edit_settlement', orderId: 'paid-order', client_event_id: '' } };
+    draft.submission.client_event_id = draft.checkoutRequestId;
+    return draft;
+  };
+  it('renews the frozen editor once with the same cart, a new identity and the attempt it replaces', async () => {
+    const draft = frozenEdit();
+    let stored: any = draft; let generation = 1;
+    const native = vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_get') return { success: true, scope, generation, draft: stored };
+      if (command === 'checkout_draft_inspect') return { success: true, outcome: 'uncertain', canCollect: false };
+      stored = command === 'checkout_draft_delete' ? null : input.draft;
+      return { success: true, scope, generation: ++generation, draft: stored };
+    });
+    mocks.getStore.mockResolvedValue(new CheckoutDraftStore(scope, native));
+    const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+    await waitFor(() => expect(result.current.status).toBe('loaded'));
+    act(() => result.current.markHydrated());
+    expect(result.current.isPending()).toBe(true);
+    await expect(result.current.renewRefusedEdit('another-event')).rejects.toThrow('NOT_READY');
+    await act(async () => { await result.current.renewRefusedEdit(draft.checkoutRequestId); });
+    expect(result.current.status).toBe('loaded');
+    expect(result.current.isPending()).toBe(false);
+    expect(result.current.identity()).not.toBe(draft.checkoutRequestId);
+    expect(stored).toMatchObject({ phase: 'editing', cartItems: draft.cartItems, state: draft.state,
+      context: { editMode: true, editOrderId: 'paid-order', supersedesEditEvent: draft.checkoutRequestId } });
+    expect(stored.submission).toBeUndefined();
+    expect(stored.draftId).not.toBe(draft.draftId);
+    expect(native.mock.calls.map(call => call[0])).toEqual(['checkout_draft_get', 'checkout_draft_delete', 'checkout_draft_put']);
+  });
+});

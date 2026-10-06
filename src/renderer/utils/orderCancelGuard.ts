@@ -20,6 +20,25 @@ export interface OrderCancelRefusals {
   notRecorded: string[];
 }
 
+/**
+ * Whether an order belongs to the canonical table lifecycle: decided by table
+ * evidence (a check session, a table, or a dine-in table number), as the till
+ * and Android's `isTableServiceOrder` decide, never by the dine-in label
+ * alone. A kiosk eat-in order has none and is cancelled like a counter order
+ * (review 06/10/2026). The till also checks table history the screen cannot
+ * see.
+ */
+export function hasTableServiceEvidence(order: unknown): boolean {
+  const row = (order ?? {}) as Record<string, unknown>;
+  const text = (value: unknown): string =>
+    typeof value === 'string' ? value.trim() : typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
+  if ([row.tableSessionId, row.table_session_id, row.tableId, row.table_id].some((value) => text(value) !== '')) {
+    return true;
+  }
+  const type = text(row.orderType ?? row.order_type).toLowerCase();
+  return (type === 'dine-in' || type === 'dine_in') && text(row.tableNumber ?? row.table_number) !== '';
+}
+
 /** The refusal code a till error carries, if any. */
 export function cancelRefusalCodeFromError(errorText: string): OrderCancelRefusalCode | null {
   if (errorText.includes(ORDER_PAYMENT_NOT_RECORDED)) return ORDER_PAYMENT_NOT_RECORDED;

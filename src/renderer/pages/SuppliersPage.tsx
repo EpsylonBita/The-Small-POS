@@ -75,6 +75,7 @@ import {
   type StoredCaptureDraft,
 } from '../utils/capture-review';
 import type { CaptureSourceConfig, ConfidenceTier } from '../types/supplier-capture';
+import { parseInvoiceAmountInput } from '../../../../shared/invoice-amount-input';
 
 interface Supplier {
   id: string;
@@ -209,6 +210,9 @@ function toNumber(value: number | string | null | undefined, fallback = 0): numb
   return fallback;
 }
 
+// The amount parser both POS apps share (review 06/10/2026).
+export { parseInvoiceAmountInput };
+
 function normalizeText(value: string | null | undefined): string {
   return (value || '').trim().toLowerCase();
 }
@@ -342,14 +346,41 @@ function getSupplierImportErrorMessage(
 }
 
 /**
+ * The office's typed refusal of a header correction, in words, or null. An
+ * invoice with any payment history keeps its amount (409
+ * SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS) and the office applies none of the
+ * correction. The code arrives typed (`code`) or inside the bridge's error
+ * text; the office's English sentence is never what the person reads.
+ */
+function getHeaderCorrectionRefusal(
+  t: TFunction,
+  result: { code?: unknown; error?: unknown; data?: unknown }
+): string | null {
+  const data = (result.data && typeof result.data === 'object' ? result.data : {}) as {
+    code?: unknown;
+    error?: unknown;
+  };
+  const said = [result.code, data.code, result.error, data.error].filter(
+    (value): value is string => typeof value === 'string'
+  );
+  if (said.some(value => value.includes('SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS'))) {
+    return t(
+      'suppliers.capture.review.amountHasPayments',
+      'This invoice already has payments, so its amount can no longer change. Nothing was saved — put the amount back to save your other changes.'
+    );
+  }
+  return null;
+}
+
+/**
  * Pull the typed outcome code out of a rejected commit's error text.
  *
  * The code is what the queue stores and later renders as one plain sentence;
  * the raw server text never becomes the primary thing a user reads (R12.1).
  * An unrecognised rejection still gets a code — `commit_rejected` — so the
- * document is never left with a blank reason.
+ * document is never left with a blank reason. Exported for its own test.
  */
-function extractCaptureReason(message: string): string {
+export function extractCaptureReason(message: string): string {
   const codes = [
     'MODULE_REQUIRED',
     'PO_INVOICE_ALREADY_APPLIED',
@@ -357,6 +388,10 @@ function extractCaptureReason(message: string): string {
     'CAPTURE_TOO_LARGE',
     'CAPTURE_TOO_MANY_PAGES',
     'CAPTURE_UNREADABLE',
+    // A re-scanned paper the office already stocked (409), or one whose commit
+    // is still running: both have their own sentence (CAPTURE_REASON_KEYS).
+    'CAPTURE_ALREADY_COMMITTED',
+    'COMMIT_IN_PROGRESS',
   ];
   return codes.find(code => message.includes(code)) || 'commit_rejected';
 }
@@ -1151,9 +1186,24 @@ const SuppliersPage: React.FC = () => {
     if (nextDueDate && nextDueDate !== baseline.dueDate) {
       body.dueDate = nextDueDate;
     }
-    const nextAmount = Number(correctAmount.replace(',', '.'));
-    if (Number.isFinite(nextAmount) && nextAmount > 0 && nextAmount !== baseline.amount) {
-      body.amount = nextAmount;
+    // An amount the person touched must be read or refused, never skipped:
+    // dropping it and answering "Invoice saved." is how «1.234,50» vanished.
+    const amountText = correctAmount.trim();
+    const loadedAmountText = baseline.amount > 0 ? String(baseline.amount) : '';
+    if (amountText !== loadedAmountText) {
+      const nextAmount = parseInvoiceAmountInput(amountText);
+      if (nextAmount === null) {
+        const message = t(
+          'suppliers.capture.review.amountInvalid',
+          'Enter the invoice amount with its cents, for example 1234.50 or 1,234.50. Nothing was saved.'
+        );
+        setImportError(message);
+        toast.error(message);
+        return;
+      }
+      if (Math.round(nextAmount * 100) !== Math.round(baseline.amount * 100)) {
+        body.amount = nextAmount;
+      }
     }
     const nextNotes = correctNotes.trim();
     if (nextNotes !== baseline.notes) {
@@ -1174,6 +1224,12 @@ const SuppliersPage: React.FC = () => {
       );
       if (requestId !== correctionRequest.current) return;
       if (!result.success || result.data?.success === false) {
+        const refusal = getHeaderCorrectionRefusal(t, result);
+        if (refusal) {
+          setImportError(refusal);
+          toast.error(refusal);
+          return;
+        }
         throw new Error(result.error || result.data?.error || 'Correction failed');
       }
       toast.success(t('suppliers.capture.review.saved', 'Invoice saved.'));
@@ -1429,7 +1485,7 @@ const SuppliersPage: React.FC = () => {
           await advanceCapture({
             captureId: capture.captureId,
             status: 'needs_attention',
-            reason: extractCaptureReason(message),
+            reason: extractCaptureReason(`${result.code ?? ''} ${message}`),
             staffId: captureStaffId,
           });
           await refreshCaptureQueue();

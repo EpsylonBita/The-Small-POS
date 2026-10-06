@@ -4606,6 +4606,13 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
             .map(|(status, total)| format!("z_report:{status} x{total}")),
     );
 
+    // Money this till recorded that has not reached the server, for the
+    // window the next Z closes (06/10/2026): the Z must not close, and so
+    // never deletes, a payment or refund whose sync is still queued.
+    let branch_id = read_runtime_terminal_credential(&conn, "branch_id").unwrap_or_default();
+    let unsent_money = crate::zreport::unsynced_money_in_closing_window(&conn, &branch_id)?;
+    summary_parts.extend(unsent_money_summary_parts(&unsent_money, limit));
+
     let blockers_summary = summary_parts.join(", ");
 
     let mut blocker_details =
@@ -4617,12 +4624,82 @@ fn capture_unsynced_sync_queue_snapshot_with_limit(
             remaining_detail_slots,
         )?);
     }
+    let remaining_detail_slots = limit.saturating_sub(blocker_details.len() as i64);
+    blocker_details.extend(
+        unsent_money
+            .iter()
+            .take(usize::try_from(remaining_detail_slots.max(0)).unwrap_or(0))
+            .map(unsent_money_blocker_detail),
+    );
 
     Ok(UnsyncedSyncQueueSnapshot {
-        count: sync_queue_count + parity_z_report_count,
+        count: sync_queue_count + parity_z_report_count + unsent_money.len() as i64,
         blockers_summary,
         blocker_details,
     })
+}
+
+/// The money entity a parity table holds, in the sync blocker vocabulary.
+fn unsent_money_entity_type(table_name: &str) -> &'static str {
+    match table_name {
+        "payments" | "order_payments" => "payment",
+        "payment_adjustments" => "payment_adjustment",
+        "staff_order_cash_returns" => "staff_cash_return",
+        "driver_earnings" | "driver_earning" => "driver_earning",
+        "shift_expenses" => "shift_expense",
+        "staff_payments" => "staff_payment",
+        _ => "financial",
+    }
+}
+
+fn unsent_money_summary_parts(
+    rows: &[crate::zreport::UnsyncedMoneyRow],
+    limit: i64,
+) -> Vec<String> {
+    let mut counts: std::collections::BTreeMap<(&'static str, &str), i64> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        *counts
+            .entry((
+                unsent_money_entity_type(&row.table_name),
+                row.status.as_str(),
+            ))
+            .or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .take(usize::try_from(limit.max(0)).unwrap_or(0))
+        .map(|((entity, status), total)| {
+            format!(
+                "{}:{entity}:{status} x{total}",
+                crate::zreport::MONEY_NOT_SYNCED_REASON
+            )
+        })
+        .collect()
+}
+
+fn unsent_money_blocker_detail(row: &crate::zreport::UnsyncedMoneyRow) -> SyncBlockerDetail {
+    let entity_type = unsent_money_entity_type(&row.table_name);
+    SyncBlockerDetail {
+        // Parity rows have text ids; the renderer reads a number (the parity
+        // z-report rows use 0 the same way) and the id travels in last_error.
+        queue_id: 0,
+        entity_type: entity_type.to_string(),
+        entity_id: row.record_id.clone(),
+        operation: row.operation.clone(),
+        queue_status: row.status.clone(),
+        blocker_reason: crate::zreport::MONEY_NOT_SYNCED_REASON.to_string(),
+        order_id: row.order_id.clone(),
+        order_number: row.order_number.clone(),
+        payment_id: (entity_type == "payment").then(|| row.record_id.clone()),
+        adjustment_id: (entity_type == "payment_adjustment").then(|| row.record_id.clone()),
+        last_error: row
+            .error_message
+            .clone()
+            .filter(|error| !error.trim().is_empty())
+            .or_else(|| Some(format!("parity_sync_queue:{}", row.queue_id))),
+        ..SyncBlockerDetail::default()
+    }
 }
 
 pub fn capture_unsynced_sync_queue_snapshot(
@@ -13027,6 +13104,28 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                 let remote_total = num_any(&remote_order, &["total_amount", "totalAmount"]);
                 let remote_subtotal = num_any(&remote_order, &["subtotal"]);
                 let remote_tax = num_any(&remote_order, &["tax_amount", "taxAmount"]);
+                // W4c dual-write contract: each REAL money column written here
+                // refreshes its `*_cents` sibling, the value every reader and
+                // a later paid-order edit's `original_total_cents` prefer
+                // (06/10/2026: the pull moved `total_amount` only, the edit
+                // then sent the stale cents and got a 409 after money moved).
+                // The server's own cents win; else the half-even rounding of
+                // its REAL value. An absent remote value leaves both alone.
+                let remote_total_cents = remote_total.and(json_money_cents_any(
+                    &remote_order,
+                    &["total_amount_cents", "totalAmountCents"],
+                    &["total_amount", "totalAmount"],
+                ));
+                let remote_subtotal_cents = remote_subtotal.and(json_money_cents_any(
+                    &remote_order,
+                    &["subtotal_cents", "subtotalCents"],
+                    &["subtotal"],
+                ));
+                let remote_tax_cents = remote_tax.and(json_money_cents_any(
+                    &remote_order,
+                    &["tax_amount_cents", "taxAmountCents"],
+                    &["tax_amount", "taxAmount"],
+                ));
                 let updated = match conn.execute(
                     "UPDATE orders
                          SET supabase_id = ?1,
@@ -13039,8 +13138,11 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                              cancellation_reason = COALESCE(?4, cancellation_reason),
                              items = COALESCE(?8, items),
                              total_amount = COALESCE(?9, total_amount),
+                             total_amount_cents = COALESCE(?12, total_amount_cents),
                              subtotal = COALESCE(?10, subtotal),
-                             tax_amount = COALESCE(?11, tax_amount)
+                             subtotal_cents = COALESCE(?13, subtotal_cents),
+                             tax_amount = COALESCE(?11, tax_amount),
+                             tax_amount_cents = COALESCE(?14, tax_amount_cents)
                          WHERE id = ?7
                            AND (
                              COALESCE(supabase_id, '') != COALESCE(?1, '')
@@ -13054,6 +13156,9 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                              OR (?9 IS NOT NULL AND COALESCE(total_amount, -1) != ?9)
                              OR (?10 IS NOT NULL AND COALESCE(subtotal, -1) != ?10)
                              OR (?11 IS NOT NULL AND COALESCE(tax_amount, -1) != ?11)
+                             OR (?12 IS NOT NULL AND COALESCE(total_amount_cents, -1) != ?12)
+                             OR (?13 IS NOT NULL AND COALESCE(subtotal_cents, -1) != ?13)
+                             OR (?14 IS NOT NULL AND COALESCE(tax_amount_cents, -1) != ?14)
                            )",
                     params![
                         remote_id,
@@ -13067,6 +13172,9 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                         remote_total,
                         remote_subtotal,
                         remote_tax,
+                        remote_total_cents,
+                        remote_subtotal_cents,
+                        remote_tax_cents,
                     ],
                 ) {
                     Ok(v) => v,
@@ -18476,6 +18584,14 @@ fn is_retryable_shift_sync_error(error: Option<&str>) -> bool {
         || lower.contains("backend yet")
         || lower.contains("not found on backend yet")
         || lower.contains("transferred_to_cashier_shift_id_fkey")
+        // Remote-handover lock contention (SQLSTATE 55P03, typed
+        // REMOTE_HANDOVER_RETRY by the freeze trigger and the API): the
+        // shift is being updated elsewhere; the same event succeeds later.
+        // A frozen snapshot (REMOTE_HANDOVER_SNAPSHOT_FROZEN) is not this.
+        || lower.contains("remote_handover_retry")
+        || lower.contains("55p03")
+        || lower.contains("lock_not_available")
+        || lower.contains("could not obtain lock")
     {
         return true;
     }
@@ -19964,7 +20080,85 @@ async fn sync_payment_items(
                         continue;
                     }
                 }
+                let reconciliation_required =
+                    crate::payment_review::admin_error_reports_reconciliation_required(&e);
                 let e = e.to_string();
+                if reconciliation_required {
+                    // The order changed on the server after this money was
+                    // taken (`409 PAYMENT_ADMISSION_CONFLICT` /
+                    // `PAYMENT_REPLAY_CONFLICT`): set aside for a manager, the
+                    // same as a platform-held refusal, never retried until the
+                    // row fails.
+                    let now = Utc::now().to_rfc3339();
+                    let set_aside = match db.conn.lock() {
+                        Ok(conn) => {
+                            crate::payment_review::set_aside_reconciliation_required_payment(
+                                &conn, entity_id, &now,
+                            )
+                            .and_then(|outcome| {
+                                match &outcome {
+                                    crate::payment_review::SetAsideOutcome::StatusUnavailable {
+                                        ..
+                                    } => crate::payment_review::hold_payment_unlinked(
+                                        &conn, entity_id, &now,
+                                    )?,
+                                    crate::payment_review::SetAsideOutcome::NotEligible => {
+                                        mark_payment_queue_row_synced(&conn, entity_id, &now)?
+                                    }
+                                    _ => {}
+                                }
+                                Ok(outcome)
+                            })
+                        }
+                        Err(err) => Err(format!("db lock: {err}")),
+                    };
+                    match set_aside {
+                        Ok(crate::payment_review::SetAsideOutcome::StatusUnavailable {
+                            ..
+                        }) => {}
+                        Ok(outcome) => {
+                            if let Some(order_id) = outcome.order_id() {
+                                if let Err(error) =
+                                    restore_ledger_after_set_aside(db, admin_url, api_key, order_id)
+                                        .await
+                                {
+                                    warn!(
+                                        payment_id = %entity_id,
+                                        order_id = %order_id,
+                                        error = %error,
+                                        "Server ledger restore after a reconciliation refusal failed; the next sync pass retries"
+                                    );
+                                }
+                            }
+                            synced += 1;
+                        }
+                        Err(err) => {
+                            warn!(
+                                payment_id = %entity_id,
+                                queue_row_id = id,
+                                error = %err,
+                                "Payment sync: setting a payment aside for reconciliation failed; keeping row retryable"
+                            );
+                            if let Ok(conn) = db.conn.lock() {
+                                let _ = conn.execute(
+                                    "UPDATE sync_queue
+                                     SET status = 'pending',
+                                         last_error = ?1,
+                                         next_retry_at = NULL,
+                                         updated_at = datetime('now')
+                                     WHERE id = ?2",
+                                    params![
+                                        format!(
+                                            "Set-aside after a reconciliation refusal failed: {err}"
+                                        ),
+                                        id
+                                    ],
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if crate::payment_review::error_message_reports_platform_held_refusal(&e) {
                     // Item D (founder decision 30/09/2026): the server refused
                     // cash/card on money the delivery platform holds. The
@@ -21474,6 +21668,20 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
 // Payment reconciliation
 // ---------------------------------------------------------------------------
 
+/// A parity payment row that `sync_queue::mark_deferred` turned into a
+/// conflict after its parent-order deferral budget ran out
+/// ("Deferred too many times (50× \"Waiting for parent order sync\"); ...").
+/// Only such a row is revived once its order synced: any other conflict is a
+/// row the office disagreed with and stays for review.
+fn parent_wait_escalation_predicate(alias: &str) -> String {
+    format!(
+        "({alias}.status = 'conflict'
+          AND {alias}.error_message LIKE 'Deferred too many times%'
+          AND lower({alias}.error_message) LIKE '%waiting for parent order%'
+          AND COALESCE({alias}.module_type, '') <> 'repairs')"
+    )
+}
+
 /// Promote deferred payments whose parent order now has a supabase_id and no
 /// queued local order edits still waiting to apply remotely.
 ///
@@ -21481,24 +21689,38 @@ fn get_sync_status_for_event(db: &DbState, sync_state: &SyncState, is_online: bo
 /// `sync_state = 'waiting_parent'` where the parent order has a non-null
 /// `supabase_id` and no active order queue rows, and transitions them to
 /// `sync_state = 'pending'` while also promoting their `sync_queue` row from
-/// `deferred` to `pending`.
+/// `deferred` to `pending`. A payment whose parity row a parent-order
+/// deferral escalated to a conflict is revived the same way, with an audit
+/// entry ([`parent_wait_escalation_predicate`]).
 ///
 /// This handles the case where the app restarts between order sync and
 /// payment sync — the periodic sweep picks them up.
 pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    // Find waiting_parent payments whose order now has supabase_id
+    // Find waiting_parent payments whose order now has supabase_id. A payment
+    // whose parity row already escalated to a conflict after 50 parent-order
+    // deferrals is found too (06/10/2026): the escalation turned its mirror
+    // `failed`, and only `waiting_parent` rows were ever revived, so a payment
+    // of an order created offline stayed parked after the order synced.
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT op.id, op.order_id
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
-             WHERE op.sync_state = 'waiting_parent'
+             WHERE (op.sync_state = 'waiting_parent'
+                    OR (op.sync_state = 'failed'
+                        AND EXISTS (
+                            SELECT 1 FROM parity_sync_queue q
+                            WHERE q.table_name = 'payments'
+                              AND q.record_id = op.id
+                              AND {}
+                        )))
                AND o.supabase_id IS NOT NULL
                AND o.supabase_id != ''
                AND lower(trim(COALESCE(o.order_context, ''))) <> 'repair_settlement'",
-        )
+            parent_wait_escalation_predicate("q")
+        ))
         .map_err(|e| e.to_string())?;
 
     let rows: Vec<(String, String)> = stmt
@@ -21524,11 +21746,41 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
             continue;
         }
 
+        // A deferral-escalated row is revived only together with its mirror,
+        // under its own audit entry (the scheduling metadata it had).
+        let escalated: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT q.id FROM parity_sync_queue q
+                     WHERE q.table_name = 'payments' AND q.record_id = ?1 AND {}
+                     LIMIT 1",
+                    parent_wait_escalation_predicate("q")
+                ),
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if let Some(queue_id) = escalated.as_deref() {
+            if let Err(error) =
+                sync_queue::audit_parent_wait_revival(&conn, queue_id, "parent_wait_revived")
+            {
+                warn!(
+                    payment_id = %payment_id,
+                    error = %error,
+                    "Could not audit the revival of an escalated parent wait; left as it is"
+                );
+                continue;
+            }
+        }
+
         // Promote the payment record
         let _ = conn.execute(
             "UPDATE order_payments SET sync_state = 'pending', updated_at = ?1
-             WHERE id = ?2 AND sync_state = 'waiting_parent'",
-            params![now, payment_id],
+             WHERE id = ?2
+               AND (sync_state = 'waiting_parent'
+                    OR (sync_state = 'failed' AND ?3 IS NOT NULL))",
+            params![now, payment_id, escalated],
         );
 
         // Promote the corresponding sync_queue entry
@@ -38898,5 +39150,253 @@ mod tests {
             );
         }
         assert!(!kept.iter().any(|entity_type| entity_type == "menu_items"));
+    }
+
+    /// Release 1.4.124 (06/10/2026): legacy shift retries, the revival of a
+    /// parent-wait escalation, the legacy reconciliation refusal and the
+    /// pulled order's cents.
+    mod money_sync_regressions {
+        use super::*;
+
+        /// The legacy shift path marked a remote-handover lock refusal as a
+        /// permanent failure: the same close succeeds once the shift is free.
+        /// A frozen snapshot stays permanent.
+        #[test]
+        fn the_legacy_shift_classifier_retries_the_remote_handover_lock() {
+            for retryable in [
+                "Update drawer closing_amount failed: REMOTE_HANDOVER_RETRY",
+                "Insert closed shift failed: could not obtain lock on row in relation \"staff_shifts\"",
+                "Shift sync failed (HTTP 409): {\"code\":\"55P03\"}",
+                "lock_not_available",
+            ] {
+                assert!(is_retryable_shift_sync_error(Some(retryable)), "{retryable}");
+            }
+            for permanent in [
+                "Update drawer closing_amount failed: REMOTE_HANDOVER_SNAPSHOT_FROZEN",
+                "Shift currency does not match the recorded currency",
+            ] {
+                assert!(
+                    !is_retryable_shift_sync_error(Some(permanent)),
+                    "{permanent}"
+                );
+            }
+        }
+
+        /// A payment whose parity row escalated to a conflict after 50
+        /// parent-order deferrals had its mirror turned `failed`; only
+        /// `waiting_parent` rows were ever revived, so it stayed parked after
+        /// its offline order synced. It is revived now, with an audit entry.
+        #[test]
+        fn a_parent_wait_escalation_is_revived_once_its_order_synced() {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents,
+                                     status, sync_status, created_at, updated_at)
+                 VALUES ('order-was-offline', '10000000-0000-4000-8000-0000000000aa', '[]',
+                         8.0, 800, 'completed', 'synced', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                                             status, sync_status, sync_state, created_at, updated_at)
+                 VALUES ('pay-escalated', 'order-was-offline', 'cash', 8.0, 800, 'completed',
+                         'failed', 'failed', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id, created_at,
+                     attempts, retry_delay_ms, priority, module_type, conflict_strategy, version,
+                     status, error_message
+                 ) VALUES (
+                     'q-escalated', 'payments', 'pay-escalated', 'INSERT',
+                     '{\"paymentId\":\"pay-escalated\",\"orderId\":\"order-was-offline\"}', 'org-1',
+                     datetime('now'), 50, 5000, 1, 'payment', 'manual', 1, 'conflict',
+                     'Deferred too many times (50× \"Waiting for parent order sync\"); escalated to conflict'
+                 )",
+                [],
+            )
+            .unwrap();
+            // Another conflict on another payment is a row the office
+            // disagreed with: it stays for review.
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                                             status, sync_status, sync_state, created_at, updated_at)
+                 VALUES ('pay-real-conflict', 'order-was-offline', 'card', 1.0, 100, 'completed',
+                         'failed', 'failed', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id, created_at,
+                     attempts, retry_delay_ms, priority, module_type, conflict_strategy, version,
+                     status, error_message
+                 ) VALUES (
+                     'q-real-conflict', 'payments', 'pay-real-conflict', 'INSERT', '{}', 'org-1',
+                     datetime('now'), 1, 5000, 1, 'payment', 'manual', 1, 'conflict',
+                     'SERVER_CONFLICT_PAYMENT_CONFLICT: Payment conflicts with the server'
+                 )",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            assert_eq!(reconcile_deferred_payments(&db).unwrap(), 1);
+
+            let conn = db.conn.lock().unwrap();
+            let revived: (String, i64, Option<String>, String) = conn
+                .query_row(
+                    "SELECT q.status, q.attempts, q.error_message, op.sync_state
+                     FROM parity_sync_queue q JOIN order_payments op ON op.id = q.record_id
+                     WHERE q.id = 'q-escalated'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                revived,
+                ("pending".to_string(), 0, None, "pending".to_string())
+            );
+            let audited: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_retry_schedule_audit_v1
+                     WHERE queue_id = 'q-escalated' AND outcome = 'parent_wait_revived'
+                       AND json_extract(before_json, '$.status') = 'conflict'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(audited, 1, "the scheduling it had is audited");
+            let untouched: (String, String) = conn
+                .query_row(
+                    "SELECT q.status, op.sync_state
+                     FROM parity_sync_queue q JOIN order_payments op ON op.id = q.record_id
+                     WHERE q.id = 'q-real-conflict'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(untouched, ("conflict".to_string(), "failed".to_string()));
+        }
+
+        /// The legacy payment path burned its retries on a typed
+        /// reconciliation refusal and ended `failed`. The money moved at the
+        /// till, so it is set aside for review like the parity path does.
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_legacy_reconciliation_refusal_sets_the_payment_aside() {
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", "term-reconcile")]);
+            let (db, queue_id, _) = legacy_lock_retry_fixture(false);
+            let item = claim_pending_sync_items(&db.conn.lock().unwrap(), 1)
+                .unwrap()
+                .remove(0);
+            let (url, server) = spawn_status_json_server(
+                409,
+                r#"{"success":false,"code":"PAYMENT_ADMISSION_CONFLICT","error":"The canonical order changed; reconcile the original payment attempt","reconciliation_required":true,"retry_same_identity":true}"#,
+            );
+            let synced =
+                sync_payment_items(&url, "test-key", "term-reconcile", &db, &[&item]).await;
+            server.join().unwrap();
+            assert_eq!(synced, 1);
+            let conn = db.conn.lock().unwrap();
+            let (status, reason): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, json_extract(metadata, '$.duplicate_review.reason')
+                     FROM order_payments WHERE id = 'lock-payment'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "duplicate_review");
+            assert_eq!(reason.as_deref(), Some("reconciliation_required"));
+            let queue_status: String = conn
+                .query_row(
+                    "SELECT status FROM sync_queue WHERE id = ?1",
+                    [queue_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(queue_status, "synced", "never retried into a failure");
+        }
+
+        /// The typed classifier reads only the reconciliation refusal.
+        #[test]
+        fn only_a_typed_reconciliation_refusal_is_read_as_one() {
+            let refusal = |status: u16, body: &str| {
+                crate::payment_review::admin_error_reports_reconciliation_required(
+                    &api::AdminFetchError::from_http_response_for_test(status, body),
+                )
+            };
+            assert!(refusal(
+                409,
+                r#"{"success":false,"code":"PAYMENT_REPLAY_CONFLICT","reconciliation_required":true}"#
+            ));
+            assert!(!refusal(
+                409,
+                r#"{"success":false,"code":"PAYMENT_ADMISSION_CONFLICT","reconciliation_required":false}"#
+            ));
+            assert!(!refusal(
+                503,
+                r#"{"success":false,"code":"PAYMENT_ADMISSION_RETRY_REQUIRED","reconciliation_required":false}"#
+            ));
+            assert!(!refusal(
+                409,
+                r#"{"success":false,"code":"PLATFORM_HELD_ORDER","reconciliation_required":true}"#
+            ));
+        }
+
+        /// The pull moved `total_amount` but left `total_amount_cents`, the
+        /// value every reader prefers: a later paid-order edit sent the stale
+        /// cents as its original total and got a 409 after money moved.
+        #[test]
+        fn a_pulled_order_total_refreshes_its_cents() {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let remote_order = serde_json::json!({
+                "id": "remote-total-moves",
+                "order_number": "ORD-TOTAL-MOVES",
+                "items": [{ "name": "Espresso", "quantity": 1, "price": 4.5 }],
+                "total_amount": 4.5,
+                "subtotal": 4.0,
+                "tax_amount": 0.5,
+                "status": "pending",
+                "order_type": "pickup",
+                "payment_status": "pending",
+                "updated_at": "2026-10-06T09:00:00Z"
+            });
+            let applied = apply_remote_orders_page(&conn, vec![remote_order.clone()]);
+            assert!(applied.error.is_none(), "{:?}", applied.error);
+            let local_id = applied
+                .newly_materialized_order_ids
+                .first()
+                .cloned()
+                .expect("materialized");
+
+            let mut moved = remote_order;
+            moved["items"] = serde_json::json!([
+                { "name": "Espresso", "quantity": 1, "price": 4.5 },
+                { "name": "Croissant", "quantity": 1, "price": 2.75 }
+            ]);
+            moved["total_amount"] = serde_json::json!(7.25);
+            moved["subtotal"] = serde_json::json!(6.45);
+            moved["tax_amount"] = serde_json::json!(0.8);
+            moved["updated_at"] = serde_json::json!("2026-10-06T09:05:00Z");
+            let again = apply_remote_orders_page(&conn, vec![moved]);
+            assert!(again.error.is_none(), "{:?}", again.error);
+
+            let money: (f64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT total_amount, total_amount_cents, subtotal_cents, tax_amount_cents
+                     FROM orders WHERE id = ?1",
+                    params![local_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(money, (7.25, 725, 645, 80));
+        }
     }
 }

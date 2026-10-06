@@ -2935,6 +2935,7 @@ pub async fn settings_clear_connection(
     Ok(serde_json::json!({ "success": true }))
 }
 
+#[cfg(test)]
 fn settings_clear_connection_checked(
     db: &db::DbState,
     auth_state: &auth::AuthState,

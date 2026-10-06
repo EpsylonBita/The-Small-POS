@@ -12,7 +12,33 @@
     "skip": "Kalo — konfirmo marrjen",
     "receiptRecovery": "Një arkëtim TWINT është konfirmuar, por pagesa nuk është ruajtur. Ruani arkëtimin fillestar përpara se të merrni një pagesë tjetër.",
     "receiptSaved": "Arkëtimi fillestar TWINT u ruajt.",
-    "saveOriginal": "Ruaj arkëtimin fillestar TWINT"
+    "saveOriginal": "Ruaj arkëtimin fillestar TWINT",
+    "returned": {
+      "button": "U kthye me TWINT jashtë arkës",
+      "title": "Pagesa TWINT u kthye jashtë arkës",
+      "body": "Vetëm nëse klienti i mori mbrapsht {{amount}} me TWINT jashtë arkës. Këtu nuk tarifohet dhe nuk kthehet asgjë. E konfirmon një menaxher dhe shuma mbetet jashtë shitjeve dhe keshit të arkës.",
+      "referenceLabel": "Referenca (e detyrueshme)",
+      "referencePlaceholder": "Referenca e kthimit TWINT ose shënim",
+      "confirm": "Konfirmo kthimin",
+      "success": "U regjistrua si e kthyer me TWINT jashtë arkës. Mbetet jashtë shitjeve dhe keshit të arkës.",
+      "managerRequired": "E konfirmon një menaxher me PIN-in e vet, pasi të gjithë të kenë dalë nga turni në këtë arkë.",
+      "zLine": "Pagesa TWINT të kthyera jashtë arkës",
+      "zNote": "Nuk llogaritet në shitje as në keshin e arkës.",
+      "notRetained": "Arkëtari e konfirmoi pagesën TWINT, por kjo arkë nuk arriti ta ruante. Mos e arkëto përsëri. Mbaje kuponin dhe njofto një menaxher para se ta mbyllësh ose ta rindezësh POS-in.",
+      "referenceRequired": "Vendosni referencën e kthimit TWINT ose një shënim (3 deri në 200 karaktere).",
+      "saveFirst": "Ky arkëtim TWINT mund të ruhet ende. Ruani fillimisht arkëtimin fillestar.",
+      "managerPin": "PIN-i i menaxherit",
+      "pinRequired": "Një menaxher fut PIN-in e vet për ta konfirmuar.",
+      "wrongPin": "Me këtë PIN nuk mund të konfirmohet. Një menaxher me të drejtë miratimi fut PIN-in e vet. Nuk u regjistrua asgjë."
+    },
+    "confirmNotSaved": "Arkëtimi TWINT nuk është ruajtur ende. Mos arkëtoni përsëri. Një menaxher e kontrollon para se të mbyllet POS-i.",
+    "admission": {
+      "notSaved": "Një pagesë e kësaj porosie nuk është ruajtur ende. Ruajeni përsëri përpara se të pranoni TWINT. Nuk u debitua asgjë.",
+      "reconcile": "Fillimisht duhet kontrolluar një hap i mëparshëm pagese i kësaj porosie. Nuk u debitua asgjë.",
+      "platformHeld": "Paratë e kësaj porosie i mban platforma e dërgesave. Në arkë nuk arkëtohet asgjë.",
+      "amountChanged": "Shuma që mbetet për t'u paguar në këtë porosi ndryshoi. Kontrolloni porosinë dhe provoni përsëri. Nuk u debitua asgjë.",
+      "unavailable": "TWINT nuk mund të pranohet tani. Kontrolloni lidhjen ose zgjidhni një pagesë tjetër. Nuk u debitua asgjë."
+    }
   },
   "displayPurchase": {
     "beforePurchase": "Para se ta blesh",
@@ -1623,7 +1649,8 @@
       "receiptPrinted": "Kuponi u printua",
       "receiptEmailed": "Kuponi u dërgua te {{email}}",
       "invalidCard": "Të dhënat e kartës s'janë të sakta",
-      "expiredCard": "Karta ka skaduar"
+      "expiredCard": "Karta ka skaduar",
+      "cardDeclinedNothingCharged": "Karta u refuzua. Nuk u debitua asgjë."
     },
     "receipt": {
       "title": "Kuponi",
@@ -1701,6 +1728,18 @@
       "unavailableTitle": "Mbyllja e porosisë u ndal",
       "unavailableMessage": "Norma e TVSH-së dhe kufiri i zbritjes së dyqanit nuk u lexuan, ndaj asgjë nuk llogaritet me hamendje. Provo sërish; nëse vazhdon të dështojë, rinis aplikacionin.",
       "retry": "Provo sërish"
+    },
+    "manualCard": {
+      "terminalNotReady": "Terminali i kartave është i zënë ose nuk është i lidhur. Nuk u debitua asgjë. Prit sa të lirohet ose lidhe sërish, pastaj provo përsëri.",
+      "terminalCheckFailed": "Terminali i kartave në këtë arkë nuk u kontrollua dot. Nuk u debitua asgjë. Provo përsëri.",
+      "terminalConfigured": "Në këtë arkë është vendosur një terminal kartash. Debitoje kartën në terminal. Nuk u regjistrua asgjë.",
+      "providerConnected": "Për këtë dyqan është lidhur një ofrues pagesash me kartë, ndaj kjo arkë nuk mund të regjistrojë pagesë me kartë të futur me dorë. Debitoje kartën në terminalin e kartave. Nuk u regjistrua asgjë.",
+      "unavailable": "Nuk u konfirmua dot nëse në këtë arkë lejohet pagesë me kartë e futur me dorë. Nuk u regjistrua asgjë. Kontrollo lidhjen me internetin dhe provo përsëri.",
+      "alreadyTakenWarning": "Nëse karta u debitua tashmë në POS-in e dyqanit, mos e debito përsëri.",
+      "confirmTitle": "Të regjistrohet pagesa me kartë e futur me dorë?",
+      "confirmBody": "Në këtë arkë nuk është lidhur asnjë terminal kartash. Regjistro {{amount}} vetëm nëse karta u debitua tashmë në POS-in e dyqanit.",
+      "confirmAction": "Konfirmo kartën e futur me dorë",
+      "portionNotice": "Në këtë arkë nuk është lidhur asnjë terminal kartash. Debitoje këtë shumë në POS-in e dyqanit; kur të konfirmosh, regjistrohet si pagesë me kartë e futur me dorë."
     }
   },
   "paymentPrintPrompt": {
@@ -2386,7 +2425,9 @@
       "issue": {
         "hardwareProfileMissing": "Zgjidh një printer për këtë printim, pastaj provo përsëri.",
         "needsAttention": "Para se të printohet, për këtë printim duhet konfiguruar printeri.",
-        "genericAttention": "Ky printim i POS-it kërkon vëmendje."
+        "genericAttention": "Ky printim i POS-it kërkon vëmendje.",
+        "foodOrderItemsPending": "Në pritje të artikujve të kësaj porosie nga platforma e dorëzimit. Printohet vetë sapo të vijnë. Nëse mbetet këtu, hap porosinë që të rifreskohen artikujt e saj.",
+        "foodOrderItemsUnavailable": "Artikujt e kësaj porosie nuk erdhën nga platforma e dorëzimit, ndaj nuk u printua. Hap porosinë që të rifreskohen artikujt e saj, pastaj shtyp Provo përsëri."
       },
       "unknown": "I panjohur",
       "cancel": "Anulo",
@@ -3459,11 +3500,13 @@
       "ambiguous_canonical_remote_payment": "pagesa fillestare përputhet me më shumë se një pagesë në admin",
       "Payment not yet synced": "pagesa fillestare ende s'është sinkronizuar",
       "Parent payment missing canonical remote id": "pagesës fillestare i mungon ID-ja e adminit",
-      "Ambiguous canonical remote payment": "pagesa fillestare përputhet me më shumë se një pagesë në admin"
+      "Ambiguous canonical remote payment": "pagesa fillestare përputhet me më shumë se një pagesë në admin",
+      "money_not_synced": "një pagesë ose rimbursim i regjistruar në këtë arkë nuk ka arritur ende në server"
     },
     "closeoutBlocked": {
       "single": "Mbyllja e ditës ngeci te {{stage}}, sepse {{orderReference}} ka mbetur bllokuar: {{reason}}.",
-      "multiple": "Mbyllja e ditës ngeci te {{stage}}, sepse {{count}} elemente sinkronizimi kanë mbetur bllokuar."
+      "multiple": "Mbyllja e ditës ngeci te {{stage}}, sepse {{count}} elemente sinkronizimi kanë mbetur bllokuar.",
+      "moneyNotSynced": "Dita nuk mund të mbyllet ende: {{count}} regjistrime pagesash ose rimbursimesh të kësaj dite nuk kanë arritur në server. Sigurohu që arka është online, shtyp Sinkronizo tani dhe mbyll sërish ditën."
     },
     "time": {
       "never": "Asnjëherë",
@@ -4099,6 +4142,8 @@
       "refundCash": "Rimburso me kesh",
       "refundCard": "Rimburso në kartë",
       "refundNote": "Rimbursimet me kartë regjistrohen si korrigjim në regjistër. Kthimin real në kartë bëje veçmas, nëse duhet.",
+      "cashDisabled": "Paratë në dorë janë çaktivizuar për këtë terminal, ndaj nuk mund të regjistrohen këtu.",
+      "cardDisabled": "Karta është çaktivizuar për këtë terminal, ndaj nuk mund të regjistrohet këtu.",
       "cancel": "Anulo",
       "failed": "Shlyerja nuk u krye dot"
     },
@@ -4191,6 +4236,17 @@
       "loadItemsFailed": "Artikujt e porosisë nuk u ngarkuan",
       "editServerUpdate": "Korrigjimet nuk janë përkohësisht të disponueshme. Kontrolloni lidhjen dhe riprovoni pas përditësimit të serverit.",
       "editSyncRequired": "Ndryshimi i pagesës ose i porosisë nuk është sinkronizuar ende. Shporta është ruajtur. Provoni përsëri pas pak.",
+      "editNotApplied": "Ky korrigjim nuk u ruajt, kështu që diferenca e tij nuk u regjistrua askund. Nëse paratë kanë ndërruar tashmë duar, përgatiteni sërish korrigjimin dhe regjistroni të njëjtat para vetëm një herë; mos i arkëtoni e mos i ktheni kurrë dy herë. Përndryshe një menaxher mund ta mbyllë pa regjistruar para.",
+      "editRequote": "Përgatite sërish korrigjimin",
+      "editRequoteReady": "Kontrolloni shportën dhe ruajeni sërish korrigjimin. Regjistroni vetëm paratë e marra tashmë; mos i arkëtoni e mos i ktheni dy herë.",
+      "editCloseWithoutMoney": "Mbyll pa regjistruar para (menaxher)",
+      "editCloseWithoutMoneyReason": "Korrigjimi nuk u ruajt; u mbyll nga një menaxher pa regjistruar para",
+      "editClosedWithoutMoney": "Korrigjimi i paruajtur u mbyll. Nuk u regjistruan para; numëroni arkën për ta konfirmuar.",
+      "editCloseWithoutMoneyFailed": "Korrigjimi nuk mund të mbyllej. Mbetet i bllokuar; nuk u regjistrua asgjë.",
+      "legacyEditReview": "Një ndryshim i kësaj porosie, i ruajtur nga një version më i vjetër i kësaj arke, u refuzua nga serveri. Serveri ruan porosinë dhe pagesat origjinale; kjo arkë ruan ndryshimin dhe faturën e tij. Nuk u arkëtua asgjë sërish. Një menaxher duhet ta shqyrtojë këtë porosi para Z-së.",
+      "editTooManyLines": "Një korrigjim mund të ketë deri në {{maxLines}} rreshta. Hiqni rreshta, ose anuloni porosinë dhe krijoni një të re. Nuk u arkëtuan para.",
+      "editMethodUnavailable": "Ky terminal nuk mund të regjistrojë para në dorë ose kartë për diferencën. Kërkojini një menaxheri të aktivizojë një mënyrë pagese për këtë terminal. Nuk u arkëtuan para.",
+      "editPreviousNotSaved": "Një korrigjim i mëparshëm i kësaj porosie u konfirmua, por nuk u ruajt. Hapeni nga shporta e ruajtur për ta përgatitur sërish, ose kërkojini një menaxheri ta mbyllë. Mos arkëtoni e mos ktheni para sërish.",
       "emptyEditHint": "Për të hequr të gjithë artikujt, mbyllni redaktuesin dhe anuloni porosinë.",
       "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash."
     },
@@ -4771,7 +4827,35 @@
         "pending": "Dorëzimi është ruajtur në këtë arkë dhe pret konfirmim. Do të provohet përsëri automatikisht; mos i regjistroni paratë sërish.",
         "retry": "Riprovo dorëzimin e ruajtur"
       },
-      "currencySettlementRequired": "Likuidoni dhe mbyllni turnet e stafit në monedhën e tyre origjinale para se të mbyllni këtë turn të arkës."
+      "currencySettlementRequired": "Likuidoni dhe mbyllni turnet e stafit në monedhën e tyre origjinale para se të mbyllni këtë turn të arkës.",
+      "satelliteHandover": {
+        "reasons": {
+          "giftClose": "Në këtë arkë dytësore ka një mbyllje me karta dhuratë për t'u përfunduar. Mbylle turnin në vetë arkën dytësore.",
+          "staffCustody": "Korrierë ose kamerierë të këtij turni të arkës dytësore mbajnë ende kesh. Mbyll fillimisht turnet e tyre, pastaj merre keshin.",
+          "movements": "Lëvizjet e keshit të arkës dytësore nuk kanë arritur ende në server. Prit sa të sinkronizohet, pastaj provo përsëri.",
+          "role": "Ky turn nuk mund të mbyllet nga arka kryesore. Mbylle në arkën dytësore.",
+          "retry": "Serveri po e përpunon këtë turn pikërisht tani. Provo përsëri pas pak.",
+          "closedElsewhere": "Arka dytësore e ka mbyllur vetë këtë turn, ndaj keshi i saj nuk mund të merret këtu.",
+          "currency": "Paratë e këtij turni të arkës dytësore janë në një monedhë tjetër nga ky sirtar. Nuk mund të merren këtu.",
+          "sourceDrawer": "Sirtari i keshit i arkës dytësore nuk u gjet ose është mbyllur tashmë.",
+          "receiver": "Ky sirtar nuk mund ta marrë keshin: është i mbyllur ose nuk është sirtari i hapur i arkëtarit në këtë arkë.",
+          "conflict": "Serveri ka regjistruar tashmë një dorëzim tjetër për këtë turn. Kërkoji një menaxheri ta kontrollojë.",
+          "mainOnly": "Vetëm arka kryesore mund të marrë kesh nga arkat e saj dytësore.",
+          "figures": "Shifrat e turnit nuk u ngarkuan nga serveri. Kontrollo lidhjen dhe provo përsëri.",
+          "pending": "Keshi i një arke dytësore po merret ende. Lidhu sërish me internetin që të përfundojë para se të mbyllet ky turn.",
+          "refused": "Serveri e refuzoi përfundimisht këtë dorëzim keshi nga arka dytësore.",
+          "unknown": "Dorëzimi i keshit nga arka dytësore nuk u përfundua. Provo përsëri ose pyet një menaxher.",
+          "staffCustodyRefused": "Korrierë ose kamerierë të këtij turni të arkës dytësore mbanin ende kesh kur u dërgua, ndaj serveri e refuzoi. Mbylle atë turn në vetë arkën dytësore.",
+          "movementsRefused": "Lëvizjet e keshit të arkës dytësore nuk ishin në server kur u dërgua, ndaj serveri e refuzoi. Mbylle atë turn në vetë arkën dytësore."
+        },
+        "releaseHint": "Një menaxher mund ta lirojë që ky turn të mbyllet. Keshi i arkës dytësore nuk i shtohet këtij sirtari.",
+        "releaseTitle": "Dorëzimi i keshit nga arka dytësore u refuzua",
+        "releasePin": "PIN-i i menaxherit",
+        "releaseAction": "Liroje pa ia shtuar keshin këtij sirtari",
+        "releaseWrongPin": "Me këtë PIN nuk mund të lirohet. Një menaxher me të drejtë anulimi porosish fut PIN-in e vet.",
+        "releaseFailed": "Dorëzimi nuk u lirua. Nuk ndryshoi asgjë; provo përsëri.",
+        "released": "U lirua. Keshi i arkës dytësore nuk iu shtua këtij sirtari. Tani mund ta mbyllësh turnin."
+      }
     },
     "zReport": {
       "title": "Raporti Z - {{date}}",
@@ -5205,6 +5289,16 @@
     },
     "orderCancellation": {
       "staffCashAmbiguous": "Nuk mund të verifikohet kush i mban paratë e stafit. Kontrolloni kthimin fillestar para anulimit.",
+      "platformOrderReturn": "Kjo porosi erdhi nga një platformë dërgese. Paratë e saj kthehen përmes platformës, prandaj arka nuk regjistron kthim për të.",
+      "receiptCheckUnavailable": "Kjo pagesë u mor në një arkë tjetër. Lidhuni me internetin që kjo arkë të kontrollojë pagesën fillestare, pastaj provoni përsëri. Nuk u kthye asgjë.",
+      "refusedByServer": "Serveri e refuzoi këtë anulim. Nuk u kthyen para dhe nuk u anulua asgjë. Një menaxher mund ta fshijë përpjekjen e refuzuar, pastaj anuloni përsëri.",
+      "releaseWait": "Ky anulim u dërgua më pak se 15 minuta më parë dhe mund të regjistrohet ende. Provoni ta fshini përsëri pas {{minutes}} min.",
+      "releaseCommitted": "Serveri e ka regjistruar tashmë këtë anulim. Sinkronizoni këtë arkë për ta përfunduar. Nuk u fshi asgjë.",
+      "cancellationPending": "Një anulim i ruajtur i kësaj porosie pret serverin. Vazhdojeni me arsyen dhe miratuesin fillestar, ose kërkojini një menaxheri ta fshijë.",
+      "refusedAttemptNotice": "Serveri e refuzoi anulimin e fundit të kësaj porosie. Nuk u kthyen para. Një menaxher mund ta fshijë para se porosia të anulohet përsëri.",
+      "pendingAttemptNotice": "Kjo porosi ka një anulim të ruajtur që pret serverin. Konfirmoni për ta vazhduar siç u ruajt. Nëse nuk mund të përfundojë, një menaxher mund ta fshijë.",
+      "clearRefusedAttempt": "Fshi anulimin e ruajtur",
+      "attemptCleared": "Anulimi i ruajtur u fshi. Nuk u kthyen para. Mund ta anuloni përsëri porosinë.",
       "staffCashUnavailable": "Anulimi me dorëzim parash nuk është përkohësisht i disponueshëm. Kontrolloni lidhjen dhe provoni përsëri pas përditësimit të serverit.",
       "connectionUnavailable": "Gjendja e lidhjes së pagesave nuk është e disponueshme. Rifreskoni integrimet dhe provoni përsëri.",
       "permissionRequired": "Kjo llogari nuk ka leje të anulojë porosi të paguara.",
@@ -6222,6 +6316,10 @@
     "printFailed": "Kuponi nuk u printua",
     "printAlreadyQueued": "Ky kupon është tashmë në radhë ose po printohet — s'u printua përsëri.",
     "printSkipped": "Printimi i kuponit është i fikur për këtë veprim.",
+    "printSent": "Kuponi u dërgua te printeri.",
+    "printQueued": "Kuponi është në radhë, por ende s'është printuar. Kontrollo radhën e printimit nëse nuk del.",
+    "printWaitingForItems": "Ende i paprintuar: artikujt e kësaj porosie s'kanë ardhur ende nga platforma e dorëzimit. Kuponi printohet vetë sapo të vijnë.",
+    "printNotPrinted": "Kuponi nuk u printua. Kontrollo radhën e printimit te Cilësime > Radha e printimit.",
     "guestCustomer": "Mysafir",
     "loadingItems": "Duke ngarkuar artikujt...",
     "loadItemsFailed": "Artikujt nuk u ngarkuan",
@@ -6544,7 +6642,9 @@
         "poorTitle": "Ky skanim lexohet me vështirësi",
         "poorDescription": "Mund ta skanosh përsëri, ose thjesht shkruaj çfarë thotë.",
         "queued": "U ruajt këtu. Do të mbërrijë në zyrë sapo të kthehesh online.",
-        "saved": "Fatura u ruajt."
+        "saved": "Fatura u ruajt.",
+        "amountInvalid": "Shkruaj shumën e faturës me qindarkat, p.sh. 1234,50 ose 1.234,50. Nuk u ruajt asgjë.",
+        "amountHasPayments": "Kjo faturë ka tashmë pagesa, ndaj shuma e saj nuk mund të ndryshojë më. Nuk u ruajt asgjë — ktheje shumën siç ishte që të ruash ndryshimet e tjera."
       },
       "scan": {
         "open": "Skano faturë",
@@ -8590,7 +8690,14 @@
       "partnerRequired": "Kërkohen kredenciale partneri",
       "connected": "Lidhur",
       "pending": "Në pritje",
-      "disconnected": "Pa lidhur"
+      "disconnected": "Pa lidhur",
+      "unknown": "Gjendja nuk dihet",
+      "unknownShort": "E panjohur"
+    },
+    "savedCopy": {
+      "title": "Kopje e ruajtur — jo e përditësuar",
+      "bodyAt": "Zyra nuk u arrit, ndaj kjo është lista e integrimeve që kjo arkë ruajti ({{time}}). Gjendjet mund të kenë ndryshuar dhe nuk shfaqen derisa të rifreskohet lista.",
+      "body": "Zyra nuk u arrit, ndaj kjo është lista e integrimeve që kjo arkë ruajti më herët. Gjendjet mund të kenë ndryshuar dhe nuk shfaqen derisa të rifreskohet lista."
     },
     "mydata": {
       "title": "Konfigurimi i MyData",
@@ -9172,6 +9279,16 @@
         "summary": "Ka sinkronizime të prapambetura, por për këtë dështim konkret s'ka ende zgjidhje të udhëzuar.",
         "guidance": "Kontakto zhvilluesit dhe bashkëngjit paketën e diagnostikës, që herën tjetër ky rast të ketë një zgjidhje të udhëzuar."
       },
+      "remoteHandoverSnapshotFrozen": {
+        "title": "Një turn është mbyllur tashmë në një pajisje tjetër",
+        "summary": "{{count}} regjistrime parash i përkasin një turni që u mbyll në një pajisje tjetër. Serveri i mban të pandryshuara shumat e atij turni dhe e refuzon ndryshimin, kështu që nuk dërgohet më.",
+        "guidance": "Kërkoji një menaxheri ta kontrollojë këtë turn në panelin e administrimit dhe ta regjistrojë aty diferencën. Mos merr dhe mos kthe sërish para në arkë."
+      },
+      "legacyEditReview": {
+        "title": "Një korrigjim porosie nga një version i vjetër do një menaxher",
+        "summary": "{{count}} korrigjime porosie që i ruajti një version i vjetër i kësaj arke u refuzuan nga serveri. Serveri mban porosinë fillestare dhe pagesat e saj; arka mban korrigjimin dhe kuponin e tij. Asgjë nuk u pagua dy herë dhe nuk dërgohet më.",
+        "guidance": "Kërkoji një menaxheri ta hapë këtë porosi, ta krahasojë me kuponin dhe ta korrigjojë një herë, para Z-së. Mos merr dhe mos kthe sërish para për këtë korrigjim."
+      },
       "duplicateCustomerConflict": {
         "title": "Ky klient ekziston tashmë në zyrë",
         "summary": "Një klient i ruajtur në këtë terminal ka të njëjtin numër telefoni me një që zyra e ka tashmë, prandaj ndryshimi s’mund të dërgohet. Nuk e pengon mbylljen e ditës, por zyra nuk e ka këtë klient derisa ta lidhësh.",
@@ -9735,7 +9852,9 @@
     "cancelRefusedNotRecorded": "Kjo porosi është shënuar e paguar, por pagesa e saj nuk është regjistruar në këtë arkë. Riktheje nga serveri me «Sinkronizo tani» ose regjistro pagesën nga Raporti Z, pastaj anuloje.",
     "notRecordedTitle": "Tavolina {{table}}: pagesa nuk është regjistruar",
     "notRecordedMessage": "Porosia e saj është shënuar e paguar, por pagesa nuk është regjistruar në këtë arkë. Mos e arkëto përsëri: riktheje nga serveri me «Sinkronizo tani» ose regjistro pagesën nga Raporti Z.",
-    "keepOpenNotRecordedHint": "Tavolina lirohet; porosia mbetet siç është derisa pagesa e saj të rikthehet ose të regjistrohet."
+    "keepOpenNotRecordedHint": "Tavolina lirohet; porosia mbetet siç është derisa pagesa e saj të rikthehet ose të regjistrohet.",
+    "clearAttemptTitle": "Miratoni fshirjen e anulimit të ruajtur",
+    "clearAttemptSubtitle": "Një menaxher fut PIN-in e vet. Nuk tarifohet dhe nuk kthehet asgjë."
   },
   "reservationForm": {
     "toasts": {
@@ -9909,8 +10028,10 @@
     },
     "reasonCodes": {
       "table_cancellation_not_saved": "Kthimi fillestar për anulimin e tavolinës nuk është ruajtur ende.",
+      "table_cancellation_not_saved__refused": "Serveri e refuzoi këtë anulim tavoline. Nuk u kthyen para dhe nuk u anulua asgjë.",
       "payments_need_review": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}) kur ajo ishte paguar tashmë. Është lënë mënjanë dhe nuk llogaritet: klienti mund të ketë paguar dy herë.",
       "payments_need_review__platform_held": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}), por paratë e kësaj porosie i mban tashmë platforma e dërgesave. Është lënë mënjanë dhe nuk llogaritet: klienti mund të ketë paguar dy herë.",
+      "payments_need_review__reconciliation_required": "Në porosinë {{orderNumber}} u mor një pagesë prej {{paymentAmount}} ({{paymentMethod}}), por më pas porosia ndryshoi në server, për shembull një arkë tjetër e anuloi. Është lënë mënjanë dhe nuk llogaritet.",
       "payments_not_saved": "Në porosinë {{orderNumber}} u debitua një pagesë me kartë prej {{paymentAmount}}, por ende nuk është ruajtur në këtë arkë. Klienti u debitua: mos e debito përsëri.",
       "payments_not_saved__new_order": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
       "payments_not_saved__new_order_cannot_save": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
@@ -9919,8 +10040,10 @@
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Rikuperoni anulimin fillestar të tavolinës. Mos i dorëzoni ose rimbursoni paratë përsëri.",
+      "table_cancellation_not_saved__refused": "Një menaxher e pastron përpjekjen e refuzuar nga llogaria e tavolinës dhe pastaj anulon përsëri. Mos kthe sërish para.",
       "payments_need_review": "Ktheja paratë klientit, pastaj konfirmoje këtu. Nëse pagesa në server është ajo e gabuara, kontakto mbështetjen para se ta mbyllësh ditën.",
       "payments_need_review__platform_held": "Ktheja paratë klientit, pastaj konfirmoje këtu. Platforma ia paguan këtë porosi dyqanit me shlyerjen e saj.",
+      "payments_need_review__reconciliation_required": "Kontrollo porosinë me klientin. Nëse është anuluar, ktheja paratë, pastaj konfirmoje këtu. Nëse klienti e detyron ende këtë shumë, kontakto mbështetjen para se të mbyllësh ditën.",
       "payments_not_saved": "Ruaje pagesën sërish. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",
       "payments_not_saved__cannot_save": "Kjo pagesë nuk mund të ruhet në këtë arkë. Ktheja paratë klientit, pastaj konfirmoje këtu.",
       "payments_not_saved__new_order": "Ruaje pagesën sërish: kjo ruan porosinë dhe pagesën e saj, pa debitim të ri. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",

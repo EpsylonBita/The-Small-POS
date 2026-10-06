@@ -158,6 +158,17 @@
       "wrongProductPrice": "Falscher Produktpreis",
       "closingSoon": "Wir schließen bald",
       "badWeather": "Wegen schlechten Wetters"
+    },
+    "decisionClosed": "BOX hat diese Bestellung geschlossen. Sie kann hier nicht mehr angenommen oder abgelehnt werden.",
+    "manualCheckTitle": "Bestellung bei BOX prüfen",
+    "manualCheck": "BOX hat diese Bestellung nicht rechtzeitig bestätigt und hat sie möglicherweise trotzdem angenommen. Prüfen Sie sie bei BOX, bevor Sie sie zubereiten oder hier schließen.",
+    "closeOrder": "Bestellung schließen",
+    "closingOrder": "Wird geschlossen…",
+    "closeOrderFailed": "Die Bestellung konnte nicht geschlossen werden. Prüfen Sie die Verbindung und versuchen Sie es erneut.",
+    "closedReasons": {
+      "box_decision_expired": "Von BOX geschlossen: keine rechtzeitige Entscheidung",
+      "box_decision_refused": "Von BOX geschlossen: die Entscheidung wurde abgelehnt",
+      "box_manual_check_closed": "Hier nach Rücksprache mit BOX geschlossen"
     }
   }
 }

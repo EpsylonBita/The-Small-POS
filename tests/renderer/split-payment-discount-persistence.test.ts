@@ -223,6 +223,44 @@ test('portions without discounts never touch order financials', async () => {
   assert.equal(order.writes.length, 0);
 });
 
+// C2 (06/10/2026): the modal keeps the cashier's requested discount while the
+// portion amount is retyped, so the settlement helpers are the last line: a
+// portion never persists more discount to the order than its own gross.
+test('a portion discount above its gross is clamped to the gross when persisted (confirm and terminal)', async () => {
+  const draftOrder = makePersistedOrder(baseFinancials(100));
+  await settleDraftPortions(
+    draftOrder.state.current,
+    [
+      { id: 'portion-a', discountAmount: 5, grossAmount: 2 },
+      { id: 'portion-b', discountAmount: 5, grossAmount: 0 },
+      { id: 'portion-c', discountAmount: 3, grossAmount: 10 },
+    ],
+    {
+      recordPayment: async (portion) => `pay-${portion.id}`,
+      persistFinancials: draftOrder.persistFinancials,
+    },
+  );
+  assert.deepEqual(
+    draftOrder.writes.map((write) => [write.totalAmount, write.discountAmount]),
+    [[98, 2], [95, 5]],
+    'a 5.00 discount on a 2.00 portion persists 2.00, on a 0.00 portion nothing, and a discount within its gross is unchanged',
+  );
+
+  const terminalOrder = makePersistedOrder(baseFinancials(100));
+  const settled = await settleTerminalPortion(
+    terminalOrder.state.current,
+    { id: 'portion-t', discountAmount: 5, grossAmount: 2 },
+    {
+      processPayment: async () => ({ transactionId: 'tx-clamp' }),
+      recordPayment: async () => 'pay-clamp',
+      persistFinancials: terminalOrder.persistFinancials,
+    },
+  );
+  assert.equal(settled.financials.totalAmount, 98);
+  assert.equal(settled.financials.discountAmount, 2);
+  assert.equal(terminalOrder.writes.length, 1);
+});
+
 test('applyAdditionalDiscount ignores sub-cent deltas, rounds to cents, clamps at zero, accumulates order discount', () => {
   const financials = { ...baseFinancials(10.05), discountAmount: 1 };
 

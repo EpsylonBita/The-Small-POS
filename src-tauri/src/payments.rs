@@ -672,16 +672,25 @@ pub(crate) fn prepare_outstanding_collection_payload(
     if outstanding_cents <= 0 {
         return Err("Order has no outstanding balance to collect".to_string());
     }
-    // `amount` is the gross receipt, including its own tip. Only the
-    // merchandise principal settles the balance captured above.
+    // The receipt collects exactly the outstanding balance. A tip the screen
+    // carries here is the checkout's own tip, which the order total already
+    // contains (tip-inclusive rule, `load_principal_paid_for_order`), so it
+    // is recorded inside this amount, never charged on top of it: the
+    // Outstanding modal shows and the TWINT QR asks for the outstanding
+    // balance alone. Symptom before (1.4.122–1.4.123): a tipped split closed
+    // unpaid charged the tip twice in cash or card, and its TWINT receipt
+    // never saved (TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED). The ledger
+    // write keeps only the part of the tip still inside the order's tip
+    // (`record_payment_with_expected_balance`).
     let tip_cents = Cents::round_half_even(
         num_field(payload, "tipAmount")
             .or_else(|| num_field(payload, "tip_amount"))
             .unwrap_or(0.0)
             .max(0.0),
     )
-    .as_i64();
-    let gross_cents = outstanding_cents + tip_cents;
+    .as_i64()
+    .min(outstanding_cents);
+    let gross_cents = outstanding_cents;
     let outstanding_amount = Cents::new(gross_cents).to_f64_dp2();
     if method == "twint"
         && payload
@@ -694,6 +703,14 @@ pub(crate) fn prepare_outstanding_collection_payload(
     }
     let payment = payload.as_object_mut().ok_or("Invalid payment payload")?;
     payment.insert("amount".to_string(), serde_json::json!(outstanding_amount));
+    for key in ["tipAmount", "tip_amount"] {
+        if payment.contains_key(key) {
+            payment.insert(
+                key.to_string(),
+                serde_json::json!(Cents::new(tip_cents).to_f64_dp2()),
+            );
+        }
+    }
 
     if method == "cash" {
         let cash_received = payment
@@ -782,9 +799,9 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         .or_else(|| num_field(payload, "tip_amount"))
         .unwrap_or(0.0)
         .max(0.0);
-    // Outstanding collection replaces the provisional UI gross amount with
-    // due principal + tip before persistence or dispatch. Its final principal
-    // guard still validates the prepared receipt.
+    // Outstanding collection replaces the provisional UI amount with the due
+    // balance, its tip inside it, before persistence or dispatch. Its final
+    // coverage guard still validates the prepared receipt.
     if !payload_collects_outstanding_balance(payload)
         && Cents::round_half_even(tip_amount).as_i64() > Cents::round_half_even(amount).as_i64()
     {
@@ -1046,7 +1063,24 @@ pub(crate) fn load_net_paid_for_order(
         .map(|cents| Cents::new(cents).to_f64_dp2())
 }
 
-/// Merchandise coverage after each receipt's own tip and effective refunds.
+/// What the order's counted receipts cover, after effective refunds, under
+/// the tip-inclusive rule (06/10/2026; shared `tipInclusiveCoveredCents`,
+/// admin `summarizeCanonicalPayments`, Android `principalCoveredCentsOfRowSql`
+/// and the SQL guards apply the same one):
+///
+///   covered = Σ max(gross − reversed − tip, 0)
+///           + min(Σ min(tip, max(gross − reversed, 0)), order tip)
+///
+/// where the order tip is `orders.tip_amount`, the tip the total already
+/// contains ([`load_order_tip_inside_total_cents`]). A receipt's principal
+/// always covers the order; its own tip covers only the tip inside the total.
+/// A desktop checkout puts the chosen tip in `orders.total_amount` and on its
+/// receipt, so one 22.00 receipt (tip 2.00) pays a 22.00 order. Table checks
+/// keep the order tip at 0, so their tips stay receipt money on top of the
+/// check, and a refund comes off a receipt's principal before its tip.
+/// Symptom before (1.4.122–1.4.123): every tipped checkout read as
+/// `partially_paid`, the Z asked for the tip again as "Record the remaining
+/// cash payment" and the paid-order edit asked to collect it once more.
 /// Gross received-money readers remain separate for reporting and cancellation.
 pub(crate) fn load_principal_paid_for_order(
     conn: &Connection,
@@ -1054,6 +1088,39 @@ pub(crate) fn load_principal_paid_for_order(
 ) -> Result<f64, String> {
     load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"), true)
         .map(|cents| Cents::new(cents).to_f64_dp2())
+}
+
+/// `orders.tip_amount`, the tip the order total already contains, in cents:
+/// never below zero nor above the total. 0 for an order this till does not
+/// hold. Read the way the total is read (cents first, REAL fallback).
+pub(crate) fn load_order_tip_inside_total_cents(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT MAX(0, MIN(
+                    COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)))
+           FROM orders
+          WHERE id = ?1",
+        params![order_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|cents| cents.unwrap_or(0))
+    .map_err(|e| format!("load the tip inside the total of {order_id}: {e}"))
+}
+
+/// How much of the order's own tip ([`load_order_tip_inside_total_cents`]) no
+/// counted receipt carries yet, in cents. A new receipt's tip covers the order
+/// only up to this; any more of it is receipt money on top.
+pub(crate) fn load_order_tip_capacity_cents(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<i64, String> {
+    let coverage =
+        load_coverage_cents_matching(conn, order_id, &counted_completed_payment_sql("op"))?;
+    Ok((coverage.order_tip_cents - coverage.retained_tip_cents).max(0))
 }
 
 /// SQL predicate over an `order_payments` row aliased `alias`: a delivery
@@ -1212,37 +1279,54 @@ pub(crate) fn load_store_taken_net_paid_cents(
     load_net_paid_cents_matching(conn, order_id, &filter, false)
 }
 
-/// The order's completed money the SERVER already holds, net of refunds, in
-/// cents (counted rows that are [`server_held_payment_sql`]). Every refund
-/// recorded here lowers it, synced or not: a claim never rests on money
-/// already given back.
-pub(crate) fn load_server_held_net_paid_cents(
-    conn: &rusqlite::Connection,
-    order_id: &str,
-) -> Result<i64, String> {
-    let filter = format!(
-        "{} AND {}",
-        counted_completed_payment_sql("op"),
-        server_held_payment_sql("op")
-    );
-    load_net_paid_cents_matching(conn, order_id, &filter, false)
-}
-
 /// Completed money net of refunds over the rows `row_filter` (an SQL
-/// predicate over `op`) selects, in cents.
+/// predicate over `op`) selects, in cents: the received money itself, or,
+/// with `exclude_tips`, what it covers of the order under the tip-inclusive
+/// rule ([`load_principal_paid_for_order`]).
 fn load_net_paid_cents_matching(
     conn: &rusqlite::Connection,
     order_id: &str,
     row_filter: &str,
     exclude_tips: bool,
 ) -> Result<i64, String> {
-    let load_err = |e: rusqlite::Error| format!("load net paid for order {order_id}: {e}");
-    let tip_cents_sql = if exclude_tips {
-        "MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)"
+    let coverage = load_coverage_cents_matching(conn, order_id, row_filter)?;
+    Ok(if exclude_tips {
+        coverage.covered_cents()
     } else {
-        "0"
-    };
-    let ordinary_cents: i64 = conn
+        coverage.retained_cents
+    })
+}
+
+/// One order's counted receipts, in cents, as the coverage rule reads them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CoverageCents {
+    /// Σ max(gross − reversed, 0): received money net of refunds, tips included.
+    retained_cents: i64,
+    /// Σ max(gross − reversed − tip, 0): each receipt's principal.
+    principal_cents: i64,
+    /// Σ min(tip, max(gross − reversed, 0)): the tips the receipts still hold.
+    retained_tip_cents: i64,
+    /// The tip the order total contains ([`load_order_tip_inside_total_cents`]).
+    order_tip_cents: i64,
+}
+
+impl CoverageCents {
+    /// Principal, plus receipt tips up to the tip inside the order total.
+    fn covered_cents(&self) -> i64 {
+        self.principal_cents + self.retained_tip_cents.min(self.order_tip_cents.max(0))
+    }
+}
+
+fn load_coverage_cents_matching(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    row_filter: &str,
+) -> Result<CoverageCents, String> {
+    let load_err = |e: rusqlite::Error| format!("load net paid for order {order_id}: {e}");
+    let tip_cents_sql =
+        "MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)";
+    let gross_cents_sql = "COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)";
+    let (retained_cents, principal_cents, retained_tip_cents): (i64, i64, i64) = conn
         .query_row(
             // W4b: aggregate using cents-with-real-fallback shim. The shim
             // (`COALESCE(*_cents, CAST(ROUND(*_real * 100) AS INTEGER))`)
@@ -1251,9 +1335,14 @@ fn load_net_paid_cents_matching(
             // the REAL columns are dropped.
             &format!(
                 "SELECT COALESCE(SUM(
-                    MAX(COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)
-                        - COALESCE(refunds.refunded_cents, 0) - {tip_cents_sql}, 0)
-                ), 0)
+                        MAX({gross_cents_sql} - COALESCE(refunds.refunded_cents, 0), 0)
+                    ), 0),
+                    COALESCE(SUM(
+                        MAX({gross_cents_sql} - COALESCE(refunds.refunded_cents, 0) - {tip_cents_sql}, 0)
+                    ), 0),
+                    COALESCE(SUM(
+                        MIN({tip_cents_sql}, MAX({gross_cents_sql} - COALESCE(refunds.refunded_cents, 0), 0))
+                    ), 0)
                  FROM order_payments op
                  LEFT JOIN (
                      SELECT payment_id,
@@ -1267,15 +1356,21 @@ fn load_net_paid_cents_matching(
                    AND op.method IS NOT ?2"
             ),
             params![order_id, GIFT_CARD_METHOD],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(load_err)?;
+    let mut coverage = CoverageCents {
+        retained_cents,
+        principal_cents,
+        retained_tip_cents,
+        order_tip_cents: load_order_tip_inside_total_cents(conn, order_id)?,
+    };
     // Gift card rows are read one by one: each nets max(refunds, proven
     // return floor), and an unreadable amount or proof fails closed.
     let mut statement = conn
         .prepare(&format!(
             "SELECT op.id,
-                    COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                    {gross_cents_sql},
                     COALESCE((
                         SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
                         FROM payment_adjustments pa
@@ -1298,7 +1393,6 @@ fn load_net_paid_cents_matching(
             ))
         })
         .map_err(load_err)?;
-    let mut net_cents = ordinary_cents;
     for row in rows {
         let (payment_id, gross_cents, refunded_cents, tip_cents) = row.map_err(load_err)?;
         let reversed_cents = effective_reversed_cents(
@@ -1309,9 +1403,12 @@ fn load_net_paid_cents_matching(
             gross_cents,
             refunded_cents,
         )?;
-        net_cents += (gross_cents - reversed_cents - tip_cents).max(0);
+        let kept_cents = (gross_cents - reversed_cents).max(0);
+        coverage.retained_cents += kept_cents;
+        coverage.principal_cents += (kept_cents - tip_cents).max(0);
+        coverage.retained_tip_cents += tip_cents.min(kept_cents);
     }
-    Ok(net_cents)
+    Ok(coverage)
 }
 
 /// Cents a payment row no longer covers. An ordinary row: its recorded
@@ -1421,11 +1518,13 @@ fn load_completed_payment_ledger_generation(
     digest.update((order_id.len() as u64).to_le_bytes());
     digest.update(order_id.as_bytes());
     digest.update(order_total_cents.to_le_bytes());
+    let mut receipts_carry_tips = false;
     for row in rows {
         let (payment_id, method, gross_cents, reference, origin, refunded_cents, tip_cents) = row
             .map_err(
             |error| format!("read completed payment for ledger generation {order_id}: {error}"),
         )?;
+        receipts_carry_tips |= tip_cents > 0;
         // A gift row fingerprints its effective reversal, so a newly proven
         // return floor invalidates a held settlement; other rows hash as before.
         let reversed_cents = effective_reversed_cents(
@@ -1450,6 +1549,16 @@ fn load_completed_payment_ledger_generation(
         if tip_cents > 0 {
             digest.update(b"receipt-tip-cents\0");
             digest.update(tip_cents.to_le_bytes());
+        }
+    }
+    // Receipt tips cover only the tip inside the total, so that tip is part
+    // of the settlement once a receipt carries one. Generations of orders
+    // whose receipts carry no tip stay as they were for held receipts.
+    if receipts_carry_tips {
+        let order_tip_cents = load_order_tip_inside_total_cents(conn, order_id)?;
+        if order_tip_cents > 0 {
+            digest.update(b"order-tip-inside-total-cents\0");
+            digest.update(order_tip_cents.to_le_bytes());
         }
     }
     let finalized = digest.finalize();
@@ -1511,7 +1620,7 @@ fn validate_payment_amount_against_outstanding(
     // path required (Wave 2a C3) goes away because integer comparison
     // is exact by construction. Both sides round half-even at the
     // f64-to-Cents boundary, then compare as i64.
-    let input_amount_cents = payment_principal_cents(input)?;
+    let input_amount_cents = payment_coverage_contribution_cents(conn, input)?;
     let outstanding_cents = Cents::round_half_even(snapshot.outstanding_amount).as_i64();
     if outstanding_cents <= 0 || input_amount_cents > outstanding_cents {
         return Err(format!(
@@ -1534,6 +1643,24 @@ fn payment_principal_cents(input: &PaymentRecordInput) -> Result<i64, String> {
         return Err("Tip amount cannot exceed the gross payment amount".into());
     }
     Ok((gross - tip).max(0))
+}
+
+/// What a new receipt adds to its order's coverage (tip-inclusive rule,
+/// [`load_principal_paid_for_order`]): its principal, plus the part of its own
+/// tip that still falls inside the order's tip. A checkout receipt of 22.00
+/// carrying the 2.00 tip of a 22.00 order adds 22.00; a tip on top of a table
+/// check adds nothing.
+fn payment_coverage_contribution_cents(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+) -> Result<i64, String> {
+    let principal_cents = payment_principal_cents(input)?;
+    let tip_cents = Cents::round_half_even(input.tip_amount.max(0.0)).as_i64();
+    if tip_cents <= 0 {
+        return Ok(principal_cents);
+    }
+    let capacity_cents = load_order_tip_capacity_cents(conn, &input.order_id)?;
+    Ok(principal_cents + tip_cents.min(capacity_cents))
 }
 
 /// Derive the effective payment method for an order from its completed
@@ -2347,7 +2474,7 @@ pub(crate) fn record_payment_in_connection(
         }
         let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
         if balance.outstanding_amount <= 0.0
-            || payment_principal_cents(input)?
+            || payment_coverage_contribution_cents(conn, input)?
                 > Cents::round_half_even(balance.outstanding_amount).as_i64()
         {
             return Err("TWINT_AMOUNT_EXCEEDS_OUTSTANDING".into());
@@ -3248,7 +3375,7 @@ fn decide_moved_money_collection(
     }
 
     let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
-    let amount_cents = payment_principal_cents(input)?;
+    let amount_cents = payment_coverage_contribution_cents(conn, input)?;
     let outstanding_cents = Cents::round_half_even(balance.outstanding_amount).as_i64();
     if outstanding_cents > 0 && amount_cents <= outstanding_cents {
         return Ok(MovedMoneyDecision::Collect);
@@ -3400,6 +3527,15 @@ pub(crate) fn record_payment_with_expected_balance(
                         input = build_payment_record_input(&prepared_payload)?;
                         input.order_id = resolve_order_id(&conn, &input.order_id)
                             .ok_or_else(|| "Order not found".to_string())?;
+                        // The collected amount is the balance itself; its
+                        // receipt keeps only the tip the order's own tip still
+                        // leaves room for, so the receipt settles exactly the
+                        // balance it collected.
+                        let capacity_cents = load_order_tip_capacity_cents(&conn, &input.order_id)?;
+                        let tip_cents = Cents::round_half_even(input.tip_amount.max(0.0))
+                            .as_i64()
+                            .min(capacity_cents);
+                        input.tip_amount = Cents::new(tip_cents).to_f64_dp2();
                     }
                 }
 
@@ -4261,6 +4397,7 @@ fn ensure_manual_payment_method_edit(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn update_payment_method_for_payment(
     db: &DbState,
     order_id_raw: &str,
@@ -5409,8 +5546,13 @@ mod tests {
         );
     }
 
+    /// The outstanding collection collects exactly the balance the Outstanding
+    /// modal shows. On an order whose total holds no tip (order tip 0) a
+    /// carried tip has no room inside the balance, so the receipt records
+    /// none and the change follows the balance shown (06/10/2026; before, the
+    /// receipt was the balance plus the tip, more than the screen asked for).
     #[test]
-    fn payment_principal_tip_outstanding_preparation_keeps_tip_inside_gross() {
+    fn payment_outstanding_collection_charges_only_the_balance_shown() {
         let db = test_db();
         principal_tip_order(&db);
         let conn = db.conn.lock().unwrap();
@@ -5427,9 +5569,154 @@ mod tests {
         .unwrap();
         assert_eq!(result["success"], true);
         let conn = db.conn.lock().unwrap();
-        assert_eq!(conn.query_row("SELECT amount_cents,tip_amount_cents,change_given_cents FROM order_payments WHERE idempotency_key='tip-outstanding'", [], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?))).unwrap(), (800,200,200));
+        assert_eq!(conn.query_row("SELECT amount_cents,tip_amount_cents,change_given_cents FROM order_payments WHERE idempotency_key='tip-outstanding'", [], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?))).unwrap(), (600,0,400));
         let balance = load_order_payment_balance_snapshot(&conn, "principal-tip-order").unwrap();
         assert_eq!((balance.net_paid, balance.outstanding_amount), (12.0, 0.0));
+    }
+
+    /// A desktop checkout (OrderFlow, NewOrderPage, OrderDashboard, the
+    /// server's create path): the 2.00 tip is inside the 22.00 total, recorded
+    /// as `orders.tip_amount`, and carried by the receipt.
+    fn tip_inside_total_order(db: &DbState, order_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        let currency = crate::shifts::require_operating_currency(&conn, "b1").unwrap();
+        conn.execute("INSERT OR IGNORE INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('tip-inside-cashier','tip-inside-staff','b1','test-terminal','cashier','now','active',?1,'now','now')", [&currency]).unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,tip_amount,tip_amount_cents,status,order_type,payment_status,sync_status,branch_id,currency,created_at,updated_at) VALUES (?1,'[]',22,2200,2,200,'completed','delivery','pending','pending','b1',?2,'now','now')", params![order_id, currency]).unwrap();
+    }
+
+    fn stored_payment_status(conn: &Connection, order_id: &str) -> String {
+        conn.query_row(
+            "SELECT payment_status FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tip_inside_total_checkout_receipt_pays_the_order_once() {
+        let db = test_db();
+        tip_inside_total_order(&db, "tip-inside");
+        let paid = record_payment(&db, &serde_json::json!({"orderId":"tip-inside","method":"cash","amount":22,"tipAmount":2,"cashReceived":22,"idempotencyKey":"tip-inside-checkout"})).unwrap();
+        assert_eq!(paid["success"], true);
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(stored_payment_status(&conn, "tip-inside"), "paid");
+            let balance = load_order_payment_balance_snapshot(&conn, "tip-inside").unwrap();
+            assert_eq!((balance.net_paid, balance.outstanding_amount), (22.0, 0.0));
+            assert!(ledger_backs_claimed_status(&conn, "tip-inside", "paid").unwrap());
+            assert!(
+                crate::payment_integrity::load_order_payment_blockers(&conn, "tip-inside")
+                    .unwrap()
+                    .is_empty(),
+                "a fully paid tipped checkout must not hold the Z"
+            );
+            assert_eq!(conn.query_row("SELECT amount_cents,tip_amount_cents FROM order_payments WHERE idempotency_key='tip-inside-checkout'", [], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?))).unwrap(), (2200,200));
+            assert_eq!(
+                load_order_tip_capacity_cents(&conn, "tip-inside").unwrap(),
+                0
+            );
+        }
+        // "Record the remaining cash payment" for the tip: nothing is owed.
+        assert!(record_payment(&db, &serde_json::json!({"orderId":"tip-inside","method":"cash","amount":2,"idempotencyKey":"tip-inside-again"})).is_err());
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE order_id='tip-inside'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn tip_inside_total_split_closed_unpaid_collects_the_outstanding_balance_once() {
+        let db = test_db();
+        tip_inside_total_order(&db, "tip-split");
+        // Split portions never carry the tip: it is an "Adjustment" line.
+        record_payment(&db, &serde_json::json!({"orderId":"tip-split","method":"cash","amount":10,"cashReceived":10,"idempotencyKey":"tip-split-portion"})).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(stored_payment_status(&conn, "tip-split"), "partially_paid");
+            let balance = load_order_payment_balance_snapshot(&conn, "tip-split").unwrap();
+            assert_eq!(balance.outstanding_amount, 12.0);
+            // TWINT: the QR shows the outstanding balance and the screen sends
+            // it with the carried checkout tip; that is the amount native keeps.
+            let mut twint = serde_json::json!({"orderId":"tip-split","method":"twint","amount":12,"tipAmount":2,"collectOutstandingBalance":true});
+            prepare_outstanding_collection_payload(&mut twint, balance).unwrap();
+            assert_eq!(twint["amount"], 12.0);
+            assert_eq!(twint["tipAmount"], 2.0);
+        }
+        // Cash: the customer pays the 12.00 shown, never the tip a second time.
+        record_payment(&db, &serde_json::json!({"orderId":"tip-split","method":"cash","amount":12,"tipAmount":2,"cashReceived":20,"collectOutstandingBalance":true,"idempotencyKey":"tip-split-outstanding"})).unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(conn.query_row("SELECT amount_cents,tip_amount_cents,change_given_cents FROM order_payments WHERE idempotency_key='tip-split-outstanding'", [], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, i64>(1)?,row.get::<_, i64>(2)?))).unwrap(), (1200,200,800));
+        assert_eq!(stored_payment_status(&conn, "tip-split"), "paid");
+        let balance = load_order_payment_balance_snapshot(&conn, "tip-split").unwrap();
+        assert_eq!((balance.net_paid, balance.outstanding_amount), (22.0, 0.0));
+        assert!(
+            crate::payment_integrity::load_order_payment_blockers(&conn, "tip-split")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tip_inside_total_counts_receipt_tips_only_up_to_the_order_tip() {
+        let db = test_db();
+        tip_inside_total_order(&db, "tip-cap");
+        let conn = db.conn.lock().unwrap();
+        // 21.00 carrying a 5.00 tip: 16.00 principal plus 2.00 of the order's tip.
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,status,created_at,updated_at) VALUES ('tip-cap-pay','tip-cap','card',21,2100,5,500,'completed','now','now')", []).unwrap();
+        let balance = load_order_payment_balance_snapshot(&conn, "tip-cap").unwrap();
+        assert_eq!((balance.net_paid, balance.outstanding_amount), (18.0, 4.0));
+        // A full return takes the principal first, then the tip: nothing covers.
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,created_at,updated_at) VALUES ('tip-cap-return','tip-cap-pay','tip-cap','refund',21,2100,'tip test refund','now','now')", []).unwrap();
+        let returned = load_order_payment_balance_snapshot(&conn, "tip-cap").unwrap();
+        assert_eq!(
+            (returned.net_paid, returned.outstanding_amount),
+            (0.0, 22.0)
+        );
+        assert_eq!(
+            load_order_tip_capacity_cents(&conn, "tip-cap").unwrap(),
+            200
+        );
+    }
+
+    #[test]
+    fn tip_inside_total_generation_fences_the_order_tip_once_receipts_carry_tips() {
+        let db = test_db();
+        tip_inside_total_order(&db, "tip-fence");
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,created_at,updated_at) VALUES ('tip-fence-portion','tip-fence','cash',10,1000,'completed','now','now')", []).unwrap();
+        let untipped = load_order_payment_balance_snapshot(&conn, "tip-fence").unwrap();
+        conn.execute(
+            "UPDATE orders SET tip_amount=3,tip_amount_cents=300 WHERE id='tip-fence'",
+            [],
+        )
+        .unwrap();
+        // No receipt carries a tip: held receipts keep their generation.
+        assert_eq!(
+            untipped.ledger_generation,
+            load_order_payment_balance_snapshot(&conn, "tip-fence")
+                .unwrap()
+                .ledger_generation
+        );
+        conn.execute("UPDATE order_payments SET tip_amount=1,tip_amount_cents=100 WHERE id='tip-fence-portion'", []).unwrap();
+        let tipped = load_order_payment_balance_snapshot(&conn, "tip-fence").unwrap();
+        conn.execute(
+            "UPDATE orders SET tip_amount=2,tip_amount_cents=200 WHERE id='tip-fence'",
+            [],
+        )
+        .unwrap();
+        assert_ne!(
+            tipped.ledger_generation,
+            load_order_payment_balance_snapshot(&conn, "tip-fence")
+                .unwrap()
+                .ledger_generation
+        );
     }
 
     #[test]

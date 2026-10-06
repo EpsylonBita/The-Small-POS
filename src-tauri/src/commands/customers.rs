@@ -640,8 +640,12 @@ fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
     if let Some(longitude) = value_f64_any(source, &["longitude"]) {
         body.insert("longitude".to_string(), serde_json::json!(longitude));
     }
-    if let Some(place_id) = string_field(source, &["place_id", "google_place_id"]) {
+    if let Some(place_id) = string_field(source, &ADDRESS_PLACE_KEYS) {
         body.insert("place_id".to_string(), serde_json::json!(place_id));
+    } else if address_edit_clears_place(source) {
+        // Like the point: an explicit null clears the stored place, so the
+        // cache merge and the captured PATCH drop the old one.
+        body.insert("place_id".to_string(), serde_json::Value::Null);
     }
     if let Some(formatted_address) = string_field(source, &["formatted_address"]) {
         body.insert(
@@ -663,6 +667,20 @@ fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
     }
 
     serde_json::Value::Object(body)
+}
+
+/// Keys of an address edit that carry its provider place.
+const ADDRESS_PLACE_KEYS: [&str; 2] = ["place_id", "google_place_id"];
+
+/// Whether an address edit clears its place: an explicit null and no place id
+/// under the other key (desktop 1.4.124, fix 6: a text edit saved offline
+/// sends `place_id: null` with its cleared point and must not keep the old
+/// place). An omitted key leaves the place as it is.
+fn address_edit_clears_place(edit: &serde_json::Value) -> bool {
+    string_field(edit, &ADDRESS_PLACE_KEYS).is_none()
+        && ADDRESS_PLACE_KEYS
+            .iter()
+            .any(|key| edit.get(*key).is_some_and(serde_json::Value::is_null))
 }
 
 fn normalize_customer_for_cache(mut customer: serde_json::Value) -> serde_json::Value {
@@ -2668,6 +2686,13 @@ fn spell_address_edit_for_queued_insert(
         && edit.get("formatted_address").is_none()
     {
         changes.insert("formatted_address".to_string(), serde_json::Value::Null);
+    }
+    // An explicitly cleared place leaves the INSERT under either spelling
+    // (the customer INSERT body drops a null place id on its own).
+    if address_edit_clears_place(edit) {
+        for key in ADDRESS_PLACE_KEYS {
+            changes.insert(key.to_string(), serde_json::Value::Null);
+        }
     }
 }
 
@@ -5213,18 +5238,32 @@ mod dto_tests {
         }
     }
 
+    /// What the desktop Customers page sends for a street edit (1.4.124): a
+    /// changed destination clears its point and place with explicit nulls.
+    fn street_edit_with_cleared_pin(street: &str) -> serde_json::Value {
+        serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "street_address": street,
+            "latitude": null,
+            "longitude": null,
+            "place_id": null
+        })
+    }
+
     #[test]
-    fn a_deferred_street_edit_changes_only_the_street_fields() {
+    fn a_deferred_street_edit_clears_the_old_pin_and_keeps_the_rest() {
+        // Regression (desktop 1.4.123, fix 6): a street edit saved while the
+        // office was unreachable kept the old point and place id in the
+        // cache, so the next delivery order was zoned and priced from the
+        // previous location. The explicit nulls now clear both, here and in
+        // the queued PATCH.
         let _keyring = crate::tests::fake_keyring::install_empty();
         let db = customer_test_db();
         seed_office_customer_with_address(
             &db,
             office_address(OFFICE_ADDRESS_ID, OFFICE_ID, Some(LOCATED)),
         );
-        let edit = office_address_edit(serde_json::json!({
-            "customer_id": OFFICE_ID,
-            "street_address": "Synthetic Street 14"
-        }));
+        let edit = office_address_edit(street_edit_with_cleared_pin("Synthetic Street 14"));
 
         let (address, _, deferred) = apply_address_edit(
             &db,
@@ -5252,16 +5291,169 @@ mod dto_tests {
             ("name_on_ringer", "Synthetic Bell"),
             ("notes", "Side door"),
             ("delivery_notes", "Side door"),
-            ("place_id", "synthetic-place-1"),
         ] {
             assert_eq!(address[key], value, "{key}: {address}");
         }
-        assert_point(&address, Some(LOCATED));
+        assert_point(&address, None);
+        for key in ["place_id", "google_place_id"] {
+            assert!(address[key].is_null(), "{key}: {address}");
+        }
         assert_eq!(address["version"], 4);
         assert_eq!(
-            customer_row(&db, "customer_addresses", "UPDATE")[0].3["street_address"],
-            "Synthetic Street 14"
+            cached(&db, OFFICE_ID).expect("cached")["addresses"][0],
+            address
         );
+        // The queued PATCH carries the clear, so the office replay drops them too.
+        let body = &customer_row(&db, "customer_addresses", "UPDATE")[0].3;
+        assert_eq!(body["street_address"], "Synthetic Street 14");
+        for key in ["latitude", "longitude", "place_id"] {
+            assert_eq!(
+                body.get(key),
+                Some(&serde_json::Value::Null),
+                "{key}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deferred_edit_without_point_keys_keeps_the_point_and_place() {
+        // An omitted key still means "unchanged": a floor-only edit keeps the
+        // stored point and place id, and its PATCH does not mention them.
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        seed_office_customer_with_address(
+            &db,
+            office_address(OFFICE_ADDRESS_ID, OFFICE_ID, Some(LOCATED)),
+        );
+        let edit = office_address_edit(serde_json::json!({
+            "customer_id": OFFICE_ID,
+            "floor_number": "5"
+        }));
+
+        let (address, _, deferred) = apply_address_edit(
+            &db,
+            OFFICE_ID,
+            OFFICE_ADDRESS_ID,
+            &edit,
+            Some(Err(AdminFetchError::transport("offline"))),
+        );
+
+        assert!(deferred);
+        assert_eq!(address["floor_number"], "5");
+        assert_point(&address, Some(LOCATED));
+        assert_eq!(address["place_id"], "synthetic-place-1");
+        assert_eq!(address["google_place_id"], "synthetic-place-1");
+        let body = &customer_row(&db, "customer_addresses", "UPDATE")[0].3;
+        for key in [
+            "coordinates",
+            "latitude",
+            "longitude",
+            "place_id",
+            "google_place_id",
+        ] {
+            assert!(body.get(key).is_none(), "{key}: {body}");
+        }
+    }
+
+    #[test]
+    fn a_street_edit_folded_into_a_queued_address_insert_drops_the_old_place() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let address_id = "addr-unsent-14";
+        let saved = office_address(address_id, OFFICE_ID, Some(LOCATED));
+        seed_office_customer_with_address(&db, saved.clone());
+        let mut insert_body = build_remote_address_body(&saved);
+        insert_body["customer_id"] = serde_json::json!(OFFICE_ID);
+        assert_eq!(insert_body["place_id"], "synthetic-place-1");
+        enqueue_customer_sync_item(
+            &db,
+            "customer_addresses",
+            address_id,
+            "INSERT",
+            &insert_body,
+            1,
+        )
+        .expect("queue address insert");
+
+        let edit = office_address_edit(street_edit_with_cleared_pin("Synthetic Street 14"));
+        assert!(matches!(
+            merge_address_edit_into_queued_address_insert(&db, address_id, &edit).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let insert = customer_row(&db, "customer_addresses", "INSERT")[0]
+            .3
+            .clone();
+        assert_eq!(insert["street_address"], "Synthetic Street 14");
+        for key in [
+            "coordinates",
+            "latitude",
+            "longitude",
+            "place_id",
+            "google_place_id",
+        ] {
+            assert!(insert.get(key).is_none(), "{key}: {insert}");
+        }
+        let (address, _, deferred) = apply_address_edit(&db, OFFICE_ID, address_id, &edit, None);
+        assert!(deferred);
+        assert_point(&address, None);
+        assert!(address["place_id"].is_null(), "{address}");
+        assert!(address["google_place_id"].is_null(), "{address}");
+    }
+
+    #[test]
+    fn a_street_edit_folded_into_an_offline_customer_insert_drops_the_old_place() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = customer_test_db();
+        let local_id = create_local_customer(&db, "6948128474");
+        let address_id = cached(&db, &local_id).expect("cached")["addresses"][0]["id"]
+            .as_str()
+            .expect("address id")
+            .to_string();
+        let local_edit = |updates: serde_json::Value| {
+            build_address_update_queue_payload(&updates, &local_id, false, 1).expect("edit body")
+        };
+        // Locate it with a picked place first.
+        let located = local_edit(serde_json::json!({
+            "customer_id": local_id,
+            "latitude": LOCATED.0,
+            "longitude": LOCATED.1,
+            "place_id": "synthetic-place-1"
+        }));
+        assert!(matches!(
+            merge_address_edit_into_customer_insert(&db, &local_id, &located).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        assert_eq!(
+            customer_row(&db, "customers", "INSERT")[0].3["place_id"],
+            "synthetic-place-1"
+        );
+        let (address, _, _) = apply_address_edit(&db, &local_id, &address_id, &located, None);
+        assert_point(&address, Some(LOCATED));
+        assert_eq!(address["place_id"], "synthetic-place-1");
+
+        let mut street = street_edit_with_cleared_pin("Synthetic Street 14");
+        street["customer_id"] = serde_json::json!(local_id);
+        let edit = local_edit(street);
+        assert!(matches!(
+            merge_address_edit_into_customer_insert(&db, &local_id, &edit).expect("fold"),
+            sync_queue::QueuedInsertMerge::Merged { .. }
+        ));
+        let insert = customer_row(&db, "customers", "INSERT")[0].3.clone();
+        assert_eq!(insert["address"], "Synthetic Street 14");
+        for key in [
+            "coordinates",
+            "latitude",
+            "longitude",
+            "place_id",
+            "google_place_id",
+        ] {
+            assert!(insert.get(key).is_none(), "{key}: {insert}");
+        }
+        let (address, _, deferred) = apply_address_edit(&db, &local_id, &address_id, &edit, None);
+        assert!(deferred);
+        assert_eq!(address["street_address"], "Synthetic Street 14");
+        assert_point(&address, None);
+        assert!(address["place_id"].is_null(), "{address}");
     }
 
     #[test]

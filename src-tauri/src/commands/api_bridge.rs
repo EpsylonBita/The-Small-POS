@@ -1,7 +1,6 @@
 use chrono::Utc;
-use zeroize::Zeroizing;
 
-use crate::{api, db, read_local_json, storage, value_str, write_local_json};
+use crate::{api, db, read_local_json, value_str, write_local_json};
 
 const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
 
@@ -219,6 +218,10 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         // response must never stand in for them offline.
         && route != "/api/pos/gift-cards"
         && !route.starts_with("/api/pos/gift-cards/")
+        // Manual card admission is decided only by a fresh server answer
+        // (ManualCardAdmissionService refuses a cached one): caching it would
+        // only store a stale answer nothing may use (review 06/10/2026).
+        && route != "/api/pos/payments/manual-admission"
         && !is_caller_id_admin_route(path)
         && !is_repair_admin_route(path)
         && !is_delta_cursor_admin_get(path)
@@ -307,6 +310,11 @@ fn admin_fetch_error_payload(
     });
     if let Some(status) = status {
         payload["status"] = serde_json::json!(status);
+    }
+    // The office's bounded machine code (e.g. SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS),
+    // so a screen can name the refusal in words instead of its English text.
+    if let Some(code) = error.code() {
+        payload["code"] = serde_json::json!(code);
     }
     payload
 }
@@ -1181,6 +1189,31 @@ mod dto_tests {
     }
 
     #[test]
+    fn admin_fetch_error_payload_carries_the_office_refusal_code() {
+        // Fix 10 (desktop 1.4.124): the supplier screen could not name the
+        // paid-invoice amount lock because the bridge dropped the office's
+        // typed code and passed only its English sentence.
+        let refusal = api::AdminFetchError::from_http_response_for_test(
+            409,
+            r#"{"success":false,"error":"Invoice amount cannot change after a payment has been recorded","code":"SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS"}"#,
+        );
+        let payload = admin_fetch_error_payload(&refusal, false);
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["status"], 409);
+        assert_eq!(payload["code"], "SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS");
+
+        // No code in the body (or no body): no code key at all.
+        for error in [
+            api::AdminFetchError::from_http_response_for_test(500, "upstream exploded"),
+            api::AdminFetchError::transport("offline"),
+        ] {
+            assert!(admin_fetch_error_payload(&error, true)
+                .get("code")
+                .is_none());
+        }
+    }
+
+    #[test]
     fn observed_admin_denial_purges_cache_but_outages_keep_offline_data() {
         let db = test_db_state();
         let path = "/api/pos/kds?branch_id=branch-1";
@@ -1236,6 +1269,16 @@ mod dto_tests {
             );
         }
         assert!(is_cacheable_admin_get("GET", "/api/pos/gift-cardsets"));
+    }
+
+    #[test]
+    fn manual_card_admission_is_never_offline_cacheable() {
+        for path in [
+            "/api/pos/payments/manual-admission",
+            "/api/pos/payments/manual-admission?terminal_id=terminal-1",
+        ] {
+            assert!(!is_cacheable_admin_get("GET", path), "{path}");
+        }
     }
 
     #[test]

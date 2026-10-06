@@ -1542,6 +1542,106 @@ const buildDuplicateCustomerConflictIssues = (
   return { suppressedRows, issues: [issue] };
 };
 
+/// The server's machine code for a money write against a shift whose figures
+/// a remote close froze (the native replay stores the conflict as
+/// `SERVER_CONFLICT_REMOTE_HANDOVER_SNAPSHOT_FROZEN: <sentence>`).
+const REMOTE_HANDOVER_SNAPSHOT_FROZEN_MARKER = 'REMOTE_HANDOVER_SNAPSHOT_FROZEN';
+
+const isRemoteHandoverFrozenRow = (item: SyncQueueItem): boolean =>
+  (item.status === 'conflict' || item.status === 'failed') &&
+  (item.errorMessage ?? '').includes(REMOTE_HANDOVER_SNAPSHOT_FROZEN_MARKER);
+
+/// Money records the server refused because their shift was closed on another
+/// device (06/10/2026). A retry never succeeds and the native replay never
+/// retries them: the operator reads why in plain words and what a manager
+/// does, instead of a raw conflict code.
+const buildRemoteHandoverFrozenIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isRemoteHandoverFrozenRow);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+  const sample = rows[0];
+  return {
+    suppressedRows: new Set(rows.map((item) => `${item.tableName}:${item.recordId}`)),
+    issues: [
+      {
+        id: `remote-handover-snapshot-frozen-${sample.id}`,
+        code: 'remote_handover_snapshot_frozen',
+        severity: 'error',
+        status: 'blocking',
+        entityType: 'parity_module',
+        entityId: sample.moduleType || sample.tableName,
+        titleKey: 'recovery.issues.remoteHandoverSnapshotFrozen.title',
+        summaryKey: 'recovery.issues.remoteHandoverSnapshotFrozen.summary',
+        guidanceKey: 'recovery.issues.remoteHandoverSnapshotFrozen.guidance',
+        actions: [createContactDevAction()],
+        params: {
+          count: rows.length,
+          moduleType: sample.moduleType || null,
+          moduleLabel: describeModule(sample.moduleType || 'financial'),
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          sampleError: sample.errorMessage ?? null,
+        },
+      },
+    ],
+  };
+};
+
+/// A paid order edit that desktop 1.4.122 saved without its identity, which
+/// the server then refused for good (a newer edit exists, or another terminal
+/// owns the order). The native replay marks it `LEGACY_EDIT_REVIEW_REQUIRED`
+/// and never sends it again (review 06/10/2026); nothing was collected twice.
+/// The operator reads what happened and that a manager reviews the order,
+/// instead of a raw English conflict.
+const LEGACY_EDIT_REVIEW_MARKER = 'LEGACY_EDIT_REVIEW_REQUIRED';
+
+const isLegacyEditReviewRow = (item: SyncQueueItem): boolean =>
+  item.tableName === 'orders' &&
+  (item.status === 'conflict' || item.status === 'failed') &&
+  (item.errorMessage ?? '').startsWith(LEGACY_EDIT_REVIEW_MARKER);
+
+const buildLegacyEditReviewIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isLegacyEditReviewRow);
+  if (rows.length === 0) {
+    return { issues: [], suppressedRows: new Set() };
+  }
+  const sample = rows[0];
+  const payload = parseJsonPayload(sample.data);
+  return {
+    suppressedRows: new Set(rows.map((item) => `${item.tableName}:${item.recordId}`)),
+    issues: [
+      {
+        id: `legacy-edit-review-${sample.id}`,
+        code: 'legacy_edit_review_required',
+        severity: 'error',
+        status: 'blocking',
+        entityType: 'order',
+        entityId: sample.recordId,
+        titleKey: 'recovery.issues.legacyEditReview.title',
+        summaryKey: 'recovery.issues.legacyEditReview.summary',
+        guidanceKey: 'recovery.issues.legacyEditReview.guidance',
+        actions: [createContactDevAction()],
+        params: {
+          count: rows.length,
+          orderId: payloadString(payload, ['orderId', 'order_id']) || sample.recordId,
+          orderNumber: payloadString(payload, ['orderNumber', 'order_number']),
+          moduleType: sample.moduleType || 'orders',
+          sampleItemId: sample.id,
+          sampleTableName: sample.tableName,
+          sampleRecordId: sample.recordId,
+          sampleError: sample.errorMessage ?? null,
+        },
+      },
+    ],
+  };
+};
+
 const buildParityModuleIssues = (
   parityItems: SyncQueueItem[],
   suppressedRows: Set<string>,
@@ -2020,6 +2120,14 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of duplicateCustomerConflictResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const remoteHandoverFrozenResult = buildRemoteHandoverFrozenIssues(parityItems);
+  for (const suppressedRow of remoteHandoverFrozenResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
+  const legacyEditReviewResult = buildLegacyEditReviewIssues(parityItems);
+  for (const suppressedRow of legacyEditReviewResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   // After the specific customer recipes: whatever customer-directory row they
   // did not cover gets the general non-blocking customer card.
   const customerDirectoryFailureResult = buildCustomerDirectoryFailureIssues(
@@ -2037,6 +2145,8 @@ export function buildSyncRecoveryIssues({
     catalogAvailabilityResult.issues.length > 0 ||
     customerAddressDefaultConflictResult.issues.length > 0 ||
     duplicateCustomerConflictResult.issues.length > 0 ||
+    remoteHandoverFrozenResult.issues.length > 0 ||
+    legacyEditReviewResult.issues.length > 0 ||
     customerDirectoryFailureResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth, localizePaymentBlocker)) {
@@ -2075,6 +2185,12 @@ export function buildSyncRecoveryIssues({
     pushIssue(issues, issue);
   }
   for (const issue of duplicateCustomerConflictResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of remoteHandoverFrozenResult.issues) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of legacyEditReviewResult.issues) {
     pushIssue(issues, issue);
   }
   for (const issue of customerDirectoryFailureResult.issues) {

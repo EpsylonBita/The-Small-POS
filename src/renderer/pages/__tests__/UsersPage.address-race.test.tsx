@@ -59,8 +59,11 @@ describe('customer directory address editing', () => {
     expect(screen.queryByDisplayValue('Stale city')).toBeNull();
     fireEvent.click(screen.getByText('Save'));
     await waitFor(() => expect(state.save).toHaveBeenCalled());
-    expect(state.save.mock.calls[0][1].latitude).toBeUndefined();
-    expect(state.save.mock.calls[0][1].longitude).toBeUndefined();
+    // A changed destination clears its point explicitly (desktop 1.4.124):
+    // `undefined` vanished from the IPC payload and kept the old pin offline.
+    expect(state.save.mock.calls[0][1].latitude).toBeNull();
+    expect(state.save.mock.calls[0][1].longitude).toBeNull();
+    expect(state.save.mock.calls[0][1].place_id).toBeNull();
   });
 
 
@@ -201,6 +204,8 @@ describe('customer directory address editing', () => {
     fireEvent.click(screen.getByLabelText('customer.actions.editAddress'));
     fireEvent.click(screen.getByText('Save'));
     await waitFor(() => expect(state.save).toHaveBeenCalledTimes(2));
+    expect(state.save.mock.calls[0][1].latitude).toBeNull();
+    expect(state.save.mock.calls[0][1].place_id).toBeNull();
     expect(state.save.mock.calls[1][1].latitude).toBeUndefined();
     expect(state.save.mock.calls[1][1].longitude).toBeUndefined();
     expect(state.save.mock.calls[1][1].place_id).toBeUndefined();
@@ -235,8 +240,10 @@ describe('customer directory address editing', () => {
     await waitFor(() => expect(screen.getByDisplayValue('Suggestion address')).toBeTruthy());
     fireEvent.click(screen.getByText('Save'));
     await waitFor(() => expect(state.save).toHaveBeenCalled());
-    expect(state.save.mock.calls[0][1].latitude).toBeUndefined();
-    expect(state.save.mock.calls[0][1].longitude).toBeUndefined();
+    // The picked place has no usable point: the old one is cleared, not kept.
+    expect(state.save.mock.calls[0][1].latitude).toBeNull();
+    expect(state.save.mock.calls[0][1].longitude).toBeNull();
+    expect(state.save.mock.calls[0][1].place_id).toBe('place');
     expect(state.save.mock.calls[0][1].coordinate_source).toBeUndefined();
   });
 });

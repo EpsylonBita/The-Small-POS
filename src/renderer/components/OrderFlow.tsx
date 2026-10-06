@@ -2330,6 +2330,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       <EditSettlementDeltaModal isOpen={recoveredEditPrompt !== null}
         mode={recoveredEditPrompt?.preview.requiredAction === 'refund' ? 'refund' : 'collect'}
+        allowedMethods={(recoveredEditPrompt?.preview as { allowedMethods?: Array<'cash' | 'card'> } | undefined)?.allowedMethods}
         amount={recoveredEditPrompt?.amount ?? 0} onConfirm={confirmRecoveredEdit}
         onCancel={() => { recoveredEditPrompt?.reject(new Error('EDIT_SETTLEMENT_CANCELLED')); setRecoveredEditPrompt(null); }} />
 

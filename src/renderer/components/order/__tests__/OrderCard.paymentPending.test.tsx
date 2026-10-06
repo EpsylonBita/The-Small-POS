@@ -129,6 +129,20 @@ describe('OrderCard platform payment ownership', () => {
     expect(screen.getByTestId('order-card-platform-payment').textContent).toBe('PLATFORM PAYMENT');
   });
 
+  // 06/10/2026: a takeaway has no courier, and the Wolt and efood ingests write
+  // delivery_provider null. The ledger still settles its online payment as
+  // prepaid platform money, so the card says so too.
+  it.each([
+    { prepaid: true, payment_method: 'online' },
+    { prepaid: true, payment_method: 'online', delivery_provider: null },
+    { prepaid: true, payment_method: 'online', delivery_provider: '' },
+    { payment_method: 'online', delivery_provider: null },
+  ])('shows prepaid money with no recorded courier as platform-settled: %j', disposition => {
+    renderCard(platformOrder(disposition));
+    expect(screen.getByTestId('order-card-platform-payment').textContent).toBe('PLATFORM PAYMENT');
+    expect(screen.getByRole('img', { name: 'Payment settled by platform; the store does not collect' })).toBeTruthy();
+  });
+
   it('accepts normalized source and JSON per-order ownership from local sync', () => {
     renderCard(platformOrder(null, {
       plugin: ' E-Food ',
@@ -139,7 +153,8 @@ describe('OrderCard platform payment ownership', () => {
 
   it.each([
     null, [], {},
-    { prepaid: true, payment_method: 'online' },
+    { prepaid: false, payment_method: 'cash', delivery_provider: null },
+    { prepaid: true, payment_method: 'cash', delivery_provider: null },
     { prepaid: true, payment_method: 'online', delivery_provider: 'unknown' },
     { delivery_provider: true },
     { payment_method: 'cash', delivery_provider: 'vendor_delivery', prepaid: false },

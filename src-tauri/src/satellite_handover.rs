@@ -1,5 +1,13 @@
 //! Durable main-register receipt of satellite cash. Capture precedes remote close;
 //! the server claim and local drawer credit are independently idempotent.
+//!
+//! States: `pending` (captured, the server claim is retried), `applied` (the
+//! proof credited the drawer once), `refused` (the server, or its proof,
+//! answered for good that this claim cannot be made: retrying cannot change
+//! it) and `released` (a manager removed a refused claim as a close blocker;
+//! no drawer was credited). Fix review 06/10/2026: a refusal used to stay
+//! `pending`, retried forever, and kept the main cashier's close and the Z
+//! blocked, in English only.
 use crate::{db::DbState, money::Cents};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -18,11 +26,23 @@ struct Handover {
     counted_cents: i64,
     closed_by: Option<String>,
     applied: bool,
+    /// `pending`, `applied`, `refused` or `released`.
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    refusal_code: Option<String>,
 }
 
-pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS satellite_cash_handovers (
-        id TEXT PRIMARY KEY,
+/// The refusal a main cashier's close meets while a captured handover is
+/// still being claimed.
+pub(crate) const HANDOVER_PENDING: &str = "SATELLITE_HANDOVER_PENDING";
+/// The refusal a main cashier's close meets while a refused handover is not
+/// released by a manager.
+pub(crate) const HANDOVER_REFUSED: &str = "SATELLITE_HANDOVER_REFUSED";
+/// The recovery log action of a manager's release.
+pub(crate) const RELEASE_ACTION_ID: &str = "satellite_handover_released";
+
+const TABLE_COLUMNS: &str = "id TEXT PRIMARY KEY,
         satellite_shift_id TEXT NOT NULL UNIQUE,
         branch_id TEXT NOT NULL,
         terminal_id TEXT NOT NULL,
@@ -32,19 +52,77 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
         opening_cents INTEGER NOT NULL CHECK(opening_cents >= 0),
         counted_cents INTEGER NOT NULL CHECK(counted_cents >= 0),
         closed_by TEXT,
-        state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','applied')),
+        state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','applied','refused','released')),
         last_error TEXT,
         proof_json TEXT,
         created_at TEXT NOT NULL,
-        applied_at TEXT
-    ); CREATE INDEX IF NOT EXISTS satellite_cash_handovers_receiver ON satellite_cash_handovers(cashier_shift_id,state);")
-        .map_err(|e| format!("satellite handover schema: {e}"))
+        applied_at TEXT,
+        refusal_code TEXT,
+        refusal_status INTEGER,
+        refused_at TEXT,
+        released_at TEXT,
+        released_by TEXT,
+        release_audit_id TEXT";
+const RECEIVER_INDEX: &str = "CREATE INDEX IF NOT EXISTS satellite_cash_handovers_receiver ON satellite_cash_handovers(cashier_shift_id,state);";
+
+pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS satellite_cash_handovers ({TABLE_COLUMNS}); {RECEIVER_INDEX}"
+    ))
+    .map_err(|e| format!("satellite handover schema: {e}"))?;
+    upgrade_states(conn)
+}
+
+/// A table created before the refused/released states (schema v96) is
+/// rebuilt once with them, every captured row kept exactly as it was.
+fn upgrade_states(conn: &Connection) -> Result<(), String> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'satellite_cash_handovers'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("inspect satellite handover schema: {e}"))?;
+    if sql.is_none_or(|sql| sql.contains("'refused'")) {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT satellite_handover_states")
+        .map_err(|e| format!("begin satellite handover states: {e}"))?;
+    let rebuilt = conn.execute_batch(&format!(
+        "CREATE TABLE satellite_cash_handovers_v2 ({TABLE_COLUMNS});
+         INSERT INTO satellite_cash_handovers_v2 (id, satellite_shift_id, branch_id, terminal_id,
+             cashier_shift_id, drawer_id, currency, opening_cents, counted_cents, closed_by, state,
+             last_error, proof_json, created_at, applied_at)
+         SELECT id, satellite_shift_id, branch_id, terminal_id, cashier_shift_id, drawer_id,
+             currency, opening_cents, counted_cents, closed_by, state, last_error, proof_json,
+             created_at, applied_at
+         FROM satellite_cash_handovers;
+         DROP TABLE satellite_cash_handovers;
+         ALTER TABLE satellite_cash_handovers_v2 RENAME TO satellite_cash_handovers;
+         {RECEIVER_INDEX}"
+    ));
+    match rebuilt {
+        Ok(()) => conn
+            .execute_batch("RELEASE satellite_handover_states")
+            .map_err(|e| format!("commit satellite handover states: {e}")),
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO satellite_handover_states; RELEASE satellite_handover_states",
+            );
+            Err(format!("upgrade satellite handover states: {error}"))
+        }
+    }
 }
 
 fn read(conn: &Connection, source: &str) -> Result<Option<Handover>, String> {
-    conn.query_row("SELECT id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,state FROM satellite_cash_handovers WHERE satellite_shift_id=?1",[source],|row| Ok(Handover {
-        id:row.get(0)?,source:row.get(1)?,branch:row.get(2)?,terminal:row.get(3)?,cashier:row.get(4)?,drawer:row.get(5)?,currency:row.get(6)?,opening_cents:row.get(7)?,counted_cents:row.get(8)?,closed_by:row.get(9)?,applied:row.get::<_,String>(10)?=="applied",
-    })).optional().map_err(|e|format!("read satellite handover: {e}"))
+    conn.query_row("SELECT id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,state,refusal_code FROM satellite_cash_handovers WHERE satellite_shift_id=?1",[source],|row| {
+        let state: String = row.get(10)?;
+        Ok(Handover {
+            id:row.get(0)?,source:row.get(1)?,branch:row.get(2)?,terminal:row.get(3)?,cashier:row.get(4)?,drawer:row.get(5)?,currency:row.get(6)?,opening_cents:row.get(7)?,counted_cents:row.get(8)?,closed_by:row.get(9)?,applied:state=="applied",
+            state, refusal_code: row.get(11)?,
+        })
+    }).optional().map_err(|e|format!("read satellite handover: {e}"))
 }
 
 fn money(value: f64) -> Result<i64, String> {
@@ -132,17 +210,41 @@ fn capture(conn: &Connection, payload: &Value) -> Result<Handover, String> {
         counted_cents,
         closed_by,
         applied: false,
+        state: "pending".to_string(),
+        refusal_code: None,
     };
     conn.execute("INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![intent.id,intent.source,intent.branch,intent.terminal,intent.cashier,intent.drawer,intent.currency,intent.opening_cents,intent.counted_cents,intent.closed_by,chrono::Utc::now().to_rfc3339()]).map_err(|e|format!("capture satellite handover: {e}"))?;
     Ok(intent)
 }
 
+/// A cashier shift that receives satellite cash closes only once every
+/// captured handover is applied, or refused and released by a manager. The
+/// refusal names its code (`SATELLITE_HANDOVER_PENDING`, or
+/// `SATELLITE_HANDOVER_REFUSED: <server code>`) for the shift screen to say in
+/// till language.
 pub(crate) fn ensure_receiver_can_close(conn: &Connection, shift: &str) -> Result<(), String> {
-    let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM satellite_cash_handovers WHERE cashier_shift_id=?1 AND state='pending')",[shift],|row|row.get(0)).map_err(|e|e.to_string())?;
-    if pending {
-        return Err("SATELLITE_HANDOVER_PENDING: reconnect to finish receiving satellite cash before closing this cashier shift".to_string());
+    ensure_schema(conn)?;
+    let blocking: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT state, refusal_code FROM satellite_cash_handovers
+             WHERE cashier_shift_id = ?1 AND state IN ('pending', 'refused')
+             ORDER BY CASE state WHEN 'refused' THEN 0 ELSE 1 END, created_at
+             LIMIT 1",
+            [shift],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match blocking {
+        Some((state, code)) if state == "refused" => Err(format!(
+            "{HANDOVER_REFUSED}: {}: the server refused this satellite cash handover for good; a manager can release it without crediting this drawer",
+            code.unwrap_or_else(|| "SATELLITE_HANDOVER_REFUSED_UNKNOWN".to_string())
+        )),
+        Some(_) => Err(format!(
+            "{HANDOVER_PENDING}: reconnect to finish receiving satellite cash before closing this cashier shift"
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn request(intent: &Handover) -> Value {
@@ -151,6 +253,96 @@ fn request(intent: &Handover) -> Value {
 
 fn outcome(intent: &Handover, applied: bool, error: Option<&str>) -> Value {
     json!({"success":true,"applied":applied,"pending":!applied,"handoverId":intent.id,"cashierShiftId":intent.cashier,"drawerId":intent.drawer,"error":error})
+}
+
+/// A refused claim: final, never resent. `error` names the refusal for the
+/// shift screen; no drawer was credited.
+fn refused_outcome(intent: &Handover, code: &str) -> Value {
+    json!({"success":false,"applied":false,"pending":false,"refused":true,
+        "released":intent.state=="released","errorCode":HANDOVER_REFUSED,"refusalCode":code,
+        "error":format!("{HANDOVER_REFUSED}: {code}"),"handoverId":intent.id,
+        "cashierShiftId":intent.cashier,"drawerId":intent.drawer})
+}
+
+/// How one failed claim ends: retried, or refused for good.
+enum ClaimFailure {
+    Retry(String),
+    Refused {
+        code: String,
+        status: Option<u16>,
+        message: String,
+    },
+}
+
+/// The server's own answer refused the claim and the same claim can never
+/// succeed: a 4xx with the application's error envelope (not a platform
+/// page), except authentication, timeouts and rate limits, which heal.
+fn classify_http_failure(error: &crate::api::AdminFetchError) -> ClaimFailure {
+    match error.status() {
+        Some(status)
+            if (400..500).contains(&status)
+                && !matches!(status, 401 | 408 | 425 | 429)
+                && error.has_app_error_body() =>
+        {
+            ClaimFailure::Refused {
+                code: error
+                    .code()
+                    .filter(|code| {
+                        code.bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    })
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("SATELLITE_HANDOVER_REFUSED_HTTP_{status}")),
+                status: Some(status),
+                message: error.to_string(),
+            }
+        }
+        _ => ClaimFailure::Retry(error.to_string()),
+    }
+}
+
+/// A proof the server returned that cannot credit this captured claim, or a
+/// receiving drawer that closed: the server's receipt is immutable, so a
+/// retry would meet the same answer.
+fn classify_proof_failure(error: String) -> ClaimFailure {
+    for code in [
+        "SATELLITE_HANDOVER_PROOF_MISMATCH",
+        "SATELLITE_HANDOVER_VARIANCE_PROOF_MISMATCH",
+        "SATELLITE_HANDOVER_RECEIVER_CHANGED",
+    ] {
+        if error.starts_with(code) {
+            return ClaimFailure::Refused {
+                code: code.to_string(),
+                status: None,
+                message: error,
+            };
+        }
+    }
+    ClaimFailure::Retry(error)
+}
+
+fn mark_refused(
+    conn: &Connection,
+    intent: &Handover,
+    code: &str,
+    status: Option<u16>,
+    message: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE satellite_cash_handovers
+            SET state = 'refused', refusal_code = ?1, refusal_status = ?2, refused_at = ?3,
+                last_error = ?4
+          WHERE id = ?5 AND state = 'pending'",
+        params![
+            code,
+            status.map(i64::from),
+            chrono::Utc::now().to_rfc3339(),
+            message,
+            intent.id
+        ],
+    )
+    .map_err(|e| format!("record the satellite handover refusal: {e}"))?;
+    Ok(())
 }
 
 fn applied_outcome(conn: &Connection, intent: &Handover) -> Result<Value, String> {
@@ -240,6 +432,15 @@ async fn send(
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         return applied_outcome(&conn, intent);
     }
+    if matches!(intent.state.as_str(), "refused" | "released") {
+        return Ok(refused_outcome(
+            intent,
+            intent
+                .refusal_code
+                .as_deref()
+                .unwrap_or("SATELLITE_HANDOVER_REFUSED_UNKNOWN"),
+        ));
+    }
     // Reconfiguration cannot replay another terminal's cash claim through its credentials.
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -255,7 +456,7 @@ async fn send(
             ));
         }
     }
-    let response = crate::api::fetch_from_admin(
+    let response = crate::api::fetch_from_admin_detailed(
         admin,
         api_key,
         "/api/pos/shifts/remote-checkout",
@@ -263,16 +464,35 @@ async fn send(
         Some(request(intent)),
     )
     .await;
-    let result = response.and_then(|body| {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        apply_proof(&conn, intent, &body)
-    });
+    let result = match response {
+        Ok(body) => {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            apply_proof(&conn, intent, &body).map_err(classify_proof_failure)
+        }
+        Err(error) => Err(classify_http_failure(&error)),
+    };
     match result {
         Ok(()) => {
             let conn = db.conn.lock().map_err(|error| error.to_string())?;
             applied_outcome(&conn, intent)
         }
-        Err(error) => {
+        Err(ClaimFailure::Refused {
+            code,
+            status,
+            message,
+        }) => {
+            // Final: never retried, and the close says so until a manager
+            // releases it (fix review 06/10/2026).
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            mark_refused(&conn, intent, &code, status, &message)?;
+            tracing::warn!(
+                handover_id = %intent.id,
+                code = %code,
+                "Satellite cash handover refused for good"
+            );
+            Ok(refused_outcome(intent, &code))
+        }
+        Err(ClaimFailure::Retry(error)) => {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             conn.execute(
                 "UPDATE satellite_cash_handovers SET last_error=?1 WHERE id=?2 AND state='pending'",
@@ -287,11 +507,22 @@ async fn send(
 pub(crate) async fn record(db: &DbState, payload: &Value) -> Result<Value, String> {
     let intent = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_schema(&conn)?;
         capture(&conn, payload)?
     };
     if intent.applied {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         return applied_outcome(&conn, &intent);
+    }
+    if matches!(intent.state.as_str(), "refused" | "released") {
+        // The same captured claim again: its final answer, never resent.
+        return Ok(refused_outcome(
+            &intent,
+            intent
+                .refusal_code
+                .as_deref()
+                .unwrap_or("SATELLITE_HANDOVER_REFUSED_UNKNOWN"),
+        ));
     }
     let Some(admin) = crate::storage::get_credential("admin_dashboard_url") else {
         return Ok(outcome(
@@ -317,6 +548,8 @@ pub(crate) async fn recover_pending(
 ) -> Result<(), String> {
     let intents = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_schema(&conn)?;
+        // Refused and released claims are final: only pending ones retry.
         let mut stmt=conn.prepare("SELECT satellite_shift_id FROM satellite_cash_handovers WHERE state='pending' ORDER BY created_at LIMIT 20").map_err(|e|e.to_string())?;
         let sources = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -336,6 +569,226 @@ pub(crate) async fn recover_pending(
     Ok(())
 }
 
+/// The captured handovers that still hold this cashier shift's close: still
+/// claimed (`pending`) or refused for good and not released (`refused`).
+pub(crate) fn blocking_handovers(
+    conn: &Connection,
+    cashier_shift: &str,
+) -> Result<Vec<Value>, String> {
+    ensure_schema(conn)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, satellite_shift_id, currency, opening_cents, counted_cents, state,
+                    refusal_code, refusal_status, refused_at, created_at
+             FROM satellite_cash_handovers
+             WHERE cashier_shift_id = ?1 AND state IN ('pending', 'refused')
+             ORDER BY created_at",
+        )
+        .map_err(|e| format!("prepare blocking satellite handovers: {e}"))?;
+    let rows = statement
+        .query_map([cashier_shift], |row| {
+            Ok(json!({
+                "handoverId": row.get::<_, String>(0)?,
+                "satelliteShiftId": row.get::<_, String>(1)?,
+                "currency": row.get::<_, String>(2)?,
+                "openingCents": row.get::<_, i64>(3)?,
+                "countedCents": row.get::<_, i64>(4)?,
+                "state": row.get::<_, String>(5)?,
+                "refusalCode": row.get::<_, Option<String>>(6)?,
+                "refusalStatus": row.get::<_, Option<i64>>(7)?,
+                "refusedAt": row.get::<_, Option<String>>(8)?,
+                "capturedAt": row.get::<_, String>(9)?,
+            }))
+        })
+        .map_err(|e| format!("read blocking satellite handovers: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read a blocking satellite handover: {e}"))
+}
+
+fn required_text(input: &Value, key: &str, code: &str) -> Result<String, String> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| code.to_string())
+}
+
+/// A manager releases a refused satellite handover so the receiving
+/// cashier's close (and the day's Z) can go on. Nothing is credited to any
+/// drawer and the captured claim is kept as it was: only its state moves
+/// `refused` → `released`, with an audit entry naming the manager, the
+/// server's refusal and a pre-action restore point. A manager's own PIN with
+/// the order-cancel right approves it, as for the other manager decisions a
+/// cashier on shift cannot make alone (the session PIN never does).
+pub(crate) fn release(
+    db: &DbState,
+    auth_state: &crate::auth::AuthState,
+    input: &Value,
+) -> Result<Value, crate::auth::GuardedCommandError> {
+    let handover_id = required_text(input, "handoverId", "SATELLITE_HANDOVER_ID_REQUIRED")?;
+    let cashier_shift =
+        required_text(input, "cashierShiftId", "SATELLITE_HANDOVER_SHIFT_REQUIRED")?;
+    let pin = required_text(
+        input,
+        "managerPin",
+        "SATELLITE_HANDOVER_MANAGER_PIN_REQUIRED",
+    )?;
+    let note = input
+        .get("note")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+        .map(|note| note.chars().take(200).collect::<String>());
+    let check = |conn: &Connection| -> Result<Option<(String, Option<String>)>, String> {
+        ensure_schema(conn)?;
+        let row: Option<(String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT cashier_shift_id, state, refusal_code FROM satellite_cash_handovers WHERE id = ?1",
+                [&handover_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("read the satellite handover to release: {e}"))?;
+        let (shift, state, code) = row.ok_or("SATELLITE_HANDOVER_NOT_FOUND")?;
+        if shift != cashier_shift {
+            return Err("SATELLITE_HANDOVER_SHIFT_MISMATCH".to_string());
+        }
+        match state.as_str() {
+            "released" => Ok(None),
+            "refused" => Ok(Some((state, code))),
+            _ => Err("SATELLITE_HANDOVER_NOT_REFUSED: only a handover the server refused for good can be released".to_string()),
+        }
+    };
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if check(&conn)?.is_none() {
+            return Ok(
+                json!({"success":true,"released":true,"alreadyReleased":true,
+                "handoverId":handover_id,"cashierShiftId":cashier_shift}),
+            );
+        }
+    }
+    crate::auth::confirm_privileged_action(
+        Some(json!({"pin": pin, "scope": "cash_drawer_control", "approval": "void_orders"})),
+        db,
+        auth_state,
+    )?;
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidOrders,
+        db,
+        auth_state,
+    )?;
+    let manager = approver
+        .manager_staff_id
+        .ok_or("SATELLITE_HANDOVER_MANAGER_APPROVAL_REQUIRED")?;
+    let snapshot = crate::recovery::create_pre_recovery_action_snapshot(db)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let audit_id = uuid::Uuid::new_v4().to_string();
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin satellite handover release: {e}"))?;
+    let released = (|| -> Result<Value, String> {
+        let Some((_, code)) = check(&conn)? else {
+            return Ok(
+                json!({"success":true,"released":true,"alreadyReleased":true,
+                "handoverId":handover_id,"cashierShiftId":cashier_shift}),
+            );
+        };
+        let captured: Value = conn
+            .query_row(
+                "SELECT json_object('handoverId', id, 'satelliteShiftId', satellite_shift_id,
+                     'branchId', branch_id, 'terminalId', terminal_id, 'cashierShiftId', cashier_shift_id,
+                     'drawerId', drawer_id, 'currency', currency, 'openingCents', opening_cents,
+                     'countedCents', counted_cents, 'closedBy', closed_by, 'refusalCode', refusal_code,
+                     'refusalStatus', refusal_status, 'refusedAt', refused_at, 'lastError', last_error,
+                     'capturedAt', created_at)
+                 FROM satellite_cash_handovers WHERE id = ?1",
+                [&handover_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| format!("read the satellite handover to release: {e}"))
+            .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))?;
+        let changed = conn
+            .execute(
+                "UPDATE satellite_cash_handovers
+                    SET state = 'released', released_at = ?1, released_by = ?2, release_audit_id = ?3
+                  WHERE id = ?4 AND state = 'refused'",
+                params![now, manager, audit_id, handover_id],
+            )
+            .map_err(|e| format!("release the satellite handover: {e}"))?;
+        if changed != 1 {
+            return Err("SATELLITE_HANDOVER_RELEASE_CONFLICT".to_string());
+        }
+        let evidence = json!({"version":1,"handover":captured,"drawerCredited":false,
+            "approvedBy":manager,"via":approver.via,"note":note,"snapshotId":snapshot.id,
+            "releasedAt":now});
+        conn.execute(
+            "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
+                 shift_id, snapshot_point_id, success, message, actor_staff_id, payload_json, created_at)
+             VALUES (?1, ?2, ?3, 'satellite_cash_handover', ?4, ?5, ?6, 1,
+                 'Refused satellite cash handover released as a close blocker; no drawer was credited',
+                 ?7, ?8, ?9)",
+            params![
+                audit_id,
+                RELEASE_ACTION_ID,
+                code.unwrap_or_else(|| HANDOVER_REFUSED.to_string()),
+                handover_id,
+                cashier_shift,
+                snapshot.id,
+                manager,
+                evidence.to_string(),
+                now
+            ],
+        )
+        .map_err(|e| format!("audit the satellite handover release: {e}"))?;
+        Ok(
+            json!({"success":true,"released":true,"alreadyReleased":false,
+            "handoverId":handover_id,"cashierShiftId":cashier_shift,"auditId":audit_id,
+            "snapshotId":snapshot.id}),
+        )
+    })();
+    match released {
+        Ok(answer) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit satellite handover release: {e}"))?;
+            Ok(answer)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error.into())
+        }
+    }
+}
+
+/// The shift screen's satellite handover recovery: `list` the handovers that
+/// hold a cashier's close, or `release` a refused one (manager).
+#[tauri::command]
+pub fn shift_satellite_handover_recovery(
+    arg0: Option<Value>,
+    db: tauri::State<'_, DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
+) -> Result<Value, crate::auth::GuardedCommandError> {
+    let input = arg0.ok_or("Missing satellite handover recovery payload")?;
+    match input.get("action").and_then(Value::as_str) {
+        Some("list") => {
+            let shift = required_text(
+                &input,
+                "cashierShiftId",
+                "SATELLITE_HANDOVER_SHIFT_REQUIRED",
+            )?;
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            Ok(json!({"success": true, "handovers": blocking_handovers(&conn, &shift)?}))
+        }
+        Some("release") => {
+            let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+            release(&db, &auth_state, &input)
+        }
+        _ => Err("SATELLITE_HANDOVER_RECOVERY_ACTION_INVALID".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +796,9 @@ mod tests {
     const CASHIER: &str = "22222222-2222-4222-8222-222222222222";
     fn seed(conn: &Connection) {
         crate::db::run_migrations_for_test(conn);
+        seed_rows(conn);
+    }
+    fn seed_rows(conn: &Connection) {
         for (category, key, value) in [
             ("terminal", "branch_id", "b1"),
             ("terminal", "terminal_id", "main"),
@@ -461,5 +917,267 @@ mod tests {
         assert_eq!(original.currency, "CHF");
         apply_proof(&conn, &original, &proof(&original)).unwrap();
         assert_eq!(totals(&conn), (2000, 5525));
+    }
+
+    fn state(conn: &Connection) -> (String, Option<String>) {
+        conn.query_row(
+            "SELECT state, refusal_code FROM satellite_cash_handovers WHERE satellite_shift_id = ?1",
+            [SOURCE],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// Fix review 06/10/2026: the satellite closed its own shift first, the
+    /// server answered 409 REMOTE_HANDOVER_PROOF_UNAVAILABLE, the row stayed
+    /// pending, was retried forever and held the main cashier's close and the
+    /// Z, in English only. A 4xx refusal of the server's own is final now.
+    #[test]
+    fn satellite_handover_classifies_only_lasting_server_refusals_as_final() {
+        let refusal = |status: u16, body: &str| {
+            classify_http_failure(&crate::api::AdminFetchError::from_http_response_for_test(
+                status, body,
+            ))
+        };
+        let coded = |code: &str| format!(r#"{{"success":false,"error":"{code}","code":"{code}"}}"#);
+        for (status, code) in [
+            (409, "REMOTE_HANDOVER_PROOF_UNAVAILABLE"),
+            (409, "REMOTE_HANDOVER_GIFT_CLOSE_REQUIRED"),
+            (409, "REMOTE_HANDOVER_MOVEMENTS_UNAVAILABLE"),
+            (409, "REMOTE_HANDOVER_CURRENCY_MISMATCH"),
+            (403, "REMOTE_CHECKOUT_MAIN_ONLY"),
+        ] {
+            match refusal(status, &coded(code)) {
+                ClaimFailure::Refused {
+                    code: refused,
+                    status: Some(answered),
+                    ..
+                } => assert_eq!((refused.as_str(), answered), (code, status)),
+                _ => panic!("{status} {code} is final"),
+            }
+        }
+        match refusal(404, r#"{"success":false,"error":"Shift not found"}"#) {
+            ClaimFailure::Refused { code, .. } => {
+                assert_eq!(code, "SATELLITE_HANDOVER_REFUSED_HTTP_404")
+            }
+            _ => panic!("the server's own 404 is final"),
+        }
+        // Authentication, timeouts, rate limits, server errors and platform
+        // pages in front of the app heal: retried.
+        for (status, body) in [
+            (401, coded("UNAUTHORIZED")),
+            (408, coded("TIMEOUT")),
+            (429, coded("RATE_LIMITED")),
+            (503, coded("REMOTE_HANDOVER_RETRY")),
+            (500, coded("REMOTE_HANDOVER_FAILED")),
+            (
+                404,
+                "<!doctype html><html><body>DEPLOYMENT_NOT_FOUND</body></html>".to_string(),
+            ),
+        ] {
+            assert!(
+                matches!(refusal(status, &body), ClaimFailure::Retry(_)),
+                "{status} {body} retries"
+            );
+        }
+        assert!(matches!(
+            classify_proof_failure("SATELLITE_HANDOVER_PROOF_MISMATCH_currency".into()),
+            ClaimFailure::Refused { .. }
+        ));
+        assert!(matches!(
+            classify_proof_failure("database is locked".into()),
+            ClaimFailure::Retry(_)
+        ));
+    }
+
+    /// A proof that can never credit this claim is final too, through the
+    /// real claim path: refused once, never resent, never credited.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn satellite_handover_refused_claim_is_never_resent_and_holds_the_close_until_released() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        let intent = {
+            let conn = td.state.conn.lock().unwrap();
+            seed_rows(&conn);
+            capture(&conn, &payload()).unwrap()
+        };
+        let mut mismatch = proof(&intent);
+        mismatch["handover"]["receiving_cashier_shift_id"] = json!("another-cashier");
+        let server = crate::tests::fake_http::MockServer::new(mismatch.to_string());
+        let first = send(&td.state, &intent, &server.url, "plain-api-key")
+            .await
+            .unwrap();
+        assert_eq!(first["refused"], true, "{first}");
+        assert_eq!(server.count(), 1);
+        {
+            let conn = td.state.conn.lock().unwrap();
+            assert_eq!(
+                state(&conn),
+                (
+                    "refused".to_string(),
+                    Some("SATELLITE_HANDOVER_PROOF_MISMATCH".to_string())
+                )
+            );
+            let error = ensure_receiver_can_close(&conn, CASHIER).unwrap_err();
+            assert!(
+                error.starts_with("SATELLITE_HANDOVER_REFUSED: SATELLITE_HANDOVER_PROOF_MISMATCH"),
+                "{error}"
+            );
+            assert_eq!(totals(&conn), (0, 0));
+            assert_eq!(blocking_handovers(&conn, CASHIER).unwrap().len(), 1);
+        }
+        // Neither the sync cycle nor the same press again reaches the server.
+        recover_pending(&td.state, &server.url, "plain-api-key")
+            .await
+            .unwrap();
+        let again = record(&td.state, &payload()).await.unwrap();
+        assert_eq!(again["refused"], true);
+        assert_eq!(server.count(), 1, "a final refusal is never resent");
+    }
+
+    fn manager_on_duty(td: &crate::tests::harness::TestDb) -> crate::auth::AuthState {
+        let conn = td.state.conn.lock().unwrap();
+        crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1").unwrap();
+        crate::db::set_setting(
+            &conn,
+            "staff",
+            "staff_pin_hash",
+            &bcrypt::hash("4321", 4).unwrap(),
+        )
+        .unwrap();
+        let entry = |id: &str, pin: &str, permissions: &[&str]| {
+            json!({"id": id, "canLoginPos": true, "isActive": true, "hasPin": true,
+                "pinHash": bcrypt::hash(pin, 4).unwrap(), "permissions": permissions})
+        };
+        let directory = json!({"version": 1, "branch_id": "b1", "synced_at": "2026-10-06T07:00:00Z",
+            "staff": [entry("staff-manager", "2468", &["pos.orders.cancel", "pos.refunds.process"]),
+                      entry("staff", "1357", &["pos.orders.create"])]});
+        crate::db::set_setting(
+            &conn,
+            "staff_auth_cache",
+            "branch_b1",
+            &directory.to_string(),
+        )
+        .unwrap();
+        drop(conn);
+        let auth = crate::auth::AuthState::new();
+        crate::auth::login(Some(json!({"pin": "4321"})), &td.state, &auth)
+            .expect("the main cashier's terminal login");
+        auth
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn satellite_handover_release_is_a_managers_audited_decision_that_credits_no_drawer() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        let intent = {
+            let conn = td.state.conn.lock().unwrap();
+            seed_rows(&conn);
+            capture(&conn, &payload()).unwrap()
+        };
+        let auth = manager_on_duty(&td);
+        let input = |pin: Option<&str>| {
+            let mut input = json!({"action": "release", "handoverId": intent.id,
+                "cashierShiftId": CASHIER, "note": "Satellite closed its own shift"});
+            if let Some(pin) = pin {
+                input["managerPin"] = json!(pin);
+            }
+            input
+        };
+        // Still being claimed: nothing to release.
+        let pending = release(&td.state, &auth, &input(Some("2468"))).unwrap_err();
+        assert!(format!("{pending:?}").contains("SATELLITE_HANDOVER_NOT_REFUSED"));
+        {
+            let conn = td.state.conn.lock().unwrap();
+            mark_refused(
+                &conn,
+                &intent,
+                "REMOTE_HANDOVER_PROOF_UNAVAILABLE",
+                Some(409),
+                "REMOTE_HANDOVER_PROOF_UNAVAILABLE (HTTP 409)",
+            )
+            .unwrap();
+        }
+        // A manager's own PIN, never the cashier's or none.
+        assert!(
+            format!("{:?}", release(&td.state, &auth, &input(None)).unwrap_err())
+                .contains("SATELLITE_HANDOVER_MANAGER_PIN_REQUIRED")
+        );
+        assert!(release(&td.state, &auth, &input(Some("1357"))).is_err());
+        assert_eq!(state(&td.state.conn.lock().unwrap()).0, "refused");
+        let released = release(&td.state, &auth, &input(Some("2468"))).unwrap();
+        assert_eq!(released["released"], true, "{released}");
+        assert_eq!(released["alreadyReleased"], false);
+        let conn = td.state.conn.lock().unwrap();
+        assert_eq!(state(&conn).0, "released");
+        ensure_receiver_can_close(&conn, CASHIER).unwrap();
+        assert_eq!(totals(&conn), (0, 0), "no drawer is credited");
+        let (actor, issue, payload): (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT actor_staff_id, issue_code, payload_json FROM recovery_action_log WHERE action_id = ?1",
+                [RELEASE_ACTION_ID],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(actor.as_deref(), Some("staff-manager"));
+        assert_eq!(issue, "REMOTE_HANDOVER_PROOF_UNAVAILABLE");
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["drawerCredited"], false);
+        assert_eq!(payload["handover"]["countedCents"], 5525);
+        assert_eq!(payload["note"], "Satellite closed its own shift");
+        assert!(payload["snapshotId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        drop(conn);
+        // Idempotent, and the captured claim stays final.
+        let again = release(&td.state, &auth, &input(Some("2468"))).unwrap();
+        assert_eq!(again["alreadyReleased"], true);
+    }
+
+    /// Schema v96 tables only allowed pending/applied: rebuilt once, every
+    /// captured row kept.
+    #[test]
+    fn satellite_handover_v96_table_gains_the_final_states_keeping_its_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE satellite_cash_handovers (
+            id TEXT PRIMARY KEY, satellite_shift_id TEXT NOT NULL UNIQUE, branch_id TEXT NOT NULL,
+            terminal_id TEXT NOT NULL, cashier_shift_id TEXT NOT NULL, drawer_id TEXT NOT NULL,
+            currency TEXT NOT NULL CHECK(currency GLOB '[A-Z][A-Z][A-Z]'),
+            opening_cents INTEGER NOT NULL CHECK(opening_cents >= 0),
+            counted_cents INTEGER NOT NULL CHECK(counted_cents >= 0), closed_by TEXT,
+            state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','applied')),
+            last_error TEXT, proof_json TEXT, created_at TEXT NOT NULL, applied_at TEXT);
+            CREATE INDEX satellite_cash_handovers_receiver ON satellite_cash_handovers(cashier_shift_id,state);
+            INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,last_error,created_at)
+            VALUES ('h1','s1','b1','main','c1','d1','CHF',2000,5525,'REMOTE_HANDOVER_PROOF_UNAVAILABLE (HTTP 409)','2026-10-05T20:00:00Z');").unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+        let kept: (String, i64, Option<String>) = conn
+            .query_row("SELECT state, counted_cents, last_error FROM satellite_cash_handovers WHERE id='h1'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap();
+        assert_eq!(
+            kept,
+            (
+                "pending".to_string(),
+                5525,
+                Some("REMOTE_HANDOVER_PROOF_UNAVAILABLE (HTTP 409)".to_string())
+            )
+        );
+        conn.execute(
+            "UPDATE satellite_cash_handovers SET state='refused', refusal_code='X' WHERE id='h1'",
+            [],
+        )
+        .unwrap();
+        assert!(ensure_receiver_can_close(&conn, "c1")
+            .unwrap_err()
+            .starts_with("SATELLITE_HANDOVER_REFUSED: X"));
     }
 }

@@ -68,8 +68,10 @@ describe('incoming-order alert ownership', () => {
     const dashboard = read('components', 'OrderDashboard.tsx')
     expect(dashboard).not.toMatch(/playSelectedPlatformSound/)
     expect(dashboard).not.toMatch(/startAlertLoop|stopAlertLoop|INCOMING_ORDER_ALERT_REPEAT_MS/)
-    // It still opens the approval panel for the queue head by itself …
-    expect(dashboard).toMatch(/const nextOrder = scopedPendingExternalOrders\[0\];/)
+    // It still opens the approval panel for the queue head by itself, the
+    // first order that still waits for a decision (a BOX decision the server
+    // closed never opens it, 06/10/2026) …
+    expect(dashboard).toMatch(/const nextOrder = scopedPendingExternalOrders\.find\(\s*\(order\) => !isIncomingOrderAlertExempt\(order\),\s*\);/)
     // … and re-presents it on top when the alert's «Open the order» asks.
     expect(dashboard).toMatch(/subscribeIncomingOrderApprovalFocus\(/)
     expect(dashboard).toMatch(/<OrderApprovalPanel\s+key=\{approvalPanelInstance\}/)

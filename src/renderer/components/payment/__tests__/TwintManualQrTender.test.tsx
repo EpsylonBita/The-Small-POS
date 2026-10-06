@@ -27,11 +27,21 @@ describe('Manual TWINT QR cashier confirmation',()=>{
   finish(true);await waitFor(()=>expect(mocks.release).toHaveBeenCalled());
   view.unmount();expect(onConfirm).toHaveBeenCalledTimes(1);
  });
- it('does not complete after the QR closes while the configuration check is outstanding',async()=>{
-  let finish:(value:unknown)=>void=()=>{};mocks.load.mockImplementation(()=>new Promise(resolve=>{finish=resolve}));
-  const onConfirm=vi.fn();const view=render(<TwintManualQrTender configuration={configuration} amount={12} externalEnabled={false} onConfirm={onConfirm} onCancel={vi.fn()}/>);
-  fireEvent.click(screen.getByRole('button',{name:'Confirm payment received'}));view.unmount();finish(configuration);
-  await Promise.resolve();expect(onConfirm).not.toHaveBeenCalled();
+ // Fix review 06/10/2026: the confirm re-read the configuration online and,
+ // offline or on any failure, kept nothing although the customer had paid.
+ // The configuration is read fresh when the QR is admitted; the confirm hands
+ // the receipt to its journal without any network read.
+ it.each([['offline',()=>Promise.reject(new Error('offline'))],['revoked',()=>Promise.resolve(null)]])('a confirmed receipt reaches its journal even when the configuration read is %s',async(_label,read)=>{
+  mocks.load.mockImplementation(read);
+  const onConfirm=vi.fn().mockResolvedValue(true);render(<TwintManualQrTender configuration={configuration} amount={12} externalEnabled={false} onConfirm={onConfirm} onCancel={vi.fn()}/>);
+  fireEvent.click(screen.getByRole('button',{name:'Confirm payment received'}));
+  await waitFor(()=>expect(onConfirm).toHaveBeenCalledWith('confirm',expect.any(String)));
+  expect(mocks.load).not.toHaveBeenCalled();
+ });
+ it('never invites a second collection when the receipt is not saved',async()=>{
+  const onConfirm=vi.fn().mockResolvedValue(false);render(<TwintManualQrTender configuration={configuration} amount={12} externalEnabled={false} onConfirm={onConfirm} onCancel={vi.fn()}/>);
+  fireEvent.click(screen.getByRole('button',{name:'Confirm payment received'}));
+  expect((await screen.findByRole('alert')).textContent).toContain('Do not collect again');
  });
  it('rejects changed organization or revoked setup and retains the original key on a save retry',async()=>{
   const onConfirm=vi.fn().mockResolvedValue(false);render(<TwintManualQrTender configuration={configuration} amount={12} externalEnabled={false} onConfirm={onConfirm} onCancel={vi.fn()}/>);

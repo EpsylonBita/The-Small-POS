@@ -13,11 +13,33 @@
  *
  * BOX has no ready / preparing / delivered callback, and accept / reject is
  * final upstream: a rejected BOX order cannot be reopened from the POS.
+ *
+ * The server owns the terminal state of a BOX decision (06/10/2026,
+ * `ghost_metadata._the_small_box_decision`, state `closed`): BOX expired or
+ * refused it, or the outcome is unknown and staff must check the order with
+ * BOX. Such an order takes no accept / decline any more; while it is still
+ * pending, staff may only close it here, without any BOX call.
  */
-import { isBoxPlatform, isBoxRejectionReason, type BoxRejectionReason } from '../../../../../shared/box-order-contract';
+import {
+  BOX_CLOSURE_CANCELLATION_REASONS,
+  boxDecisionFailureKind,
+  isBoxDecisionClosed,
+  isBoxPlatform,
+  isBoxRejectionReason,
+  type BoxRejectionReason,
+} from '../../../../../shared/box-order-contract';
 
-export { BOX_REJECTION_REASONS, isBoxRejectionReason } from '../../../../../shared/box-order-contract';
-export type { BoxRejectionReason } from '../../../../../shared/box-order-contract';
+export {
+  BOX_CLOSURE_CANCELLATION_REASONS,
+  BOX_REJECTION_REASONS,
+  boxDecisionFailureKind,
+  isBoxDecisionClosed,
+  isBoxManualCheckRequired,
+  isBoxRejectionReason,
+  readBoxDecisionClosure,
+  readBoxDisplayItems,
+} from '../../../../../shared/box-order-contract';
+export type { BoxDecisionClosure, BoxDisplayItem, BoxRejectionReason } from '../../../../../shared/box-order-contract';
 
 export const BOX_PLUGIN_ID = 'box';
 
@@ -38,6 +60,57 @@ export const BOX_REJECTION_REASON_LABEL_KEYS: Readonly<Record<BoxRejectionReason
 /** The i18n key of the operator-facing label for a BOX reason. */
 export function boxRejectionReasonLabelKey(reason: BoxRejectionReason): string {
   return `boxOrder.reasons.${BOX_REJECTION_REASON_LABEL_KEYS[reason]}`;
+}
+
+const BOX_CLOSURE_CANCELLATION_REASON_SET: ReadonlySet<string> = new Set<string>(
+  Object.values(BOX_CLOSURE_CANCELLATION_REASONS),
+);
+
+/**
+ * The i18n key (`boxOrder.closedReasons.<code>`) of a cancellation reason the
+ * server or this till wrote when a BOX decision closed. Null for any other
+ * reason: those are staff's own words or a BOX reason, shown as written.
+ */
+export function boxClosedReasonLabelKey(cancellationReason: unknown): string | null {
+  const code = typeof cancellationReason === 'string' ? cancellationReason.trim() : '';
+  return BOX_CLOSURE_CANCELLATION_REASON_SET.has(code) ? `boxOrder.closedReasons.${code}` : null;
+}
+
+const ERROR_TEXT_MAX_DEPTH = 4;
+
+/** The texts an error value carries: a string, its message / code and its nested causes. */
+function collectErrorTexts(value: unknown, texts: string[], depth: number, seen: Set<unknown>): void {
+  if (typeof value === 'string') {
+    if (value) texts.push(value);
+    return;
+  }
+  if (!value || typeof value !== 'object' || depth > ERROR_TEXT_MAX_DEPTH || seen.has(value)) return;
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  // POSError keeps what was thrown in `details.error`; others nest a cause.
+  for (const key of ['message', 'code', 'error', 'details', 'originalError', 'cause']) {
+    collectErrorTexts(record[key], texts, depth + 1, seen);
+  }
+}
+
+/**
+ * What a failed BOX accept / decline means to staff, from any of the errors
+ * around it: what the caller threw and the order store's last error (whose
+ * `details.error` keeps the native refusal, e.g. "BOX decision refused (HTTP
+ * 400, BOX_DECISION_MANUAL_CHECK); refresh the order"). Null: an ordinary
+ * failure that may be retried while the order is pending.
+ */
+export function classifyBoxDecisionFailure(...errors: unknown[]): 'closed' | 'manual_check' | null {
+  const texts: string[] = [];
+  for (const error of errors) collectErrorTexts(error, texts, 0, new Set());
+  return boxDecisionFailureKind(texts.join('\n'));
+}
+
+/** The operator message of a failed BOX decision of that kind. */
+export function boxDecisionFailureMessageKey(kind: 'closed' | 'manual_check' | null): string {
+  if (kind === 'manual_check') return 'boxOrder.manualCheck';
+  if (kind === 'closed') return 'boxOrder.decisionClosed';
+  return 'boxOrder.decisionUnconfirmed';
 }
 
 // Bridge payloads are camelCase, the admin API is snake_case; the first
@@ -91,7 +164,10 @@ export function boxOrderStatusMutationAllowed(
   }
   if (['cancelled', 'canceled', 'rejected'].includes(current)) return false;
   if (current === 'pending') {
-    return next === 'pending';
+    // The server closed the decision (no accept / decline is possible any
+    // more): staff may close the order here, a plain local cancel that never
+    // reaches BOX. An open decision is only accepted or declined.
+    return next === 'pending' || ((next === 'cancelled' || next === 'canceled') && isBoxDecisionClosed(order));
   }
   // Local ready/completed/driver fulfillment remain usable after acceptance.
   return next !== 'cancelled' && next !== 'canceled' && next !== 'rejected' && next !== 'pending';

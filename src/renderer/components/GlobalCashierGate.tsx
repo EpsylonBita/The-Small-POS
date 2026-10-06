@@ -20,6 +20,14 @@ type CashierRecoveryActions = {
 };
 const RecoveryActionsContext = createContext<CashierRecoveryActions | null>(null);
 
+/**
+ * The only surfaces a locked cashier day leaves interactive: recovery dialogs
+ * (shift, Z, health/support, sync recovery), shell navigation and the window frame.
+ * A portal that must stay usable while locked marks its root `data-cashier-recovery`.
+ */
+export const CASHIER_GATE_SAFE_SELECTOR =
+  '[data-cashier-recovery="true"], [data-cashier-navigation="true"], [data-app-window-frame]';
+
 /** Keep a page/draft mounted while only its operational content is unavailable. */
 export function CashierOperationalBoundary({ children }: { children: React.ReactNode }) {
   const locked = useCashierOperationsLocked();
@@ -28,7 +36,7 @@ export function CashierOperationalBoundary({ children }: { children: React.React
   const content = useRef<HTMLDivElement>(null);
   const prompt = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const safeFocus = document.activeElement instanceof Element && document.activeElement.closest('[data-cashier-recovery="true"], [data-cashier-navigation="true"], [data-app-window-frame]');
+    const safeFocus = document.activeElement instanceof Element && document.activeElement.closest(CASHIER_GATE_SAFE_SELECTOR);
     if (locked && !safeFocus) {
       prompt.current?.querySelector<HTMLButtonElement>('button')?.focus();
     }
@@ -92,7 +100,7 @@ export function GlobalCashierGate({ children, onLogout, onOpenSettings }: {
       const shortcut = keyboard && (/^F\d+$/.test(keyboard.key) || keyboard.altKey || keyboard.metaKey || keyboard.ctrlKey);
       const editing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
       const clipboard = keyboard && editing && !keyboard.altKey && /^[acvxyz]$/i.test(keyboard.key);
-      const safeTarget = target instanceof Element && target.closest('[data-cashier-recovery="true"], [data-cashier-navigation="true"], [data-app-window-frame]');
+      const safeTarget = target instanceof Element && target.closest(CASHIER_GATE_SAFE_SELECTOR);
       if (safeTarget && (!shortcut || clipboard)) return;
       // Native Tab order skips inert operational content and can reach the sidebar.
       if (keyboard?.key === 'Tab' && target === document.body) return;

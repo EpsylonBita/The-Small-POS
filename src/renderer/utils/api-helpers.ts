@@ -147,13 +147,52 @@ export async function getPosAuthHeaders(): Promise<Record<string, string>> {
 }
 
 /**
+ * What a POS admin API call answered.
+ *
+ * `stale: true` (`source: 'cache'`) means the office was not reached
+ * (offline, timeout, 5xx) and `data` is the copy this till saved at
+ * `cachedAt` (null when unknown). It stays `success: true` because offline
+ * readers rely on that copy, but a screen must show it as a saved copy and
+ * never as the office's current answer (desktop 1.4.123 dropped the marker
+ * and showed a lapsed Wolt licence as "Connected").
+ */
+export interface PosApiResult<T = any> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  status?: number;
+  /** The office's machine code on a refusal, e.g. `SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS`. */
+  code?: string;
+  source?: 'remote' | 'cache';
+  stale?: boolean;
+  cachedAt?: string | null;
+}
+
+function readTypedCode(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() && value.length <= 120 ? value : undefined;
+}
+
+/** The bridge's saved-copy marker (`meta.source: 'cache'` / `meta.offlineFallback`). */
+function readSavedCopyMarker(ipcResult: unknown): Pick<PosApiResult, 'source' | 'stale' | 'cachedAt'> {
+  const meta = (ipcResult as { meta?: { source?: unknown; offlineFallback?: unknown; cachedAt?: unknown } } | null)?.meta;
+  if (meta?.source === 'cache' || meta?.offlineFallback === true) {
+    return {
+      source: 'cache',
+      stale: true,
+      cachedAt: typeof meta.cachedAt === 'string' && meta.cachedAt ? meta.cachedAt : null,
+    };
+  }
+  return { source: 'remote', stale: false };
+}
+
+/**
  * Authenticated fetch wrapper for Admin Dashboard API calls
  * Automatically adds terminal ID and API key headers
  */
 export async function posApiFetch<T = any>(
   endpoint: string,
   options: RequestInit = {}
-): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+): Promise<PosApiResult<T>> {
   const method = (options.method || 'GET').toUpperCase();
   try {
     const callerHeaders = normalizeHeaders(options.headers);
@@ -180,6 +219,7 @@ export async function posApiFetch<T = any>(
       });
 
       if (!ipcResult?.success) {
+        const code = readTypedCode((ipcResult as { code?: unknown } | null)?.code);
         return {
           success: false,
           error: normalizeTransportError(
@@ -187,6 +227,7 @@ export async function posApiFetch<T = any>(
             ipcResult?.error || 'Failed to fetch from admin API',
           ),
           status: ipcResult?.status,
+          ...(code ? { code } : {}),
         };
       }
 
@@ -194,6 +235,7 @@ export async function posApiFetch<T = any>(
         success: true,
         data: (ipcResult?.data ?? ipcResult) as T,
         status: ipcResult.status,
+        ...readSavedCopyMarker(ipcResult),
       };
     }
 
@@ -207,15 +249,17 @@ export async function posApiFetch<T = any>(
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: response.statusText }));
       console.error(`[posApiFetch] ${endpoint} failed:`, response.status, errorData);
-      return { 
-        success: false, 
+      const code = readTypedCode(errorData?.code);
+      return {
+        success: false,
         error: errorData.error || errorData.message || `HTTP ${response.status}`,
-        status: response.status
+        status: response.status,
+        ...(code ? { code } : {}),
       };
     }
 
     const data = await response.json();
-    return { success: true, data, status: response.status };
+    return { success: true, data, status: response.status, source: 'remote', stale: false };
   } catch (error: any) {
     console.error(`[posApiFetch] ${endpoint} error:`, error);
     return {
@@ -231,7 +275,7 @@ export async function posApiFetch<T = any>(
 export async function posApiGet<T = any>(
   endpoint: string,
   options: RequestInit = {}
-): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+): Promise<PosApiResult<T>> {
   return posApiFetch<T>(endpoint, { ...options, method: 'GET' });
 }
 
@@ -241,7 +285,7 @@ export async function posApiGet<T = any>(
 export async function posApiPost<T = any>(
   endpoint: string,
   body: any
-): Promise<{ success: boolean; data?: T; error?: string }> {
+): Promise<PosApiResult<T>> {
   return posApiFetch<T>(endpoint, {
     method: 'POST',
     body: JSON.stringify(body),
@@ -254,7 +298,7 @@ export async function posApiPost<T = any>(
 export async function posApiPut<T = any>(
   endpoint: string,
   body: any
-): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+): Promise<PosApiResult<T>> {
   return posApiFetch<T>(endpoint, {
     method: 'PUT',
     body: JSON.stringify(body),
@@ -267,7 +311,7 @@ export async function posApiPut<T = any>(
 export async function posApiPatch<T = any>(
   endpoint: string,
   body: any
-): Promise<{ success: boolean; data?: T; error?: string }> {
+): Promise<PosApiResult<T>> {
   return posApiFetch<T>(endpoint, {
     method: 'PATCH',
     body: JSON.stringify(body),
@@ -279,6 +323,6 @@ export async function posApiPatch<T = any>(
  */
 export async function posApiDelete<T = any>(
   endpoint: string
-): Promise<{ success: boolean; data?: T; error?: string }> {
+): Promise<PosApiResult<T>> {
   return posApiFetch<T>(endpoint, { method: 'DELETE' });
 }

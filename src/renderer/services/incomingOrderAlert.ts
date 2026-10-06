@@ -26,6 +26,21 @@
  * panel in the DOM so the alert can see it is showing.
  */
 import { getActiveUiBlockers } from './uiBlockerRegistry';
+import { isBoxDecisionClosed } from '../../../../shared/box-order-contract';
+
+/**
+ * True for an order that may look like it waits for accept / decline but
+ * must not ring the incoming-order alert: a BOX order whose decision the
+ * server closed (BOX expired or refused it, or the outcome is unknown and
+ * staff check it with BOX; see shared/box-order-contract.ts). It takes no
+ * accept / decline any more, even while it is still pending (the manual-check
+ * case), so the alert would ask staff for a decision nobody can take. Meant
+ * for the alert queue (services/incomingOrderAlertLoop.ts) to leave such
+ * orders out; the order itself stays visible on the Orders screen.
+ */
+export function isIncomingOrderAlertExempt(order: unknown): boolean {
+  return isBoxDecisionClosed(order);
+}
 
 /** The alert repeats this often while an order waits. */
 export const INCOMING_ORDER_ALERT_REPEAT_MS = 30_000;

@@ -12,7 +12,33 @@
     "skip": "Salta — conferma ricezione",
     "receiptRecovery": "Un incasso TWINT è confermato, ma il suo pagamento non è salvato. Salva l’incasso originale prima di accettare un altro pagamento.",
     "receiptSaved": "L’incasso TWINT originale è stato salvato.",
-    "saveOriginal": "Salva l’incasso TWINT originale"
+    "saveOriginal": "Salva l’incasso TWINT originale",
+    "returned": {
+      "button": "Restituito tramite TWINT fuori dalla cassa",
+      "title": "Incasso TWINT restituito fuori dalla cassa",
+      "body": "Solo se il cliente ha riavuto i {{amount}} tramite TWINT fuori dalla cassa. Qui non si addebita né si rimborsa nulla. Lo conferma un responsabile e l'importo resta fuori dalle vendite e dal contante in cassa.",
+      "referenceLabel": "Riferimento (obbligatorio)",
+      "referencePlaceholder": "Riferimento del rimborso TWINT o nota",
+      "confirm": "Conferma restituzione",
+      "success": "Registrato come restituito tramite TWINT fuori dalla cassa. L'importo resta fuori dalle vendite e dal contante in cassa.",
+      "managerRequired": "Lo conferma un responsabile con il proprio PIN dopo che tutti hanno chiuso il turno su questa cassa.",
+      "zLine": "Incassi TWINT restituiti fuori dalla cassa",
+      "zNote": "Non conteggiato nelle vendite né nel contante in cassa.",
+      "notRetained": "Il cassiere ha confermato l'incasso TWINT, ma questa cassa non è riuscita a conservarlo. Non incassare di nuovo. Conserva la ricevuta e avvisa un responsabile prima di chiudere o riavviare la cassa.",
+      "referenceRequired": "Inserisci il riferimento del rimborso TWINT o una nota (da 3 a 200 caratteri).",
+      "saveFirst": "Questo incasso TWINT può ancora essere salvato. Salva prima l'incasso originale.",
+      "managerPin": "PIN del responsabile",
+      "pinRequired": "Un responsabile inserisce il proprio PIN per confermarlo.",
+      "wrongPin": "Questo PIN non può confermarlo. Un responsabile con il permesso di approvarlo inserisce il proprio PIN. Non è stato registrato nulla."
+    },
+    "confirmNotSaved": "L'incasso TWINT non è ancora salvato. Non incassare di nuovo. Un responsabile lo verifica prima della chiusura della cassa.",
+    "admission": {
+      "notSaved": "Un pagamento di questo ordine non è ancora salvato. Salvalo di nuovo prima di accettare TWINT. Non è stato addebitato nulla.",
+      "reconcile": "Un passaggio di pagamento precedente di questo ordine deve essere prima verificato. Non è stato addebitato nulla.",
+      "platformHeld": "Il denaro di questo ordine è trattenuto dalla piattaforma di consegna. Alla cassa non si incassa nulla.",
+      "amountChanged": "L'importo ancora da pagare di questo ordine è cambiato. Controlla l'ordine e riprova. Non è stato addebitato nulla.",
+      "unavailable": "Al momento non è possibile accettare TWINT. Controlla la connessione o scegli un altro pagamento. Non è stato addebitato nulla."
+    }
   },
   "displayPurchase": {
     "beforePurchase": "Prima dell'acquisto",
@@ -1623,7 +1649,8 @@
       "receiptPrinted": "Scontrino stampato",
       "receiptEmailed": "Scontrino inviato a {{email}}",
       "invalidCard": "Dati carta non validi",
-      "expiredCard": "Carta scaduta"
+      "expiredCard": "Carta scaduta",
+      "cardDeclinedNothingCharged": "La carta è stata rifiutata. Non è stato addebitato nulla."
     },
     "receipt": {
       "title": "Scontrino",
@@ -1701,6 +1728,18 @@
       "unavailableTitle": "Chiusura dell'ordine sospesa",
       "unavailableMessage": "L'aliquota IVA e il limite di sconto del negozio non sono stati letti, quindi nulla viene prezzato per supposizione. Riprova; se continua a non riuscire, riavvia l'app.",
       "retry": "Riprova"
+    },
+    "manualCard": {
+      "terminalNotReady": "Il terminale di pagamento è occupato o non connesso. Non è stato addebitato nulla. Attendi che sia libero o ricollegalo, poi riprova.",
+      "terminalCheckFailed": "Impossibile verificare il terminale di pagamento di questa cassa. Non è stato addebitato nulla. Riprova.",
+      "terminalConfigured": "Su questa cassa è configurato un terminale di pagamento. Addebita la carta sul terminale. Non è stato registrato nulla.",
+      "providerConnected": "Per questo negozio è collegato un fornitore di pagamenti con carta, quindi questa cassa non può registrare un pagamento con carta manuale. Addebita la carta sul terminale di pagamento. Non è stato registrato nulla.",
+      "unavailable": "Impossibile confermare che su questa cassa sia consentito un pagamento con carta manuale. Non è stato registrato nulla. Controlla la connessione a Internet e riprova.",
+      "alreadyTakenWarning": "Se la carta è già stata addebitata sul POS del negozio, non addebitarla di nuovo.",
+      "confirmTitle": "Registrare un pagamento con carta manuale?",
+      "confirmBody": "A questa cassa non è collegato alcun terminale di pagamento. Registra {{amount}} solo se la carta è già stata addebitata sul POS del negozio.",
+      "confirmAction": "Conferma carta manuale",
+      "portionNotice": "A questa cassa non è collegato alcun terminale di pagamento. Addebita questo importo sul POS del negozio; alla conferma viene registrato come pagamento con carta manuale."
     }
   },
   "paymentPrintPrompt": {
@@ -2386,7 +2425,9 @@
       "issue": {
         "hardwareProfileMissing": "Scegli una stampante per questo lavoro, poi riprova.",
         "needsAttention": "Questo lavoro di stampa richiede prima la configurazione della stampante.",
-        "genericAttention": "Questo lavoro di stampa POS richiede attenzione."
+        "genericAttention": "Questo lavoro di stampa POS richiede attenzione.",
+        "foodOrderItemsPending": "In attesa degli articoli di questo ordine dalla piattaforma di consegna. La stampa parte da sola appena arrivano. Se il lavoro resta qui, apri l'ordine per aggiornarne gli articoli.",
+        "foodOrderItemsUnavailable": "Gli articoli di questo ordine non sono arrivati dalla piattaforma di consegna, quindi non è stato stampato. Apri l'ordine per aggiornarne gli articoli, poi premi Riprova."
       },
       "unknown": "Sconosciuto",
       "cancel": "Annulla",
@@ -3459,11 +3500,13 @@
       "ambiguous_canonical_remote_payment": "il pagamento padre corrisponde a più pagamenti admin",
       "Payment not yet synced": "il pagamento padre non è ancora sincronizzato",
       "Parent payment missing canonical remote id": "manca l'id admin del pagamento padre",
-      "Ambiguous canonical remote payment": "il pagamento padre corrisponde a più pagamenti admin"
+      "Ambiguous canonical remote payment": "il pagamento padre corrisponde a più pagamenti admin",
+      "money_not_synced": "un pagamento o un rimborso registrato su questa cassa non ha ancora raggiunto il server"
     },
     "closeoutBlocked": {
       "single": "Impossibile chiudere la giornata durante {{stage}} perché {{orderReference}} è ancora bloccato: {{reason}}.",
-      "multiple": "Impossibile chiudere la giornata durante {{stage}} perché {{count}} elementi di sincronizzazione sono ancora bloccati."
+      "multiple": "Impossibile chiudere la giornata durante {{stage}} perché {{count}} elementi di sincronizzazione sono ancora bloccati.",
+      "moneyNotSynced": "La giornata non può ancora essere chiusa: {{count}} registrazioni di pagamenti o rimborsi di questa giornata non hanno raggiunto il server. Verifica che la cassa sia online, premi Sincronizza ora e chiudi di nuovo la giornata."
     },
     "time": {
       "never": "Mai",
@@ -4085,6 +4128,8 @@
       "refundCash": "Rimborso in contanti",
       "refundCard": "Rimborso su carta",
       "refundNote": "I rimborsi su carta sono registrati come rettifica contabile. Esegui l'annullamento della carta separatamente se necessario.",
+      "cashDisabled": "I contanti sono disattivati per questo terminale, quindi non possono essere registrati qui.",
+      "cardDisabled": "La carta è disattivata per questo terminale, quindi non può essere registrata qui.",
       "cancel": "Annulla",
       "failed": "Impossibile completare il regolamento"
     },
@@ -4191,6 +4236,17 @@
       "loadItemsFailed": "Impossibile caricare gli articoli dell'ordine",
       "editServerUpdate": "Le correzioni non sono temporaneamente disponibili. Verifica la connessione e riprova dopo l’aggiornamento del server.",
       "editSyncRequired": "La modifica del pagamento o dell’ordine non è ancora sincronizzata. Il carrello è salvato. Riprova tra poco.",
+      "editNotApplied": "Questa correzione non è stata salvata, quindi la sua differenza non è stata registrata da nessuna parte. Se il denaro è già passato di mano, prepara di nuovo la correzione e registra quello stesso importo una sola volta; non incassarlo né restituirlo mai due volte. Altrimenti un responsabile può chiuderla senza registrare denaro.",
+      "editRequote": "Prepara di nuovo la correzione",
+      "editRequoteReady": "Controlla il carrello e salva di nuovo la correzione. Registra solo il denaro già ricevuto; non incassarlo né restituirlo due volte.",
+      "editCloseWithoutMoney": "Chiudi senza registrare denaro (responsabile)",
+      "editCloseWithoutMoneyReason": "Correzione non salvata; chiusa da un responsabile senza registrare denaro",
+      "editClosedWithoutMoney": "La correzione non salvata è stata chiusa. Non è stato registrato denaro; conta la cassa per confermare.",
+      "editCloseWithoutMoneyFailed": "Non è stato possibile chiudere la correzione. Resta in sospeso; non è stato registrato nulla.",
+      "legacyEditReview": "Una modifica di questo ordine salvata da una versione precedente di questa cassa è stata rifiutata dal server. Il server conserva l’ordine e i pagamenti originali; questa cassa conserva la modifica e la sua ricevuta. Non è stato incassato nulla di nuovo. Un responsabile deve verificare questo ordine prima dello Z.",
+      "editTooManyLines": "Una correzione può avere al massimo {{maxLines}} righe. Rimuovi alcune righe, oppure annulla l’ordine e creane uno nuovo. Non è stato incassato denaro.",
+      "editMethodUnavailable": "Questo terminale non può registrare contanti o carta per la differenza. Chiedi a un responsabile di attivare un metodo di pagamento per questo terminale. Non è stato incassato denaro.",
+      "editPreviousNotSaved": "Una correzione precedente di questo ordine è stata confermata ma non salvata. Riaprila dal carrello salvato per prepararla di nuovo, oppure chiedi a un responsabile di chiuderla. Non incassare né restituire di nuovo denaro.",
       "emptyEditHint": "Per rimuovere tutti gli articoli, chiudi l’editor e annulla l’ordine.",
       "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso."
     },
@@ -4771,7 +4827,35 @@
         "pending": "La consegna è salvata su questa cassa e attende conferma. Verrà riprovata automaticamente; non registrare di nuovo i contanti.",
         "retry": "Riprova la consegna salvata"
       },
-      "currencySettlementRequired": "Regola e chiudi i turni del personale nella valuta originale prima di chiudere questo turno di cassa."
+      "currencySettlementRequired": "Regola e chiudi i turni del personale nella valuta originale prima di chiudere questo turno di cassa.",
+      "satelliteHandover": {
+        "reasons": {
+          "giftClose": "Su questa cassa secondaria c'è una chiusura carte regalo da completare. Chiudi il turno sulla cassa secondaria stessa.",
+          "staffCustody": "Fattorini o camerieri di questo turno della cassa secondaria hanno ancora contanti. Chiudi prima i loro turni, poi ricevi i contanti.",
+          "movements": "I movimenti di contante della cassa secondaria non sono ancora arrivati al server. Attendi la sincronizzazione, poi riprova.",
+          "role": "Questo turno non si può chiudere dalla cassa principale. Chiudilo sulla cassa secondaria.",
+          "retry": "Il server sta elaborando questo turno proprio ora. Riprova tra un momento.",
+          "closedElsewhere": "La cassa secondaria ha già chiuso da sé questo turno, quindi i suoi contanti non si possono ricevere qui.",
+          "currency": "Il denaro di questo turno della cassa secondaria è in una valuta diversa da quella di questo cassetto. Non si può ricevere qui.",
+          "sourceDrawer": "Il cassetto della cassa secondaria non è stato trovato o è già chiuso.",
+          "receiver": "Questo cassetto non può ricevere i contanti: è chiuso, oppure non è il cassetto cassiere aperto di questa cassa.",
+          "conflict": "Il server ha già registrato una consegna diversa per questo turno. Chiedi a un responsabile di verificarla.",
+          "mainOnly": "Solo la cassa principale può ricevere i contanti dalle sue casse secondarie.",
+          "figures": "Impossibile caricare i dati del turno dal server. Controlla la connessione e riprova.",
+          "pending": "I contanti di una cassa secondaria sono ancora in ricezione. Riconnettiti a Internet perché la ricezione finisca prima della chiusura di questo turno.",
+          "refused": "Il server ha rifiutato in modo definitivo questa consegna di contanti della cassa secondaria.",
+          "unknown": "La consegna di contanti della cassa secondaria non è stata completata. Riprova o chiedi a un responsabile.",
+          "staffCustodyRefused": "Fattorini o camerieri di questo turno della cassa secondaria avevano ancora contanti al momento dell'invio, quindi il server l'ha rifiutata. Chiudi quel turno sulla cassa secondaria stessa.",
+          "movementsRefused": "I movimenti di contante della cassa secondaria non erano sul server al momento dell'invio, quindi il server l'ha rifiutata. Chiudi quel turno sulla cassa secondaria stessa."
+        },
+        "releaseHint": "Un responsabile può sbloccarla perché questo turno si possa chiudere. I contanti della cassa secondaria non vengono aggiunti a questo cassetto.",
+        "releaseTitle": "Consegna di contanti della cassa secondaria rifiutata",
+        "releasePin": "PIN del responsabile",
+        "releaseAction": "Sblocca senza aggiungere i contanti a questo cassetto",
+        "releaseWrongPin": "Questo PIN non può sbloccarla. Un responsabile con il permesso di annullare gli ordini inserisce il proprio PIN.",
+        "releaseFailed": "Non è stato possibile sbloccare la consegna. Non è cambiato nulla; riprova.",
+        "released": "Sbloccata. I contanti della cassa secondaria non sono stati aggiunti a questo cassetto. Ora puoi chiudere il turno."
+      }
     },
     "zReport": {
       "title": "Rapporto Z - {{date}}",
@@ -5205,6 +5289,16 @@
     },
     "orderCancellation": {
       "staffCashAmbiguous": "Non è possibile verificare chi detiene il contante. Controlla il rimborso originale prima di annullare.",
+      "platformOrderReturn": "Questo ordine proviene da una piattaforma di consegna. Il suo denaro viene restituito tramite la piattaforma, quindi la cassa non registra alcun rimborso.",
+      "receiptCheckUnavailable": "Questo pagamento è stato registrato su un'altra cassa. Connettiti a Internet perché questa cassa possa verificare il pagamento originale, poi riprova. Non è stato restituito nulla.",
+      "refusedByServer": "Il server ha rifiutato questo annullamento. Non è stato restituito denaro e non è stato annullato nulla. Un responsabile può eliminare il tentativo rifiutato, poi puoi annullare di nuovo.",
+      "releaseWait": "Questo annullamento è stato inviato meno di 15 minuti fa e potrebbe ancora essere registrato. Riprova a eliminarlo tra {{minutes}} min.",
+      "releaseCommitted": "Il server ha già registrato questo annullamento. Sincronizza questa cassa per completarlo. Non è stato eliminato nulla.",
+      "cancellationPending": "Un annullamento salvato di questo ordine è in attesa del server. Riprendilo con il motivo e l'approvatore originali, oppure chiedi a un responsabile di eliminarlo.",
+      "refusedAttemptNotice": "Il server ha rifiutato l'ultimo annullamento di questo ordine. Non è stato restituito denaro. Un responsabile può eliminarlo prima di annullare di nuovo l'ordine.",
+      "pendingAttemptNotice": "Questo ordine ha un annullamento salvato in attesa del server. Conferma per riprenderlo come è stato salvato. Se non si può completare, un responsabile può eliminarlo.",
+      "clearRefusedAttempt": "Elimina l'annullamento salvato",
+      "attemptCleared": "L'annullamento salvato è stato eliminato. Non è stato restituito denaro. Puoi annullare di nuovo l'ordine.",
       "staffCashUnavailable": "L’annullamento con consegna del contante non è al momento disponibile. Controlla la connessione e riprova dopo l’aggiornamento del server.",
       "connectionUnavailable": "Lo stato della connessione dei pagamenti non è disponibile. Aggiorna le integrazioni e riprova.",
       "permissionRequired": "Questo account non può annullare ordini pagati.",
@@ -6222,6 +6316,10 @@
     "printFailed": "Impossibile stampare lo scontrino",
     "printAlreadyQueued": "Questo scontrino è già in coda o in stampa — non è stato ristampato.",
     "printSkipped": "La stampa dello scontrino è disattivata per questa azione.",
+    "printSent": "Scontrino inviato alla stampante.",
+    "printQueued": "Scontrino in coda ma non ancora stampato. Controlla la coda di stampa se non esce.",
+    "printWaitingForItems": "Non ancora stampato: gli articoli di questo ordine non sono ancora arrivati dalla piattaforma di consegna. Lo scontrino verrà stampato da solo appena arrivano.",
+    "printNotPrinted": "Lo scontrino non è stato stampato. Controlla la coda di stampa in Impostazioni > Coda di stampa.",
     "guestCustomer": "Ospite",
     "loadingItems": "Caricamento articoli...",
     "loadItemsFailed": "Impossibile caricare gli articoli",
@@ -6557,7 +6655,9 @@
         "poorTitle": "Questa scansione si legge male",
         "poorDescription": "Puoi scansionarla di nuovo, oppure scrivere semplicemente quello che c'è scritto.",
         "queued": "Salvata qui. Arriverà in ufficio appena torni online.",
-        "saved": "Fattura salvata."
+        "saved": "Fattura salvata.",
+        "amountInvalid": "Scrivi l'importo della fattura con i centesimi, ad esempio 1234,50 o 1.234,50. Non è stato salvato nulla.",
+        "amountHasPayments": "Questa fattura ha già dei pagamenti, quindi il suo importo non può più cambiare. Non è stato salvato nulla: rimetti l'importo di prima per salvare le altre modifiche."
       },
       "scan": {
         "open": "Scansiona fattura",
@@ -8590,7 +8690,14 @@
       "partnerRequired": "Credenziali partner richieste",
       "connected": "Connesso",
       "pending": "In attesa",
-      "disconnected": "Non connesso"
+      "disconnected": "Non connesso",
+      "unknown": "Stato sconosciuto",
+      "unknownShort": "Sconosciuto"
+    },
+    "savedCopy": {
+      "title": "Copia salvata — non aggiornata",
+      "bodyAt": "Non è stato possibile raggiungere l'ufficio: questa è la lista dei plugin salvata da questa cassa ({{time}}). Gli stati potrebbero essere cambiati e non vengono mostrati finché la lista non si aggiorna.",
+      "body": "Non è stato possibile raggiungere l'ufficio: questa è la lista dei plugin salvata in precedenza da questa cassa. Gli stati potrebbero essere cambiati e non vengono mostrati finché la lista non si aggiorna."
     },
     "mydata": {
       "title": "Configurazione MyData",
@@ -9182,6 +9289,16 @@
         "summary": "Il server non ha confermato la modifica dell’indirizzo predefinito. La modifica resta salvata su questa cassa.",
         "guidance": "Riprova una volta. Se viene rifiutato di nuovo, chiedi aiuto tramite i dettagli di assistenza."
       },
+      "remoteHandoverSnapshotFrozen": {
+        "title": "Un turno è già stato chiuso su un altro dispositivo",
+        "summary": "{{count}} registrazioni di denaro appartengono a un turno chiuso su un altro dispositivo. Il server mantiene fissi gli importi di quel turno e rifiuta la modifica, che non verrà inviata di nuovo.",
+        "guidance": "Chiedi a un responsabile di controllare questo turno nel pannello di amministrazione e di registrare lì la differenza. Non incassare né restituire di nuovo denaro alla cassa."
+      },
+      "legacyEditReview": {
+        "title": "Una correzione di ordine di una versione precedente richiede un responsabile",
+        "summary": "{{count}} correzioni di ordine salvate da una versione precedente di questa cassa sono state rifiutate dal server. Il server conserva l'ordine originale e i suoi pagamenti; questa cassa conserva la correzione e la sua ricevuta. Non è stato addebitato nulla due volte e non verrà inviata di nuovo.",
+        "guidance": "Chiedi a un responsabile di aprire questo ordine, confrontarlo con la ricevuta e correggerlo una sola volta, prima della Z. Non incassare né restituire di nuovo denaro per questa correzione."
+      },
       "duplicateCustomerConflict": {
         "title": "Questo cliente esiste già in ufficio",
         "summary": "Un cliente salvato su questa cassa ha lo stesso numero di telefono di uno che l’ufficio conserva già, quindi la modifica non può essere inviata. Non impedisce la chiusura della giornata, ma l’ufficio non avrà questo cliente finché non lo colleghi.",
@@ -9735,7 +9852,9 @@
     "cancelRefusedNotRecorded": "Questo ordine risulta pagato, ma il suo pagamento non è registrato su questa cassa. Ripristinalo dal server con «Sincronizza ora» oppure registra il pagamento dal Rapporto Z, poi annulla.",
     "notRecordedTitle": "Tavolo {{table}}: pagamento non registrato",
     "notRecordedMessage": "Il suo ordine risulta pagato, ma il pagamento non è registrato su questa cassa. Non incassarlo di nuovo: ripristinalo dal server con «Sincronizza ora» oppure registra il pagamento dal Rapporto Z.",
-    "keepOpenNotRecordedHint": "Il tavolo viene liberato; l'ordine resta così finché il suo pagamento non viene ripristinato o registrato."
+    "keepOpenNotRecordedHint": "Il tavolo viene liberato; l'ordine resta così finché il suo pagamento non viene ripristinato o registrato.",
+    "clearAttemptTitle": "Approva l'eliminazione dell'annullamento salvato",
+    "clearAttemptSubtitle": "Un responsabile inserisce il proprio PIN. Non viene addebitato né restituito nulla."
   },
   "reservationForm": {
     "toasts": {
@@ -9909,8 +10028,10 @@
     },
     "reasonCodes": {
       "table_cancellation_not_saved": "Il rimborso originale per l’annullamento del tavolo non è ancora stato salvato.",
+      "table_cancellation_not_saved__refused": "Il server ha rifiutato questo annullamento del tavolo. Non è stato restituito denaro e non è stato annullato nulla.",
       "payments_need_review": "Sull'ordine {{orderNumber}} è stato incassato un pagamento di {{paymentAmount}} ({{paymentMethod}}) quando era già pagato. È messo da parte e non viene conteggiato: il cliente potrebbe aver pagato due volte.",
       "payments_need_review__platform_held": "Sull'ordine {{orderNumber}} è stato incassato un pagamento di {{paymentAmount}} ({{paymentMethod}}), ma la piattaforma di consegna detiene già il denaro di questo ordine. È messo da parte e non viene conteggiato: il cliente potrebbe aver pagato due volte.",
+      "payments_need_review__reconciliation_required": "Sull'ordine {{orderNumber}} è stato incassato un pagamento di {{paymentAmount}} ({{paymentMethod}}), ma poi l'ordine è cambiato sul server, per esempio un'altra cassa lo ha annullato. È messo da parte e non viene conteggiato.",
       "payments_not_saved": "Un pagamento con carta di {{paymentAmount}} è stato addebitato sull'ordine {{orderNumber}} ma non è ancora salvato su questa cassa. Il cliente è stato addebitato: non addebitare di nuovo.",
       "payments_not_saved__new_order": "Un pagamento con carta di {{paymentAmount}} è stato addebitato per un nuovo ordine non ancora salvato su questa cassa: l'ordine e il suo pagamento restano in attesa finché non vengono salvati. Il cliente è stato addebitato: non addebitare di nuovo.",
       "payments_not_saved__new_order_cannot_save": "Un pagamento con carta di {{paymentAmount}} è stato addebitato per un nuovo ordine non ancora salvato su questa cassa: l'ordine e il suo pagamento restano in attesa finché non vengono salvati. Il cliente è stato addebitato: non addebitare di nuovo.",
@@ -9919,8 +10040,10 @@
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Recupera l’annullamento originale del tavolo. Non consegnare o rimborsare nuovamente il denaro.",
+      "table_cancellation_not_saved__refused": "Un responsabile cancella il tentativo rifiutato dal conto del tavolo, poi annulla di nuovo. Non restituire di nuovo denaro.",
       "payments_need_review": "Restituisci il denaro al cliente, poi confermalo qui. Se è sbagliato il pagamento registrato sul server, contatta l'assistenza prima di chiudere la giornata.",
       "payments_need_review__platform_held": "Restituisci il denaro al cliente, poi confermalo qui. La piattaforma versa questo ordine al negozio con il proprio regolamento.",
+      "payments_need_review__reconciliation_required": "Verifica l'ordine con il cliente. Se è annullato, restituisci il denaro, poi confermalo qui. Se il cliente deve ancora questo importo, contatta l'assistenza prima di chiudere la giornata.",
       "payments_not_saved": "Salva di nuovo il pagamento. Se non si riesce a salvarlo, restituisci il denaro al cliente e confermalo qui.",
       "payments_not_saved__cannot_save": "Questo pagamento non può essere salvato su questa cassa. Restituisci il denaro al cliente, poi confermalo qui.",
       "payments_not_saved__new_order": "Salva di nuovo il pagamento: salva l'ordine e il suo pagamento, senza un nuovo addebito. Se non si riesce a salvarlo, restituisci il denaro al cliente e confermalo qui.",

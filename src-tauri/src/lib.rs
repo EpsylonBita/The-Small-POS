@@ -1524,6 +1524,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::shifts::shift_get_active,
             commands::shifts::shift_get_active_for_branch,
             commands::shifts::shift_record_satellite_handover,
+            satellite_handover::shift_satellite_handover_recovery,
             commands::shifts::shift_get_by_id,
             commands::shifts::shift_get_sync_state,
             commands::shifts::shift_get_active_by_terminal,

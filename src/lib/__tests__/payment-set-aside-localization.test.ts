@@ -14,6 +14,7 @@ import {
   formatSetAsidePaymentMessage,
   getLocalizedPaymentBlockerFix,
   getLocalizedPaymentBlockerReason,
+  getLocalizedPaymentMethod,
   paymentBlockerKey,
 } from '../payment-integrity';
 
@@ -81,6 +82,37 @@ describe('payments set aside for review, in every locale', () => {
       'paymentIntegrity.statuses.duplicate_review',
     );
   });
+
+  // Release 1.4.124 (06/10/2026): an offline receipt the server refused
+  // because the order changed there (`PAYMENT_ADMISSION_CONFLICT` with
+  // `reconciliation_required`) is set aside with its own reason; the sentence
+  // says so, never "a possible duplicate".
+  it.each(Object.keys(LOCALES) as Lng[])(
+    '%s names a payment set aside because its order changed on the server',
+    async (lng) => {
+      const t = await translatorFor(lng);
+      const blocker: UnsettledPaymentBlocker = {
+        ...reviewBlocker('pay-reconcile'),
+        reasonVariant: 'reconciliation_required',
+        reviewPayment: {
+          ...reviewBlocker('pay-reconcile').reviewPayment!,
+          reason: 'reconciliation_required',
+        },
+      };
+      const reason = getLocalizedPaymentBlockerReason(blocker, t as never, money);
+      const fix = getLocalizedPaymentBlockerFix(blocker, t as never, money);
+      expect(reason).toBe(
+        (LOCALES[lng] as typeof en).paymentIntegrity.reasonCodes.payments_need_review__reconciliation_required
+          .replace('{{paymentAmount}}', '13.00 €')
+          .replace('{{paymentMethod}}', getLocalizedPaymentMethod('cash', t as never))
+          .replace('{{orderNumber}}', 'A-0042'),
+      );
+      expect(fix).toBe(
+        (LOCALES[lng] as typeof en).paymentIntegrity.fixCodes.payments_need_review__reconciliation_required,
+      );
+      expect(reason).not.toBe(getLocalizedPaymentBlockerReason(reviewBlocker('pay-1'), t as never, money));
+    },
+  );
 
   it.each(Object.keys(LOCALES) as Lng[])(
     '%s tells the cashier an approved card was set aside, never in native English',

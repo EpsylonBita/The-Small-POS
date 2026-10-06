@@ -1,5 +1,11 @@
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
 import type { LocalPreparationPhase } from './KdsLocalPhaseStore';
+import {
+  isCustomerOriginOrder,
+  isExternalPlatformOrder,
+  type OrderApprovalFields,
+} from '../../../../shared/order-approval';
+import { isBoxDecisionClosed } from '../../../../shared/box-order-contract';
 
 /**
  * Local order rules shared by the Windows KDS and the connected customer display:
@@ -66,7 +72,26 @@ export const matchesKdsTenant = (organizationId: string | null, branchId: string
   return (!orderOrganizationId || orderOrganizationId === organizationId) && (!orderBranchId || orderBranchId === branchId);
 };
 
-/** Active kitchen work: not closed, finished, cancelled, refunded, ghost, a repair settlement or in a Z report. */
+/**
+ * Not kitchen work yet: a delivery platform order (efood, Wolt, BOX…) still
+ * waiting for the store's accept, and any BOX order whose decision the server
+ * closed (BOX expired or refused it, or staff must check it with BOX first;
+ * shared/box-order-contract.ts). A pending BOX order has no order items until
+ * BOX confirms the accept. Customer self-orders (QR, web, kiosk) are not
+ * platform orders and keep their place on the board.
+ */
+const isUnconfirmedPlatformOrder = (order: Record<string, unknown>, status: string): boolean => {
+  const fields = order as OrderApprovalFields;
+  return (
+    (status === 'pending' && isExternalPlatformOrder(fields) && !isCustomerOriginOrder(fields)) ||
+    isBoxDecisionClosed(order)
+  );
+};
+
+/**
+ * Active kitchen work: not closed, finished, cancelled, refunded, ghost, a repair settlement, in a Z report or
+ * an unconfirmed platform order.
+ */
 export const isActiveLocalKitchenOrder = (order: Record<string, unknown>): boolean => {
   const status = readKdsString(order, 'status').toLowerCase();
   return (
@@ -77,7 +102,8 @@ export const isActiveLocalKitchenOrder = (order: Record<string, unknown>): boole
     !isFlagSet(order['is_ghost']) &&
     !readKdsString(order, 'z_report_id') &&
     !readKdsString(order, 'zReportId') &&
-    !isRepairSettlement(order)
+    !isRepairSettlement(order) &&
+    !isUnconfirmedPlatformOrder(order, status)
   );
 };
 

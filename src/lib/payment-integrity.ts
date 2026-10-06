@@ -13,6 +13,12 @@ export const UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE =
   "UNSETTLED_PAYMENT_BLOCKER";
 export const SYNC_CLOSEOUT_BLOCKED_ERROR_CODE = "SYNC_CLOSEOUT_BLOCKED";
 /**
+ * Sync blocker reason of a payment, refund or other money record of the
+ * closing window that has not reached the server (native
+ * `zreport::MONEY_NOT_SYNCED_REASON`).
+ */
+export const MONEY_NOT_SYNCED_BLOCKER_REASON = "money_not_synced";
+/**
  * One unresolved payment set aside as a possible duplicate (30/09/2026). The
  * native Z gate and the shared Health contract key on this exact code.
  */
@@ -611,6 +617,19 @@ export function formatSyncCloseoutError(
 
   const stage = closeoutStageLabel(payload, t);
   const details = payload.syncBlockerDetails ?? [];
+  // Money this till recorded that has not reached the server holds the day
+  // close (06/10/2026: a Z erased a refund that was still unsent). Say it
+  // in the operator's terms, with what to do.
+  if (
+    details.length > 0 &&
+    details.every((blocker) => blocker.blockerReason === MONEY_NOT_SYNCED_BLOCKER_REASON)
+  ) {
+    return t("sync.closeoutBlocked.moneyNotSynced", {
+      defaultValue:
+        "The day cannot be closed yet: {{count}} payment or refund record(s) of this day have not reached the server. Make sure the till is online, press Sync Now and close the day again.",
+      count: payload.syncItemCount ?? details.length,
+    });
+  }
   if (details.length === 1) {
     const blocker = details[0];
     const orderReference =

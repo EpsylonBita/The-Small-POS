@@ -11,14 +11,22 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
 import {
+  BOX_CLOSURE_CANCELLATION_REASONS,
   BOX_REJECTION_REASONS,
+  boxDecisionFailureMessageKey,
   boxRejectionReasonLabelKey,
+  classifyBoxDecisionFailure,
+  isBoxDecisionClosed,
+  isBoxManualCheckRequired,
   isBoxOrder,
   isBoxRejectionReason,
+  readBoxDisplayItems,
 } from './box-order-decision';
-import type { BoxRejectionReason } from './box-order-decision';
+import type { BoxDisplayItem, BoxRejectionReason } from './box-order-decision';
 import { INCOMING_ORDER_APPROVAL_MARKER_ATTR } from '../../services/incomingOrderAlert';
+import { observeQueuedPrintJob, printQueueReasonText } from '../printing/PrintQueuePanel';
 import { usePrepTimePicker } from '../../hooks/usePrepTimePicker';
+import { useOrderStore } from '../../hooks/useOrderStore';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -228,6 +236,12 @@ function resolveRequestedPaymentMethod(order: Order | any): 'cash' | 'card' | 'o
   return null;
 }
 
+interface OrderItemsLookup {
+  items: any[];
+  /** The order's local DB copy, when it was read on the way (newer than the prop). */
+  localCopy: Record<string, unknown> | null;
+}
+
 /**
  * Fetches order items with a clear fallback chain:
  * 1. Try local order items first
@@ -237,25 +251,26 @@ function resolveRequestedPaymentMethod(order: Order | any): 'cash' | 'card' | 'o
  * Requirements: 2.1, 2.5, 2.6
  *
  * @param order - The order object
- * @returns Promise resolving to array of order items
+ * @returns Promise resolving to the order items and the local DB copy read
  */
-async function fetchOrderItems(order: Order): Promise<any[]> {
+async function fetchOrderItems(order: Order): Promise<OrderItemsLookup> {
   // 1. Check local order first - handle JSON string format
   const localItems = getOrderItemsCandidate(order);
   const parsedLocalItems = parseItemsFromJson(localItems);
 
   if (parsedLocalItems.length > 0) {
     console.log('[OrderApprovalPanel] Using local order items:', parsedLocalItems.length);
-    return parsedLocalItems;
+    return { items: parsedLocalItems, localCopy: null };
   }
 
   // Need to fetch from backend
   if (!order.id || typeof window === 'undefined') {
     console.log('[OrderApprovalPanel] Cannot fetch items - no order ID or not in browser');
-    return [];
+    return { items: [], localCopy: null };
   }
 
   const bridge = getBridge();
+  let localCopy: Record<string, unknown> | null = null;
 
   // 2. Fetch from local DB by order ID
   try {
@@ -263,11 +278,12 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
     const response: any = await bridge.orders.getById(order.id);
     const fetchedOrder = response?.data || response;
 
-    if (fetchedOrder) {
+    if (fetchedOrder && typeof fetchedOrder === 'object') {
+      localCopy = fetchedOrder as Record<string, unknown>;
       const dbItems = parseItemsFromJson(getOrderItemsCandidate(fetchedOrder));
       if (dbItems.length > 0) {
         console.log('[OrderApprovalPanel] Fetched items from local DB:', dbItems.length);
-        return dbItems;
+        return { items: dbItems, localCopy };
       }
     }
   } catch (e) {
@@ -284,14 +300,71 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
 
     if (Array.isArray(itemsResult) && itemsResult.length > 0) {
       console.log('[OrderApprovalPanel] Fetched items from Supabase:', itemsResult.length);
-      return itemsResult;
+      return { items: itemsResult, localCopy };
     }
   } catch (e) {
     console.warn('[OrderApprovalPanel] Supabase fetch failed:', e);
   }
 
   console.log('[OrderApprovalPanel] No items found after all fetch attempts');
-  return [];
+  return { items: [], localCopy };
+}
+
+/**
+ * The order store's last error, or null when it cannot be read. Its approve /
+ * decline keep the native refusal there (`details.error`) and only answer
+ * false to the screen.
+ */
+function readOrderStoreError(): unknown {
+  try {
+    return typeof useOrderStore.getState === 'function' ? useOrderStore.getState().error : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The provider's lines of a BOX order that has no order items: a pending BOX
+ * order gets them only once BOX confirms the accept. Read from the newest copy
+ * of the order; display only, never items, totals, prints or kitchen work.
+ */
+function resolveBoxDisplayItems(order: unknown, localCopy: unknown): BoxDisplayItem[] {
+  if (!isBoxOrder(order)) return [];
+  const fromLocalCopy = readBoxDisplayItems(localCopy);
+  return fromLocalCopy.length > 0 ? fromLocalCopy : readBoxDisplayItems(order);
+}
+
+function hasBoxDisplayItems(order: unknown, localCopy: unknown): boolean {
+  return resolveBoxDisplayItems(order, localCopy).length > 0;
+}
+
+const isCancelledStatus = (status: unknown): boolean =>
+  ['cancelled', 'canceled'].includes(String(status ?? '').toLowerCase());
+
+/**
+ * Staff close a pending BOX order whose decision the server closed: a plain
+ * local cancel through the order store and the native status command, which
+ * never calls BOX (the server takes it as a local close). The store accepts it
+ * only once ITS copy carries the closed decision, so it re-reads the local
+ * orders first when it does not yet. Already cancelled (BOX closed it as not
+ * accepted meanwhile): nothing is left to do.
+ */
+async function closeBoxOrderWithClosedDecision(orderId: string): Promise<boolean> {
+  const storeCopy = () => {
+    const state = useOrderStore.getState();
+    return [...state.orders, ...state.pendingExternalOrders].find((entry) => entry.id === orderId);
+  };
+  let copy = storeCopy();
+  if (copy && !isBoxDecisionClosed(copy)) {
+    await useOrderStore.getState().silentRefresh();
+    copy = storeCopy();
+  }
+  if (copy && isCancelledStatus(copy.status)) {
+    return true;
+  }
+  return useOrderStore.getState().updateOrderStatus(orderId, 'cancelled', {
+    cancellationReason: BOX_CLOSURE_CANCELLATION_REASONS.manual_check_closed,
+  });
 }
 
 /**
@@ -338,9 +411,27 @@ export function OrderApprovalPanel({
   const [isPrinting, setIsPrinting] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [itemsLoadError, setItemsLoadError] = useState<string | null>(null);
+  const [isClosingOrder, setIsClosingOrder] = useState(false);
+  // The order's local DB copy read while looking for its items. A pending BOX
+  // order has none until BOX confirms the accept, so this copy is always read
+  // for it, and it may already carry the server's closed decision.
+  const [localCopy, setLocalCopy] = useState<Record<string, unknown> | null>(null);
   const isBox = isBoxOrder(order);
-  const canClose = viewOnly || (dismissible && !isApproving && !isDeclining && !isCheckingDecline);
-  const showCloseButton = viewOnly || dismissible;
+  // The server closed this BOX decision (BOX expired or refused it, or the
+  // outcome is unknown and staff check it with BOX): no accept, decline or
+  // prep time any more, only closing the order here, without any BOX call.
+  const isBoxDecisionClosedHere =
+    isBox &&
+    !viewOnly &&
+    String(order.status ?? '').toLowerCase() === 'pending' &&
+    (isBoxDecisionClosed(order) || isBoxDecisionClosed(localCopy));
+  const isBoxManualCheck =
+    isBoxDecisionClosedHere && (isBoxManualCheckRequired(order) || isBoxManualCheckRequired(localCopy));
+  const isBusy = isApproving || isDeclining || isCheckingDecline || isClosingOrder;
+  // Nothing is left to decide on a closed BOX decision, so its panel can be
+  // dismissed like a dismissible one.
+  const canClose = viewOnly || ((dismissible || isBoxDecisionClosedHere) && !isBusy);
+  const showCloseButton = viewOnly || dismissible || isBoxDecisionClosedHere;
 
   useEffect(() => {
     setSelectedBoxReason(null);
@@ -480,10 +571,11 @@ export function OrderApprovalPanel({
       setItemsLoadError(null);
 
       try {
-        const items = await fetchOrderItems(order);
+        const { items, localCopy: readCopy } = await fetchOrderItems(order);
+        if (readCopy) setLocalCopy(readCopy);
         if (items.length > 0) {
           setFullOrder({ ...order, items });
-        } else {
+        } else if (!hasBoxDisplayItems(order, readCopy)) {
           setItemsLoadError(t('orderApprovalPanel.noItems', { defaultValue: 'No items found' }));
         }
       } catch (e) {
@@ -529,10 +621,11 @@ export function OrderApprovalPanel({
     setItemsLoadError(null);
 
     try {
-      const items = await fetchOrderItems(order);
+      const { items, localCopy: readCopy } = await fetchOrderItems(order);
+      if (readCopy) setLocalCopy(readCopy);
       if (items.length > 0) {
         setFullOrder({ ...order, items });
-      } else {
+      } else if (!hasBoxDisplayItems(order, readCopy)) {
         setItemsLoadError(t('orderApprovalPanel.noItems', { defaultValue: 'No items found' }));
       }
     } catch (e) {
@@ -542,6 +635,19 @@ export function OrderApprovalPanel({
       setIsLoadingItems(false);
     }
   }, [order, t]);
+
+  // A BOX order without order items (pending until BOX confirms the accept)
+  // shows the provider's lines instead: display only, so no subtotal is
+  // derived from them and the total stays the order's own.
+  const canonicalItemCount = useMemo(
+    () => parseItemsFromJson(getOrderItemsCandidate(fullOrder || order)).length,
+    [fullOrder, order],
+  );
+  const boxDisplayItems = useMemo(
+    () => (canonicalItemCount > 0 ? [] : resolveBoxDisplayItems(order, localCopy)),
+    [canonicalItemCount, order, localCopy],
+  );
+  const showsBoxDisplayItems = boxDisplayItems.length > 0;
 
   /**
    * Normalizes order items for display.
@@ -571,7 +677,10 @@ export function OrderApprovalPanel({
 
     console.log('[OrderApprovalPanel] Unique items after dedup:', uniqueItems.length);
 
-    return uniqueItems.map((item: any) => {
+    // The provider's lines are each their own line: never deduplicated.
+    const lines: any[] = uniqueItems.length > 0 ? uniqueItems : boxDisplayItems;
+
+    return lines.map((item: any) => {
       // Extract customizations/ingredients - handle both array and object formats
       // Requirements: 2.2 - Display customizations as sub-items with prices
       let customizationsList: { name: string; price: number; isWithout?: boolean; isLittle?: boolean; categoryName?: string }[] = [];
@@ -716,22 +825,37 @@ export function OrderApprovalPanel({
         categoryPath: resolveCategoryPath(item),
       };
     });
-  }, [fullOrder, order, t]);
+  }, [fullOrder, order, boxDisplayItems, t]);
 
   // Calculate subtotal from items using total_price values
   // Requirements: 2.3, 6.1, 6.3
   const subtotal = useMemo(() => {
+    if (showsBoxDisplayItems) return 0;
     return calculateSubtotalFromItems(normalizedItems.map(item => ({
       total_price: item.total_price,
       unit_price: item.price,
       quantity: item.quantity
     })));
-  }, [normalizedItems]);
+  }, [normalizedItems, showsBoxDisplayItems]);
   const taxAmount = order.tax_amount || order.taxAmount || 0;
   const deliveryFee = order.deliveryFee ?? 0;
   const discountAmount = order.discount_amount || 0;
   const discountPercentage = order.discount_percentage || 0;
   const totalAmount = resolveOrderTotalAmount(fullOrder || order, subtotal);
+
+  /**
+   * What staff read after a failed BOX accept / decline: the server may have
+   * closed the decision (BOX_DECISION_CLOSED / _EXPIRED / _REFUSED) or left it
+   * to a check with BOX (BOX_DECISION_MANUAL_CHECK); only an ordinary failure
+   * says to retry while the order is pending. The callers answer false or
+   * throw a bare error, so the native refusal is read from the order store's
+   * error, when the store set it during this decision.
+   */
+  const boxDecisionFailureMessage = useCallback((error: unknown, storeErrorBefore: unknown): string => {
+    const storeError = readOrderStoreError();
+    const freshStoreError = storeError !== storeErrorBefore ? storeError : null;
+    return t(boxDecisionFailureMessageKey(classifyBoxDecisionFailure(error, freshStoreError)));
+  }, [t]);
 
   const handleApprove = useCallback(async () => {
     if (!estimatedTime) {
@@ -739,6 +863,7 @@ export function OrderApprovalPanel({
       return;
     }
     setIsApproving(true);
+    const storeErrorBefore = isBox ? readOrderStoreError() : null;
     try {
       // Read the window again now: the most the platform takes keeps shrinking.
       const approved = await onApprove(order.id, isBox ? estimatedTime : minutesToSend());
@@ -748,11 +873,11 @@ export function OrderApprovalPanel({
       toast.success(t('orderApprovalPanel.approved'));
       onClose();
     } catch (error) {
-      toast.error(t(isBox ? 'boxOrder.decisionUnconfirmed' : 'orderApprovalPanel.approveFailed'));
+      toast.error(isBox ? boxDecisionFailureMessage(error, storeErrorBefore) : t('orderApprovalPanel.approveFailed'));
     } finally {
       setIsApproving(false);
     }
-  }, [isBox, order.id, estimatedTime, minutesToSend, onApprove, onClose, t]);
+  }, [isBox, order.id, estimatedTime, minutesToSend, onApprove, onClose, boxDecisionFailureMessage, t]);
 
   const handleDecline = useCallback(async () => {
     let reasonToSend: string;
@@ -772,6 +897,7 @@ export function OrderApprovalPanel({
       reasonToSend = trimmedReason;
     }
     setIsDeclining(true);
+    const storeErrorBefore = isBox ? readOrderStoreError() : null;
     try {
       const declined = await onDecline(order.id, reasonToSend);
       // Not declined (refused, or it failed): the caller said why, and the
@@ -780,12 +906,32 @@ export function OrderApprovalPanel({
       toast.success(t('orderApprovalPanel.declined'));
       onClose();
     } catch (error) {
-      toast.error(t(isBox ? 'boxOrder.decisionUnconfirmed' : 'orderApprovalPanel.declineFailed'));
+      toast.error(isBox ? boxDecisionFailureMessage(error, storeErrorBefore) : t('orderApprovalPanel.declineFailed'));
     } finally {
       setIsDeclining(false);
       setShowDeclineModal(false);
     }
-  }, [isBox, selectedBoxReason, order.id, declineReason, onDecline, onClose, t]);
+  }, [isBox, selectedBoxReason, order.id, declineReason, onDecline, onClose, boxDecisionFailureMessage, t]);
+
+  const handleCloseBoxOrder = useCallback(async () => {
+    setIsClosingOrder(true);
+    try {
+      if (!(await closeBoxOrderWithClosedDecision(order.id))) {
+        toast.error(t('boxOrder.closeOrderFailed', {
+          defaultValue: 'The order could not be closed. Check the connection and try again.',
+        }));
+        return;
+      }
+      onClose();
+    } catch (error) {
+      console.warn('[OrderApprovalPanel] Closing the BOX order failed:', error);
+      toast.error(t('boxOrder.closeOrderFailed', {
+        defaultValue: 'The order could not be closed. Check the connection and try again.',
+      }));
+    } finally {
+      setIsClosingOrder(false);
+    }
+  }, [order.id, onClose, t]);
 
   // Founder rule (30/09 and 01/10/2026): an order the till refuses to
   // decline (money was taken on it, or it is labelled paid with no payment
@@ -840,7 +986,38 @@ export function OrderApprovalPanel({
           { icon: 'ℹ️' },
         );
       } else {
-        toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
+        // The reply only says the job is queued: read what the queue did with
+        // it before naming an outcome, as the dashboard does (review
+        // 06/10/2026; this panel said "printed" for a job that never printed).
+        const jobId = typeof (result as any)?.jobId === 'string' ? (result as any).jobId : null;
+        const outcome = jobId
+          ? await observeQueuedPrintJob(bridge.printer.listJobs, jobId)
+          : { kind: 'queued' as const };
+        if (outcome.kind === 'sent') {
+          toast.success(t('orderApprovalPanel.printSent', { defaultValue: 'Receipt sent to the printer.' }));
+        } else if (outcome.kind === 'waiting') {
+          toast(
+            t('orderApprovalPanel.printWaitingForItems', {
+              defaultValue:
+                "Not printed yet: this order's items have not arrived from the delivery platform. The receipt prints by itself once they do.",
+            }),
+            { duration: 8000 },
+          );
+        } else if (outcome.kind === 'not_printed') {
+          toast.error(
+            printQueueReasonText(outcome.reasonCode, (key, defaultValue) => t(key, { defaultValue })) ??
+              t('orderApprovalPanel.printNotPrinted', {
+                defaultValue: 'The receipt was not printed. Check the print queue in Settings > Print Queue.',
+              }),
+            { duration: 8000 },
+          );
+        } else {
+          toast(
+            t('orderApprovalPanel.printQueued', {
+              defaultValue: 'Receipt queued but not printed yet. Check the print queue if it does not come out.',
+            }),
+          );
+        }
       }
     } catch (error) {
       console.error('[OrderApprovalPanel] Print error:', error);
@@ -848,7 +1025,7 @@ export function OrderApprovalPanel({
     } finally {
       setIsPrinting(false);
     }
-  }, [bridge.payments, order.id, order.order_type, t]);
+  }, [bridge.payments, bridge.printer, order.id, order.order_type, t]);
 
 
   const getOrderTypeLabel = (type: string) => {
@@ -955,7 +1132,48 @@ export function OrderApprovalPanel({
         )}
         footer={(
           <div className="flex-shrink-0 space-y-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
-            {!viewOnly ? (
+            {isBoxDecisionClosedHere ? (
+              <>
+                <div
+                  role="status"
+                  data-testid="box-decision-closed"
+                  className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3"
+                >
+                  {isBoxManualCheck ? (
+                    <>
+                      <p className="text-sm font-bold text-amber-700 dark:text-amber-300">
+                        {t('boxOrder.manualCheckTitle', { defaultValue: 'Check this order with BOX' })}
+                      </p>
+                      <p className="mt-1 text-sm liquid-glass-modal-text">
+                        {t('boxOrder.manualCheck', {
+                          defaultValue: 'BOX did not confirm this order in time and may still have accepted it. Check with BOX before you prepare it or close it here.',
+                        })}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-sm font-semibold liquid-glass-modal-text">
+                      {t('boxOrder.decisionClosed', {
+                        defaultValue: 'BOX has closed this order. It can no longer be accepted or declined here.',
+                      })}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  data-testid="box-close-order"
+                  onClick={() => {
+                    void handleCloseBoxOrder();
+                  }}
+                  disabled={isClosingOrder}
+                  className="liquid-glass-modal-button min-h-[3.25rem] w-full justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
+                >
+                  <Ban className="h-4 w-4" />
+                  {isClosingOrder
+                    ? t('boxOrder.closingOrder', { defaultValue: 'Closing…' })
+                    : t('boxOrder.closeOrder', { defaultValue: 'Close order' })}
+                </button>
+              </>
+            ) : !viewOnly ? (
               <>
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
                   <div className="flex flex-col gap-1 lg:w-48">
@@ -1206,10 +1424,12 @@ export function OrderApprovalPanel({
             )}
 
             <div className="space-y-2 border-t liquid-glass-modal-border px-4 py-3">
-              <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
-                <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
-                <span>{formatCurrency(subtotal)}</span>
-              </div>
+              {!showsBoxDisplayItems ? (
+                <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
+                  <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
+                  <span>{formatCurrency(subtotal)}</span>
+                </div>
+              ) : null}
               {taxAmount > 0 && (
                 <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                   <span>{t('orderApprovalPanel.tax', { defaultValue: 'Tax' })}</span>
@@ -1238,7 +1458,7 @@ export function OrderApprovalPanel({
       </LiquidGlassModal>
 
       <LiquidGlassModal
-        isOpen={showDeclineModal}
+        isOpen={showDeclineModal && !isBoxDecisionClosedHere}
         onClose={() => {
           if (!isDeclining) {
             setShowDeclineModal(false);

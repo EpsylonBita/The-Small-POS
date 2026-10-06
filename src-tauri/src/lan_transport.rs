@@ -23,8 +23,24 @@ use zeroize::Zeroizing;
 pub const PORT: u16 = 8765;
 const MAX_FRAME: usize = 1_100_000;
 const MAX_PLAIN: usize = 256 * 1024;
-const MAX_NONCES: i64 = 100_000;
 const KEY_PREFIX: &str = "cafe_lan_pair_v1:";
+/// A timestamped waiter frame must reach the main within this window, either
+/// direction (clock skew included).
+const FRAME_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// Nonces outlive the freshness window, so a timestamped frame can never be
+/// replayed; older history is pruned instead of exhausting the pair.
+const NONCE_RETENTION_SECS: i64 = 60 * 60;
+/// Mutation receipts expire after a week; the oldest settled ones give way
+/// when a child's count or stored size reaches its cap.
+const RECEIPT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+const MAX_RECEIPTS_PER_CHILD: i64 = 5_000;
+const MAX_RECEIPT_BYTES_PER_CHILD: i64 = 64 * 1024 * 1024;
+/// A dispatch claim younger than this is in flight: never pruned or taken over.
+const DISPATCH_CLAIM_SECS: i64 = 120;
+/// Canonical refusals that stay the same for the same request bytes. Any other
+/// 4xx (408, 409, 423, 425, 429, or a reply asking to retry the same identity)
+/// may change on the next attempt and is never retained.
+const DETERMINISTIC_REFUSALS: [u16; 6] = [400, 405, 410, 413, 415, 422];
 
 #[derive(Default)]
 pub struct LanTransportState {
@@ -66,6 +82,9 @@ struct Request {
     api_key: String,
     staff_session_id: Option<String>,
     payment_capabilities: Option<String>,
+    /// Waiter clock (epoch milliseconds) when the frame was sealed. Absent
+    /// from waiters older than Android 1.0.20; never part of the identity.
+    sent_at: Option<i64>,
 }
 impl Drop for Request {
     fn drop(&mut self) {
@@ -225,8 +244,22 @@ fn response_frame(frame: &Frame, secret: &[u8], response: &Value) -> Result<Fram
     Ok(result)
 }
 
+fn journal_error<E>(_: E) -> String {
+    "LAN_JOURNAL_UNAVAILABLE".into()
+}
 fn schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
+    let current: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='cafe_lan_receipt_usage_delete')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(journal_error)?;
+    if current {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(journal_error)?;
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS cafe_lan_receipts_v1 (
         child_id TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL,
         path TEXT NOT NULL, response_ciphertext TEXT, state TEXT NOT NULL,
@@ -234,13 +267,150 @@ fn schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS cafe_lan_nonces_v1 (
         child_id TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(child_id,nonce));",
     )
-    .map_err(|_| "LAN_JOURNAL_UNAVAILABLE".to_string())
+    .map_err(journal_error)?;
+    // Desktop 1.4.124 bounds the journal. Nonces carry the time they were seen;
+    // existing history counts from now, so it still expires after one window.
+    let timestamped: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cafe_lan_nonces_v1') WHERE name='seen_at')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(journal_error)?;
+    if !timestamped {
+        tx.execute_batch(
+            "ALTER TABLE cafe_lan_nonces_v1 ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0",
+        )
+        .map_err(journal_error)?;
+        tx.execute(
+            "UPDATE cafe_lan_nonces_v1 SET seen_at=?1",
+            [chrono::Utc::now().timestamp()],
+        )
+        .map_err(journal_error)?;
+    }
+    // Reads never needed a receipt; drop those an older build kept for every
+    // order poll and table read (these families are read-only on the LAN).
+    // Receipt count and stored size are then kept by triggers, so making room
+    // never re-scans the stored replies under the database lock.
+    tx.execute_batch(
+        "DELETE FROM cafe_lan_receipts_v1 WHERE path IN ('pos/orders/sync','pos/tables');
+        CREATE INDEX IF NOT EXISTS cafe_lan_receipts_v1_age ON cafe_lan_receipts_v1(child_id,updated_at);
+        CREATE INDEX IF NOT EXISTS cafe_lan_nonces_v1_age ON cafe_lan_nonces_v1(child_id,seen_at);
+        CREATE TABLE IF NOT EXISTS cafe_lan_usage_v1 (child_id TEXT PRIMARY KEY,
+        receipts INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0);
+        DELETE FROM cafe_lan_usage_v1;
+        INSERT INTO cafe_lan_usage_v1(child_id,receipts,bytes)
+        SELECT child_id,count(*),coalesce(sum(length(response_ciphertext)),0)
+        FROM cafe_lan_receipts_v1 GROUP BY child_id;
+        CREATE TRIGGER IF NOT EXISTS cafe_lan_receipt_usage_insert AFTER INSERT ON cafe_lan_receipts_v1 BEGIN
+        INSERT OR IGNORE INTO cafe_lan_usage_v1(child_id) VALUES (NEW.child_id);
+        UPDATE cafe_lan_usage_v1 SET receipts=receipts+1,
+        bytes=bytes+length(coalesce(NEW.response_ciphertext,'')) WHERE child_id=NEW.child_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS cafe_lan_receipt_usage_update AFTER UPDATE OF response_ciphertext ON cafe_lan_receipts_v1 BEGIN
+        UPDATE cafe_lan_usage_v1 SET bytes=bytes-length(coalesce(OLD.response_ciphertext,''))
+        +length(coalesce(NEW.response_ciphertext,'')) WHERE child_id=NEW.child_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS cafe_lan_receipt_usage_delete AFTER DELETE ON cafe_lan_receipts_v1 BEGIN
+        UPDATE cafe_lan_usage_v1 SET receipts=receipts-1,
+        bytes=bytes-length(coalesce(OLD.response_ciphertext,'')) WHERE child_id=OLD.child_id;
+        END;",
+    )
+    .map_err(journal_error)?;
+    tx.commit().map_err(journal_error)
+}
+/// Admits an authenticated delivery once, before any cloud call: a stale
+/// timestamp or a replayed nonce is refused locally. Older waiters send no
+/// timestamp; their frames keep the nonce check.
+fn admit_frame(
+    conn: &Connection,
+    frame: &Frame,
+    request: &Request,
+    now_ms: i64,
+) -> Result<(), String> {
+    if request
+        .sent_at
+        .is_some_and(|sent_at| now_ms.abs_diff(sent_at) > FRAME_WINDOW_MS)
+    {
+        return Err("LAN_FRAME_EXPIRED".into());
+    }
+    schema(conn)?;
+    let now = now_ms.div_euclid(1000);
+    let tx = conn.unchecked_transaction().map_err(journal_error)?;
+    tx.execute(
+        "DELETE FROM cafe_lan_nonces_v1 WHERE child_id=?1 AND seen_at<?2",
+        params![frame.scope.source_terminal_id, now - NONCE_RETENTION_SECS],
+    )
+    .map_err(journal_error)?;
+    let inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO cafe_lan_nonces_v1(child_id,nonce,seen_at) VALUES(?1,?2,?3)",
+            params![frame.scope.source_terminal_id, frame.nonce, now],
+        )
+        .map_err(journal_error)?;
+    if inserted == 0 {
+        return Err("LAN_NONCE_REPLAY".into());
+    }
+    tx.commit().map_err(journal_error)
+}
+fn receipt_usage(conn: &Connection, child: &str) -> Result<(i64, i64), String> {
+    conn.query_row(
+        "SELECT receipts,bytes FROM cafe_lan_usage_v1 WHERE child_id=?1",
+        [child],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .map(|usage| usage.unwrap_or((0, 0)))
+    .map_err(journal_error)
+}
+/// Makes room for one more receipt without refusing the waiter: receipts
+/// expire by age, then the oldest settled ones give way to the count and size
+/// caps. In-flight dispatch claims are never removed.
+fn make_room(conn: &Connection, child: &str, now: i64) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM cafe_lan_receipts_v1 WHERE child_id=?1 AND updated_at<?2",
+        params![child, now - RECEIPT_RETENTION_SECS],
+    )
+    .map_err(journal_error)?;
+    let oldest = "DELETE FROM cafe_lan_receipts_v1 WHERE rowid IN (
+        SELECT rowid FROM cafe_lan_receipts_v1 WHERE child_id=?1
+        AND NOT (state='dispatching' AND updated_at>=?2) ORDER BY updated_at,rowid LIMIT ?3)";
+    let (receipts, _) = receipt_usage(conn, child)?;
+    if receipts >= MAX_RECEIPTS_PER_CHILD {
+        conn.execute(
+            oldest,
+            params![
+                child,
+                now - DISPATCH_CLAIM_SECS,
+                receipts - MAX_RECEIPTS_PER_CHILD + 1
+            ],
+        )
+        .map_err(journal_error)?;
+    }
+    for _ in 0..64 {
+        if receipt_usage(conn, child)?.1 < MAX_RECEIPT_BYTES_PER_CHILD {
+            break;
+        }
+        let removed = conn
+            .execute(oldest, params![child, now - DISPATCH_CLAIM_SECS, 256])
+            .map_err(journal_error)?;
+        if removed == 0 {
+            break;
+        }
+    }
+    let (receipts, bytes) = receipt_usage(conn, child)?;
+    if receipts >= MAX_RECEIPTS_PER_CHILD || bytes >= MAX_RECEIPT_BYTES_PER_CHILD {
+        return Err("LAN_PAIR_CAPACITY_ROTATE_REQUIRED".into());
+    }
+    Ok(())
 }
 enum Receipt {
     Dispatch,
     Cached(String),
     Busy,
 }
+/// Claims the receipt of one mutation (reads keep none). Nonces are admitted
+/// separately, before any cloud call.
 fn begin_receipt(
     conn: &Connection,
     frame: &Frame,
@@ -248,6 +418,7 @@ fn begin_receipt(
     path: &str,
 ) -> Result<Receipt, String> {
     schema(conn)?;
+    let now = chrono::Utc::now().timestamp();
     let tx = conn
         .unchecked_transaction()
         .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
@@ -258,41 +429,14 @@ fn begin_receipt(
     if existing.as_ref().is_some_and(|row| row.0 != hash) {
         return Err("LAN_REQUEST_ID_CONFLICT".into());
     }
-    let nonce_exists: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM cafe_lan_nonces_v1 WHERE child_id=?1 AND nonce=?2)",
-            params![frame.scope.source_terminal_id, frame.nonce],
-            |r| r.get(0),
-        )
-        .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
-    if nonce_exists {
-        return Err("LAN_NONCE_REPLAY".into());
-    }
-    let count: i64 = tx
-        .query_row(
-            "SELECT count(*) FROM cafe_lan_nonces_v1 WHERE child_id=?1",
-            [&frame.scope.source_terminal_id],
-            |r| r.get(0),
-        )
-        .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
-    if count >= MAX_NONCES {
-        return Err("LAN_PAIR_CAPACITY_ROTATE_REQUIRED".into());
-    }
-    tx.execute(
-        "INSERT INTO cafe_lan_nonces_v1(child_id,nonce) VALUES(?1,?2)",
-        params![frame.scope.source_terminal_id, frame.nonce],
-    )
-    .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
     if existing.is_none() {
-        let (receipts,size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(response_ciphertext)),0) FROM cafe_lan_receipts_v1 WHERE child_id=?1",[&frame.scope.source_terminal_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|"LAN_JOURNAL_UNAVAILABLE")?;
-        if receipts >= 10_000 || size >= 128 * 1024 * 1024 {
-            return Err("LAN_PAIR_CAPACITY_ROTATE_REQUIRED".into());
-        }
+        make_room(&tx, &frame.scope.source_terminal_id, now)?;
     }
-    let now = chrono::Utc::now().timestamp();
     let result = match existing {
         Some((_, Some(response), _, _)) => Receipt::Cached(response),
-        Some((_, None, state, updated)) if state == "dispatching" && now - updated < 120 => {
+        Some((_, None, state, updated))
+            if state == "dispatching" && now - updated < DISPATCH_CLAIM_SECS =>
+        {
             Receipt::Busy
         }
         _ => {
@@ -306,13 +450,50 @@ fn begin_receipt(
     tx.commit().map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
     Ok(result)
 }
+#[derive(Debug, PartialEq, Eq)]
+enum ReplyClass {
+    /// 2xx or a deterministic refusal: the final canonical answer for these bytes.
+    Final,
+    /// A refusal that may change on the next attempt; relayed once, never retained.
+    Retry,
+    /// 202, 1xx, 3xx or 5xx: the cloud outcome is unknown.
+    Uncertain,
+}
+fn reply_class(status: u16, body: &Value) -> ReplyClass {
+    let asks_retry = ["retryable", "retry_same_identity"]
+        .iter()
+        .any(|key| body.get(*key).and_then(Value::as_bool) == Some(true));
+    match status {
+        202 => ReplyClass::Uncertain,
+        200..=299 => ReplyClass::Final,
+        400..=499 if DETERMINISTIC_REFUSALS.contains(&status) && !asks_retry => ReplyClass::Final,
+        400..=499 => ReplyClass::Retry,
+        _ => ReplyClass::Uncertain,
+    }
+}
+fn wire_is_final(wire: &Value) -> bool {
+    wire["status"]
+        .as_u64()
+        .and_then(|status| u16::try_from(status).ok())
+        .is_some_and(|status| reply_class(status, &wire["data"]) == ReplyClass::Final)
+}
+/// Retains a canonical reply only when it is the final answer for this exact
+/// request (a 2xx or a deterministic refusal). A retry-class refusal (408,
+/// 409, 429, a reply asking to retry the same identity...) is never retained:
+/// the attempt is left pending, so the next delivery of the same operation
+/// asks the cloud again instead of replaying a stale refusal forever.
+/// Returns whether the reply was retained.
 fn persist_response(
     conn: &Connection,
     frame: &Frame,
     hash: &str,
     secret: &[u8],
     response: &Value,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    if !wire_is_final(&response["wire"]) {
+        pending(conn, frame);
+        return Ok(false);
+    }
     let encrypted = encrypt(
         secret,
         &receipt_aad(frame, hash),
@@ -334,11 +515,34 @@ fn persist_response(
     if changed != 1 {
         return Err("LAN_JOURNAL_IDENTITY_CHANGED".into());
     }
-    Ok(())
+    Ok(true)
 }
 fn pending(conn: &Connection, frame: &Frame) {
     let _=conn.execute("UPDATE cafe_lan_receipts_v1 SET state='pending' WHERE child_id=?1 AND request_id=?2 AND response_ciphertext IS NULL",
         params![frame.scope.source_terminal_id,frame.request_id]);
+}
+/// Takes over a receipt whose retained reply is not final (desktop builds
+/// before 1.4.124 retained retry-class refusals). Exactly one delivery wins;
+/// a concurrent one sees the claim and reports the request as in progress.
+fn reclaim_receipt(
+    conn: &Connection,
+    frame: &Frame,
+    hash: &str,
+    encrypted: &str,
+) -> Result<bool, String> {
+    conn.execute(
+        "UPDATE cafe_lan_receipts_v1 SET response_ciphertext=NULL,state='dispatching',updated_at=?1
+        WHERE child_id=?2 AND request_id=?3 AND request_hash=?4 AND response_ciphertext=?5",
+        params![
+            chrono::Utc::now().timestamp(),
+            frame.scope.source_terminal_id,
+            frame.request_id,
+            hash,
+            encrypted
+        ],
+    )
+    .map(|changed| changed == 1)
+    .map_err(journal_error)
 }
 fn request_hash(request: &Request) -> String {
     let identity = json!([
@@ -424,6 +628,10 @@ fn allowed(request: &Request) -> Result<(), String> {
             .ok_or("LAN_MUTATION_BODY_REQUIRED")?,
     )
     .map_err(|_| "LAN_INVALID_REQUEST")?;
+    // Every relayed mutation is a JSON object, as on an Android main.
+    if !value.is_object() {
+        return Err("LAN_INVALID_REQUEST".into());
+    }
     // Approval/PIN/token exchange is direct HTTPS only, including nested fields.
     fn sensitive(value: &Value) -> bool {
         match value {
@@ -514,6 +722,21 @@ fn endpoint(origin: &str, path: &str) -> Result<String, String> {
     }
     Ok(format!("{}/api/{path}", origin.trim_end_matches('/')))
 }
+/// A payment keyed only by its header carries the same key in its body. A
+/// body that is not a JSON object is refused instead of panicking on insert.
+fn outbound_body(path: &str, body: &str, idem: Option<&str>) -> Result<String, String> {
+    let Some(idem) = idem.filter(|_| path == "pos/payments") else {
+        return Ok(body.to_string());
+    };
+    let mut value: Value = serde_json::from_str(body).map_err(|_| "LAN_INVALID_REQUEST")?;
+    if !stable(&value, "idempotency_key") {
+        value
+            .as_object_mut()
+            .ok_or("LAN_INVALID_REQUEST")?
+            .insert("idempotency_key".into(), json!(idem));
+    }
+    Ok(value.to_string())
+}
 async fn http(
     client: &reqwest::Client,
     origin: &str,
@@ -537,15 +760,7 @@ async fn http(
         builder = builder.header("x-pos-capabilities", value);
     }
     if let Some(body) = body {
-        if path == "pos/payments" && idem.is_some() {
-            let mut value: Value = serde_json::from_str(body).map_err(|_| "LAN_INVALID_REQUEST")?;
-            if !stable(&value, "idempotency_key") {
-                value["idempotency_key"] = json!(idem);
-            }
-            builder = builder.body(value.to_string());
-        } else {
-            builder = builder.body(body.to_string());
-        }
+        builder = builder.body(outbound_body(path, body, idem)?);
     }
     if let Some(idem) = idem {
         builder = builder.header("idempotency-key", idem);
@@ -680,6 +895,8 @@ fn clear_journal(app: &tauri::AppHandle, child: &str) -> Result<(), String> {
     )
     .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
     tx.execute("DELETE FROM cafe_lan_nonces_v1 WHERE child_id=?1", [child])
+        .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+    tx.execute("DELETE FROM cafe_lan_usage_v1 WHERE child_id=?1", [child])
         .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
     tx.commit().map_err(|_| "LAN_JOURNAL_UNAVAILABLE".into())
 }
@@ -1141,14 +1358,104 @@ fn decode_cached_receipt(
     Ok(cached)
 }
 
+/// What the relay core needs from outside: the keyring pair fence, the
+/// canonical HTTPS API and the domain owners. Production uses [`HttpsRelay`];
+/// tests script every call to prove ordering and journaling rules.
+trait RelayPorts: Sync {
+    fn pair_current(&self, frame: &Frame, secret: &[u8]) -> Result<(), String>;
+    fn validate(
+        &self,
+        frame: &Frame,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Result<(u16, Value), String>> + Send;
+    fn send(
+        &self,
+        frame: &Frame,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Result<(u16, Value), String>> + Send;
+    fn hydrate(
+        &self,
+        frame: &Frame,
+        request: &Request,
+        data: &mut Value,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    fn apply(&self, conn: &Connection, path: &str, canonical: &Value) -> Result<(), String>;
+    fn applied(&self, frame: &Frame);
+}
+
+struct HttpsRelay<'a> {
+    app: &'a tauri::AppHandle,
+    client: reqwest::Client,
+    origin: String,
+}
+
+impl RelayPorts for HttpsRelay<'_> {
+    fn pair_current(&self, frame: &Frame, secret: &[u8]) -> Result<(), String> {
+        check_pair_current(frame, secret)
+    }
+    async fn validate(&self, frame: &Frame, request: &Request) -> Result<(u16, Value), String> {
+        let scope = serde_json::to_string(&frame.scope).map_err(|_| "LAN_INVALID_SCOPE")?;
+        http(
+            &self.client,
+            &self.origin,
+            &validation_path(request),
+            "POST",
+            &request.api_key,
+            &frame.scope.source_terminal_id,
+            Some(&scope),
+            None,
+            request.staff_session_id.as_deref(),
+            request.payment_capabilities.as_deref(),
+        )
+        .await
+    }
+    async fn send(&self, frame: &Frame, request: &Request) -> Result<(u16, Value), String> {
+        http(
+            &self.client,
+            &self.origin,
+            &request.path,
+            &request.method,
+            &request.api_key,
+            &frame.scope.source_terminal_id,
+            request.body.as_deref(),
+            request.idempotency_key.as_deref(),
+            request.staff_session_id.as_deref(),
+            request.payment_capabilities.as_deref(),
+        )
+        .await
+    }
+    async fn hydrate(
+        &self,
+        frame: &Frame,
+        request: &Request,
+        data: &mut Value,
+    ) -> Result<(), String> {
+        hydrate(
+            &self.client,
+            &self.origin,
+            &frame.scope.source_terminal_id,
+            request,
+            data,
+        )
+        .await
+    }
+    fn apply(&self, conn: &Connection, path: &str, canonical: &Value) -> Result<(), String> {
+        crate::sync::apply_lan_canonical_response(conn, path, canonical)
+    }
+    fn applied(&self, frame: &Frame) {
+        let _ = self.app.emit(
+            "order_realtime_update",
+            json!({"source":"lan","request_id":frame.request_id}),
+        );
+    }
+}
+
 async fn dispatch(
     app: &tauri::AppHandle,
     frame: &Frame,
     secret: &[u8],
     request: &Request,
 ) -> Result<Value, String> {
-    allowed(request)?;
-    check_pair_current(frame, secret)?;
     let db = app.state::<crate::db::DbState>();
     let (origin, _main_key) = crate::resolve_admin_endpoint(Some(&db))
         .await
@@ -1158,25 +1465,43 @@ async fn dispatch(
     if current.as_str() != frame.scope.parent_terminal_id {
         return Err("LAN_MAIN_SCOPE_CHANGED".into());
     }
-    let client = client()?;
-    let validate_path = validation_path(request);
-    let (auth_status, auth) = http(
-        &client,
-        &origin,
-        &validate_path,
-        "POST",
-        &request.api_key,
-        &frame.scope.source_terminal_id,
-        Some(&serde_json::to_string(&frame.scope).map_err(|_| "LAN_INVALID_SCOPE")?),
-        None,
-        request.staff_session_id.as_deref(),
-        request.payment_capabilities.as_deref(),
+    let ports = HttpsRelay {
+        app,
+        client: client()?,
+        origin,
+    };
+    relay(
+        &ports,
+        &db.conn,
+        frame,
+        secret,
+        request,
+        chrono::Utc::now().timestamp_millis(),
     )
-    .await?;
+    .await
+}
+
+async fn relay<P: RelayPorts>(
+    ports: &P,
+    db: &Mutex<Connection>,
+    frame: &Frame,
+    secret: &[u8],
+    request: &Request,
+    now_ms: i64,
+) -> Result<Value, String> {
+    allowed(request)?;
+    // A stale or replayed delivery is refused here, before any cloud call.
+    {
+        let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+        admit_frame(&conn, frame, request, now_ms)?;
+    }
+    ports.pair_current(frame, secret)?;
+    let (auth_status, auth) = ports.validate(frame, request).await?;
     if auth_status != 200 || auth.get("success").and_then(Value::as_bool) != Some(true) {
-        return Ok(
-            json!({"success":false,"status":auth_status,"data":auth,"error":"LAN_CHILD_AUTHORITY_DENIED"}),
-        );
+        // A refusal of the relay itself (pairing, module or action policy, rate
+        // limit) is not the canonical answer to the waiter's operation. As on an
+        // Android main, the waiter retries it on its own HTTPS path.
+        return Err("LAN_CHILD_AUTHORITY_DENIED".into());
     }
     for (key, expected) in [
         ("organization_id", &frame.scope.organization_id),
@@ -1188,104 +1513,167 @@ async fn dispatch(
             return Err("LAN_AUTHORITY_SCOPE_MISMATCH".into());
         }
     }
+    if request.method == "GET" {
+        return relay_read(ports, db, frame, secret, request).await;
+    }
     let hash = request_hash(request);
     let receipt = {
-        let conn = db.conn.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+        let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
         begin_receipt(&conn, frame, &hash, &request.path)?
     };
-    let mut durable: Value = match receipt {
+    let sent = match receipt {
         Receipt::Busy => return Err("LAN_REQUEST_IN_PROGRESS".into()),
-        Receipt::Cached(encrypted) => decode_cached_receipt(frame, &hash, secret, &encrypted)?,
-        Receipt::Dispatch => {
-            let received = http(
-                &client,
-                &origin,
-                &request.path,
-                &request.method,
-                &request.api_key,
-                &frame.scope.source_terminal_id,
-                request.body.as_deref(),
-                request.idempotency_key.as_deref(),
-                request.staff_session_id.as_deref(),
-                request.payment_capabilities.as_deref(),
-            )
-            .await;
-            let (status, canonical) = match received {
-                Ok(value) => value,
-                Err(error) => {
-                    if let Ok(conn) = db.conn.lock() {
-                        pending(&conn, frame);
-                    }
-                    return Err(error);
+        Receipt::Cached(encrypted) => {
+            let cached = decode_cached_receipt(frame, &hash, secret, &encrypted)?;
+            if wire_is_final(&cached["wire"]) {
+                Sent::Durable(cached)
+            } else {
+                let reclaimed = {
+                    let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+                    reclaim_receipt(&conn, frame, &hash, &encrypted)?
+                };
+                if !reclaimed {
+                    return Err("LAN_REQUEST_IN_PROGRESS".into());
                 }
-            };
-            if status == 202 || status >= 500 || status < 200 || status >= 300 && status < 400 {
-                if let Ok(conn) = db.conn.lock() {
-                    pending(&conn, frame);
-                }
-                return Err("LAN_CLOUD_UNCERTAIN".into());
+                send_mutation(ports, db, frame, secret, request, &hash).await?
             }
-            let successful = (200..300).contains(&status)
-                && canonical.get("success").and_then(Value::as_bool) != Some(false);
-
-            // Persist the canonical reply before follow-up refresh: a failed refresh
-            // can be repaired by retrying the original canonical operation key.
-            let initial = json!({"wire":{"success":successful,"status":status,"data":canonical},"ready":!successful});
-            {
-                let conn = db.conn.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
-                check_pair_current(frame, secret)?;
-                persist_response(&conn, frame, &hash, secret, &initial)?;
-            }
-            initial
         }
+        Receipt::Dispatch => send_mutation(ports, db, frame, secret, request, &hash).await?,
+    };
+    let mut durable = match sent {
+        Sent::Durable(durable) => durable,
+        Sent::Refused(wire) => return Ok(wire),
     };
     if durable["wire"]["success"].as_bool() == Some(true) {
         if durable["ready"].as_bool() != Some(true) {
-            hydrate(
-                &client,
-                &origin,
-                &frame.scope.source_terminal_id,
-                request,
-                &mut durable["wire"]["data"],
-            )
-            .await?;
+            ports
+                .hydrate(frame, request, &mut durable["wire"]["data"])
+                .await?;
             if durable["wire"].to_string().len() > MAX_PLAIN {
                 return Err("LAN_RESPONSE_TOO_LARGE".into());
             }
             durable["ready"] = json!(true);
-            let conn = db.conn.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
-            check_pair_current(frame, secret)?;
+            let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+            ports.pair_current(frame, secret)?;
             persist_response(&conn, frame, &hash, secret, &durable)?;
         }
-        let conn = db.conn.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
-        check_pair_current(frame, secret)?;
-        let mut canonical = durable["wire"]["data"].clone();
-        canonical["lan_canonical_orders"] = canonical["cafe_lan_snapshot"]["orders"].clone();
-        canonical["lan_canonical_sessions"] = canonical["cafe_lan_snapshot"]["sessions"].clone();
-        canonical["lan_canonical_tables"] = canonical["cafe_lan_snapshot"]["tables"].clone();
-        canonical["lan_canonical_payments"] = canonical["cafe_lan_snapshot"]["payments"].clone();
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
-        let path = format!("/api/{}", request.path.split('?').next().unwrap_or(""));
-        if let Err(error) = crate::sync::apply_lan_canonical_response(&tx, &path, &canonical) {
-            tx.rollback().map_err(|_| "LAN_DOMAIN_ROLLBACK_FAILED")?;
-            durable["ready"] = json!(false);
-            persist_response(&conn, frame, &hash, secret, &durable)?;
-            return Err(error);
+        {
+            let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+            ports.pair_current(frame, secret)?;
+            let canonical = lan_canonical(&durable["wire"]["data"]);
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+            let path = format!("/api/{}", request.path.split('?').next().unwrap_or(""));
+            if let Err(error) = ports.apply(&tx, &path, &canonical) {
+                tx.rollback().map_err(|_| "LAN_DOMAIN_ROLLBACK_FAILED")?;
+                durable["ready"] = json!(false);
+                persist_response(&conn, frame, &hash, secret, &durable)?;
+                return Err(error);
+            }
+            let updated=tx.execute("UPDATE cafe_lan_receipts_v1 SET state='applied' WHERE child_id=?1 AND request_id=?2 AND request_hash=?3",
+                params![frame.scope.source_terminal_id,frame.request_id,hash]).map_err(|_|"LAN_JOURNAL_UNAVAILABLE")?;
+            if updated != 1 {
+                return Err("LAN_JOURNAL_IDENTITY_CHANGED".into());
+            }
+            tx.commit().map_err(|_| "LAN_JOURNAL_COMMIT_FAILED")?;
         }
-        let updated=tx.execute("UPDATE cafe_lan_receipts_v1 SET state='applied' WHERE child_id=?1 AND request_id=?2 AND request_hash=?3",
-            params![frame.scope.source_terminal_id,frame.request_id,hash]).map_err(|_|"LAN_JOURNAL_UNAVAILABLE")?;
-        if updated != 1 {
-            return Err("LAN_JOURNAL_IDENTITY_CHANGED".into());
-        }
-        tx.commit().map_err(|_| "LAN_JOURNAL_COMMIT_FAILED")?;
-        let _ = app.emit(
-            "order_realtime_update",
-            json!({"source":"lan","request_id":frame.request_id}),
-        );
+        ports.applied(frame);
     }
     Ok(durable["wire"].clone())
+}
+
+enum Sent {
+    /// A final reply, retained before any follow-up read.
+    Durable(Value),
+    /// A retry-class refusal: relayed to the waiter once, never retained.
+    Refused(Value),
+}
+
+async fn send_mutation<P: RelayPorts>(
+    ports: &P,
+    db: &Mutex<Connection>,
+    frame: &Frame,
+    secret: &[u8],
+    request: &Request,
+    hash: &str,
+) -> Result<Sent, String> {
+    let (status, canonical) = match ports.send(frame, request).await {
+        Ok(value) => value,
+        Err(error) => {
+            if let Ok(conn) = db.lock() {
+                pending(&conn, frame);
+            }
+            return Err(error);
+        }
+    };
+    if reply_class(status, &canonical) == ReplyClass::Uncertain {
+        if let Ok(conn) = db.lock() {
+            pending(&conn, frame);
+        }
+        return Err("LAN_CLOUD_UNCERTAIN".into());
+    }
+    let successful = (200..300).contains(&status)
+        && canonical.get("success").and_then(Value::as_bool) != Some(false);
+    // Persist the canonical reply before follow-up refresh: a failed refresh
+    // can be repaired by retrying the original canonical operation key.
+    let initial =
+        json!({"wire":{"success":successful,"status":status,"data":canonical},"ready":!successful});
+    let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+    ports.pair_current(frame, secret)?;
+    Ok(if persist_response(&conn, frame, hash, secret, &initial)? {
+        Sent::Durable(initial)
+    } else {
+        Sent::Refused(initial["wire"].clone())
+    })
+}
+
+/// Reads keep no receipt: a repeated order poll or table read simply asks the
+/// cloud again. A successful read still refreshes the main's own snapshot.
+async fn relay_read<P: RelayPorts>(
+    ports: &P,
+    db: &Mutex<Connection>,
+    frame: &Frame,
+    secret: &[u8],
+    request: &Request,
+) -> Result<Value, String> {
+    let (status, canonical) = ports.send(frame, request).await?;
+    if reply_class(status, &canonical) == ReplyClass::Uncertain {
+        return Err("LAN_CLOUD_UNCERTAIN".into());
+    }
+    let successful = (200..300).contains(&status)
+        && canonical.get("success").and_then(Value::as_bool) != Some(false);
+    let mut wire = json!({"success":successful,"status":status,"data":canonical});
+    if successful {
+        ports.hydrate(frame, request, &mut wire["data"]).await?;
+        if wire.to_string().len() > MAX_PLAIN {
+            return Err("LAN_RESPONSE_TOO_LARGE".into());
+        }
+        {
+            let conn = db.lock().map_err(|_| "LAN_DB_LOCK_FAILED")?;
+            ports.pair_current(frame, secret)?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|_| "LAN_JOURNAL_UNAVAILABLE")?;
+            let path = format!("/api/{}", request.path.split('?').next().unwrap_or(""));
+            if let Err(error) = ports.apply(&tx, &path, &lan_canonical(&wire["data"])) {
+                tx.rollback().map_err(|_| "LAN_DOMAIN_ROLLBACK_FAILED")?;
+                return Err(error);
+            }
+            tx.commit().map_err(|_| "LAN_JOURNAL_COMMIT_FAILED")?;
+        }
+        ports.applied(frame);
+    }
+    Ok(wire)
+}
+
+/// The domain owners read the hydrated snapshot under these flat keys.
+fn lan_canonical(data: &Value) -> Value {
+    let mut canonical = data.clone();
+    for key in ["orders", "sessions", "tables", "payments"] {
+        canonical[format!("lan_canonical_{key}")] = data["cafe_lan_snapshot"][key].clone();
+    }
+    canonical
 }
 async fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
@@ -1349,19 +1737,6 @@ pub fn status(state: &LanTransportState) -> Result<Value, String> {
     Ok(
         json!({"running":active.as_ref().is_some_and(|running|!running.cancel.is_cancelled()),"port":PORT,"protocol_version":1}),
     )
-}
-/// Synchronous cancellation fence for immediate process-exit paths. Call the
-/// async drain before taking a reset snapshot or wiping the database.
-pub fn stop(state: &LanTransportState) -> Result<Value, String> {
-    if let Some(running) = state
-        .running
-        .lock()
-        .map_err(|_| "LAN_STATE_UNAVAILABLE")?
-        .as_ref()
-    {
-        running.cancel.cancel();
-    }
-    status(state)
 }
 pub async fn stop_and_drain(state: &LanTransportState) -> Result<Value, String> {
     let running = state
@@ -1513,6 +1888,7 @@ mod tests {
             api_key: "child-only-key".into(),
             staff_session_id: None,
             payment_capabilities: None,
+            sent_at: None,
         }
     }
     #[test]
@@ -1638,16 +2014,20 @@ mod tests {
     fn durable_receipt_replay_conflict_and_uncertain_retry() {
         let conn = Connection::open_in_memory().unwrap();
         let mut f = frame();
+        let payment = request(
+            "pos/payments",
+            "POST",
+            Some(json!({"idempotency_key":"stable","amount":1})),
+        );
+        admit_frame(&conn, &f, &payment, now_ms()).unwrap();
+        assert_eq!(
+            admit_frame(&conn, &f, &payment, now_ms()).unwrap_err(),
+            "LAN_NONCE_REPLAY"
+        );
         assert!(matches!(
             begin_receipt(&conn, &f, "hash", "pos/payments").unwrap(),
             Receipt::Dispatch
         ));
-        assert_eq!(
-            begin_receipt(&conn, &f, "hash", "pos/payments")
-                .err()
-                .unwrap(),
-            "LAN_NONCE_REPLAY"
-        );
         f.nonce = random_hex(16).unwrap();
         assert!(matches!(
             begin_receipt(&conn, &f, "hash", "pos/payments").unwrap(),
@@ -1711,23 +2091,67 @@ mod tests {
         );
     }
     #[test]
-    fn receipt_transaction_rollback_does_not_consume_nonce() {
+    fn receipt_claim_rolls_back_without_leaving_a_receipt_or_usage() {
         let conn = Connection::open_in_memory().unwrap();
         schema(&conn).unwrap();
         conn.execute_batch("CREATE TRIGGER deny_receipt BEFORE INSERT ON cafe_lan_receipts_v1 BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
         let f = frame();
         assert!(begin_receipt(&conn, &f, "hash", "pos/payments").is_err());
         assert_eq!(
-            conn.query_row("SELECT count(*) FROM cafe_lan_nonces_v1", [], |r| r
+            conn.query_row("SELECT count(*) FROM cafe_lan_receipts_v1", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+        assert_eq!(
+            receipt_usage(&conn, &f.scope.source_terminal_id).unwrap(),
+            (0, 0)
         );
         conn.execute_batch("DROP TRIGGER deny_receipt;").unwrap();
         assert!(matches!(
             begin_receipt(&conn, &f, "hash", "pos/payments").unwrap(),
             Receipt::Dispatch
         ));
+        assert_eq!(
+            receipt_usage(&conn, &f.scope.source_terminal_id).unwrap(),
+            (1, 0)
+        );
+    }
+    #[test]
+    fn reply_classes_follow_the_journal_contract() {
+        let plain = json!({"success": false});
+        for status in [200, 201, 204] {
+            assert_eq!(reply_class(status, &plain), ReplyClass::Final);
+        }
+        for status in DETERMINISTIC_REFUSALS {
+            assert_eq!(reply_class(status, &plain), ReplyClass::Final);
+            assert_eq!(
+                reply_class(status, &json!({"retry_same_identity": true})),
+                ReplyClass::Retry
+            );
+        }
+        for status in [401, 403, 404, 408, 409, 423, 425, 429] {
+            assert_eq!(reply_class(status, &plain), ReplyClass::Retry);
+        }
+        for status in [101, 202, 302, 500, 502, 503] {
+            assert_eq!(reply_class(status, &plain), ReplyClass::Uncertain);
+        }
+    }
+    #[test]
+    fn outbound_payment_body_rejects_arrays_and_carries_the_header_key() {
+        assert_eq!(
+            outbound_body("pos/payments", "[{\"amount\":1}]", Some("key")).unwrap_err(),
+            "LAN_INVALID_REQUEST"
+        );
+        let keyed: Value = serde_json::from_str(
+            &outbound_body("pos/payments", "{\"amount\":1}", Some("key")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(keyed["idempotency_key"], "key");
+        assert_eq!(
+            outbound_body("pos/orders", "[1]", Some("key")).unwrap(),
+            "[1]"
+        );
     }
     #[test]
     fn two_waiters_claim_one_dispatch_and_keep_uncertain_receipt() {
@@ -1865,5 +2289,447 @@ mod tests {
         let (mut stream, _) = listener.accept().await.unwrap();
         assert!(read_frame(&mut stream).await.is_err());
         send.await.unwrap();
+    }
+
+    // Relay core regressions from the 2026-10-06 LAN review (desktop 1.4.124).
+    const TABLE: &str = "pos/tables/00000000-0000-4000-8000-000000000009";
+
+    #[derive(Default)]
+    struct ScriptedCloud {
+        validate_reply: Mutex<Option<(u16, Value)>>,
+        sends: Mutex<std::collections::VecDeque<(u16, Value)>>,
+        calls: Mutex<Vec<&'static str>>,
+    }
+    impl ScriptedCloud {
+        fn replying(replies: Vec<(u16, Value)>) -> Self {
+            Self {
+                sends: Mutex::new(replies.into()),
+                ..Self::default()
+            }
+        }
+        fn record(&self, call: &'static str) {
+            self.calls.lock().unwrap().push(call);
+        }
+        fn count(&self, call: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| **seen == call)
+                .count()
+        }
+        fn refuse_validation(&self, status: u16, body: Value) {
+            *self.validate_reply.lock().unwrap() = Some((status, body));
+        }
+    }
+    impl RelayPorts for ScriptedCloud {
+        fn pair_current(&self, _frame: &Frame, _secret: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        async fn validate(
+            &self,
+            frame: &Frame,
+            _request: &Request,
+        ) -> Result<(u16, Value), String> {
+            self.record("validate");
+            let scripted = self.validate_reply.lock().unwrap().clone();
+            Ok(scripted.unwrap_or_else(|| {
+                (
+                    200,
+                    json!({
+                        "success": true,
+                        "organization_id": frame.scope.organization_id,
+                        "branch_id": frame.scope.branch_id,
+                        "parent_terminal_id": frame.scope.parent_terminal_id,
+                        "source_terminal_id": frame.scope.source_terminal_id,
+                    }),
+                )
+            }))
+        }
+        async fn send(&self, _frame: &Frame, _request: &Request) -> Result<(u16, Value), String> {
+            self.record("send");
+            let next = self.sends.lock().unwrap().pop_front();
+            Ok(next.unwrap_or_else(|| (200, json!({"success": true}))))
+        }
+        async fn hydrate(
+            &self,
+            _frame: &Frame,
+            _request: &Request,
+            data: &mut Value,
+        ) -> Result<(), String> {
+            self.record("hydrate");
+            data["cafe_lan_snapshot"] =
+                json!({"orders": [], "sessions": [], "tables": [], "payments": []});
+            Ok(())
+        }
+        fn apply(&self, _conn: &Connection, _path: &str, _canonical: &Value) -> Result<(), String> {
+            self.record("apply");
+            Ok(())
+        }
+        fn applied(&self, _frame: &Frame) {}
+    }
+    fn delivery() -> Frame {
+        let mut next = frame();
+        next.nonce = random_hex(16).unwrap();
+        next
+    }
+    fn read_delivery() -> Frame {
+        let mut next = delivery();
+        next.request_id = random_hex(32).unwrap();
+        next
+    }
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+    fn table_edit() -> Request {
+        request(
+            TABLE,
+            "PATCH",
+            Some(json!({"client_event_id": "assign-waiter-1", "waiter_id": "waiter"})),
+        )
+    }
+    fn receipt_count(db: &Mutex<Connection>) -> i64 {
+        db.lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM cafe_lan_receipts_v1", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retry_class_refusals_are_never_replayed_from_the_journal() {
+        for refusal in [
+            (
+                429,
+                json!({"success": false, "error": "Rate limit exceeded"}),
+            ),
+            (
+                409,
+                json!({"success": false, "error": "Waiting for parent order sync"}),
+            ),
+            (408, json!({"success": false, "error": "Request timeout"})),
+        ] {
+            let db = Mutex::new(Connection::open_in_memory().unwrap());
+            let cloud = ScriptedCloud::replying(vec![
+                refusal.clone(),
+                (200, json!({"success": true, "table": {"id": "table"}})),
+            ]);
+            let request = table_edit();
+            let first = relay(&cloud, &db, &delivery(), &[7; 32], &request, now_ms())
+                .await
+                .unwrap();
+            assert_eq!(first["status"], refusal.0);
+            assert_eq!(first["success"], false);
+            let second = relay(&cloud, &db, &delivery(), &[7; 32], &request, now_ms())
+                .await
+                .unwrap();
+            assert_eq!(
+                cloud.count("send"),
+                2,
+                "status {} was replayed from the journal",
+                refusal.0
+            );
+            assert_eq!(second["status"], 200);
+            assert_eq!(cloud.count("apply"), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn deterministic_refusals_stay_journaled_unless_marked_retryable() {
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::replying(vec![(
+            400,
+            json!({"success": false, "error": "Validation failed"}),
+        )]);
+        for _ in 0..2 {
+            let reply = relay(&cloud, &db, &delivery(), &[7; 32], &table_edit(), now_ms())
+                .await
+                .unwrap();
+            assert_eq!(reply["status"], 400);
+        }
+        assert_eq!(cloud.count("send"), 1);
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::replying(vec![
+            (
+                422,
+                json!({"success": false, "code": "PAYMENT_CURRENCY_UNRESOLVED", "retry_same_identity": true}),
+            ),
+            (200, json!({"success": true})),
+        ]);
+        relay(&cloud, &db, &delivery(), &[7; 32], &table_edit(), now_ms())
+            .await
+            .unwrap();
+        let retried = relay(&cloud, &db, &delivery(), &[7; 32], &table_edit(), now_ms())
+            .await
+            .unwrap();
+        assert_eq!(cloud.count("send"), 2);
+        assert_eq!(retried["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn legacy_retained_retry_refusal_is_dispatched_again() {
+        // A 1.4.123 main retained a 429 as final; after the upgrade that row
+        // must stop answering the waiter's retries.
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let request = table_edit();
+        let hash = request_hash(&request);
+        let seeded = delivery();
+        {
+            let conn = db.lock().unwrap();
+            assert!(matches!(
+                begin_receipt(&conn, &seeded, &hash, &request.path).unwrap(),
+                Receipt::Dispatch
+            ));
+            let legacy = json!({"wire": {"success": false, "status": 429, "data": {"success": false, "error": "Rate limit exceeded"}}, "ready": true});
+            let encrypted = encrypt(
+                &[7; 32],
+                &receipt_aad(&seeded, &hash),
+                legacy.to_string().as_bytes(),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE cafe_lan_receipts_v1 SET response_ciphertext=?1,state='received' WHERE request_id=?2",
+                params![encrypted, seeded.request_id],
+            )
+            .unwrap();
+        }
+        let cloud = ScriptedCloud::replying(vec![(200, json!({"success": true}))]);
+        let reply = relay(&cloud, &db, &delivery(), &[7; 32], &request, now_ms())
+            .await
+            .unwrap();
+        assert_eq!(cloud.count("send"), 1);
+        assert_eq!(reply["status"], 200);
+        let again = relay(&cloud, &db, &delivery(), &[7; 32], &request, now_ms())
+            .await
+            .unwrap();
+        assert_eq!(again["status"], 200);
+        assert_eq!(
+            cloud.count("send"),
+            1,
+            "the fresh success is the final receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_keep_no_receipt_and_still_refresh_the_main() {
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::default();
+        let poll = request("pos/orders/sync?limit=100", "GET", None);
+        for _ in 0..3 {
+            let reply = relay(&cloud, &db, &read_delivery(), &[7; 32], &poll, now_ms())
+                .await
+                .unwrap();
+            assert_eq!(reply["success"], true);
+        }
+        assert_eq!(receipt_count(&db), 0);
+        assert_eq!(cloud.count("apply"), 3);
+    }
+
+    #[test]
+    fn mutation_receipts_are_pruned_by_age_and_count_instead_of_refusing_the_waiter() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema(&conn).unwrap();
+        let f = delivery();
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
+             INSERT INTO cafe_lan_receipts_v1(child_id,request_id,request_hash,path,response_ciphertext,state,updated_at)
+             SELECT ?1,'seed-'||i,'h','pos/orders','v1:00','applied',
+               CASE WHEN i<=4000 THEN ?2 ELSE ?3-10000+i END FROM n",
+            params![f.scope.source_terminal_id, now - 8 * 24 * 60 * 60, now - 60],
+        )
+        .unwrap();
+        assert!(matches!(
+            begin_receipt(&conn, &f, "hash", "pos/payments").unwrap(),
+            Receipt::Dispatch
+        ));
+        let (count, oldest_kept): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*),min(CAST(substr(request_id,6) AS INTEGER)) FROM cafe_lan_receipts_v1 WHERE request_id LIKE 'seed-%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 4_999);
+        assert_eq!(oldest_kept, 5_002);
+        let usage: (i64, i64) = conn
+            .query_row(
+                "SELECT receipts,bytes FROM cafe_lan_usage_v1 WHERE child_id=?1",
+                [&f.scope.source_terminal_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(usage, (5_000, 4_999 * 5));
+    }
+
+    #[test]
+    fn receipt_size_accounting_is_incremental() {
+        let conn = Connection::open_in_memory().unwrap();
+        let f = delivery();
+        let child = f.scope.source_terminal_id.clone();
+        begin_receipt(&conn, &f, "hash", "pos/payments").unwrap();
+        persist_response(
+            &conn,
+            &f,
+            "hash",
+            &[7; 32],
+            &json!({"wire": {"success": true, "status": 200, "data": {"payment_id": "p"}}, "ready": false}),
+        )
+        .unwrap();
+        let stored = |conn: &Connection| -> (i64, i64) {
+            conn.query_row(
+                "SELECT receipts,bytes FROM cafe_lan_usage_v1 WHERE child_id=?1",
+                [&child],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        let actual = |conn: &Connection| -> (i64, i64) {
+            conn.query_row(
+                "SELECT count(*),coalesce(sum(length(response_ciphertext)),0) FROM cafe_lan_receipts_v1 WHERE child_id=?1",
+                [&child],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(stored(&conn), actual(&conn));
+        assert!(stored(&conn).1 > 0);
+        conn.execute("DELETE FROM cafe_lan_receipts_v1", [])
+            .unwrap();
+        assert_eq!(stored(&conn), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn nonce_history_is_bounded_by_age() {
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::default();
+        let read = request("pos/tables", "GET", None);
+        let first = read_delivery();
+        let start = now_ms();
+        relay(&cloud, &db, &first, &[7; 32], &read, start)
+            .await
+            .unwrap();
+        relay(
+            &cloud,
+            &db,
+            &read_delivery(),
+            &[7; 32],
+            &read,
+            start + 2 * 60 * 60 * 1000,
+        )
+        .await
+        .unwrap();
+        let kept: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM cafe_lan_nonces_v1 WHERE nonce=?1",
+                [&first.nonce],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 0);
+    }
+
+    #[tokio::test]
+    async fn replayed_frame_is_refused_before_any_cloud_call() {
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::default();
+        let payment = request(
+            "pos/payments",
+            "POST",
+            Some(json!({"idempotency_key": "pay-1", "amount": 5})),
+        );
+        let delivered = delivery();
+        relay(&cloud, &db, &delivered, &[7; 32], &payment, now_ms())
+            .await
+            .unwrap();
+        assert_eq!(
+            relay(&cloud, &db, &delivered, &[7; 32], &payment, now_ms())
+                .await
+                .unwrap_err(),
+            "LAN_NONCE_REPLAY"
+        );
+        assert_eq!(cloud.count("validate"), 1);
+        assert_eq!(cloud.count("send"), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_or_future_frames_are_refused_before_any_cloud_call() {
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::default();
+        let now = now_ms();
+        for skew in [-11 * 60 * 1000, 11 * 60 * 1000] {
+            let mut read = request("pos/tables", "GET", None);
+            read.sent_at = Some(now + skew);
+            assert_eq!(
+                relay(&cloud, &db, &read_delivery(), &[7; 32], &read, now)
+                    .await
+                    .unwrap_err(),
+                "LAN_FRAME_EXPIRED"
+            );
+        }
+        assert_eq!(cloud.count("validate"), 0);
+        let mut read = request("pos/tables", "GET", None);
+        read.sent_at = Some(now - 30_000);
+        relay(&cloud, &db, &read_delivery(), &[7; 32], &read, now)
+            .await
+            .unwrap();
+        // Waiters older than Android 1.0.20 send no timestamp and keep working.
+        relay(
+            &cloud,
+            &db,
+            &read_delivery(),
+            &[7; 32],
+            &request("pos/tables", "GET", None),
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cloud.count("validate"), 2);
+    }
+
+    #[tokio::test]
+    async fn relay_policy_refusal_falls_back_to_https_instead_of_answering() {
+        let db = Mutex::new(Connection::open_in_memory().unwrap());
+        let cloud = ScriptedCloud::default();
+        let payment = request(
+            "pos/payments",
+            "POST",
+            Some(json!({"idempotency_key": "pay-1", "amount": 5})),
+        );
+        for (status, body) in [
+            (
+                403,
+                json!({"success": false, "error": "MODULE_REQUIRED", "missingModules": ["tables"]}),
+            ),
+            (
+                429,
+                json!({"success": false, "error": "Rate limit exceeded"}),
+            ),
+        ] {
+            cloud.refuse_validation(status, body);
+            assert_eq!(
+                relay(&cloud, &db, &delivery(), &[7; 32], &payment, now_ms())
+                    .await
+                    .unwrap_err(),
+                "LAN_CHILD_AUTHORITY_DENIED"
+            );
+        }
+        assert_eq!(cloud.count("send"), 0);
+        assert_eq!(receipt_count(&db), 0);
+    }
+
+    #[test]
+    fn allowlist_rejects_non_object_mutation_bodies() {
+        let mut payment = request(
+            "pos/payments",
+            "POST",
+            Some(json!([{"idempotency_key": "x", "amount": 1}])),
+        );
+        payment.idempotency_key = Some("x".into());
+        assert_eq!(allowed(&payment).unwrap_err(), "LAN_INVALID_REQUEST");
+        assert!(allowed(&request(TABLE, "PATCH", Some(json!("client_event_id")))).is_err());
     }
 }

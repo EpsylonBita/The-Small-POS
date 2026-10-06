@@ -31,6 +31,12 @@ export function deriveMenuEditChanges(original: Record<string, any>, items: any[
 export interface MenuOrderEditData {
   orderId: string;
   client_event_id?: string;
+  /**
+   * A re-quote after a confirmed edit was proven never applied (fix 4): the
+   * new event replaces that attempt once it is applied, so the money it
+   * declared is recorded exactly once.
+   */
+  supersedes_client_event_id?: string;
   expected_version?: number;
   expected_local_version?: number;
   renderer_local_version?: number;
@@ -50,7 +56,24 @@ export interface MenuOrderEditLifecycle {
 }
 
 export type MenuEditSettlementRequest = Parameters<PlatformBridge['orders']['applyEditSettlement']>[0];
-export type MenuEditPreflight = { financials?: Partial<OrderFinancialsUpdateParams>; kind: 'ordinary' | 'metadata' | 'settlement'; requiredAction?: 'none' | 'collect' | 'refund'; canonicalExpectedVersion?: number; localExpectedVersion?: number };
+export type MenuEditSettlementMethod = 'cash' | 'card';
+export type MenuEditPreflight = { financials?: Partial<OrderFinancialsUpdateParams>; kind: 'ordinary' | 'metadata' | 'settlement'; requiredAction?: 'none' | 'collect' | 'refund'; canonicalExpectedVersion?: number; localExpectedVersion?: number;
+  /** Tenders this terminal may record for the difference (server method_policy). */
+  allowedMethods?: MenuEditSettlementMethod[];
+  /** The order PATCH line limit (server max_lines). */
+  maxLines?: number };
+
+/** The order PATCH accepts at most this many lines (the quote accepts 500). */
+export const MENU_EDIT_MAX_LINES = 50;
+
+function settlementPolicy(preview: unknown): Pick<MenuEditPreflight, 'allowedMethods' | 'maxLines'> {
+  const source = (preview ?? {}) as { allowedMethods?: unknown; maxLines?: unknown };
+  const allowedMethods = Array.isArray(source.allowedMethods)
+    ? source.allowedMethods.filter((method): method is MenuEditSettlementMethod => method === 'cash' || method === 'card')
+    : undefined;
+  const maxLines = Number.isSafeInteger(source.maxLines) && Number(source.maxLines) > 0 ? Number(source.maxLines) : undefined;
+  return { ...(allowedMethods ? { allowedMethods } : {}), ...(maxLines ? { maxLines } : {}) };
+}
 
 export function menuEditRefundAction(preview: OrderEditSettlementPreview, amount: number, method: 'cash' | 'card', reason: string,
   attribution: { staffId?: string; staffShiftId?: string } = {}): OrderEditSettlementAction {
@@ -75,7 +98,8 @@ export function menuEditRequest(data: MenuOrderEditData): Omit<MenuEditSettlemen
   return { orderId: data.orderId, items: data.items, orderNotes: data.notes,
     orderUpdates: data.orderUpdates, financials: data.financials,
     client_event_id: data.client_event_id, expected_version: data.expected_version,
-    ...(data.expected_local_version === undefined ? {} : { expected_local_version: data.expected_local_version }) };
+    ...(data.expected_local_version === undefined ? {} : { expected_local_version: data.expected_local_version }),
+    ...(data.supersedes_client_event_id ? { supersedes_client_event_id: data.supersedes_client_event_id } : {}) };
 }
 
 export async function previewMenuOrderEdit(
@@ -172,7 +196,8 @@ async function previewMenuOrderEditOnce(
   if (data.expected_local_version !== undefined && (data.expected_local_version !== scoped.localExpectedVersion ||
       data.expected_version !== scoped.canonicalExpectedVersion)) throw new Error('EDIT_SETTLEMENT_VERSION_CHANGED');
   return { preflight: { kind: 'settlement', financials: scoped.quotedFinancials, requiredAction: scoped.requiredAction,
-    canonicalExpectedVersion: scoped.canonicalExpectedVersion, localExpectedVersion: scoped.localExpectedVersion }, preview: scoped };
+    canonicalExpectedVersion: scoped.canonicalExpectedVersion, localExpectedVersion: scoped.localExpectedVersion,
+    ...settlementPolicy(scoped) }, preview: scoped };
 }
 
 export async function commitMenuOrderEdit(

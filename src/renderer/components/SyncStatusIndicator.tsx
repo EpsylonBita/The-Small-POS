@@ -37,6 +37,7 @@ import { formatDate, formatDateTime, formatNumber } from '../utils/format';
 import { cn } from '../utils/cn';
 import { liquidGlassModalTone } from '../styles/designSystem';
 import { useBackgroundAccessibilityIsolation } from './ui/pos-glass-components';
+import { CashierRecovery } from '../contexts/cashier-gate-context';
 import { buildHealthSupportContext } from '../support';
 import {
   getLocalizedPaymentBlockerFix,
@@ -2986,11 +2987,15 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       healthAvailability === 'stale'
         ? `${healthDialogDescriptionId}-stale ${healthDialogDescriptionId}`
         : healthDialogDescriptionId;
+    // Health is a support path: a locked cashier day (no open shift) must not fence
+    // it off, or the dialog opens and then ignores every click and key — even Close.
     return ReactDOM.createPortal(
+      <CashierRecovery>
       <div
         className="fixed inset-0 z-[10000]"
         style={{ isolation: 'isolate' }}
         data-liquid-glass-modal-viewport
+        data-cashier-recovery="true"
       >
         <div
           className="absolute inset-0 bg-black/45 backdrop-blur-md"
@@ -3252,7 +3257,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             </div>
           </div>
         </div>
-      </div>,
+      </div>
+      </CashierRecovery>,
       document.body,
     );
   };

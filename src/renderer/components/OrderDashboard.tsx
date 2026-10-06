@@ -41,7 +41,8 @@ import { TableWorkspaceToolbar, TableWorkspaceCard } from "./tables/TableWorkspa
 import BulkActionsBar from "./BulkActionsBar";
 import DriverAssignmentModal from "./modals/DriverAssignmentModal";
 import OrderCancellationModal, { type CancellationReturnChannel } from "./modals/OrderCancellationModal";
-import { prepareManualOrderCancellation, commitManualOrderCancellation, type ManualCancellationPlan, manualCancellationFailureKey } from "../services/ManualOrderCancellation";
+import { prepareManualOrderCancellation, commitManualOrderCancellation, type ManualCancellationPlan, manualCancellationFailureKey, manualCancellationFailureOptions } from "../services/ManualOrderCancellation";
+import { releaseRefusedTableCancellation } from "../services/TableManualCancellation";
 import EditOptionsModal from "./modals/EditOptionsModal";
 import EditPaymentMethodModal, {
   type EditablePaymentRow,
@@ -70,6 +71,11 @@ import {
   type SinglePaymentCollectionResult,
 } from "./modals/SinglePaymentCollectionModal";
 import OrderDetailsModal from "./modals/OrderDetailsModal";
+import {
+  observeQueuedPrintJob,
+  printQueueReasonText,
+  type QueuedPrintOutcome,
+} from "./printing/PrintQueuePanel";
 import type {
   SplitPaymentCollectionMode,
   SplitPaymentResult,
@@ -143,7 +149,7 @@ import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
 import { useKioskOrderAutoPrint, isKioskOrder } from "../hooks/useKioskOrderAutoPrint";
-import { subscribeIncomingOrderApprovalFocus } from "../services/incomingOrderAlert";
+import { isIncomingOrderAlertExempt, subscribeIncomingOrderApprovalFocus } from "../services/incomingOrderAlert";
 import { noticeShortenedPreparationTime } from "../services/platformAcceptNotice";
 import {
   resolveCallerIdOrderSelection,
@@ -209,6 +215,7 @@ import { usePrivilegedActionConfirmation } from "../hooks/usePrivilegedActionCon
 import { useTableReleaseGuard } from "../hooks/useTableReleaseGuard";
 import {
   findCancelRefusals,
+  hasTableServiceEvidence,
   ORDER_HAS_PAYMENTS,
   ORDER_PAYMENT_NOT_RECORDED,
 } from "../utils/orderCancelGuard";
@@ -1821,7 +1828,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return;
       }
 
-      const nextOrder = scopedPendingExternalOrders[0];
+      // A BOX order whose decision the server closed waits for no decision
+      // (06/10/2026): it never opens the panel by itself. Its closed view is
+      // still one click away on the order.
+      const nextOrder = scopedPendingExternalOrders.find(
+        (order) => !isIncomingOrderAlertExempt(order),
+      );
       if (!nextOrder) return;
 
       if (
@@ -6542,18 +6554,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             if (refusals.notRecorded.length > 0) announceCancelRefusedNotRecorded(refusals.notRecorded);
             const plans: Record<string, ManualCancellationPlan> = {};
             const protectedOrders: string[] = [];
-            const tableIds = selectedOrders.filter(id => {
-              const order = [...orders, ...pendingExternalOrders].find(row => row.id === id);
-              const type = String(order?.orderType || (order as any)?.order_type || "");
-              return Boolean((order as any)?.tableSessionId || (order as any)?.table_session_id || type === "dine-in" || type === "dine_in");
-            });
+            // Table checks are decided by table evidence, never by the dine-in
+            // label alone: a kiosk eat-in order is cancelled like a counter
+            // order (review 06/10/2026). Orders holding money are prepared
+            // anyway, so the till decides their table history itself.
+            const tableIds = selectedOrders.filter(id =>
+              hasTableServiceEvidence([...orders, ...pendingExternalOrders].find(row => row.id === id)));
             for (const orderId of new Set([...refusals.hasPayments, ...tableIds])) {
               try {
                 plans[orderId] = await prepareManualOrderCancellation(bridge, orderId);
               } catch (error) {
                 console.warn("Manual cancellation preflight refused", error);
                 protectedOrders.push(orderId);
-                toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers([orderId]) }), { duration: 9000 });
+                toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers([orderId]), ...manualCancellationFailureOptions(error) }), { duration: 9000 });
               }
             }
             const cancellable = selectedOrders.filter(id => !refusals.notRecorded.includes(id) && !protectedOrders.includes(id));
@@ -6712,7 +6725,34 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         await loadOrders();
       } catch (error) {
         console.error("Failed to cancel orders:", error);
-        toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers(pendingCancelOrders) }), { duration: 9000 });
+        toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers(pendingCancelOrders), ...manualCancellationFailureOptions(error) }), { duration: 9000 });
+      }
+    };
+
+    // A manager clears a saved table cancellation that never applied money
+    // (refused by the server, never sent, or proven uncommitted). Nothing is
+    // charged, returned or cancelled; the order can then be cancelled again.
+    const handleReleaseSavedCancellation = async () => {
+      const saved = Object.values(manualCancelPlans).find(plan => plan.pending && plan.tableSessionId);
+      if (!saved?.tableSessionId) return;
+      try {
+        await runTableReleaseApproval({
+          scope: "cash_drawer_control",
+          action: (managerPin) => releaseRefusedTableCancellation({
+            orderId: saved.orderId, tableSessionId: saved.tableSessionId as string,
+            requestId: saved.requestId, reason: saved.reason,
+          }, managerPin),
+          title: t("tableRelease.clearAttemptTitle"),
+          subtitle: t("tableRelease.clearAttemptSubtitle"),
+        });
+        toast.success(t("modals.orderCancellation.attemptCleared"));
+        setShowCancelModal(false);
+        setPendingCancelOrders([]);
+        setManualCancelPlans({});
+        await loadOrders();
+      } catch (error) {
+        if (error instanceof Error && error.message === "Privileged action confirmation cancelled") return;
+        toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers([saved.orderId]), ...manualCancellationFailureOptions(error) }), { duration: 9000 });
       }
     };
 
@@ -8506,6 +8546,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           mode={editSettlementDeltaPrompt?.mode ?? "collect"}
           amount={editSettlementDeltaPrompt?.amount ?? 0}
           orderNumber={editSettlementDeltaPrompt?.orderNumber ?? null}
+          allowedMethods={(editSettlementDeltaPrompt?.preview as { allowedMethods?: Array<"cash" | "card"> } | undefined)?.allowedMethods}
           onConfirm={handleEditSettlementDeltaConfirm}
           onCancel={handleEditSettlementDeltaCancel}
         />
@@ -8555,13 +8596,62 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                     }),
                     { id: "dashboard-view-print" },
                   );
-                } else if (result?.success) {
-                  toast.success(
-                    t("orderApprovalPanel.printSuccess", {
-                      defaultValue: "Receipt printed successfully",
+                } else if ((result as any)?.skipped) {
+                  // The receipt action is turned off: nothing was queued.
+                  toast(
+                    t("orderApprovalPanel.printSkipped", {
+                      defaultValue: "Receipt printing is turned off for this action.",
                     }),
                     { id: "dashboard-view-print" },
                   );
+                } else if (result?.success) {
+                  // The reply only says the job is queued (or already was).
+                  // Read what the queue did with it before naming an outcome.
+                  const jobId =
+                    typeof (result as any)?.jobId === "string" ? (result as any).jobId : null;
+                  const outcome: QueuedPrintOutcome = jobId
+                    ? await observeQueuedPrintJob(bridge.printer.listJobs, jobId)
+                    : { kind: "queued" };
+                  if (outcome.kind === "waiting") {
+                    toast(
+                      t("orderApprovalPanel.printWaitingForItems", {
+                        defaultValue:
+                          "Not printed yet: this order's items have not arrived from the delivery platform. The receipt prints by itself once they do.",
+                      }),
+                      { id: "dashboard-view-print", duration: 8000 },
+                    );
+                  } else if (outcome.kind === "sent") {
+                    toast.success(
+                      t("orderApprovalPanel.printSent", {
+                        defaultValue: "Receipt sent to the printer.",
+                      }),
+                      { id: "dashboard-view-print" },
+                    );
+                  } else if (outcome.kind === "not_printed") {
+                    toast.error(
+                      printQueueReasonText(outcome.reasonCode, (key, defaultValue) =>
+                        t(key, { defaultValue }),
+                      ) ??
+                        t("orderApprovalPanel.printNotPrinted", {
+                          defaultValue:
+                            "The receipt was not printed. Check the print queue in Settings > Print Queue.",
+                        }),
+                      { id: "dashboard-view-print", duration: 8000 },
+                    );
+                  } else {
+                    toast(
+                      (result as any)?.duplicate
+                        ? t("orderApprovalPanel.printAlreadyQueued", {
+                            defaultValue:
+                              "This receipt is already queued or printing — not reprinted.",
+                          })
+                        : t("orderApprovalPanel.printQueued", {
+                            defaultValue:
+                              "Receipt queued but not printed yet. Check the print queue if it does not come out.",
+                          }),
+                      { id: "dashboard-view-print" },
+                    );
+                  }
                 } else {
                   toast.error(
                     result?.error ||
@@ -8622,6 +8712,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           manualReturn={Object.values(manualCancelPlans).some(plan => plan.requiresReturn) ? {
             amountCents: Object.values(manualCancelPlans).reduce((sum, plan) => sum + plan.amountCents, 0),
             currency: Object.values(manualCancelPlans).find(plan => plan.requiresReturn)?.currency || "",
+          } : undefined}
+          savedAttempt={Object.values(manualCancelPlans).find(plan => plan.pending && plan.tableSessionId) ? {
+            refused: Boolean(Object.values(manualCancelPlans).find(plan => plan.pending && plan.tableSessionId)?.refused),
+            onRelease: handleReleaseSavedCancellation,
           } : undefined}
           platformOrder={orders.some((order) => {
             if (!pendingCancelOrders.includes(order.id)) {

@@ -689,7 +689,10 @@ fn ensure_box_order_mutation_allowed(
             if matches!(current.as_str(), "cancelled" | "rejected") {
                 false
             } else if current == "pending" {
-                next == "pending"
+                // A decision the server closed takes no accept or decline any
+                // more: staff may close the order here, a plain local cancel
+                // that never reaches BOX (the server takes it as one).
+                next == "pending" || (next == "cancelled" && box_decision_closed(conn, order_id)?)
             } else {
                 !matches!(next.as_str(), "cancelled" | "rejected" | "pending")
             }
@@ -702,18 +705,35 @@ fn ensure_box_order_mutation_allowed(
     }
 }
 
+/// True when the server closed this BOX order's decision: the local copy of
+/// `ghost_metadata._the_small_box_decision` has `state: "closed"` (BOX
+/// expired or refused it, or the outcome is unknown and staff check it with
+/// BOX; shared/box-order-contract.ts). Missing or unreadable metadata is
+/// never read as closed.
+fn box_decision_closed(conn: &rusqlite::Connection, order_id: &str) -> Result<bool, String> {
+    let metadata: Option<String> = conn
+        .query_row(
+            "SELECT ghost_metadata FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load BOX decision state: {e}"))?;
+    Ok(metadata
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .is_some_and(|metadata| {
+            metadata
+                .pointer("/_the_small_box_decision/state")
+                .and_then(Value::as_str)
+                == Some("closed")
+        }))
+}
+
 fn status_requires_payment_integrity_guard(next_status: &str) -> bool {
     matches!(
         normalize_status_for_storage(next_status).as_str(),
         "completed" | "delivered"
     )
-}
-
-#[cfg(test)]
-fn is_invalid_status_transition_failure_message(message: &str) -> bool {
-    message
-        .to_ascii_lowercase()
-        .contains("invalid status transition")
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1504,12 +1524,18 @@ fn prepare_box_decision_request(
     }))
 }
 
+/// How long the till waits for the server's answer to a BOX accept or
+/// decline. The server may spend up to 8 s on BOX itself before it records
+/// and broadcasts the decision, so an 8 s wait gave up on decisions that went
+/// through. The Android POS waits 30 s as well.
+const BOX_DECISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn request_box_decision_confirmation(
     context: &ImmediateOrderStatusSyncContext,
     body: &Value,
 ) -> Result<(), String> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .timeout(BOX_DECISION_REQUEST_TIMEOUT)
         .build()
         .map_err(|_| "BOX decision requires an online terminal; refresh or retry".to_string())?;
     let url = format!(
@@ -1533,10 +1559,13 @@ async fn request_box_decision_confirmation(
         .await
         .map_err(|_| "BOX decision response is unknown; refresh before retrying".to_string())?;
     if !status.is_success() {
+        // Only the server's own typed code says what a refusal means. An
+        // untyped failure (404, 403, 5xx) carries no BOX code, so the
+        // renderer never reads it as a closed or manual-check BOX decision.
         let code = payload
             .get("code")
             .and_then(Value::as_str)
-            .unwrap_or("BOX_DECISION_REFUSED");
+            .unwrap_or("HTTP_ERROR");
         return Err(format!(
             "BOX decision refused (HTTP {}, {code}); refresh the order",
             status.as_u16()
@@ -2807,6 +2836,41 @@ fn edit_settlement_required_refund(ledger_paid: f64, next_total: f64) -> f64 {
     Cents::round_half_even((ledger_paid - next_total).max(0.0)).to_f64_dp2()
 }
 
+/// The settlement the edit itself causes, in exact cents (fix 7, 06/10/2026).
+///
+/// Only the difference this edit causes is collected or returned, exactly as
+/// the server's settlement validates it (Android uses the same rule):
+/// - the local rows hold more than the new total: return exactly the excess
+///   (the server refuses `none` while retained money exceeds the total);
+/// - an order that was fully paid and grew: collect exactly the growth;
+/// - anything else (unpaid, partly paid, an equal total, a decrease that
+///   stays above what was paid): nothing. A partly paid order's open balance
+///   stays open for the ordinary payment flow; the settlement contract can
+///   only collect the whole outstanding, which would charge the old balance.
+/// There is no tolerance: one cent less is a one-cent return and one cent
+/// more a one-cent collection (the 0.01 tolerance turned a one-cent decrease
+/// into `none`, which the server then refused after the local commit).
+fn edit_settlement_action_for_cents(
+    original_total_cents: i64,
+    effective_paid_cents: i64,
+    ledger_paid_cents: i64,
+    next_total_cents: i64,
+) -> &'static str {
+    if effective_paid_cents <= 0 {
+        return "none";
+    }
+    if ledger_paid_cents > next_total_cents {
+        return "refund";
+    }
+    if next_total_cents > original_total_cents
+        && effective_paid_cents >= original_total_cents
+        && effective_paid_cents < next_total_cents
+    {
+        return "collect";
+    }
+    "none"
+}
+
 fn resolve_stale_unsynced_overpay_payments_for_order(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -2902,16 +2966,18 @@ fn capture_proven_payment_coverage(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<ProvenPaymentCoverage, String> {
-    let (raw_status, total_cents): (String, i64) = conn
+    let (raw_status, total_amount): (String, f64) = conn
         .query_row(
-            // W4b: cents-with-real-fallback shim (removed in 4e).
-            "SELECT COALESCE(payment_status, 'pending'),
-                    COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+            // Fix 3 (06/10/2026): the cached cents column can be stale after a
+            // canonical pull refreshed `total_amount`; the REAL total is the
+            // value every edit pre-check verified against the server.
+            "SELECT COALESCE(payment_status, 'pending'), COALESCE(total_amount, 0)
              FROM orders WHERE id = ?1",
             rusqlite::params![order_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| format!("load order payment proof: {e}"))?;
+    let total_cents = Cents::round_half_even(total_amount).as_i64();
     let prior_status = normalized_order_payment_status(&raw_status);
     let proven_cents = match prior_status.as_str() {
         "paid" => total_cents.max(0),
@@ -5545,6 +5611,7 @@ pub async fn orders_preview_edit_settlement(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let raw_request = arg0.clone().unwrap_or_else(|| serde_json::json!({}));
+    let supersedes = crate::edit_settlement_recovery::superseded_events(&raw_request);
     let mut payload = parse_order_edit_settlement_preview_payload(arg0)?;
     // The collect/refund prompt must be computed against the whole ledger,
     // not a local mirror that lost rows (29/09/2026).
@@ -5674,11 +5741,40 @@ pub async fn orders_preview_edit_settlement(
         payload.expected_version = Some(wire);
         payload.expected_local_version = Some(local);
     }
-    let mut result = preview_edit_settlement_in_connection(&conn, &payload)?;
+    // Fix 5 (06/10/2026): the tender policy and PATCH line limit gate the
+    // picker; the server refuses both with 403 / 400 only after the cashier
+    // confirmed money. Read the policy the capability answer carried.
+    let policy = canonical_snapshot
+        .as_ref()
+        .map(|capability| crate::edit_settlement_recovery::edit_method_policy(&conn, capability));
+    if let Some(policy) = policy.as_ref() {
+        if payload.items.len() as i64
+            > policy["maxLines"]
+                .as_i64()
+                .unwrap_or(crate::edit_settlement_recovery::EDIT_PATCH_MAX_LINES)
+        {
+            return Err("EDIT_TOO_MANY_LINES".into());
+        }
+    }
+    let mut result = preview_edit_settlement_superseding(&conn, &payload, &supersedes)?;
     if let Some(local) = payload.expected_local_version {
         result["canonicalExpectedVersion"] = serde_json::json!(payload.expected_version);
         result["localExpectedVersion"] = serde_json::json!(local);
         result["quotedFinancials"] = financials_for_renderer(payload.financials.as_ref().unwrap());
+    }
+    if let Some(policy) = policy {
+        if matches!(
+            result["requiredAction"].as_str(),
+            Some("collect" | "refund")
+        ) && policy["allowedMethods"]
+            .as_array()
+            .is_none_or(|methods| methods.is_empty())
+        {
+            return Err("EDIT_SETTLEMENT_METHOD_UNAVAILABLE".into());
+        }
+        result["allowedMethods"] = policy["allowedMethods"].clone();
+        result["maxLines"] = policy["maxLines"].clone();
+        result["methodPolicy"] = policy;
     }
     Ok(result)
 }
@@ -5687,9 +5783,25 @@ fn preview_edit_settlement_in_connection(
     conn: &rusqlite::Connection,
     payload: &OrderEditSettlementPayload,
 ) -> Result<serde_json::Value, String> {
+    preview_edit_settlement_superseding(conn, payload, &[])
+}
+
+/// The preview of an edit that may replace earlier attempts proven never
+/// applied (a re-quote after a refused confirmed edit, fix 4).
+fn preview_edit_settlement_superseding(
+    conn: &rusqlite::Connection,
+    payload: &OrderEditSettlementPayload,
+    supersedes: &[String],
+) -> Result<serde_json::Value, String> {
     let actual_order_id = resolve_renderer_order_id(conn, &payload.order_id)?;
     if let Some(expected) = payload.expected_version {
-        validate_journaled_edit_target(conn, &actual_order_id, payload, expected)?;
+        validate_journaled_edit_target_superseding(
+            conn,
+            &actual_order_id,
+            payload,
+            expected,
+            supersedes,
+        )?;
     }
     let (next_total, _) = resolve_edit_settlement_totals(conn, &actual_order_id, payload)?;
 
@@ -5742,16 +5854,19 @@ fn preview_edit_settlement_in_connection(
     let coverage = capture_proven_payment_coverage(conn, &actual_order_id)?;
     let paid_total = ledger_paid_total + coverage.missing_amount();
     let delta = next_total - current_total;
-    let required_action = determine_edit_settlement_required_action_for_ledger(
-        paid_total,
-        ledger_paid_total,
-        next_total,
+    let ledger_paid_cents = Cents::round_half_even(ledger_paid_total).as_i64();
+    let next_total_cents = Cents::round_half_even(next_total).as_i64();
+    let required_action = edit_settlement_action_for_cents(
+        Cents::round_half_even(current_total).as_i64(),
+        Cents::round_half_even(paid_total).as_i64(),
+        ledger_paid_cents,
+        next_total_cents,
     );
     if payload.client_event_id.is_some() && required_action == "refund" {
         validate_manual_edit_refund_originals(conn, &actual_order_id)?;
     }
     let refund_amount = if required_action == "refund" {
-        edit_settlement_required_refund(ledger_paid_total, next_total)
+        Cents::new(ledger_paid_cents - next_total_cents).to_f64_dp2()
     } else {
         0.0
     };
@@ -5798,9 +5913,19 @@ fn preview_edit_settlement_in_connection(
 pub async fn orders_apply_edit_settlement(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let original_request = arg0.clone().unwrap_or_default();
+    if original_request.get("reconcile").is_some() {
+        let response = reconcile_unapplied_edit_settlement(&db, &auth_state, &original_request)?;
+        if let Some(order) = response["orderId"].as_str() {
+            if let Ok(order_json) = sync::get_order_by_id(&db, order) {
+                let _ = app.emit("order_realtime_update", order_json);
+            }
+        }
+        return Ok(response);
+    }
     let (payload, action) = parse_order_edit_settlement_apply_payload(arg0)?;
     // A paid order whose local mirror lost rows is restored from the server
     // ledger first, so the edit decides on the whole ledger (29/09/2026).
@@ -5816,12 +5941,19 @@ pub async fn orders_apply_edit_settlement(
     let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
     let response = if payload.client_event_id.is_some() {
         let event = payload.client_event_id.as_deref().unwrap();
-        if crate::edit_settlement_recovery::inspect(&conn, event, &actual_order_id)?.is_none() {
+        let methods = edit_settlement_action_methods(&action);
+        // Fix 4 (06/10/2026): these first-attempt checks run AFTER `run` has
+        // journaled the confirmed action, so a server-side change while the
+        // picker was open leaves a traced, not-applied attempt (Z blocker,
+        // re-quote or manager reconciliation), never untraced declared money.
+        // Freshness is checked by the uncached canonical preview before the
+        // picker; a physically confirmed delta is never expired by time.
+        let admission = |conn: &rusqlite::Connection| -> Result<(), String> {
             let local = payload
                 .expected_local_version
                 .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
             crate::edit_settlement_recovery::require_canonical_preflight(
-                &conn,
+                conn,
                 &actual_order_id,
                 event,
                 payload
@@ -5830,7 +5962,7 @@ pub async fn orders_apply_edit_settlement(
                 local,
             )?;
             crate::edit_settlement_recovery::require_fulfillment_capability(
-                &conn,
+                conn,
                 &actual_order_id,
                 event,
                 payload
@@ -5838,19 +5970,26 @@ pub async fn orders_apply_edit_settlement(
                     .as_ref()
                     .and_then(|updates| updates.order_type.as_deref()),
             )?;
-            require_original_edit_quote(&conn, &actual_order_id, event, &payload)?;
-            // Freshness is checked by the uncached canonical preview before
-            // the picker. Never expire a physically confirmed delta by time.
-        }
-        apply_journaled_edit_settlement(
+            require_original_edit_quote(conn, &actual_order_id, event, &payload)?;
+            crate::edit_settlement_recovery::require_edit_policy(
+                conn,
+                &actual_order_id,
+                event,
+                &methods,
+                payload.items.len(),
+            )
+        };
+        apply_journaled_edit_settlement_admitted(
             &conn,
             &actual_order_id,
             &payload,
             action,
             &original_request,
             &now,
+            admission,
         )?
     } else {
+        refuse_identity_less_item_edit(&payload)?;
         let prepared = prepare_edit_settlement(&conn, &actual_order_id, &payload)?;
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| format!("begin transaction: {e}"))?;
@@ -5902,11 +6041,70 @@ pub async fn orders_apply_edit_settlement(
     Ok(response)
 }
 
-fn validate_journaled_edit_target(
+/// A manager closes a confirmed edit attempt that is proven never applied,
+/// without recording money (fix 5, 06/10/2026). The proof is checked before
+/// the approval is asked (a refused proof never consumes a manager grant)
+/// and again under the lock. Approval is the desktop money-action approval:
+/// the session plus a fresh PIN with a cashier on shift, otherwise a
+/// manager's own PIN. Nothing is charged, returned, voided or rewritten.
+fn reconcile_unapplied_edit_settlement(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    request: &Value,
+) -> Result<Value, String> {
+    let reconcile = request
+        .get("reconcile")
+        .filter(|value| value.is_object())
+        .ok_or("EDIT_RECONCILIATION_DECISION_REQUIRED")?;
+    if reconcile.get("decision").and_then(Value::as_str) != Some("close_without_money") {
+        return Err("EDIT_RECONCILIATION_DECISION_REQUIRED".into());
+    }
+    let order_raw = value_str(request, &["orderId", "order_id"]).ok_or("Missing orderId")?;
+    let event = value_str(request, &["client_event_id", "clientEventId"])
+        .ok_or("EDIT_SETTLEMENT_ID_REQUIRED")?;
+    let reason = value_str(reconcile, &["reason"]).unwrap_or_default();
+    {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let order = resolve_renderer_order_id(&conn, &order_raw)?;
+        if !crate::edit_settlement_recovery::proven_not_applied(&conn, &order, &event)? {
+            return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+        }
+    }
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidPayments,
+        db,
+        auth_state,
+    )
+    .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
+    let session = crate::auth::get_session_json(auth_state);
+    let approved_by = approver.manager_staff_id.clone().or_else(|| {
+        ["databaseStaffId", "staffId"].iter().find_map(|key| {
+            session
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
+    });
+    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+    let order = resolve_renderer_order_id(&conn, &order_raw)?;
+    crate::edit_settlement_recovery::reconcile_unapplied(
+        &conn,
+        &order,
+        &event,
+        &serde_json::json!({"approvedBy":approved_by,"via":approver.via}),
+        &reason,
+    )
+}
+
+fn validate_journaled_edit_target_superseding(
     conn: &rusqlite::Connection,
     order: &str,
     payload: &OrderEditSettlementPayload,
     expected: i64,
+    supersedes: &[String],
 ) -> Result<(), String> {
     if let Some(local) = payload.expected_local_version {
         crate::edit_settlement_recovery::validate_local_target(conn, order, local)?;
@@ -5923,7 +6121,7 @@ fn validate_journaled_edit_target(
     } else {
         crate::edit_settlement_recovery::validate_target(conn, order, expected)?;
     }
-    crate::edit_settlement_recovery::require_original_financial_attempt(
+    crate::edit_settlement_recovery::require_original_financial_attempt_superseding(
         conn,
         order,
         payload
@@ -5931,6 +6129,7 @@ fn validate_journaled_edit_target(
             .as_ref()
             .map(|event| format!("edit:{event}:"))
             .as_deref(),
+        supersedes,
     )?;
     let prior_pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND status NOT IN ('completed','synced') AND json_valid(data) AND json_extract(data,'$.settlement_context.version')=1 AND COALESCE(json_extract(data,'$.client_event_id'),'')<>?2)",rusqlite::params![order,payload.client_event_id.as_deref().unwrap_or("")],|row|row.get(0)).map_err(|error|error.to_string())?;
     if prior_pending {
@@ -6016,6 +6215,9 @@ fn validate_journaled_edit_target(
     Ok(())
 }
 
+// Test entry point only: production applies through
+// `apply_journaled_edit_settlement_admitted` after the journal (fix 4).
+#[cfg(test)]
 fn apply_journaled_edit_settlement(
     conn: &rusqlite::Connection,
     order: &str,
@@ -6024,14 +6226,40 @@ fn apply_journaled_edit_settlement(
     original_request: &Value,
     now: &str,
 ) -> Result<Value, String> {
-    crate::edit_settlement_recovery::run(conn, order, original_request, |conn| {
-        validate_journaled_edit_target(
+    apply_journaled_edit_settlement_admitted(
+        conn,
+        order,
+        payload,
+        action,
+        original_request,
+        now,
+        |_| Ok(()),
+    )
+}
+
+/// The journaled edit with its first-attempt admission (canonical preflight,
+/// quote, fulfillment capability, tender policy and line limit). Admission
+/// runs AFTER the confirmed action is journaled (fix 4): a refusal leaves a
+/// traced, not-applied attempt instead of untraced declared money.
+fn apply_journaled_edit_settlement_admitted(
+    conn: &rusqlite::Connection,
+    order: &str,
+    payload: &OrderEditSettlementPayload,
+    action: EditSettlementActionPayload,
+    original_request: &Value,
+    now: &str,
+    admission: impl FnOnce(&rusqlite::Connection) -> Result<(), String>,
+) -> Result<Value, String> {
+    let supersedes = crate::edit_settlement_recovery::superseded_events(original_request);
+    crate::edit_settlement_recovery::run(conn, order, original_request, admission, |conn| {
+        validate_journaled_edit_target_superseding(
             conn,
             order,
             payload,
             payload
                 .expected_version
                 .ok_or("EDIT_SETTLEMENT_VERSION_REQUIRED")?,
+            &supersedes,
         )?;
         if matches!(&action, EditSettlementActionPayload::Refund { .. }) {
             validate_manual_edit_refund_originals(conn, order)?;
@@ -6039,6 +6267,45 @@ fn apply_journaled_edit_settlement(
         let prepared = prepare_edit_settlement(conn, order, payload)?;
         apply_edit_settlement_changes(conn, order, payload, &prepared, action, now)
     })
+}
+
+/// Fix 1 (06/10/2026): 1.4.122 saved paid edits through the identity-less
+/// branch of `orders_apply_edit_settlement`. Its `orders` UPDATE carries
+/// items, which the server's atomic editor refused ("Stable client_event_id
+/// and request identity required") after the till had already recorded the
+/// difference, and the dependent payment then waited forever. Every item
+/// UPDATE reaches that editor (also after an unsynced order's INSERT), so an
+/// item edit is only ever saved through the identified, journaled contract.
+fn refuse_identity_less_item_edit(payload: &OrderEditSettlementPayload) -> Result<(), String> {
+    if payload.client_event_id.is_none() && !payload.items.is_empty() {
+        return Err("EDIT_SETTLEMENT_ID_REQUIRED".into());
+    }
+    Ok(())
+}
+
+/// The tender channels a journaled edit names (collections and returns).
+fn edit_settlement_action_methods(action: &EditSettlementActionPayload) -> Vec<String> {
+    let mut methods: Vec<String> = match action {
+        EditSettlementActionPayload::Collect { payments } => payments
+            .iter()
+            .map(|payment| payment.method.trim().to_ascii_lowercase())
+            .collect(),
+        EditSettlementActionPayload::Refund { refunds } => refunds
+            .iter()
+            .map(|refund| {
+                refund
+                    .refund_method
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    methods.sort();
+    methods.dedup();
+    methods
 }
 
 fn validate_manual_edit_refund_originals(
@@ -6234,7 +6501,18 @@ fn apply_edit_settlement_changes(
         // What the order's payment status proves, read before this edit
         // changes its total or payments (29/09/2026).
         let coverage = capture_proven_payment_coverage(conn, &actual_order_id)?;
-        let original_total_cents:i64=conn.query_row("SELECT COALESCE(total_amount_cents,CAST(ROUND(total_amount*100) AS INTEGER)) FROM orders WHERE id=?1",[&actual_order_id],|row|row.get(0)).map_err(|error|error.to_string())?;
+        // Fix 3 (06/10/2026): `original_total_cents` is checked by the server
+        // against round(total_amount*100). The cached cents column could be
+        // stale after a canonical pull; the REAL total is the value the
+        // canonical preflight verified, so the settlement is built from it.
+        let original_total: f64 = conn
+            .query_row(
+                "SELECT COALESCE(total_amount,0) FROM orders WHERE id=?1",
+                [&actual_order_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let original_total_cents = Cents::round_half_even(original_total).as_i64();
         let original_paid_cents = Cents::round_half_even(payments::load_principal_paid_for_order(
             conn,
             &actual_order_id,
@@ -6245,6 +6523,20 @@ fn apply_edit_settlement_changes(
             EditSettlementActionPayload::Refund { .. } => "refund",
             _ => "none",
         };
+        if payload.client_event_id.is_some() {
+            // The confirmed action must be exactly the difference this edit
+            // causes (fix 7); a partly paid order's old balance is never
+            // collected through an edit.
+            let required = edit_settlement_action_for_cents(
+                original_total_cents,
+                original_paid_cents + coverage.missing_cents,
+                original_paid_cents,
+                Cents::round_half_even(next_total).as_i64(),
+            );
+            if required != action_name {
+                return Err("EDIT_SETTLEMENT_EXACT_ACTION_REQUIRED".into());
+            }
+        }
         let mut settlement_payments = Vec::new();
         let mut settlement_refunds = Vec::new();
 
@@ -6363,7 +6655,10 @@ fn apply_edit_settlement_changes(
                 let refund_total: f64 = refund_rows.iter().map(|refund| refund.amount).sum();
                 let required_refund =
                     edit_settlement_required_refund(ledger_paid_before, next_total);
-                if (refund_total - required_refund).abs() > 0.01 {
+                let exact_mismatch = payload.client_event_id.is_some()
+                    && Cents::round_half_even(refund_total)
+                        != Cents::round_half_even(required_refund);
+                if exact_mismatch || (refund_total - required_refund).abs() > 0.01 {
                     return Err(format!(
                         "Refund allocation {refund_total:.2} must match the overpaid amount {required_refund:.2}"
                     ));
@@ -7738,14 +8033,6 @@ fn checkout_in_progress_response(client_request_id: &str) -> serde_json::Value {
     })
 }
 
-fn twint_prior_checkout_refusal() -> Value {
-    serde_json::json!({
-        "success": false, "errorCode": "TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED",
-        "paymentApproved": false, "orderPersisted": false, "requiresReconciliation": true,
-        "error": "Check the earlier checkout payment before collecting TWINT money.",
-    })
-}
-
 /// The new-order checkout: the fiscal checkout (which charges a card on the
 /// fiscal device), then the order and its initial payment in one write.
 ///
@@ -7805,6 +8092,28 @@ pub(crate) async fn create_order_with_initial_payment(
         order.insert("initialPayment".into(), initial_payment.clone());
         order.insert("initial_payment".into(), initial_payment.clone());
     }
+    let manual_twint = initial_payment
+        .get("method")
+        .or_else(|| initial_payment.get("paymentMethod"))
+        .or_else(|| initial_payment.get("payment_method"))
+        .and_then(Value::as_str)
+        .is_some_and(|method| method.trim().eq_ignore_ascii_case("twint"));
+    // The renderer's checkout names no organization, branch or terminal, and
+    // a scope it did name is no authority: the cashier-confirmed TWINT
+    // original carries this terminal's own (fix review 06/10/2026). Before,
+    // the receipt check refused every new-order TWINT checkout and the
+    // renderer saved the order for retry with no receipt journal.
+    if manual_twint {
+        // The receipt's canonical tender, whichever alias named it.
+        for key in ["initialPayment", "initial_payment"] {
+            if let Some(payment) = normalized.get_mut(key).and_then(Value::as_object_mut) {
+                payment.insert("method".into(), Value::String("twint".into()));
+            }
+        }
+        if let Err(error) = crate::unsaved_payments::stamp_manual_twint_scope(db, &mut normalized) {
+            return Ok(crate::unsaved_payments::manual_twint_receipt_unretained_response(&error));
+        }
+    }
 
     // One press at a time per checkout: a second press while the first still
     // waits on the card terminal never reaches the terminal.
@@ -7858,13 +8167,7 @@ pub(crate) async fn create_order_with_initial_payment(
 
     // A card the fiscal device approved for this checkout: money that moved.
     let mut card_money_moved = false;
-    let manual_twint = initial_payment
-        .get("method")
-        .or_else(|| initial_payment.get("paymentMethod"))
-        .or_else(|| initial_payment.get("payment_method"))
-        .and_then(Value::as_str)
-        .is_some_and(|method| method.trim().eq_ignore_ascii_case("twint"));
-    if existing_order_id.is_none() {
+    if existing_order_id.is_none() && !manual_twint {
         // This checkout's charge is held as not saved (item E): replay the
         // held order and payment, the payload the card was charged for.
         let held = {
@@ -7874,9 +8177,6 @@ pub(crate) async fn create_order_with_initial_payment(
                 .find(crate::unsaved_payments::UnsavedChargedPayment::is_new_order_checkout)
         };
         if let Some(entry) = held {
-            if manual_twint {
-                return Ok(twint_prior_checkout_refusal());
-            }
             return Ok(crate::unsaved_payments::save_charged_payment(
                 db,
                 entry,
@@ -7885,26 +8185,6 @@ pub(crate) async fn create_order_with_initial_payment(
                 |db, entry| crate::unsaved_payments::write_recorded_entry(db, entry, invalidator),
             )
             .await);
-        }
-
-        if manual_twint {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            let prior: i64 = conn.query_row(
-                "SELECT count(*) FROM ecr_transactions WHERE order_id=?1
-                 AND lower(trim(transaction_type)) IN ('sale','fiscal_receipt')
-                 AND lower(trim(status)) NOT IN ('declined','error','cancelled')
-                 AND (CASE WHEN json_valid(receipt_data) THEN json_extract(receipt_data,'$.returnedToCustomer') END) IS NULL",
-                [&client_request_id], |row| row.get(0),
-            ).map_err(|e| format!("inspect prior checkout before TWINT: {e}"))?;
-            if prior != 0
-                || crate::commands::ecr::find_approved_fiscal_transaction(
-                    &conn,
-                    &client_request_id,
-                )?
-                .is_some()
-            {
-                return Ok(twint_prior_checkout_refusal());
-            }
         }
     }
 
@@ -8021,14 +8301,25 @@ pub(crate) async fn create_order_with_initial_payment(
             && crate::commands::payments::payment_payload_has_terminal_approval(checkout_payment);
     }
 
-    let checkout_record = if manual_twint && existing_order_id.is_none() {
-        let entry = crate::unsaved_payments::UnsavedChargedPayment::for_manual_twint_checkout(
+    let checkout_record = if manual_twint {
+        // A cashier-confirmed TWINT receipt is money that moved: it is
+        // retained before anything may refuse it. An earlier card attempt of
+        // this checkout, or its order saved meanwhile without this receipt,
+        // refuses the write (`unsaved_payments::write_recorded_entry`), never
+        // the receipt itself (fix review 06/10/2026: the customer had paid).
+        match crate::unsaved_payments::UnsavedChargedPayment::for_manual_twint_checkout(
             db,
             &client_request_id,
             &normalized,
             &Utc::now().to_rfc3339(),
-        )?;
-        Some((entry.clone(), entry.request))
+        ) {
+            Ok(entry) => Some((entry.clone(), entry.request)),
+            Err(error) => {
+                return Ok(
+                    crate::unsaved_payments::manual_twint_receipt_unretained_response(&error),
+                )
+            }
+        }
     } else if card_money_moved {
         crate::unsaved_payments::UnsavedChargedPayment::for_new_order_checkout(
             &client_request_id,
@@ -8040,13 +8331,18 @@ pub(crate) async fn create_order_with_initial_payment(
     };
     let (mut resp, fiscal_enqueued) = match checkout_record {
         Some((entry, keyed_order)) => {
+            use crate::unsaved_payments::{write_new_order_checkout, write_recorded_entry};
             let answer = crate::unsaved_payments::save_charged_payment(
                 db,
                 entry,
                 save_delays_ms,
                 None,
-                |db, _entry| {
-                    crate::unsaved_payments::write_new_order_checkout(db, &keyed_order, invalidator)
+                |db, entry| {
+                    if entry.is_manual_twint() {
+                        write_recorded_entry(db, entry, invalidator)
+                    } else {
+                        write_new_order_checkout(db, &keyed_order, invalidator)
+                    }
                 },
             )
             .await;
@@ -8500,10 +8796,27 @@ pub(crate) fn cancel_refusal_code(
 /// its payment is voided or refunded from the order first, or the rest is
 /// collected. Cancelling it would take back what the drawer counted for it
 /// while the payment stays recorded.
+#[cfg(test)]
 pub(crate) fn authorize_owing_order_cancel(
     db: &db::DbState,
     auth_state: &crate::auth::AuthState,
     arg0: Option<serde_json::Value>,
+) -> Result<(String, String, crate::auth::MoneyApprover), crate::auth::GuardedCommandError> {
+    authorize_owing_order_cancel_with_evidence(
+        db,
+        auth_state,
+        arg0,
+        &crate::manual_order_cancellation::ReturnEvidence::default(),
+    )
+}
+
+/// [`authorize_owing_order_cancel`] with the fresh remote evidence a frozen
+/// table return needs (provider admission, canonical mirrored receipts).
+pub(crate) fn authorize_owing_order_cancel_with_evidence(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    arg0: Option<serde_json::Value>,
+    evidence: &crate::manual_order_cancellation::ReturnEvidence,
 ) -> Result<(String, String, crate::auth::MoneyApprover), crate::auth::GuardedCommandError> {
     let payload = arg0.ok_or("Missing cancel payload")?;
     let order_id = value_str(&payload, &["orderId", "order_id"])
@@ -8532,8 +8845,11 @@ pub(crate) fn authorize_owing_order_cancel(
                 .ok_or("CANCELLATION_REQUEST_CONFLICT")?;
             if crate::table_manual_cancellation::original(&conn, &event)?.is_none() {
                 validate_table_manual_cancel_target(&conn, &local_order_id, &session)?;
-                let plan =
-                    crate::manual_order_cancellation::prepare_validated(&conn, &local_order_id)?;
+                let plan = crate::manual_order_cancellation::prepare_validated(
+                    &conn,
+                    &local_order_id,
+                    evidence,
+                )?;
                 if plan["generation"] != manual["generation"] {
                     return Err("CANCELLATION_PAYMENT_CHANGED".into());
                 }
@@ -8652,6 +8968,167 @@ pub(crate) fn record_owing_order_cancel_audit(
     Ok(())
 }
 
+/// A server answer that refuses the request itself: the admin application's
+/// own 4xx error. A lost, throttled or failed request, a platform page or an
+/// invalid terminal key proves nothing about the request.
+fn is_definitive_server_refusal(error: &crate::api::AdminFetchError) -> bool {
+    !error.is_transport_failure()
+        && error.has_app_error_body()
+        && error.status().is_some_and(|status| {
+            (400..500).contains(&status) && !matches!(status, 401 | 408 | 425 | 429)
+        })
+}
+
+fn server_refusal_code(error: &crate::api::AdminFetchError) -> String {
+    error
+        .code()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("HTTP_{}", error.status().unwrap_or_default()))
+}
+
+#[cfg(test)]
+mod table_cancellation_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_applications_own_refusal_proves_a_refused_request() {
+        let refusal = |status: u16, body: &str| {
+            is_definitive_server_refusal(&crate::api::AdminFetchError::from_http_response_for_test(
+                status, body,
+            ))
+        };
+        let denied = r#"{"success":false,"error":"Cancellation approval denied"}"#;
+        assert!(refusal(403, denied));
+        assert!(refusal(
+            409,
+            r#"{"success":false,"error":"Order holds money; refund or settle it before cancellation"}"#
+        ));
+        assert!(refusal(
+            400,
+            r#"{"success":false,"error":"Validation failed"}"#
+        ));
+        // A lost, throttled, failed or unauthenticated request proves nothing.
+        assert!(!refusal(401, denied));
+        assert!(!refusal(408, denied));
+        assert!(!refusal(429, denied));
+        assert!(!refusal(500, denied));
+        assert!(!refusal(
+            503,
+            r#"{"success":false,"code":"REMOTE_HANDOVER_RETRY"}"#
+        ));
+        assert!(!refusal(404, "<html>DEPLOYMENT_NOT_FOUND</html>"));
+        assert!(!is_definitive_server_refusal(
+            &crate::api::AdminFetchError::transport("connection reset")
+        ));
+    }
+}
+
+fn refused_table_cancellation_message() -> String {
+    format!(
+        "{}: The server refused this cancellation. No money was returned and the table was not released. A manager can clear the refused attempt, then cancel again.",
+        crate::table_manual_cancellation::REFUSED
+    )
+}
+
+/// A manager clears a saved table cancellation that is proven never to have
+/// applied money (review 06/10/2026): refused by the server, never sent, or
+/// reported uncommitted after every approval it could carry expired. Their
+/// own PIN approves it; the audit entry names them. Nothing is charged,
+/// returned or cancelled.
+async fn release_refused_table_cancellation(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    payload: &Value,
+) -> Result<Value, crate::auth::GuardedCommandError> {
+    use crate::table_manual_cancellation::{RefusalProof, ReleaseCheck};
+    let event = payload
+        .pointer("/releaseRefusedCancellation/clientEventId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|event| !event.is_empty())
+        .ok_or("CANCELLATION_REQUEST_CONFLICT")?
+        .to_string();
+    let note = value_str(
+        payload,
+        &["reason", "cancellationReason", "cancellation_reason"],
+    )
+    .map(|value| value.trim().chars().take(500).collect::<String>())
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| "Refused table cancellation cleared".to_string());
+    let (local_order_id, check) = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let raw = value_str(payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
+        let (local, _) = resolve_order_id_with_remote(&conn, raw.trim())?;
+        // Refuse before anyone's PIN is asked.
+        let check = crate::table_manual_cancellation::release_check(&conn, &local, &event)?;
+        (local, check)
+    };
+    if value_str(payload, &["managerPin", "manager_pin"]).is_none() {
+        return Err(crate::auth::PrivilegedActionError {
+            code: "REAUTH_REQUIRED",
+            scope: "cash_drawer_control".into(),
+            reason: "A staff member's own PIN is required to clear a refused table cancellation"
+                .into(),
+            ttl_seconds: None,
+            approval: Some("void_orders"),
+        }
+        .into());
+    }
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidOrders,
+        db,
+        auth_state,
+    )?;
+    let manager = approver
+        .manager_staff_id
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .ok_or("A staff member's own approval is required")?;
+    let proof = match check {
+        ReleaseCheck::Proven => None,
+        ReleaseCheck::NeverSent => Some(RefusalProof::NeverSent),
+        ReleaseCheck::ServerReadRequired {
+            session,
+            actor,
+            last_dispatch_at,
+        } => {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("expected_action", "whole_order_cancel")
+                .append_pair("approved_staff_id", &actor)
+                .finish();
+            let encoded: String = url::form_urlencoded::byte_serialize(event.as_bytes()).collect();
+            let receipt = crate::admin_fetch_detailed(
+                Some(db),
+                &format!("/api/pos/table-sessions/{session}/operations/{encoded}?{query}"),
+                "GET",
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            if receipt["committed"] == true {
+                return Err("TABLE_CANCELLATION_COMMITTED: The server already recorded this cancellation. Sync this till to finish it; nothing was cleared.".into());
+            }
+            if receipt["success"] != true || receipt["committed"] != false {
+                return Err("CANONICAL_RECEIPT_IDENTITY_CHANGED".into());
+            }
+            Some(RefusalProof::ExpiredUncommitted { last_dispatch_at })
+        }
+    };
+    let result = {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        crate::db::with_full_sync(&conn, |conn| {
+            crate::table_manual_cancellation::release(
+                conn,
+                &local_order_id,
+                &event,
+                &manager,
+                &note,
+                proof.as_ref(),
+            )
+        })?
+    };
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn order_cancel_with_approval(
     arg0: Option<serde_json::Value>,
@@ -8661,7 +9138,32 @@ pub async fn order_cancel_with_approval(
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
     let _binding = crate::repairs::acquire_terminal_binding_lease()?;
     let payload = arg0.clone().ok_or("Missing cancel payload")?;
-    let (order_id, reason, approver) = authorize_owing_order_cancel(&db, &auth_state, arg0)?;
+    if payload.get("releaseRefusedCancellation").is_some() {
+        return release_refused_table_cancellation(&db, &auth_state, &payload).await;
+    }
+    // A new frozen table return reads the same fresh remote evidence as its
+    // preview (provider admission, canonical rows of mirrored receipts)
+    // before anyone's PIN is asked. A saved one resumes its original.
+    let evidence = if payload.get("manualCancellation").is_some() {
+        let (local, saved) = {
+            let conn = db.conn.lock().map_err(|error| error.to_string())?;
+            let raw = value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
+            let (local, _) = resolve_order_id_with_remote(&conn, raw.trim())?;
+            let event = value_str(&payload, &["clientEventId", "client_event_id"])
+                .ok_or("CANCELLATION_REQUEST_CONFLICT")?;
+            let saved = crate::table_manual_cancellation::original(&conn, &event)?.is_some();
+            (local, saved)
+        };
+        if saved {
+            crate::manual_order_cancellation::ReturnEvidence::default()
+        } else {
+            crate::manual_order_cancellation::fetch_return_evidence(&db, &local, None).await?
+        }
+    } else {
+        crate::manual_order_cancellation::ReturnEvidence::default()
+    };
+    let (order_id, reason, approver) =
+        authorize_owing_order_cancel_with_evidence(&db, &auth_state, arg0, &evidence)?;
     let outstanding_cents = owing_order_outstanding_cents(&db, &order_id)
         .inspect_err(|error| {
             tracing::warn!(
@@ -8713,6 +9215,7 @@ pub async fn order_cancel_with_approval(
                         &reason,
                         staff_id,
                         manual,
+                        &evidence,
                     )
                 })?;
             }
@@ -8725,6 +9228,15 @@ pub async fn order_cancel_with_approval(
                 value_str(&payload, &["clientEventId", "client_event_id"]).as_deref(),
             )?
         };
+        // A frozen return travels only under its own event: the request sent
+        // is always the one saved (review 06/10/2026, an older attempt's
+        // plain request was sent while the frozen refund waited forever).
+        if payload.get("manualCancellation").is_some()
+            && value_str(&payload, &["clientEventId", "client_event_id"]).as_deref()
+                != Some(event_id.as_str())
+        {
+            return Err("CANCELLATION_REQUEST_CONFLICT".into());
+        }
         let path = format!("/api/pos/table-sessions/{table_session_id}");
         let recovered = if payload.get("manualCancellation").is_some() {
             let receipt=crate::admin_fetch_detailed(Some(&db),&format!("{path}/operations/{event_id}?expected_action=whole_order_cancel&approved_staff_id={staff_id}"),"GET",None).await.map_err(|e|e.to_string())?;
@@ -8770,26 +9282,67 @@ pub async fn order_cancel_with_approval(
                     .into(),
             );
             }
-            let grant=crate::admin_fetch_detailed(Some(&db),"/api/pos/table-cancel-approvals","POST",Some(serde_json::json!({
+            let grant = match crate::admin_fetch_detailed(Some(&db),"/api/pos/table-cancel-approvals","POST",Some(serde_json::json!({
             "session_id":table_session_id,"client_event_id":event_id,"staff_id":staff_id,"pin":pin
-        }))).await.map_err(|error|error.to_string())?;
+        }))).await {
+                Ok(grant) => grant,
+                Err(error) => {
+                    // No apply request was ever sent for this event: a server
+                    // refusal of its approval is final. The saved return stays
+                    // until a manager clears it; retrying cannot help.
+                    if is_definitive_server_refusal(&error) {
+                        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                        if crate::table_manual_cancellation::mark_refused(
+                            &conn,
+                            &event_id,
+                            &crate::table_manual_cancellation::RefusalProof::ApprovalRefused,
+                            &server_refusal_code(&error),
+                        )? {
+                            return Err(refused_table_cancellation_message().into());
+                        }
+                    }
+                    return Err(error.to_string().into());
+                }
+            };
             let approval_token = grant
                 .get("approval_token")
                 .and_then(Value::as_str)
                 .ok_or("Server cancellation approval was not granted")?;
-            let mut cancellation_request = {
+            let (mut cancellation_request, dispatches) = {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                crate::table_manual_cancellation::original(&conn,&event_id)?.unwrap_or_else(||serde_json::json!({
+                // Saved before the request leaves: a crash or a lost answer can
+                // never hide that this event was sent.
+                let dispatches = crate::db::with_full_sync(&conn, |conn| {
+                    crate::table_manual_cancellation::mark_dispatch(conn, &event_id)
+                })?;
+                (crate::table_manual_cancellation::original(&conn,&event_id)?.unwrap_or_else(||serde_json::json!({
                 "action":"whole_order_cancel","client_event_id":event_id,"cancellation_reason":reason,"approved_staff_id":staff_id
-            }))
+            })), dispatches)
             };
             cancellation_request["approval_token"] = serde_json::json!(approval_token);
             cancellation_request["release_status"] = serde_json::json!("available");
-            let cancelled =
-                crate::admin_fetch_detailed(Some(&db), &path, "PATCH", Some(cancellation_request))
-                    .await
-                    .map_err(|error| error.to_string())?;
-            cancelled
+            match crate::admin_fetch_detailed(Some(&db), &path, "PATCH", Some(cancellation_request))
+                .await
+            {
+                Ok(cancelled) => cancelled,
+                Err(error) => {
+                    // The first and only apply request of this event was
+                    // refused by the server itself: nothing applied, and its
+                    // approval is never requested again.
+                    if dispatches == Some(Some(1)) && is_definitive_server_refusal(&error) {
+                        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                        if crate::table_manual_cancellation::mark_refused(
+                            &conn,
+                            &event_id,
+                            &crate::table_manual_cancellation::RefusalProof::ApplyRefused,
+                            &server_refusal_code(&error),
+                        )? {
+                            return Err(refused_table_cancellation_message().into());
+                        }
+                    }
+                    return Err(error.to_string().into());
+                }
+            }
         };
         if cancelled.get("success").and_then(Value::as_bool) != Some(true) {
             return Err("Server cancellation failed. The table was not released.".into());
@@ -11186,6 +11739,71 @@ mod box_order_mutation_tests {
     }
 
     #[tokio::test]
+    async fn box_untyped_http_failure_never_reads_as_a_box_refusal() {
+        for (http_status, payload) in [
+            (
+                404,
+                serde_json::json!({ "success": false, "error": "Order not found" }),
+            ),
+            (
+                403,
+                serde_json::json!({ "success": false, "error": "Access denied" }),
+            ),
+            (
+                500,
+                serde_json::json!({ "success": false, "error": "Internal server error" }),
+            ),
+        ] {
+            let db = feedback_db();
+            let body = prepare_box_decision_request(
+                &db.conn.lock().unwrap(),
+                "box-order",
+                "confirmed",
+                Some(25),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let before = snapshot(&db.conn.lock().unwrap());
+            let (url, server) = feedback_response_server(http_status, payload);
+            let error =
+                confirm_box_decision_with_context(&db, "box-order", &body, &feedback_context(url))
+                    .await
+                    .unwrap_err();
+            assert!(error.contains(&format!("HTTP {http_status}")), "{error}");
+            // No BOX_DECISION_* code: staff are not told BOX closed the order.
+            assert!(!error.contains("BOX_DECISION_"), "{error}");
+            assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+            server.join().unwrap();
+        }
+
+        // The server's typed refusal still reaches the renderer verbatim.
+        let db = feedback_db();
+        let body = prepare_box_decision_request(
+            &db.conn.lock().unwrap(),
+            "box-order",
+            "confirmed",
+            Some(25),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let (url, server) = feedback_response_server(
+            400,
+            serde_json::json!({ "success": false, "code": "BOX_DECISION_MANUAL_CHECK", "error": "check with BOX" }),
+        );
+        let error =
+            confirm_box_decision_with_context(&db, "box-order", &body, &feedback_context(url))
+                .await
+                .unwrap_err();
+        assert!(
+            error.contains("HTTP 400, BOX_DECISION_MANUAL_CHECK"),
+            "{error}"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn box_http202_unknown_or_missing_confirmation_keeps_pending_without_queue() {
         for (status, payload) in [
             (
@@ -11886,6 +12504,213 @@ mod box_order_mutation_tests {
         )
         .is_ok());
     }
+
+    /// The server's terminal state of an unknown-outcome BOX decision: the
+    /// order stays pending and staff check it with BOX.
+    const CLOSED_MANUAL_CHECK_METADATA: &str = r#"{"food_delivery":{"platform":"box"},"_the_small_box_decision":{"version":1,"state":"closed","closure":{"reason":"expired","outcome":"unknown","manual_check":true,"code":"BOX_DECISION_EXPIRED","closed_at":"2026-10-06T10:00:00Z"}}}"#;
+
+    #[test]
+    fn box_closed_decision_lets_staff_close_the_pending_order_locally() {
+        let reasons: Vec<String> = serde_json::from_str(include_str!(
+            "../../../../shared/box-rejection-reasons.json"
+        ))
+        .unwrap();
+        let conn = connection("box", "pending", CLOSED_MANUAL_CHECK_METADATA);
+        let before = snapshot(&conn);
+        for next in ["cancelled", "canceled", "pending"] {
+            assert!(
+                ensure_box_order_mutation_allowed(
+                    &conn,
+                    "box-order",
+                    next,
+                    BoxOrderMutation::Generic
+                )
+                .is_ok(),
+                "{next}"
+            );
+        }
+        // No local fulfilment and no ready notification for an order BOX
+        // never confirmed.
+        for next in ["confirmed", "preparing", "ready", "delivered", "completed"] {
+            assert!(
+                ensure_box_order_mutation_allowed(
+                    &conn,
+                    "box-order",
+                    next,
+                    BoxOrderMutation::Generic
+                )
+                .is_err(),
+                "{next}"
+            );
+        }
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "ready",
+            BoxOrderMutation::NotifyReady
+        )
+        .is_err());
+        // A pending accept or decline still goes to the server, which answers
+        // the closed decision with its typed refusal.
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "confirmed",
+            BoxOrderMutation::Accept(Some(25))
+        )
+        .is_ok());
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "cancelled",
+            BoxOrderMutation::Reject(Some(&reasons[0]))
+        )
+        .is_ok());
+        assert_eq!(snapshot(&conn), before);
+
+        // Once the order is closed or BOX accepted it, nothing reopens or
+        // cancels it, closed record or not.
+        for status in ["cancelled", "confirmed"] {
+            let conn = connection("box", status, CLOSED_MANUAL_CHECK_METADATA);
+            for next in ["cancelled", "pending"] {
+                assert!(
+                    ensure_box_order_mutation_allowed(
+                        &conn,
+                        "box-order",
+                        next,
+                        BoxOrderMutation::Generic
+                    )
+                    .is_err(),
+                    "{status} -> {next}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_open_unreadable_or_missing_decision_still_refuses_a_pending_cancel() {
+        for metadata in [
+            "",
+            "{not json",
+            "null",
+            r#"{"food_delivery":{"platform":"box"}}"#,
+            r#"{"_the_small_box_decision":{"version":1,"state":"pending","action":"accepted"}}"#,
+            r#"{"_the_small_box_decision":{"version":1,"state":"confirmed","action":"rejected"}}"#,
+            r#"{"_the_small_box_decision":"closed"}"#,
+            r#"{"_the_small_box_decision":{"version":1,"state":"CLOSED"}}"#,
+        ] {
+            let conn = connection("box", "pending", metadata);
+            let before = snapshot(&conn);
+            assert!(
+                ensure_box_order_mutation_allowed(
+                    &conn,
+                    "box-order",
+                    "cancelled",
+                    BoxOrderMutation::Generic
+                )
+                .is_err(),
+                "{metadata}"
+            );
+            assert_eq!(snapshot(&conn), before);
+        }
+        let conn = connection("box", "pending", "");
+        conn.execute("UPDATE orders SET ghost_metadata = NULL", [])
+            .unwrap();
+        assert!(ensure_box_order_mutation_allowed(
+            &conn,
+            "box-order",
+            "cancelled",
+            BoxOrderMutation::Generic
+        )
+        .is_err());
+    }
+
+    /// The order changes this till queued for the server (`parity_sync_queue`).
+    fn queued_order_changes(conn: &rusqlite::Connection) -> Vec<Value> {
+        let mut statement = conn
+            .prepare(
+                "SELECT data FROM parity_sync_queue
+                 WHERE table_name = 'orders' AND record_id = 'box-order'",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|data| serde_json::from_str(&data.unwrap()).unwrap())
+            .collect();
+        rows
+    }
+
+    #[test]
+    fn box_closed_decision_local_close_writes_the_reason_and_queues_it() {
+        let db = feedback_db();
+        let before = snapshot(&db.conn.lock().unwrap());
+        // Without the server's closed record the plain cancel is refused
+        // before anything is written.
+        assert!(apply_order_status_locally(
+            &db,
+            "box-order",
+            "cancelled",
+            None,
+            Some("box_manual_check_closed"),
+            "2026-10-06T10:05:00Z"
+        )
+        .is_err());
+        assert_eq!(snapshot(&db.conn.lock().unwrap()), before);
+        assert!(queued_order_changes(&db.conn.lock().unwrap()).is_empty());
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET ghost_metadata = ?1 WHERE id = 'box-order'",
+                [CLOSED_MANUAL_CHECK_METADATA],
+            )
+            .unwrap();
+        let change = apply_order_status_locally(
+            &db,
+            "box-order",
+            "cancelled",
+            None,
+            Some("box_manual_check_closed"),
+            "2026-10-06T10:05:00Z",
+        )
+        .expect("a closed BOX decision may be closed locally");
+        assert!(matches!(
+            change,
+            LocalStatusChange::Applied {
+                ref order_id,
+                remote_order_id: Some(ref remote),
+            } if order_id == "box-order" && remote == REMOTE_ID
+        ));
+        let conn = db.conn.lock().unwrap();
+        let (status, reason, sync_status): (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, cancellation_reason, sync_status FROM orders WHERE id = 'box-order'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        assert_eq!(reason.as_deref(), Some("box_manual_check_closed"));
+        assert_eq!(sync_status, "pending");
+        // Queued for the server as a plain cancel with the manual-check code.
+        let queued = queued_order_changes(&conn);
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert_eq!(queued[0]["status"], "cancelled");
+        assert_eq!(queued[0]["cancellation_reason"], "box_manual_check_closed");
+    }
+
+    #[test]
+    fn box_decision_request_waits_as_long_as_android() {
+        assert_eq!(BOX_DECISION_REQUEST_TIMEOUT, Duration::from_secs(30));
+        let source = include_str!("orders.rs");
+        let start = source
+            .find("async fn request_box_decision_confirmation(")
+            .expect("BOX decision request");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(body.contains(".timeout(BOX_DECISION_REQUEST_TIMEOUT)"));
+    }
 }
 
 #[cfg(test)]
@@ -12052,14 +12877,40 @@ mod transition_tests {
         assert!(recheck_room_charge_approval(&conn, "room-snapshot", &confirmation).is_err());
     }
 
+    /// This terminal's own TWINT scope and a CHF store: the only authority
+    /// for a cashier-confirmed TWINT receipt.
+    fn seed_manual_twint_terminal(conn: &Connection) {
+        for (key, value) in [
+            ("organization_id", "manual-org"),
+            ("branch_id", "manual-branch"),
+            ("terminal_id", "manual-terminal"),
+        ] {
+            db::set_setting(conn, "terminal", key, value).unwrap();
+        }
+        for (key, value) in [
+            ("currency", "CHF"),
+            ("store_currency_available", "true"),
+            ("store_currency_source", "branch_country"),
+            ("store_currency_branch_id", "manual-branch"),
+        ] {
+            db::set_setting(conn, "restaurant", key, value).unwrap();
+        }
+    }
+
+    /// The customer already paid by TWINT when the cashier confirms it: an
+    /// earlier card attempt of the same checkout refuses the order write, but
+    /// never the receipt, which is retained for a manager (fix review
+    /// 06/10/2026; before, nothing was kept at all).
     #[tokio::test]
-    async fn twint_new_checkout_refuses_held_card_unknown_sale_fiscal_and_orphan_approval() {
+    async fn twint_new_checkout_retains_the_receipt_and_refuses_its_write_after_an_earlier_card_attempt(
+    ) {
         for prior in ["held", "sale", "fiscal", "orphan"] {
             for method_key in ["method", "paymentMethod", "payment_method"] {
                 let db = test_db();
                 let reference = format!("twint-checkout-{prior}-{method_key}");
                 {
                     let conn = db.conn.lock().unwrap();
+                    seed_manual_twint_terminal(&conn);
                     if prior == "held" {
                         let card = serde_json::json!({"initialPayment":{"method":"card","amount":12,"currency":"CHF","transactionRef":"approved-card","terminalApproved":true,"paymentOrigin":"terminal"}});
                         let (entry, _) =
@@ -12086,10 +12937,9 @@ mod transition_tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(
-                    result["errorCode"],
-                    "TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED"
-                );
+                assert_eq!(result["errorCode"], "PAYMENT_NOT_SAVED", "{result}");
+                assert_eq!(result["manualReceiptConfirmed"], true);
+                assert_eq!(result["unsavedPayment"]["canSaveAgain"], false);
                 let conn = db.conn.lock().unwrap();
                 assert_eq!(
                     conn.query_row("SELECT count(*) FROM orders", [], |row| row
@@ -12103,16 +12953,169 @@ mod transition_tests {
                         .unwrap(),
                     0
                 );
-                if prior == "held" {
-                    assert_eq!(
-                        crate::unsaved_payments::list(&conn, Some(&reference))
-                            .unwrap()
-                            .len(),
-                        1
-                    );
-                }
+                let held = crate::unsaved_payments::list(&conn, Some(&reference)).unwrap();
+                assert_eq!(held.len(), if prior == "held" { 2 } else { 1 });
+                let receipt = held
+                    .iter()
+                    .find(|entry| entry.idempotency_key == "twint-original")
+                    .expect("the confirmed TWINT receipt is retained");
+                assert!(receipt.is_manual_twint() && receipt.is_new_order_checkout());
+                assert!(receipt.last_error.as_deref().is_some_and(
+                    |error| error.contains("TWINT_PRIOR_CHECKOUT_RECONCILIATION_REQUIRED")
+                ));
+                assert_eq!(receipt.request["branchId"], "manual-branch");
             }
         }
+    }
+
+    /// Fix review 06/10/2026: the payload `OrderService.createOrder` really
+    /// sends names no organization, branch or terminal. The receipt check
+    /// refused every new-order TWINT checkout with TWINT_RECEIPT_SCOPE_CHANGED,
+    /// so the renderer saved the order for retry without a receipt journal.
+    /// The scope is now stamped natively; a forged renderer alias is
+    /// overwritten.
+    #[tokio::test]
+    async fn twint_new_checkout_from_the_renderer_payload_is_scoped_natively_journaled_and_saved() {
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            seed_manual_twint_terminal(&conn);
+        }
+        let tender = serde_json::json!({"method":"twint","payment_method":"twint","amount":12,"currency":"CHF",
+            "idempotencyKey":"renderer-twint-key","staffId":"manual-cashier","staffShiftId":"manual-shift",
+            "metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"confirm","qr_mode":"static_qr_manual"}});
+        let payload = serde_json::json!({
+            "customerId": null, "customer_id": null,
+            "clientOrderId": "renderer-checkout", "client_order_id": "renderer-checkout",
+            "clientRequestId": "renderer-checkout", "client_request_id": "renderer-checkout",
+            "items": [{"name":"Coffee","quantity":1,"price":12}],
+            "totalAmount": 12, "subtotal": 12, "discountAmount": 0, "currency": "CHF",
+            "status": "completed", "orderType": "takeaway",
+            "branch_id": "forged-branch",
+            "initialPayment": tender, "initial_payment": tender,
+            "staffShiftId": "manual-shift", "staffId": "manual-cashier",
+        });
+        for key in ["organizationId", "branchId", "terminalId"] {
+            assert!(
+                payload.get(key).is_none(),
+                "the renderer shape has no {key}"
+            );
+        }
+        let mgr = crate::ecr::DeviceManager::new();
+        // No cashier shift yet: the order write fails after the customer paid,
+        // and the receipt is held under this terminal's own scope.
+        let first = create_order_with_initial_payment(
+            &db.state,
+            &mgr,
+            &crate::print::NoopPrintQueueInvalidator,
+            payload.clone(),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["errorCode"], "PAYMENT_NOT_SAVED", "{first}");
+        assert_eq!(first["manualReceiptConfirmed"], true);
+        {
+            let conn = db.state.conn.lock().unwrap();
+            let held = crate::unsaved_payments::list(&conn, None).unwrap();
+            assert_eq!(held.len(), 1);
+            assert_eq!(
+                held[0].manual_scope.as_deref(),
+                Some("manual-org|manual-branch|manual-terminal")
+            );
+            for (key, value) in [
+                ("organizationId", "manual-org"),
+                ("branchId", "manual-branch"),
+                ("branch_id", "manual-branch"),
+                ("terminalId", "manual-terminal"),
+            ] {
+                assert_eq!(held[0].request[key], value, "{key}");
+            }
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,staff_name,branch_id,terminal_id,role_type,check_in_time,opening_cash_amount,status,sync_status,created_at,updated_at,currency) VALUES ('manual-shift','manual-cashier','Cashier','manual-branch','manual-terminal','cashier','now',0,'active','pending','now','now','CHF')",[]).unwrap();
+        }
+        // The same press again replays the retained original: one order of
+        // this terminal, one TWINT row, no record left.
+        let again = create_order_with_initial_payment(
+            &db.state,
+            &mgr,
+            &crate::print::NoopPrintQueueInvalidator,
+            payload,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(again["success"], true, "{again}");
+        let conn = db.state.conn.lock().unwrap();
+        assert!(crate::unsaved_payments::list(&conn, None)
+            .unwrap()
+            .is_empty());
+        let (branch, terminal): (String, String) = conn
+            .query_row(
+                "SELECT branch_id, terminal_id FROM orders WHERE client_request_id='renderer-checkout'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (branch.as_str(), terminal.as_str()),
+            ("manual-branch", "manual-terminal")
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE idempotency_key='renderer-twint-key' AND method='twint' AND currency='CHF'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    /// The order of this checkout already exists without this receipt (a
+    /// card of the same checkout booked it): the receipt is retained, never
+    /// answered as a success with no TWINT row.
+    #[tokio::test]
+    async fn twint_new_checkout_never_reports_success_for_an_order_saved_without_its_receipt() {
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            seed_manual_twint_terminal(&conn);
+            conn.execute("INSERT INTO orders(id,client_request_id,items,total_amount,total_amount_cents,status,order_type,payment_status,sync_status,branch_id,created_at,updated_at) VALUES ('booked-order','booked-checkout','[]',12,1200,'completed','takeaway','paid','pending','manual-branch','now','now')",[]).unwrap();
+        }
+        let tender = serde_json::json!({"method":"twint","amount":12,"currency":"CHF","idempotencyKey":"late-twint-key",
+            "metadata":{"provider":"twint","confirmation":"cashier","confirmation_action":"skip","qr_mode":"static_qr_manual"}});
+        let answer = create_order_with_initial_payment(
+            &db.state,
+            &crate::ecr::DeviceManager::new(),
+            &crate::print::NoopPrintQueueInvalidator,
+            serde_json::json!({"clientRequestId":"booked-checkout","items":[{"name":"Coffee","quantity":1,"price":12}],"totalAmount":12,"initialPayment":tender}),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer["errorCode"], "PAYMENT_NOT_SAVED", "{answer}");
+        assert_eq!(answer["unsavedPayment"]["canSaveAgain"], false);
+        let conn = db.state.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE method='twint'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let held = crate::unsaved_payments::list(&conn, None).unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(held[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("TWINT_RECEIPT_ORDER_CONTEXT_CHANGED")));
     }
 
     #[tokio::test]
@@ -13133,7 +14136,9 @@ mod transition_tests {
         };
         let preview = preview_edit_settlement_in_connection(&conn, &payload).unwrap();
         assert_eq!(preview["paidTotal"], 6.0);
-        assert_eq!(preview["requiredAction"], "collect");
+        // Fix 7: an unchanged total causes no difference; the partly covered
+        // principal stays open for the ordinary payment flow.
+        assert_eq!(preview["requiredAction"], "none");
         let snapshot =
             refresh_order_payment_snapshot_with_coverage(&conn, "tip-edit", "now", &coverage)
                 .unwrap();
@@ -13143,6 +14148,55 @@ mod transition_tests {
             payments::load_net_paid_for_order(&conn, "tip-edit").unwrap(),
             14.0
         );
+    }
+
+    /// Tip-inclusive coverage (06/10/2026): a desktop checkout's 2.00 tip is
+    /// inside its 22.00 total and on its 22.00 receipt. Editing the paid order
+    /// without changing its money asked to collect the tip again (1.4.122).
+    #[test]
+    fn tip_inside_total_edit_preview_asks_for_nothing() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "tip-inside-edit",
+            r#"[{"name":"Coffee","quantity":1,"unit_price":20,"total_price":20}]"#,
+            20.0,
+            22.0,
+            "paid",
+        );
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders SET tip_amount=2,tip_amount_cents=200 WHERE id='tip-inside-edit'",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,status,created_at,updated_at) VALUES ('tip-inside-edit-payment','tip-inside-edit','cash',22,2200,2,200,'completed','now','now')",[]).unwrap();
+        let payload = OrderEditSettlementPayload {
+            client_event_id: None,
+            expected_version: None,
+            expected_local_version: None,
+            order_id: "tip-inside-edit".into(),
+            items: vec![
+                serde_json::json!({"name":"Coffee","quantity":1,"unit_price":20,"total_price":20}),
+            ],
+            order_notes: None,
+            order_updates: None,
+            financials: None,
+        };
+        let preview = preview_edit_settlement_in_connection(&conn, &payload).unwrap();
+        assert_eq!(preview["nextTotal"], 22.0);
+        assert_eq!(preview["paidTotal"], 22.0);
+        assert_eq!(preview["ledgerPaidTotal"], 22.0);
+        assert_eq!(preview["requiredAction"], "none");
+        let coverage = capture_proven_payment_coverage(&conn, "tip-inside-edit").unwrap();
+        let snapshot = refresh_order_payment_snapshot_with_coverage(
+            &conn,
+            "tip-inside-edit",
+            "now",
+            &coverage,
+        )
+        .unwrap();
+        assert_eq!(snapshot.status, "paid");
     }
 
     #[test]
@@ -15058,27 +16112,29 @@ mod paid_edit_ledger_tests {
             [],
         )
         .unwrap();
-        request["action"]["payments"][0]["amount"] = serde_json::json!(7.5);
+        // Fix 7 (06/10/2026): an edit collects or returns only the difference
+        // it causes. The partly paid order's old 3.00 balance is not collected
+        // through the edit; the grown balance stays open for the ordinary
+        // payment flow (the settlement contract can only collect it whole).
+        request["action"] = serde_json::json!({"type":"none"});
         let (payload, _) =
             parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
         let preview = preview_edit_settlement_in_connection(&conn, &payload).unwrap();
-        assert_eq!(
-            preview["nextTotal"].as_f64().unwrap() - preview["paidTotal"].as_f64().unwrap(),
-            7.5
-        );
+        assert_eq!(preview["requiredAction"], "none", "{preview}");
         assert_eq!(
             run_journaled_edit(&conn, &request).unwrap()["success"],
             true
         );
         assert_eq!(
             payments::load_principal_paid_for_order(&conn, "legacy-edit").unwrap(),
-            10.5
+            3.0
         );
         let envelope = queued_order_push(&conn, "legacy-edit");
+        assert_eq!(envelope["settlement_context"]["action"], "none");
         assert_eq!(envelope["settlement_context"]["original_paid_cents"], 300);
         assert_eq!(
-            envelope["settlement_context"]["payments"][0]["amount_cents"],
-            750
+            envelope["settlement_context"]["payments"],
+            serde_json::json!([])
         );
     }
 
@@ -16010,6 +17066,669 @@ mod paid_edit_ledger_tests {
         )
         .expect("edit the zero order");
         assert_eq!(response["paymentStatus"], "pending", "{response}");
+    }
+
+    /// Paid/unpaid order corrections, review of 06/10/2026 (fixes 1-7).
+    mod corrections_20261006 {
+        use super::*;
+        use serde_json::json;
+
+        const INCIDENT_ORDER: &str = "ord-06102026-00084";
+        const INCIDENT_REMOTE: &str = "9a0f0c5e-6b3c-4d2e-9f61-2f0b9d6c0084";
+        const ORIGINAL_LINE: &str = "7d1e2c4a-0d8b-4c1f-9a77-5b2f0e9c1a01";
+        const ORIGINAL_PAYMENT: &str = "pay-original-720";
+        const DIFFERENCE_PAYMENT: &str = "5ca68709-9650-4f31-8615-578c739187f1";
+        const IDENTITY_REFUSAL: &str =
+            "SERVER_CONFLICT: POS_ORDER_EDIT_CONFLICT: Stable client_event_id and request identity required";
+
+        fn count(conn: &Connection, sql: &str) -> i64 {
+            conn.query_row(sql, [], |row| row.get(0)).unwrap()
+        }
+
+        /// The real Tomikro case (06/10/2026, desktop 1.4.122), customer data
+        /// omitted: a delivered delivery order of 7.20 with one 7.20 cash
+        /// receipt, edited at 23:41:32Z to add a 4.70 line (11.90, VAT 2.30)
+        /// with 4.70 collected in cash. The identity-less `orders` UPDATE was
+        /// refused (409) and its payment escalated after 50 parent waits.
+        fn incident(conn: &Connection) -> (String, String) {
+            journaled_edit_fixture(conn, false);
+            let items = json!([
+                {"id":ORIGINAL_LINE,"order_item_id":ORIGINAL_LINE,"source_order_item_id":ORIGINAL_LINE,
+                 "menuItemId":"11111111-aaaa-4aaa-8aaa-000000000001","name":"Κρέπα Αλμυρή","quantity":1,
+                 "unit_price":7.2,"price":7.2,"total_price":7.2,"customizations":[]},
+                {"id":"edit-local-1759707692000","menuItemId":"11111111-aaaa-4aaa-8aaa-000000000002",
+                 "name":"Γλυκιά Κρέπα","quantity":1,"unit_price":4.7,"price":4.7,"total_price":4.7,
+                 "customizations":[{"name":"Nutella","price":1.5,"quantity":1},{"name":"Banana","price":0.6,"quantity":1},
+                   {"name":"Biscuit","price":0.7,"quantity":1}]}
+            ]);
+            conn.execute("INSERT INTO orders(id,supabase_id,organization_id,branch_id,terminal_id,items,total_amount,total_amount_cents,subtotal,subtotal_cents,tax_amount,status,payment_status,order_type,sync_status,version,remote_version,created_at,updated_at)
+                VALUES(?1,?2,'edit-org','edit-branch','11111111-1111-4111-8111-111111111111',?3,11.9,1190,11.9,1190,2.3,'delivered','paid','delivery','pending',2,2,'2026-10-05T23:40:10Z','2026-10-05T23:41:32Z')",
+                params![INCIDENT_ORDER, INCIDENT_REMOTE, items.to_string()]).unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,sync_status,sync_state,payment_origin,remote_payment_id,idempotency_key,created_at,updated_at)
+                VALUES(?1,?2,'cash',7.2,720,'EUR','completed','synced','applied','manual','b1b1b1b1-0000-4000-8000-000000000720','payment:pay-original-720','2026-10-05T23:40:34Z','2026-10-05T23:40:34Z')",
+                params![ORIGINAL_PAYMENT, INCIDENT_ORDER]).unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,sync_status,sync_state,payment_origin,created_at,updated_at)
+                VALUES(?1,?2,'cash',4.7,470,'EUR','completed','pending','waiting_parent','manual','2026-10-05T23:41:32Z','2026-10-05T23:41:32Z')",
+                params![DIFFERENCE_PAYMENT, INCIDENT_ORDER]).unwrap();
+            // The exact payload `enqueue_order_edit_sync` wrote in 1.4.122.
+            let parent = json!({"orderId":INCIDENT_ORDER,"items":items,"orderNotes":null,"totalAmount":11.9,
+                "total_amount_cents":1190,"subtotal":11.9,"subtotal_cents":1190,"paymentStatus":"paid","paymentMethod":"cash",
+                "taxAmount":2.3,"tax_amount_cents":230}).to_string();
+            conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,attempts,priority,module_type,conflict_strategy,version,status,error_message)
+                VALUES('legacy-parent-row','orders',?1,'UPDATE',?2,'edit-org','2026-10-05T23:41:32.511+00:00',0,0,'orders','server-wins',1,'conflict',?3)",
+                params![INCIDENT_ORDER, parent, IDENTITY_REFUSAL]).unwrap();
+            let child = json!({"paymentId":DIFFERENCE_PAYMENT,"orderId":INCIDENT_ORDER,"method":"cash","amount":4.7,"amount_cents":470,
+                "currency":"EUR","paymentOrigin":"manual","collectedBy":"cashier_drawer","staffShiftId":"edit-shift","items":[]}).to_string();
+            conn.execute("INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,created_at,attempts,priority,module_type,conflict_strategy,version,status,error_message)
+                VALUES('legacy-payment-row','payments',?1,'INSERT',?2,'edit-org','2026-10-05T23:41:32.511+00:00',50,1,'payment','manual',1,'conflict',
+                'Deferred too many times (50x \"Waiting for parent order update sync\"); escalated to conflict')",
+                params![DIFFERENCE_PAYMENT, child]).unwrap();
+            (parent, child)
+        }
+
+        #[test]
+        fn legacy_1_4_122_edit_is_retried_unchanged_and_its_payment_released_once_acknowledged() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let (parent, child) = incident(&conn);
+            // The refused row goes back in line byte-for-byte: the server derives
+            // the legacy event from the unchanged request (hotfix PR #329).
+            assert_eq!(
+                crate::edit_settlement_recovery::requeue_legacy_edits(&conn).unwrap(),
+                1
+            );
+            let row: (String, i64, Option<String>, String) = conn.query_row("SELECT status,attempts,error_message,data FROM parity_sync_queue WHERE id='legacy-parent-row'",[],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+            assert_eq!(row, ("pending".into(), 0, None, parent.clone()));
+            let guard: (i64, String) = conn.query_row("SELECT attempts,audit_json FROM legacy_edit_replays_v1 WHERE queue_id='legacy-parent-row'",[],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(guard.0, 1);
+            assert!(
+                guard.1.contains("\"status\":\"conflict\"")
+                    && guard.1.contains("Stable client_event_id"),
+                "{}",
+                guard.1
+            );
+            // Persisted cooldown: no second requeue inside the window.
+            assert_eq!(
+                crate::edit_settlement_recovery::requeue_legacy_edits(&conn).unwrap(),
+                0
+            );
+            // The PATCH is the identity-less legacy request, not a rewritten one.
+            let canonical = json!({"success":true,"data":{"id":INCIDENT_REMOTE,"organization_id":"edit-org","branch_id":"edit-branch",
+                "terminal_id":"11111111-1111-4111-8111-111111111111","version":3,"status":"delivered","order_type":"delivery",
+                "total_amount":11.9,"payment_status":"partially_paid","items":[]}});
+            let sent =
+                crate::sync_queue::apply_ack_for_test(&conn, "orders", INCIDENT_ORDER, &canonical)
+                    .unwrap();
+            assert!(sent.get("client_event_id").is_none(), "{sent}");
+            assert!(sent.get("settlement_context").is_none(), "{sent}");
+            assert_eq!(sent["items"].as_array().unwrap().len(), 2, "{sent}");
+            // Released: the parked difference row is back in line, unchanged.
+            let payment: (String, i64, Option<String>, String) = conn.query_row("SELECT status,attempts,error_message,data FROM parity_sync_queue WHERE id='legacy-payment-row'",[],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+            assert_eq!(payment, ("pending".into(), 0, None, child));
+            // It syncs idempotently on its original identity and records nothing new.
+            let wire = crate::sync_queue::apply_ack_for_test(
+                &conn,
+                "payments",
+                DIFFERENCE_PAYMENT,
+                &json!({"success":true,"payment_id":"c0ffee00-0000-4000-8000-000000000470"}),
+            )
+            .unwrap();
+            assert_eq!(
+                wire["idempotency_key"],
+                format!("payment:{DIFFERENCE_PAYMENT}")
+            );
+            assert_eq!(wire["payment_id"], DIFFERENCE_PAYMENT);
+            assert_eq!(wire["amount_cents"], 470);
+            assert_eq!(
+                count(
+                    &conn,
+                    &format!(
+                        "SELECT COUNT(*) FROM order_payments WHERE order_id='{INCIDENT_ORDER}'"
+                    )
+                ),
+                2
+            );
+            assert_eq!(count(&conn, &format!("SELECT SUM(amount_cents) FROM order_payments WHERE order_id='{INCIDENT_ORDER}'")), 1190);
+            assert_eq!(count(&conn, &format!("SELECT COUNT(*) FROM order_payments WHERE order_id='{INCIDENT_ORDER}' AND remote_payment_id IS NULL")), 0);
+            assert_eq!(count(&conn, &format!("SELECT COUNT(*) FROM parity_sync_queue WHERE record_id IN ('{INCIDENT_ORDER}','{DIFFERENCE_PAYMENT}')")), 0);
+        }
+
+        #[test]
+        fn legacy_edit_refused_by_the_new_server_is_named_for_a_manager_and_never_retried() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let (parent, _) = incident(&conn);
+            conn.execute("UPDATE parity_sync_queue SET error_message='SERVER_CONFLICT: POS_ORDER_EDIT_CONFLICT: A newer canonical edit exists' WHERE id='legacy-parent-row'",[]).unwrap();
+            assert_eq!(
+                crate::edit_settlement_recovery::requeue_legacy_edits(&conn).unwrap(),
+                0
+            );
+            assert_eq!(
+                crate::edit_settlement_recovery::mark_legacy_edits_for_review(&conn).unwrap(),
+                1
+            );
+            assert_eq!(
+                crate::edit_settlement_recovery::mark_legacy_edits_for_review(&conn).unwrap(),
+                0
+            );
+            let row: (String, String, String) = conn.query_row("SELECT status,error_message,data FROM parity_sync_queue WHERE id='legacy-parent-row'",[],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+            assert_eq!(row.0, "conflict");
+            assert!(
+                row.1.starts_with("LEGACY_EDIT_REVIEW_REQUIRED")
+                    && row.1.contains("newer canonical edit"),
+                "{}",
+                row.1
+            );
+            assert_eq!(row.2, parent);
+            assert_eq!(
+                crate::edit_settlement_recovery::capture_preflight(&conn, INCIDENT_ORDER)
+                    .unwrap_err(),
+                "LEGACY_EDIT_REVIEW_REQUIRED"
+            );
+            // Its payment stays held; nothing is sent, voided or recorded.
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM parity_sync_queue WHERE id='legacy-payment-row' AND status='conflict'"), 1);
+            assert_eq!(
+                count(
+                    &conn,
+                    &format!(
+                        "SELECT COUNT(*) FROM order_payments WHERE order_id='{INCIDENT_ORDER}'"
+                    )
+                ),
+                2
+            );
+        }
+
+        #[test]
+        fn identity_less_item_edit_is_refused_before_any_write() {
+            let mut payload = edit_payload("legacy-edit", 10.5, None);
+            assert_eq!(
+                refuse_identity_less_item_edit(&payload).unwrap_err(),
+                "EDIT_SETTLEMENT_ID_REQUIRED"
+            );
+            payload.client_event_id = Some("identified".into());
+            assert!(refuse_identity_less_item_edit(&payload).is_ok());
+        }
+
+        fn acknowledged_edit(conn: &Connection, request: &mut Value) -> (Value, String) {
+            conn.execute("UPDATE orders SET supabase_id='44444444-4444-4444-8444-444444444444' WHERE id='legacy-edit'",[]).unwrap();
+            prepare_fresh_canonical_edit(conn, request, 3);
+            let response = run_journaled_edit(conn, request).unwrap();
+            assert_eq!(response["success"], true, "{response}");
+            let frozen = queued_order_push(conn, "legacy-edit");
+            let payment = frozen["settlement_context"]["payments"][0]["payment_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            (frozen, payment)
+        }
+
+        fn discounted_answer(frozen: &Value, payment: &str) -> Value {
+            let mut items = frozen["items"].clone();
+            items[1]["id"] = json!("55555555-5555-4555-8555-555555555555");
+            // The server spreads an order-level discount over the lines.
+            items[0]["total_price"] = json!(5.7);
+            items[1]["total_price"] = json!(4.8);
+            json!({"success":true,"data":{"id":"44444444-4444-4444-8444-444444444444","organization_id":"edit-org","branch_id":"edit-branch",
+                "terminal_id":"11111111-1111-4111-8111-111111111111","version":4,"status":"pending","order_type":"pickup","items":items,
+                "total_amount":10.5,"subtotal":11.3,"tax_amount":0,"discount_amount":0.8,"delivery_fee":0,"tip_amount":0,
+                "notes":null,"special_instructions":null,"customer_id":"66666666-6666-4666-8666-666666666666",
+                "customer_name":"Maria","customer_phone":"6900000000",
+                "edit_settlement":{"version":1,"client_event_id":"edit-event","payments":[{"payment_id":"77777777-7777-4777-8777-777777777770",
+                    "local_payment_id":payment,"amount_cents":450}],"refunds":[]}}})
+        }
+
+        #[test]
+        fn paid_edit_ack_accepts_allocated_discount_and_linked_customer_but_refuses_another_money_outcome(
+        ) {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            for scenario in ["accepted", "total", "receipt", "quantity", "product"] {
+                let db = test_db();
+                let conn = db.conn.lock().unwrap();
+                let mut request = journaled_edit_fixture(&conn, false);
+                request["orderUpdates"] =
+                    json!({"customerId":null,"customerName":"Maria","customerPhone":"6900000000"});
+                let (frozen, payment) = acknowledged_edit(&conn, &mut request);
+                let mut answer = discounted_answer(&frozen, &payment);
+                match scenario {
+                    "total" => answer["data"]["total_amount"] = json!(11.0),
+                    "receipt" => {
+                        answer["data"]["edit_settlement"]["payments"][0]["amount_cents"] =
+                            json!(400)
+                    }
+                    "quantity" => answer["data"]["items"][1]["quantity"] = json!(2),
+                    "product" => {
+                        answer["data"]["items"][1]["menu_item_id"] =
+                            json!("99999999-9999-4999-8999-999999999999")
+                    }
+                    _ => {}
+                }
+                let result =
+                    crate::sync_queue::apply_ack_for_test(&conn, "orders", "legacy-edit", &answer);
+                let state: (String, i64, Option<String>) = conn.query_row("SELECT items,COALESCE(remote_version,0),customer_id FROM orders WHERE id='legacy-edit'",[],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+                if scenario == "accepted" {
+                    result.unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&state.0).unwrap(),
+                        answer["data"]["items"]
+                    );
+                    assert_eq!(state.1, 4);
+                    assert_eq!(
+                        state.2.as_deref(),
+                        Some("66666666-6666-4666-8666-666666666666")
+                    );
+                    // The confirmed money is unchanged: 6.00 original + 4.50 difference.
+                    assert_eq!(count(&conn, "SELECT SUM(amount_cents) FROM order_payments WHERE order_id='legacy-edit'"), 1050);
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .contains("EDIT_SETTLEMENT_ACK_CANONICAL_SNAPSHOT_REQUIRED"),
+                        "{scenario}"
+                    );
+                    assert_ne!(state.1, 4, "{scenario}");
+                }
+            }
+        }
+
+        #[test]
+        fn header_ack_adopts_a_server_linked_customer() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            journaled_edit_fixture(&conn, false);
+            conn.execute("UPDATE orders SET supabase_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',sync_status='synced' WHERE id='legacy-edit'",[]).unwrap();
+            let edit = json!({"orderId":"legacy-edit","customerId":null,"customerName":"Maria","customerPhone":"6900000000","deliveryAddress":"","expectedVersion":1});
+            update_customer_headers_in_connection(&conn, edit, Some(&header_test_proof(&conn, 1)))
+                .unwrap();
+            let mut canonical =
+                crate::edit_settlement_recovery::capture_order_headers(&conn, "legacy-edit")
+                    .unwrap();
+            canonical["id"] = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+            canonical["organization_id"] = json!("edit-org");
+            canonical["branch_id"] = json!("edit-branch");
+            canonical["version"] = json!(2);
+            canonical["status"] = json!("pending");
+            canonical["customer_id"] = json!("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+            crate::sync_queue::apply_ack_for_test(
+                &conn,
+                "orders",
+                "legacy-edit",
+                &json!({"success":true,"data":canonical}),
+            )
+            .unwrap();
+            let state: (i64, Option<String>) = conn
+                .query_row(
+                    "SELECT remote_version,customer_id FROM orders WHERE id='legacy-edit'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                state,
+                (2, Some("cccccccc-cccc-4ccc-8ccc-cccccccccccc".into()))
+            );
+        }
+
+        #[test]
+        fn settlement_original_total_is_the_verified_total_not_a_stale_cents_cache() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let request = journaled_edit_fixture(&conn, false);
+            // A canonical pull refreshed the REAL total; the cents cache is stale.
+            conn.execute(
+                "UPDATE orders SET total_amount_cents=550 WHERE id='legacy-edit'",
+                [],
+            )
+            .unwrap();
+            assert_eq!(
+                capture_proven_payment_coverage(&conn, "legacy-edit")
+                    .unwrap()
+                    .missing_cents,
+                0
+            );
+            let answer = run_journaled_edit(&conn, &request).unwrap();
+            assert_eq!(answer["success"], true, "{answer}");
+            let context = &queued_order_push(&conn, "legacy-edit")["settlement_context"];
+            assert_eq!(context["original_total_cents"], 600, "{context}");
+            assert_eq!(context["original_paid_cents"], 600);
+            assert_eq!(context["payments"][0]["amount_cents"], 450);
+        }
+
+        #[test]
+        fn a_confirmed_edit_refused_by_its_first_checks_is_journaled_held_and_then_requoted_once() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let request = journaled_edit_fixture(&conn, false);
+            let (payload, action) =
+                parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+            // The canonical order changed while the picker was open: the first
+            // attempt checks refuse AFTER the operator confirmed the cash.
+            let refused = apply_journaled_edit_settlement_admitted(
+                &conn,
+                "legacy-edit",
+                &payload,
+                action,
+                &request,
+                "2026-10-06T10:00:00Z",
+                |_| Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into()),
+            )
+            .unwrap();
+            assert_eq!(refused["success"], false);
+            assert_eq!(refused["code"], "EDIT_SETTLEMENT_NOT_APPLIED");
+            assert_eq!(refused["requoteAllowed"], true);
+            assert_eq!(
+                crate::edit_settlement_recovery::inspect(&conn, "edit-event", "legacy-edit")
+                    .unwrap()
+                    .unwrap()["state"],
+                "refused"
+            );
+            // The declared money is traced: the Z is held and nothing was recorded.
+            assert_eq!(
+                crate::edit_settlement_recovery::pending_financial_edits(&conn, "edit-branch")
+                    .unwrap(),
+                vec!["legacy-edit"]
+            );
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 1);
+            assert!(crate::edit_settlement_recovery::proven_not_applied(
+                &conn,
+                "legacy-edit",
+                "edit-event"
+            )
+            .unwrap());
+            // An unrelated new attempt still waits for the original.
+            let mut unrelated = request.clone();
+            unrelated["client_event_id"] = json!("unrelated-event");
+            assert_eq!(
+                run_journaled_edit(&conn, &unrelated).unwrap_err(),
+                "ORDER_EDIT_SETTLEMENT_PENDING"
+            );
+            assert!(crate::edit_settlement_recovery::inspect(
+                &conn,
+                "unrelated-event",
+                "legacy-edit"
+            )
+            .unwrap()
+            .is_none());
+            // A re-quote names the attempt it replaces and records the money once.
+            let mut requote = request.clone();
+            requote["client_event_id"] = json!("requote-event");
+            requote["supersedes_client_event_id"] = json!("edit-event");
+            let applied = run_journaled_edit(&conn, &requote).unwrap();
+            assert_eq!(applied["success"], true, "{applied}");
+            assert_eq!(
+                crate::edit_settlement_recovery::inspect(&conn, "edit-event", "legacy-edit")
+                    .unwrap()
+                    .unwrap()["state"],
+                "superseded"
+            );
+            assert!(
+                crate::edit_settlement_recovery::pending_financial_edits(&conn, "edit-branch")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 2);
+            assert_eq!(
+                count(&conn, "SELECT SUM(amount_cents) FROM order_payments"),
+                1050
+            );
+            // The replaced attempt can never run again.
+            assert_eq!(
+                run_journaled_edit(&conn, &request).unwrap()["code"],
+                "EDIT_SETTLEMENT_CLOSED"
+            );
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 2);
+        }
+
+        #[test]
+        fn a_manager_closes_an_attempt_that_can_never_apply_without_recording_money() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let request = journaled_edit_fixture(&conn, false);
+            let (payload, action) =
+                parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+            apply_journaled_edit_settlement_admitted(
+                &conn,
+                "legacy-edit",
+                &payload,
+                action,
+                &request,
+                "2026-10-06T10:00:00Z",
+                |_| Err("EDIT_SETTLEMENT_METHOD_UNAVAILABLE".into()),
+            )
+            .unwrap();
+            let approval = json!({"approvedBy":"manager-1","via":"manager_pin"});
+            assert_eq!(
+                crate::edit_settlement_recovery::reconcile_unapplied(
+                    &conn,
+                    "legacy-edit",
+                    "edit-event",
+                    &approval,
+                    " "
+                )
+                .unwrap_err(),
+                "EDIT_RECONCILIATION_REASON_REQUIRED"
+            );
+            let closed = crate::edit_settlement_recovery::reconcile_unapplied(
+                &conn,
+                "legacy-edit",
+                "edit-event",
+                &approval,
+                "Cash was handed back",
+            )
+            .unwrap();
+            assert_eq!(closed["state"], "reconciled");
+            assert_eq!(closed["audit"]["charged"], false);
+            assert!(
+                crate::edit_settlement_recovery::pending_financial_edits(&conn, "edit-branch")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 1);
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM payment_adjustments"), 0);
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT COUNT(*) FROM edit_settlement_reconciliations_v1"
+                ),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT total_amount FROM orders WHERE id='legacy-edit'",
+                    [],
+                    |r| r.get::<_, f64>(0)
+                )
+                .unwrap(),
+                6.0
+            );
+            // Idempotent; an applied attempt is never reconcilable.
+            assert_eq!(
+                crate::edit_settlement_recovery::reconcile_unapplied(
+                    &conn,
+                    "legacy-edit",
+                    "edit-event",
+                    &approval,
+                    "again"
+                )
+                .unwrap()["replayed"],
+                true
+            );
+            let mut applied = request.clone();
+            applied["client_event_id"] = json!("applied-event");
+            assert_eq!(
+                run_journaled_edit(&conn, &applied).unwrap()["success"],
+                true
+            );
+            assert_eq!(
+                crate::edit_settlement_recovery::reconcile_unapplied(
+                    &conn,
+                    "legacy-edit",
+                    "applied-event",
+                    &approval,
+                    "no"
+                )
+                .unwrap_err(),
+                "EDIT_RECONCILIATION_NOT_PROVEN"
+            );
+        }
+
+        #[test]
+        fn edit_policy_reads_the_server_gate_then_terminal_flags_and_refuses_after_journaling() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let request = journaled_edit_fixture(&conn, false);
+            let server = crate::edit_settlement_recovery::edit_method_policy(
+                &conn,
+                &json!({"method_policy":{"payment_processing":true,"cash_payments":false,"card_payments":true,"cash":false,"card":true},"max_lines":50}),
+            );
+            assert_eq!(server["allowedMethods"], json!(["card"]));
+            assert_eq!(server["maxLines"], 50);
+            db::set_setting(
+                &conn,
+                "terminal",
+                "enabled_features",
+                r#"{"payment_processing":false}"#,
+            )
+            .unwrap();
+            let fallback = crate::edit_settlement_recovery::edit_method_policy(&conn, &json!({}));
+            assert_eq!(fallback["allowedMethods"], json!([]));
+            assert_eq!(fallback["source"], "terminal_settings");
+            db::set_setting(
+                &conn,
+                "terminal",
+                "enabled_features",
+                r#"{"cashPayments":true,"card_payments":"false"}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::edit_settlement_recovery::edit_method_policy(&conn, &json!({}))
+                    ["allowedMethods"],
+                json!(["cash"])
+            );
+            assert_eq!(
+                crate::edit_settlement_recovery::require_edit_policy(
+                    &conn,
+                    "legacy-edit",
+                    "edit-event",
+                    &["card".into()],
+                    2
+                )
+                .unwrap_err(),
+                "EDIT_SETTLEMENT_METHOD_UNAVAILABLE"
+            );
+            assert_eq!(
+                crate::edit_settlement_recovery::require_edit_policy(
+                    &conn,
+                    "legacy-edit",
+                    "edit-event",
+                    &["cash".into()],
+                    51
+                )
+                .unwrap_err(),
+                "EDIT_TOO_MANY_LINES"
+            );
+            // A tender the terminal may not record is refused after the confirmed
+            // action is journaled: traced and held, never sent to a 403.
+            let (payload, action) =
+                parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+            let methods = edit_settlement_action_methods(&action);
+            db::set_setting(
+                &conn,
+                "terminal",
+                "enabled_features",
+                r#"{"cash_payments":false}"#,
+            )
+            .unwrap();
+            let refused = apply_journaled_edit_settlement_admitted(
+                &conn,
+                "legacy-edit",
+                &payload,
+                action,
+                &request,
+                "2026-10-06T10:00:00Z",
+                |conn| {
+                    crate::edit_settlement_recovery::require_edit_policy(
+                        conn,
+                        "legacy-edit",
+                        "edit-event",
+                        &methods,
+                        2,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(refused["error"], "EDIT_SETTLEMENT_METHOD_UNAVAILABLE");
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='orders' AND record_id='legacy-edit'"), 0);
+            assert_eq!(
+                crate::edit_settlement_recovery::pending_financial_edits(&conn, "edit-branch")
+                    .unwrap(),
+                vec!["legacy-edit"]
+            );
+        }
+
+        #[test]
+        fn an_edit_collects_or_returns_only_the_difference_it_causes_in_exact_cents() {
+            // (original total, effective paid, ledger paid, next total) -> action
+            for (original, effective, ledger, next, expected) in [
+                (1000, 1000, 1000, 1001, "collect"), // one cent more: collect one cent
+                (1000, 1000, 1000, 999, "refund"),   // one cent less: return one cent
+                (1000, 1000, 1000, 1000, "none"),
+                (1000, 400, 400, 1000, "none"), // partly paid, equal total: nothing
+                (1000, 400, 400, 1500, "none"), // partly paid grows: balance stays open
+                (1000, 400, 400, 700, "none"),  // drops but stays above what was paid
+                (1000, 400, 400, 300, "refund"), // drops below what was paid: return 1.00
+                (0, 0, 0, 500, "none"),         // unpaid
+                (1000, 1000, 0, 1200, "collect"), // proven paid, rows missing: collect the growth
+                (1000, 1000, 0, 800, "none"),   // a refund needs the local rows
+            ] {
+                assert_eq!(
+                    edit_settlement_action_for_cents(original, effective, ledger, next),
+                    expected,
+                    "{original} {effective} {ledger} {next}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_partly_paid_order_correction_never_collects_the_old_balance() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let mut request = journaled_edit_fixture(&conn, false);
+            conn.execute(
+                "UPDATE order_payments SET amount=3,amount_cents=300 WHERE id='original-six'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE orders SET payment_status='partially_paid' WHERE id='legacy-edit'",
+                [],
+            )
+            .unwrap();
+            let (payload, _) =
+                parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+            let preview = preview_edit_settlement_in_connection(&conn, &payload).unwrap();
+            assert_eq!(preview["requiredAction"], "none", "{preview}");
+            // A confirmed collection of the old balance is refused before any write.
+            request["action"]["payments"][0]["amount"] = json!(7.5);
+            let refused = run_journaled_edit(&conn, &request).unwrap();
+            assert_eq!(
+                refused["error"], "EDIT_SETTLEMENT_EXACT_ACTION_REQUIRED",
+                "{refused}"
+            );
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 1);
+        }
     }
 }
 

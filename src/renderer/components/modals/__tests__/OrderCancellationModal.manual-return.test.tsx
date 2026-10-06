@@ -66,3 +66,31 @@ describe('manual paid order cancellation', () => {
     expect(screen.getByText(key('bank'))).toHaveAttribute('aria-pressed', 'true');
   });
 });
+
+// Review 06/10/2026: a table cancellation the server refused is never sent
+// again; a manager clears it before the order is cancelled again.
+describe('saved table cancellation attempt', () => {
+  it('a refused attempt cannot be resubmitted and offers only the manager clear', async () => {
+    const confirm = vi.fn();
+    const release = vi.fn().mockResolvedValue(undefined);
+    render(<OrderCancellationModal isOpen orderCount={1} manualReturn={{ amountCents: 600, currency: 'EUR' }}
+      recovery={{ reason: 'Original reason', returnChannel: 'bank' }}
+      savedAttempt={{ refused: true, onRelease: release }} onConfirmCancel={confirm} onClose={vi.fn()} />);
+    expect(screen.getByRole('alert').textContent).toContain(key('refusedAttemptNotice'));
+    expect(screen.getByText(key('confirm'))).toBeDisabled();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    fireEvent.click(screen.getByText(key('clearRefusedAttempt')));
+    await waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+  it('a pending attempt still resumes as saved and can also be cleared', async () => {
+    const confirm = vi.fn().mockResolvedValue(undefined);
+    render(<OrderCancellationModal isOpen orderCount={1} manualReturn={{ amountCents: 600, currency: 'EUR' }}
+      recovery={{ reason: 'Original reason', returnChannel: 'cash_drawer' }}
+      savedAttempt={{ refused: false, onRelease: vi.fn() }} onConfirmCancel={confirm} onClose={vi.fn()} />);
+    expect(screen.getByRole('status').textContent).toContain(key('pendingAttemptNotice'));
+    expect(screen.getByText(key('clearRefusedAttempt'))).toBeEnabled();
+    fireEvent.click(screen.getByText(key('confirm')));
+    await waitFor(() => expect(confirm).toHaveBeenCalledExactlyOnceWith('Original reason', 'cash_drawer'));
+  });
+});

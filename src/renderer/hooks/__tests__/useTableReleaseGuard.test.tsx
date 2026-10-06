@@ -335,6 +335,116 @@ describe('releasing a table whose order the till refuses to cancel', () => {
   });
 });
 
+// Review 06/10/2026, regression from 91591acc8: "Cancel the order" did
+// nothing at all when the table had no check session (the canonical preflight
+// needs one). Such a table keeps the release question's own reason step.
+describe('releasing a table that has no check session', () => {
+  const noSession = { ...table, tableSessionId: null } as RestaurantTable;
+  function NoSessionHarness() {
+    const guard = useTableReleaseGuard({
+      runWithPrivilegedConfirmation: runWithPrivilegedConfirmation as any,
+      onCollect,
+    });
+    return (
+      <>
+        <button type="button" onClick={() => void guard.guardRelease(noSession, release)}>
+          Release legacy
+        </button>
+        {guard.modal}
+      </>
+    );
+  }
+
+  it('cancels an unpaid order with a reason and the approval instead of doing nothing', async () => {
+    mock.getSettlementSnapshot.mockResolvedValue({ outstandingAmount: 13, netPaid: 0, cancelRefusal: null });
+    mock.cancelWithApproval.mockResolvedValue({ success: true, orderId: 'order-table-5', data: { workflow: {
+      affected_table_ids: ['table-5'], affected_session_ids: [],
+    } } });
+    render(<NoSessionHarness />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Release legacy' }));
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel the order' }));
+    });
+    // The reason step opened: no canonical preflight without a check session.
+    expect(mock.invoke).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Walked out' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the order' }));
+    });
+    await waitFor(() => expect(mock.cancelWithApproval).toHaveBeenCalledTimes(1));
+    const params = mock.cancelWithApproval.mock.calls[0][0];
+    expect(params).toMatchObject({ orderId: 'order-table-5', reason: 'Walked out' });
+    expect(params.tableSessionId).toBeUndefined();
+    expect(params.manualCancellation).toBeUndefined();
+  });
+
+  it('a paid order says why it cannot be cancelled here instead of a dead button', async () => {
+    mock.getSettlementSnapshot.mockResolvedValue({ outstandingAmount: 4, netPaid: 5, cancelRefusal: 'ORDER_HAS_PAYMENTS' });
+    render(<NoSessionHarness />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Release legacy' }));
+    });
+    expect(await screen.findByTestId('table-release-cancel-refused')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cancel the order' })).toBeNull();
+  });
+});
+
+// Review 06/10/2026: a refused table cancellation used to lock the check, its
+// refunds and the Z for good. A proven refusal is never sent again and a
+// manager clears it with their own PIN; the check is then read again.
+describe('a saved table cancellation the server refused', () => {
+  const refusedPlan = {
+    success: true, orderId: 'order-table-5', tableSessionId: table.tableSessionId, requestId: 'refused-event',
+    requiresReturn: true, requiresHandback: false, amountCents: 1050, currency: 'EUR', generation: 'g-1',
+    pending: true, refused: true, refusalCode: 'approval_refused:HTTP_403', reason: 'Customer left', returnChannel: 'bank',
+  };
+
+  it('is cleared by a manager and the next attempt starts from a fresh plan', async () => {
+    mock.getSettlementSnapshot.mockResolvedValue({ outstandingAmount: 0.01, netPaid: 10.5, cancelRefusal: 'ORDER_HAS_PAYMENTS' });
+    mock.invoke.mockReset()
+      .mockResolvedValueOnce(refusedPlan)
+      .mockResolvedValueOnce({ ...refusedPlan, requestId: 'fresh-event', pending: false, refused: false, refusalCode: null, reason: undefined, returnChannel: undefined });
+    mock.cancelWithApproval.mockResolvedValue({ success: true, released: true, orderId: 'order-table-5' });
+    render(<Harness />);
+    await clickRelease();
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel the order' }));
+    });
+    expect(await screen.findByTestId('order-cancellation-saved-attempt')).toBeTruthy();
+    // Never resubmitted: the confirm stays disabled.
+    expect((screen.getByRole('button', { name: 'Cancel the order' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'modals.orderCancellation.clearRefusedAttempt' }));
+    });
+    await waitFor(() => expect(mock.cancelWithApproval).toHaveBeenCalledTimes(1));
+    expect(mock.cancelWithApproval.mock.calls[0][0]).toMatchObject({
+      orderId: 'order-table-5', tableSessionId: table.tableSessionId,
+      releaseRefusedCancellation: { clientEventId: 'refused-event' },
+    });
+    expect(mock.cancelWithApproval.mock.calls[0][0].manualCancellation).toBeUndefined();
+    await waitFor(() => expect(mock.invoke).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId('order-cancellation-saved-attempt')).toBeNull());
+    // The fresh attempt starts with no return channel chosen.
+    expect(screen.getByRole('button', { name: 'Bank' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Cash drawer' }).getAttribute('aria-pressed')).toBe('false');
+    expect(mock.emit).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('explains a refused attempt and a clear that has to wait', () => {
+    const t = (_key: string, options?: Record<string, unknown>) => {
+      let text = String(options?.defaultValue ?? '');
+      for (const [name, value] of Object.entries(options ?? {})) text = text.replace(`{{${name}}}`, String(value));
+      return text;
+    };
+    expect(owingCancelFailureMessage('TABLE_CANCELLATION_REFUSED: refused', t)).toContain('No money was returned');
+    expect(owingCancelFailureMessage(new Error('TABLE_CANCELLATION_RELEASE_WAIT:9'), t)).toContain('9 min');
+    expect(owingCancelFailureMessage('TABLE_CANCELLATION_COMMITTED: done', t)).toContain('already recorded');
+  });
+});
+
 describe('refuseOwingCancelUpFront (the table check asks it before the reason)', () => {
   const t = (key: string, options?: Record<string, unknown>) =>
     typeof options?.defaultValue === 'string' ? options.defaultValue : key;

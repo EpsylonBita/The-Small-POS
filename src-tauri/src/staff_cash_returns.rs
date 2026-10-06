@@ -114,10 +114,17 @@ pub(crate) fn original_cash_collector(
 
 /// Original collector proof only. A cancelled label or cashier handover flag
 /// alone does not establish a physical return.
+///
+/// The returned receipts are not yet proven manual: the cancellation planner
+/// (`manual_order_cancellation::prepare_validated`) classifies each one with
+/// the same evidence as the customer refund, so a receipt mirrored from
+/// another till is judged by its canonical server row (review 06/10/2026).
+/// Callers that only ask whether a handback is owed (`cancel_refusal_code`)
+/// never authorize a return from this list.
 pub(crate) fn plan(conn: &Connection, order: &str) -> Result<Vec<Value>, String> {
     let mut stmt=conn.prepare("SELECT p.id,p.remote_payment_id,p.staff_id,p.staff_shift_id,p.currency,
       COALESCE(p.amount_cents,CAST(ROUND(p.amount*100) AS INTEGER),0)-COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER),0)) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type='refund' AND LOWER(COALESCE(a.refund_method,'cash'))='cash' AND LOWER(COALESCE(a.cash_handler,''))='driver_shift'),0),
-      p.sync_state,p.sync_status,o.supabase_id,o.branch_id,p.payment_origin,p.transaction_ref,p.terminal_device_id,p.metadata
+      p.sync_state,p.sync_status,o.supabase_id,o.branch_id,p.metadata
       FROM order_payments p JOIN orders o ON o.id=p.order_id WHERE p.order_id=?1 AND p.method='cash' AND p.status IN ('completed','refunded') ORDER BY p.id") .map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([order], |r| {
@@ -133,9 +140,6 @@ pub(crate) fn plan(conn: &Connection, order: &str) -> Result<Vec<Value>, String>
                 r.get::<_, Option<String>>(8)?,
                 r.get::<_, Option<String>>(9)?,
                 r.get::<_, Option<String>>(10)?,
-                r.get::<_, Option<String>>(11)?,
-                r.get::<_, Option<String>>(12)?,
-                r.get::<_, Option<String>>(13)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -153,9 +157,6 @@ pub(crate) fn plan(conn: &Connection, order: &str) -> Result<Vec<Value>, String>
         sync_status,
         remote_order,
         branch,
-        origin,
-        reference,
-        device,
         metadata,
     ) in rows
     {
@@ -245,15 +246,6 @@ pub(crate) fn plan(conn: &Connection, order: &str) -> Result<Vec<Value>, String>
             || remote_order.as_deref().is_none_or(str::is_empty)
         {
             return Err("PAYMENT_SYNC_REQUIRED".into());
-        }
-        if !crate::manual_order_cancellation::original_is_manual_with_metadata(
-            "cash",
-            origin.as_deref().unwrap_or(""),
-            device.as_deref().unwrap_or(""),
-            reference.as_deref().unwrap_or(""),
-            metadata.as_deref(),
-        ) {
-            return Err("ORIGINAL_PROVIDER_RETURN_REQUIRED".into());
         }
         let currency = currency
             .filter(|unit| unit.len() == 3 && unit.bytes().all(|b| b.is_ascii_uppercase()))

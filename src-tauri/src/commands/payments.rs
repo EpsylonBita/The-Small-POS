@@ -596,26 +596,33 @@ pub async fn payment_record(
             return Ok(outstanding_idempotency_error_response(error_code));
         }
     }
+    // A cashier-confirmed TWINT receipt is money that already moved: it is
+    // retained before its unit or anything else may refuse it (fix review
+    // 06/10/2026). Its save resolves the order's unit
+    // (`unsaved_payments::write_recorded_payment`); its admission was asked
+    // before the QR was shown (`payment_get_settlement_snapshot`).
+    if let Ok(requested_input) = payments::build_payment_record_input(&payload) {
+        if requested_input.method == "twint" {
+            let order_id = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?
+            };
+            let _reservation = reserve_payment_record(&order_id)?;
+            return save_manual_twint_existing_receipt(
+                &db,
+                &order_id,
+                &payload,
+                &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+            )
+            .await;
+        }
+    }
     {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         payments::prepare_local_payment_currency(&conn, &mut payload)?;
     }
     let requested_input = payments::build_payment_record_input(&payload)?;
     let terminal_approved = payment_payload_has_terminal_approval(&payload);
-    if requested_input.method == "twint" {
-        let order_id = {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?
-        };
-        let _reservation = reserve_payment_record(&order_id)?;
-        return save_manual_twint_existing_receipt(
-            &db,
-            &order_id,
-            &payload,
-            &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
-        )
-        .await;
-    }
     let order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let order_id =
@@ -896,12 +903,35 @@ pub(crate) async fn save_manual_twint_existing_receipt(
     payload: &serde_json::Value,
     delays: &[u64],
 ) -> Result<serde_json::Value, String> {
-    let entry = crate::unsaved_payments::UnsavedChargedPayment::for_manual_twint_payment(
+    let entry = match crate::unsaved_payments::UnsavedChargedPayment::for_manual_twint_payment(
         db,
         order_id,
         payload,
         &Utc::now().to_rfc3339(),
-    )?;
+    ) {
+        Ok(entry) => entry,
+        Err(error) => {
+            // A different confirmation under a retained original's key: the
+            // original stands and keeps its own recovery.
+            let retained = crate::unsaved_payments::moved_money_key(payload)
+                .map(|key| {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    crate::unsaved_payments::load(&conn, &key)
+                })
+                .transpose()?
+                .flatten()
+                .is_some();
+            if retained {
+                return Err(error);
+            }
+            // The customer paid and nothing could be retained: say so
+            // plainly, never a bare refusal read as "nothing moved".
+            let mut answer =
+                crate::unsaved_payments::manual_twint_receipt_unretained_response(&error);
+            answer["orderId"] = serde_json::Value::String(order_id.to_string());
+            return Ok(answer);
+        }
+    };
     Ok(crate::unsaved_payments::save_charged_payment(
         db,
         entry,
@@ -919,11 +949,15 @@ pub(crate) fn validate_manual_twint_outstanding_context(
 ) -> Result<(), String> {
     let settlement = load_order_settlement_read_transaction(conn, order_id)?;
     validate_collect_outstanding_generation(payload, &settlement).map_err(|answer| {
-        answer
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("TWINT_RECEIPT_OUTSTANDING_CONTEXT_CHANGED")
-            .to_string()
+        // Lasting: a ledger generation never comes back, so the receipt
+        // confirmed against it can never be saved (fix review 06/10/2026).
+        format!(
+            "TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED: {}",
+            answer
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the outstanding context changed")
+        )
     })
 }
 
@@ -1083,6 +1117,12 @@ pub(crate) fn list_unsaved_payments(
     db: &db::DbState,
     arg0: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    // The Z asks for the TWINT receipts returned outside the POS in its window
+    // too: shown for what they are, counted nowhere.
+    let twint_returned_since = arg0
+        .as_ref()
+        .and_then(|payload| payload.get("twintReturnedSince"))
+        .map(|since| since.as_str().map(ToString::to_string));
     let (order_id, idempotency_key) = parse_unsaved_payment_target(arg0);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = order_id.map(|id| resolve_order_id(&conn, &id).unwrap_or(id));
@@ -1095,7 +1135,13 @@ pub(crate) fn list_unsaved_payments(
         })
         .map(crate::unsaved_payments::summary_json)
         .collect::<Vec<_>>();
-    Ok(serde_json::json!({ "success": true, "payments": payments }))
+    let mut answer = serde_json::json!({ "success": true, "payments": payments });
+    if let Some(since) = twint_returned_since {
+        answer["twintReturnedOutsidePos"] = serde_json::Value::Array(
+            crate::unsaved_payments::twint_returned_outside_pos(&conn, since.as_deref())?,
+        );
+    }
+    Ok(answer)
 }
 
 #[tauri::command]
@@ -1161,6 +1207,112 @@ struct ResolveUnsavedPaymentPayload {
     outcome: Option<String>,
     #[serde(default, alias = "resolved_by")]
     resolved_by: Option<String>,
+    /// `twint_returned_to_customer` only: the TWINT refund reference or a note.
+    #[serde(default)]
+    reference: Option<String>,
+    /// `twint_returned_to_customer` only: the approving manager's own PIN,
+    /// verified natively for this one decision and never stored.
+    #[serde(default, alias = "manager_pin")]
+    manager_pin: Option<String>,
+}
+
+/// Is a cashier or manager checked in on this terminal? Then the desktop's
+/// money approval is that session's own PIN, which never proves a manager.
+fn cash_drawer_shift_active_here(conn: &rusqlite::Connection) -> Result<bool, String> {
+    let Some(terminal) =
+        crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn)
+    else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM staff_shifts
+         WHERE terminal_id = ?1 AND status = 'active' AND role_type IN ('cashier', 'manager'))",
+        rusqlite::params![terminal],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("read the active shifts of this terminal: {e}"))
+}
+
+const TWINT_RETURN_MANAGER_APPROVAL_REQUIRED: &str =
+    "TWINT_RETURN_MANAGER_APPROVAL_REQUIRED: a manager confirms it with their own PIN";
+
+/// "Returned via TWINT outside the POS" for a retained cashier-confirmed
+/// TWINT receipt that can never be saved (fix review 06/10/2026; the same
+/// code on Android). Only a manager's own PIN approves it, and the manager is
+/// the one named; a session PIN of a cashier on shift never does. Checked
+/// before any PIN: the reference and the receipt's eligibility.
+///
+/// With nobody on shift here the approval is the refund right
+/// (`void_payments`), as on Android. While someone is still checked in, the
+/// desktop's only own-PIN manager approval is `void_orders` (the satellite
+/// release uses it too): an existing order left unpaid by a receipt that can
+/// never be saved holds that cashier's checkout, so waiting for everyone to
+/// check out would hold the till for good.
+fn resolve_twint_returned_guarded(
+    db: &db::DbState,
+    auth_state: &crate::auth::AuthState,
+    idempotency_key: &str,
+    reference: Option<&str>,
+    manager_pin: Option<&str>,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    use crate::auth::MoneyApproval;
+    let reference = crate::unsaved_payments::twint_return_reference(reference)?;
+    let on_shift = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::unsaved_payments::twint_return_eligibility(&conn, idempotency_key)?;
+        cash_drawer_shift_active_here(&conn)?
+    };
+    let (approval, approval_code) = if on_shift {
+        (MoneyApproval::VoidOrders, "void_orders")
+    } else {
+        (MoneyApproval::VoidPayments, "void_payments")
+    };
+    match manager_pin.map(str::trim).filter(|pin| !pin.is_empty()) {
+        Some(pin) => {
+            crate::auth::confirm_privileged_action(
+                Some(serde_json::json!({
+                    "pin": pin,
+                    "scope": "cash_drawer_control",
+                    "approval": approval_code,
+                })),
+                db,
+                auth_state,
+            )?;
+        }
+        // A session PIN prompt could only prove the cashier on shift.
+        None if on_shift => return Err(TWINT_RETURN_MANAGER_APPROVAL_REQUIRED.into()),
+        None => {}
+    }
+    let approver = crate::auth::authorize_money_action(approval, db, auth_state)?;
+    let Some(manager) = approver.manager_staff_id.clone() else {
+        return Err(TWINT_RETURN_MANAGER_APPROVAL_REQUIRED.into());
+    };
+    let now = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let outcome = crate::unsaved_payments::resolve_twint_returned_in_connection(
+        &conn,
+        idempotency_key,
+        &reference,
+        &manager,
+        approver.via,
+        &now,
+    )?;
+    let order_id = match &outcome {
+        crate::unsaved_payments::ResolveOutcome::Resolved { order_id, .. } => {
+            Some(order_id.clone())
+        }
+        _ => None,
+    };
+    let remaining = crate::unsaved_payments::count(&conn)?;
+    Ok(serde_json::json!({
+        "success": !matches!(outcome, crate::unsaved_payments::ResolveOutcome::NotFound),
+        "idempotencyKey": idempotency_key,
+        "orderId": order_id,
+        "outcome": crate::unsaved_payments::TWINT_RETURNED_TO_CUSTOMER_OUTCOME,
+        "result": outcome.as_str(),
+        "resolvedAt": now,
+        "remainingUnsavedPayments": remaining,
+    }))
 }
 
 /// "Money given back to the customer" for a charged payment this till could
@@ -1182,6 +1334,15 @@ pub(crate) fn resolve_unsaved_payment_guarded(
         return Err("Missing idempotencyKey".into());
     }
     if let Some(outcome) = payload.outcome.as_deref().map(str::trim) {
+        if outcome == crate::unsaved_payments::TWINT_RETURNED_TO_CUSTOMER_OUTCOME {
+            return resolve_twint_returned_guarded(
+                db,
+                auth_state,
+                &idempotency_key,
+                payload.reference.as_deref(),
+                payload.manager_pin.as_deref(),
+            );
+        }
         if !outcome.is_empty() && outcome != crate::unsaved_payments::RETURNED_TO_CUSTOMER_OUTCOME {
             return Err(format!("Unsupported charged payment outcome: {outcome}").into());
         }
@@ -1280,6 +1441,12 @@ pub async fn payment_get_settlement_snapshot(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
+    // Asked before a TWINT QR is shown for this order (fix review 06/10/2026).
+    let wants_twint_admission = arg0
+        .as_ref()
+        .and_then(|payload| payload.get("twintAdmission"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
     let order_id = parse_order_id_payload(arg0)?;
     let mut snapshot = payments::get_order_settlement_snapshot(&db, &order_id)?;
     let actual_order_id = snapshot
@@ -1310,6 +1477,13 @@ pub async fn payment_get_settlement_snapshot(
                 "Cancel refusal could not be read for the settlement snapshot"
             );
         }
+    }
+    // Whether a cashier-confirmed TWINT receipt for the whole outstanding
+    // balance could be saved now: the QR is shown only when it could, so a
+    // refusal comes before the customer pays, never after.
+    if wants_twint_admission {
+        snapshot["twintAdmission"] =
+            crate::unsaved_payments::manual_twint_existing_admission(&conn, actual_order_id);
     }
     Ok(snapshot)
 }
@@ -1754,6 +1928,410 @@ mod dto_tests {
                 .unwrap(),
             0
         );
+    }
+
+    fn twint_admission(db: &db::DbState) -> serde_json::Value {
+        let conn = db.conn.lock().unwrap();
+        crate::unsaved_payments::manual_twint_existing_admission(&conn, "manual-order")
+    }
+
+    /// Fix review 06/10/2026: the TWINT QR for an existing order was shown
+    /// before any admission check, so the save's refusals came after the
+    /// customer had paid (a split card portion charged and not saved left the
+    /// ledger unpaid, TWINT was offered, and the receipt could never be
+    /// saved). The admission is asked before the QR and refuses what the save
+    /// would refuse, writing nothing.
+    #[tokio::test]
+    async fn twint_existing_admission_refuses_before_the_qr_what_the_save_would_refuse() {
+        let (db, _) = manual_existing_fixture("confirm");
+        let open = twint_admission(&db.state);
+        assert_eq!(open["admitted"], true, "{open}");
+        assert_eq!(open["outstandingCents"], 1200);
+        for (prior, code) in [
+            ("card", "PAYMENT_NOT_SAVED_PENDING"),
+            ("sale", "DIRECT_SALE_RECONCILIATION_REQUIRED"),
+            ("gift", "GIFT_CARD_RECOVERY_REQUIRED"),
+            ("platform", "PLATFORM_HELD_NOT_COLLECTABLE"),
+            ("cancelled", "TWINT_RECEIPT_ORDER_CONTEXT_CHANGED"),
+            ("paid", "TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED"),
+            ("euro", "TWINT_CURRENCY_UNAVAILABLE"),
+            ("scope", "TWINT_RECEIPT_SCOPE_UNAVAILABLE"),
+        ] {
+            let (db, _) = manual_existing_fixture("confirm");
+            {
+                let conn = db.state.conn.lock().unwrap();
+                match prior {
+                    "card" => {
+                        let entry = crate::unsaved_payments::UnsavedChargedPayment::for_payment("manual-order", &serde_json::json!({"orderId":"manual-order","method":"card","amount":6,"transactionRef":"split-card","terminalApproved":true,"items":[{"itemIndex":0}]}), None, "now").unwrap();
+                        crate::unsaved_payments::record(&conn, &entry).unwrap();
+                    }
+                    "sale" => {
+                        conn.execute("INSERT INTO ecr_devices(id,name,device_type,brand,protocol,connection_type,connection_details) VALUES ('device','Reader','payment_terminal','test','test','network','{}')",[]).unwrap();
+                        conn.execute("INSERT INTO ecr_transactions(id,device_id,order_id,transaction_type,amount,currency,status,started_at) VALUES ('prior','device','manual-order','sale',1200,'CHF','timeout','now')",[]).unwrap();
+                    }
+                    "gift" => {
+                        conn.execute("INSERT INTO gift_card_redemption_attempts(idempotency_key,organization_id,branch_id,terminal_id,local_order_id,remote_order_id,amount_cents,currency,card_fingerprint,request_fingerprint,status,created_at,updated_at) VALUES ('gift-original','manual-org','manual-branch','manual-terminal','manual-order','remote',1200,'CHF','fingerprint','request','pending','now','now')",[]).unwrap();
+                    }
+                    "platform" => {
+                        conn.execute("UPDATE orders SET plugin='efood',ghost_metadata=?1 WHERE id='manual-order'",[r#"{"food_delivery":{"payment_method":"card","prepaid":true,"delivery_provider":"platform_delivery"}}"#]).unwrap();
+                    }
+                    "cancelled" => {
+                        conn.execute(
+                            "UPDATE orders SET status='cancelled' WHERE id='manual-order'",
+                            [],
+                        )
+                        .unwrap();
+                    }
+                    "paid" => {
+                        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,idempotency_key,created_at,updated_at) VALUES ('paid-cash','manual-order','cash',12,1200,'CHF','completed','manual','paid-cash-key','now','now')",[]).unwrap();
+                    }
+                    "euro" => db::set_setting(&conn, "restaurant", "currency", "EUR").unwrap(),
+                    _ => db::set_setting(&conn, "terminal", "organization_id", "").unwrap(),
+                }
+            }
+            let verdict = twint_admission(&db.state);
+            assert_eq!(verdict["admitted"], false, "{prior}: {verdict}");
+            assert_eq!(verdict["code"], code, "{prior}: {verdict}");
+            let conn = db.state.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM order_payments WHERE method='twint'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0,
+                "{prior}"
+            );
+            assert!(
+                !crate::unsaved_payments::list(&conn, None)
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.method == "twint"),
+                "{prior}: the admission journals nothing"
+            );
+        }
+    }
+
+    /// The receipt is journaled before its unit is resolved (`payment_record`
+    /// asks the TWINT save first), so the save itself refuses an order in
+    /// another unit: never a CHF receipt on it, and a lasting refusal a
+    /// manager can resolve.
+    #[tokio::test]
+    async fn twint_existing_receipt_is_retained_but_never_saved_on_an_order_in_another_unit() {
+        let (db, payload) = manual_existing_fixture("skip");
+        // An order recorded in EUR before the store moved to CHF (the
+        // recorded unit is immutable, so the fixture rewrites it directly).
+        db.state
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER orders_currency_immutable;
+                 UPDATE orders SET currency='EUR' WHERE id='manual-order';",
+            )
+            .unwrap();
+        let answer = save_manual_twint_existing_receipt(&db.state, "manual-order", &payload, &[])
+            .await
+            .unwrap();
+        assert_eq!(answer["errorCode"], "PAYMENT_NOT_SAVED", "{answer}");
+        assert_eq!(answer["unsavedPayment"]["canSaveAgain"], false);
+        let conn = db.state.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE method='twint'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let held = crate::unsaved_payments::list(&conn, Some("manual-order")).unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(held[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("TWINT_RECEIPT_ORDER_CURRENCY_MISMATCH")));
+    }
+
+    /// A retained TWINT receipt that can never be saved, the cashier checked
+    /// out, the till's terminal staff logged in: the Z's way out.
+    fn twint_receipt_that_can_never_be_saved() -> (
+        crate::tests::fake_keyring::Guard,
+        crate::tests::harness::TestDb,
+        crate::auth::AuthState,
+    ) {
+        let keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "manual-terminal"),
+            ("branch_id", "manual-branch"),
+        ]);
+        let (db, payload) = manual_existing_fixture("confirm");
+        fail_manual_write(&db.state);
+        tauri::async_runtime::block_on(save_manual_twint_existing_receipt(
+            &db.state,
+            "manual-order",
+            &payload,
+            &[],
+        ))
+        .unwrap();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            conn.execute_batch("DROP TRIGGER fail_manual_write;")
+                .unwrap();
+            // The ledger moved after the receipt was captured: lasting.
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,idempotency_key,created_at,updated_at) VALUES ('other-cash','manual-order','cash',2,200,'CHF','completed','manual','other-key','now','now')",[]).unwrap();
+        }
+        let saved = tauri::async_runtime::block_on(crate::unsaved_payments::save_unsaved_payments(
+            &db.state,
+            Some("manual-order"),
+            Some("manual-existing-key"),
+            &[],
+            &crate::print::NoopPrintQueueInvalidator,
+        ))
+        .unwrap();
+        assert_eq!(saved["success"], false, "{saved}");
+        assert_eq!(saved["unsaved"][0]["canSaveAgain"], false, "{saved}");
+        {
+            let conn = db.state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "__ignore_keyring", "1").unwrap();
+            conn.execute("UPDATE staff_shifts SET status='closed',check_out_time='now' WHERE id='manual-shift'",[]).unwrap();
+            db::set_setting(
+                &conn,
+                "staff",
+                "staff_pin_hash",
+                &bcrypt::hash("4321", 4).unwrap(),
+            )
+            .unwrap();
+            let directory = serde_json::json!({"version":1,"branch_id":"manual-branch","synced_at":"2026-10-06T07:00:00Z","staff":[
+                {"id":"staff-manager","canLoginPos":true,"isActive":true,"hasPin":true,"pinHash":bcrypt::hash("2468",4).unwrap(),"permissions":["pos.refunds.process","pos.orders.cancel"]},
+                {"id":"staff-cashier","canLoginPos":true,"isActive":true,"hasPin":true,"pinHash":bcrypt::hash("1357",4).unwrap(),"permissions":["pos.orders.create"]}]});
+            db::set_setting(
+                &conn,
+                "staff_auth_cache",
+                "branch_manual-branch",
+                &directory.to_string(),
+            )
+            .unwrap();
+        }
+        let auth = crate::auth::AuthState::new();
+        crate::auth::login(Some(serde_json::json!({"pin":"4321"})), &db.state, &auth)
+            .expect("the terminal's staff login");
+        (keyring, db, auth)
+    }
+
+    fn twint_return(
+        db: &db::DbState,
+        auth: &crate::auth::AuthState,
+        reference: Option<&str>,
+    ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+        let mut payload = serde_json::json!({"idempotencyKey":"manual-existing-key","outcome":"twint_returned_to_customer","resolvedBy":"staff-cashier"});
+        if let Some(reference) = reference {
+            payload["reference"] = serde_json::json!(reference);
+        }
+        resolve_unsaved_payment_guarded(db, auth, Some(payload))
+    }
+
+    fn message(error: crate::auth::GuardedCommandError) -> String {
+        match error {
+            crate::auth::GuardedCommandError::Message(message) => message,
+            other => panic!("expected a refusal message, got {other:?}"),
+        }
+    }
+
+    /// Fix review 06/10/2026: a TWINT receipt that can never be saved had no
+    /// way out, so the Z stayed blocked until support stepped in. A manager's
+    /// own PIN records that the customer got it back through TWINT outside
+    /// the POS: audited, never a payment row, never sales or drawer cash.
+    #[test]
+    fn twint_receipt_returned_outside_pos_needs_a_reference_and_a_managers_own_pin() {
+        let (_keyring, db, auth) = twint_receipt_that_can_never_be_saved();
+        let manager_approves = || {
+            crate::auth::confirm_privileged_action(
+                Some(serde_json::json!({"pin":"2468","scope":"cash_drawer_control","approval":"void_payments"})),
+                &db.state,
+                &auth,
+            )
+            .expect("the manager approves")
+        };
+        // The generic return stays refused for TWINT, even approved.
+        manager_approves();
+        let generic = resolve_unsaved_payment_guarded(
+            &db.state,
+            &auth,
+            Some(
+                serde_json::json!({"idempotencyKey":"manual-existing-key","outcome":"returned_to_customer"}),
+            ),
+        );
+        assert!(format!("{:?}", generic.unwrap_err())
+            .contains("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED"));
+        // A reference first, before any PIN is asked.
+        for reference in [None, Some(""), Some("  x ")] {
+            assert!(
+                message(twint_return(&db.state, &auth, reference).unwrap_err())
+                    .contains("TWINT_RETURN_REFERENCE_REQUIRED")
+            );
+        }
+        // Nobody on shift: a manager's own PIN with the void-payments right.
+        let asked = twint_return(&db.state, &auth, Some("TW-REF-0001")).unwrap_err();
+        match &asked {
+            crate::auth::GuardedCommandError::Structured(error) => {
+                assert_eq!(error.code, "REAUTH_REQUIRED");
+                assert_eq!(error.approval, Some("void_payments"));
+            }
+            other => panic!("expected the manager approval request, got {other:?}"),
+        }
+        manager_approves();
+        let resolved = twint_return(&db.state, &auth, Some("  TW-REF-0001 ")).unwrap();
+        assert_eq!(resolved["result"], "resolved", "{resolved}");
+        assert_eq!(resolved["outcome"], "twint_returned_to_customer");
+        assert_eq!(resolved["remainingUnsavedPayments"], 0);
+        let conn = db.state.conn.lock().unwrap();
+        let (actor, payload): (Option<String>, String) = conn
+            .query_row(
+                "SELECT actor_staff_id, payload_json FROM recovery_action_log
+                 WHERE action_id = 'twint_receipt_returned_outside_pos' AND issue_code = 'payments_not_saved'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the audit entry");
+        assert_eq!(actor.as_deref(), Some("staff-manager"));
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["resolution"]["reference"], "TW-REF-0001");
+        assert_eq!(payload["resolution"]["approved_via"], "manager_pin");
+        assert!(payload["resolution"]["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("TWINT_RECEIPT_OUTSTANDING_AMOUNT_CHANGED"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE method='twint'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0,
+            "no TWINT row: nothing counts as sales or tender"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM payment_adjustments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(crate::unsaved_payments::list(&conn, None)
+            .unwrap()
+            .is_empty());
+        let listed = crate::unsaved_payments::twint_returned_outside_pos(&conn, None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["amountCents"], 1200);
+        assert_eq!(listed[0]["reference"], "TW-REF-0001");
+        assert!(crate::unsaved_payments::twint_returned_outside_pos(
+            &conn,
+            Some("2999-01-01T00:00:00Z")
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    fn twint_return_with_pin(
+        db: &db::DbState,
+        auth: &crate::auth::AuthState,
+        pin: &str,
+    ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+        resolve_unsaved_payment_guarded(
+            db,
+            auth,
+            Some(
+                serde_json::json!({"idempotencyKey":"manual-existing-key","outcome":"twint_returned_to_customer","reference":"TW-REF-0002","managerPin":pin}),
+            ),
+        )
+    }
+
+    fn held_twint_receipts(db: &db::DbState) -> usize {
+        crate::unsaved_payments::list(&db.conn.lock().unwrap(), None)
+            .unwrap()
+            .len()
+    }
+
+    /// An existing order left unpaid by a receipt that can never be saved
+    /// holds its cashier's checkout, so the decision cannot wait until
+    /// everyone checked out: a manager's own PIN takes it while the cashier
+    /// is still on shift. Never the session PIN, never another staff's PIN,
+    /// never a receipt that can still be saved.
+    #[test]
+    fn twint_receipt_return_while_someone_is_on_shift_takes_only_a_managers_own_pin() {
+        let (_keyring, db, auth) = twint_receipt_that_can_never_be_saved();
+        db.state.conn.lock().unwrap().execute("UPDATE staff_shifts SET status='active',check_out_time=NULL WHERE id='manual-shift'",[]).unwrap();
+        // No PIN: the session prompt could only prove the cashier on shift.
+        assert!(
+            message(twint_return(&db.state, &auth, Some("TW-REF-0002")).unwrap_err())
+                .contains("TWINT_RETURN_MANAGER_APPROVAL_REQUIRED")
+        );
+        // A PIN without the manager right decides nothing.
+        assert!(twint_return_with_pin(&db.state, &auth, "1357").is_err());
+        assert!(twint_return_with_pin(&db.state, &auth, "9999").is_err());
+        assert_eq!(held_twint_receipts(&db.state), 1, "nothing was resolved");
+        // A receipt that can still be saved is refused before any PIN.
+        let lasting = {
+            let conn = db.state.conn.lock().unwrap();
+            let mut entry = crate::unsaved_payments::load(&conn, "manual-existing-key")
+                .unwrap()
+                .unwrap();
+            let lasting = entry.last_error.replace("database is locked".into());
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+            lasting
+        };
+        assert!(
+            message(twint_return_with_pin(&db.state, &auth, "2468").unwrap_err())
+                .contains("TWINT_RECEIPT_SAVE_STILL_POSSIBLE")
+        );
+        assert_eq!(held_twint_receipts(&db.state), 1, "nothing was resolved");
+        {
+            let conn = db.state.conn.lock().unwrap();
+            let mut entry = crate::unsaved_payments::load(&conn, "manual-existing-key")
+                .unwrap()
+                .unwrap();
+            entry.last_error = lasting;
+            crate::unsaved_payments::record(&conn, &entry).unwrap();
+        }
+        // The manager's own PIN, with the cashier still on shift.
+        let resolved = twint_return_with_pin(&db.state, &auth, "2468").unwrap();
+        assert_eq!(resolved["result"], "resolved", "{resolved}");
+        assert_eq!(held_twint_receipts(&db.state), 0);
+        let conn = db.state.conn.lock().unwrap();
+        let (actor, payload): (Option<String>, String) = conn
+            .query_row(
+                "SELECT actor_staff_id, payload_json FROM recovery_action_log
+                 WHERE action_id = 'twint_receipt_returned_outside_pos'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the audit entry");
+        assert_eq!(actor.as_deref(), Some("staff-manager"));
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["resolution"]["approved_via"], "manager_pin");
+        assert_eq!(payload["resolution"]["reference"], "TW-REF-0002");
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE method='twint'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    /// With nobody on shift, the manager's own PIN given with the decision
+    /// approves it in one step (the Z's dialog asks for it).
+    #[test]
+    fn twint_receipt_return_takes_the_managers_pin_with_the_decision() {
+        let (_keyring, db, auth) = twint_receipt_that_can_never_be_saved();
+        assert!(twint_return_with_pin(&db.state, &auth, "1357").is_err());
+        assert_eq!(held_twint_receipts(&db.state), 1, "nothing was resolved");
+        let resolved = twint_return_with_pin(&db.state, &auth, "2468").unwrap();
+        assert_eq!(resolved["result"], "resolved", "{resolved}");
+        assert_eq!(held_twint_receipts(&db.state), 0);
     }
 
     #[test]

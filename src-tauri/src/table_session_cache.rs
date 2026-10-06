@@ -214,6 +214,14 @@ pub(crate) fn cancellation_attempt(
     Ok(event)
 }
 
+/// The check's saved cancellation attempt (its event, reason and approver).
+///
+/// Only an attempt that may have applied money pins its original identity:
+/// its frozen return is resumed with the same event, reason and approver,
+/// never replaced. A reason-only attempt replays under its event with the
+/// same approval, and otherwise gives way to a new event; so does an attempt
+/// whose server refusal is proven (review 06/10/2026). A frozen return always
+/// travels under its own event, so the request sent is the one saved.
 fn cancellation_attempt_scoped(
     conn: &Connection,
     scope: &Scope,
@@ -222,27 +230,69 @@ fn cancellation_attempt_scoped(
     approved_staff_id: &str,
     requested: Option<&str>,
 ) -> Result<String, String> {
+    use crate::table_manual_cancellation::{event_money_state, EventMoneyState};
+    let requested = requested.map(str::trim).filter(|s| !s.is_empty());
     let previous: Option<(String,String,Option<String>)> = conn.query_row("SELECT client_event_id,cancellation_reason,approved_staff_id FROM table_cancel_attempts_v1
         WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND session_id=?4",
         params![scope.organization,scope.branch,scope.terminal,session_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
         .optional().map_err(|error| format!("Read cancellation attempt: {error}"))?;
-    if let Some((event, previous_reason, previous_actor)) = previous {
-        if previous_actor.as_deref() != Some(approved_staff_id) {
-            return Err("ORIGINAL_CANCEL_APPROVER_REQUIRED: A cancellation attempt is pending. Its original approving staff member must retry after reconnecting. The table was not released.".into());
-        }
-        if previous_reason != reason {
-            return Err("A cancellation attempt is pending. Retry with its original reason after reconnecting.".into());
-        }
+    let new_event = || {
+        requested
+            .map(ToString::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    };
+    let Some((event, previous_reason, previous_actor)) = previous else {
+        let event = new_event();
+        conn.execute("INSERT INTO table_cancel_attempts_v1 (organization_id,branch_id,terminal_id,session_id,client_event_id,cancellation_reason,approved_staff_id)
+            VALUES (?1,?2,?3,?4,?5,?6,?7)",params![scope.organization,scope.branch,scope.terminal,session_id,event,reason,approved_staff_id])
+            .map_err(|error| format!("Save cancellation attempt: {error}"))?;
         return Ok(event);
-    }
-    let event = requested
-        .filter(|s| !s.trim().is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    conn.execute("INSERT INTO table_cancel_attempts_v1 (organization_id,branch_id,terminal_id,session_id,client_event_id,cancellation_reason,approved_staff_id)
-        VALUES (?1,?2,?3,?4,?5,?6,?7)",params![scope.organization,scope.branch,scope.terminal,session_id,event,reason,approved_staff_id])
+    };
+    let same_approval =
+        previous_actor.as_deref() == Some(approved_staff_id) && previous_reason == reason;
+    let requested_state = match requested {
+        Some(id) if id != event => event_money_state(conn, &scope.organization, &scope.branch, id)?,
+        _ => EventMoneyState::None,
+    };
+    let replacement = match event_money_state(conn, &scope.organization, &scope.branch, &event)? {
+        EventMoneyState::Unresolved | EventMoneyState::Applied => {
+            if requested.is_some_and(|id| id != event) {
+                return Err("TABLE_CANCELLATION_PENDING: A cancellation of this check is saved and may already be recorded. Resume it with its original reason and approver, or ask a manager to clear it. The table was not released.".into());
+            }
+            if previous_actor.as_deref() != Some(approved_staff_id) {
+                return Err("ORIGINAL_CANCEL_APPROVER_REQUIRED: A cancellation attempt is pending. Its original approving staff member must retry after reconnecting. The table was not released.".into());
+            }
+            if previous_reason != reason {
+                return Err("A cancellation attempt is pending. Retry with its original reason after reconnecting.".into());
+            }
+            return Ok(event);
+        }
+        EventMoneyState::Refused => {
+            if requested == Some(event.as_str()) {
+                return Err(format!(
+                    "{}: this cancellation was refused by the server and is not sent again. A manager can clear it.",
+                    crate::table_manual_cancellation::REFUSED
+                ));
+            }
+            new_event()
+        }
+        EventMoneyState::None => {
+            // A new frozen return must travel under its own event; a plain
+            // retry with the same approval replays the saved one.
+            if same_approval && requested_state == EventMoneyState::None {
+                return Ok(event);
+            }
+            match requested {
+                Some(id) if id != event => id.to_string(),
+                _ => uuid::Uuid::new_v4().to_string(),
+            }
+        }
+    };
+    conn.execute("UPDATE table_cancel_attempts_v1 SET client_event_id=?1,cancellation_reason=?2,approved_staff_id=?3
+        WHERE organization_id=?4 AND branch_id=?5 AND terminal_id=?6 AND session_id=?7 AND client_event_id=?8",
+        params![replacement,reason,approved_staff_id,scope.organization,scope.branch,scope.terminal,session_id,event])
         .map_err(|error| format!("Save cancellation attempt: {error}"))?;
-    Ok(event)
+    Ok(replacement)
 }
 
 pub(crate) fn invalidate(conn: &Connection, session_ids: &[Value]) -> Result<(), String> {
@@ -476,6 +526,75 @@ mod tests {
             .unwrap(),
             first
         );
+        // Review 06/10/2026: a reason-only attempt (no money can move) never
+        // locks the check. Another approver or another reason starts a new
+        // event instead of ORIGINAL_CANCEL_APPROVER_REQUIRED forever.
+        let second = cancellation_attempt_scoped(
+            &conn,
+            &scope(),
+            "session",
+            "customer left",
+            "staff-b",
+            None,
+        )
+        .unwrap();
+        assert_ne!(second, first);
+        let third = cancellation_attempt_scoped(
+            &conn,
+            &scope(),
+            "session",
+            "different reason",
+            "staff-b",
+            None,
+        )
+        .unwrap();
+        assert_ne!(third, second);
+        let actor: String = conn
+            .query_row(
+                "SELECT approved_staff_id FROM table_cancel_attempts_v1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actor, "staff-b");
+        let sensitive_columns:i64=conn.query_row("SELECT COUNT(*) FROM pragma_table_info('table_cancel_attempts_v1') WHERE name IN ('pin','manager_pin','approval_token')",[],|row|row.get(0)).unwrap();
+        assert_eq!(sensitive_columns, 0);
+    }
+
+    /// A frozen table return under `event`: `outcome` NULL while its server
+    /// outcome may be unknown, `refused` once a refusal is proven.
+    fn frozen_return(conn: &Connection, event: &str, outcome: Option<&str>) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS table_manual_cancel_intents_v1 (
+              organization_id TEXT NOT NULL,branch_id TEXT NOT NULL,terminal_id TEXT NOT NULL,
+              event_id TEXT NOT NULL,order_id TEXT NOT NULL,session_id TEXT NOT NULL,
+              generation TEXT NOT NULL,channel TEXT NOT NULL,reason TEXT NOT NULL,actor TEXT NOT NULL,
+              request_json TEXT NOT NULL,applied INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,
+              dispatch_count INTEGER,last_dispatch_at TEXT,outcome TEXT,refusal_code TEXT,resolved_at TEXT,resolved_by TEXT,
+              PRIMARY KEY(organization_id,branch_id,terminal_id,event_id));",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO table_manual_cancel_intents_v1(organization_id,branch_id,terminal_id,event_id,order_id,session_id,generation,channel,reason,actor,request_json,created_at,dispatch_count,outcome)
+            VALUES('org','branch','terminal',?1,'order','session','g','bank','customer left','staff-a','{}','now',1,?2)",params![event,outcome]).unwrap();
+    }
+
+    #[test]
+    fn a_saved_return_that_may_have_applied_money_keeps_its_original_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema(&conn).unwrap();
+        frozen_return(&conn, "money-event", None);
+        assert_eq!(
+            cancellation_attempt_scoped(
+                &conn,
+                &scope(),
+                "session",
+                "customer left",
+                "staff-a",
+                Some("money-event")
+            )
+            .unwrap(),
+            "money-event"
+        );
         assert!(cancellation_attempt_scoped(
             &conn,
             &scope(),
@@ -490,21 +609,104 @@ mod tests {
             &conn,
             &scope(),
             "session",
-            "different reason",
+            "other reason",
             "staff-a",
             None
         )
         .is_err());
-        let actor: String = conn
+        assert!(cancellation_attempt_scoped(
+            &conn,
+            &scope(),
+            "session",
+            "customer left",
+            "staff-a",
+            Some("new-event")
+        )
+        .unwrap_err()
+        .contains("TABLE_CANCELLATION_PENDING"));
+        // A proven refusal releases the check for a new approver and event.
+        conn.execute(
+            "UPDATE table_manual_cancel_intents_v1 SET outcome='released'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            cancellation_attempt_scoped(
+                &conn,
+                &scope(),
+                "session",
+                "customer left",
+                "staff-b",
+                Some("new-event")
+            )
+            .unwrap(),
+            "new-event"
+        );
+    }
+
+    #[test]
+    fn a_frozen_return_travels_under_its_own_event_not_an_older_attempt() {
+        // Symptom: a refund frozen under a new event was sent as the older
+        // attempt's plain request, refused, and left orphaned (applied=0),
+        // holding every manual table cancellation in the branch.
+        let conn = Connection::open_in_memory().unwrap();
+        schema(&conn).unwrap();
+        assert_eq!(
+            cancellation_attempt_scoped(
+                &conn,
+                &scope(),
+                "session",
+                "customer left",
+                "staff-a",
+                Some("plain-event")
+            )
+            .unwrap(),
+            "plain-event"
+        );
+        frozen_return(&conn, "money-event", None);
+        assert_eq!(
+            cancellation_attempt_scoped(
+                &conn,
+                &scope(),
+                "session",
+                "customer left",
+                "staff-a",
+                Some("money-event")
+            )
+            .unwrap(),
+            "money-event"
+        );
+        let saved: String = conn
             .query_row(
-                "SELECT approved_staff_id FROM table_cancel_attempts_v1",
+                "SELECT client_event_id FROM table_cancel_attempts_v1",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(actor, "staff-a");
-        let sensitive_columns:i64=conn.query_row("SELECT COUNT(*) FROM pragma_table_info('table_cancel_attempts_v1') WHERE name IN ('pin','manager_pin','approval_token')",[],|row|row.get(0)).unwrap();
-        assert_eq!(sensitive_columns, 0);
+        assert_eq!(saved, "money-event");
+        // A refused saved return is never resumed under its event.
+        let conn = Connection::open_in_memory().unwrap();
+        schema(&conn).unwrap();
+        frozen_return(&conn, "refused-event", Some("refused"));
+        cancellation_attempt_scoped(
+            &conn,
+            &scope(),
+            "session",
+            "customer left",
+            "staff-a",
+            Some("refused-event"),
+        )
+        .unwrap();
+        assert!(cancellation_attempt_scoped(
+            &conn,
+            &scope(),
+            "session",
+            "customer left",
+            "staff-a",
+            Some("refused-event")
+        )
+        .unwrap_err()
+        .contains("TABLE_CANCELLATION_REFUSED"));
     }
     #[test]
     fn durable_cache_keeps_scoped_lines_and_ledger_and_rejects_old_revision() {

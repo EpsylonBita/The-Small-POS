@@ -35,6 +35,13 @@ export interface EditSettlementDeltaModalProps {
   amount: number;
   /** Display hint — shown in the subtitle if provided. */
   orderNumber?: string | null;
+  /**
+   * Tenders this terminal may record for the difference (the server's own
+   * `method_policy`, read by the native preview). Omitted means both; a
+   * disallowed tender is never offered, because the server would refuse it
+   * only after the cashier had taken or returned the money.
+   */
+  allowedMethods?: readonly EditSettlementDeltaMethod[] | null;
   onConfirm: (method: EditSettlementDeltaMethod) => void | Promise<void>;
   onCancel: () => void;
 }
@@ -48,12 +55,16 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
   mode,
   amount,
   orderNumber,
+  allowedMethods,
   onConfirm,
   onCancel,
 }) => {
   const { t } = useTranslation();
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  const permits = (method: EditSettlementDeltaMethod) =>
+    !Array.isArray(allowedMethods) || allowedMethods.includes(method);
+  const restricted = !permits('cash') || !permits('card');
 
   // Reset submit state whenever the modal re-opens so a previous in-flight
   // error doesn't leave the buttons disabled forever.
@@ -79,7 +90,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
       });
 
   const handlePick = async (method: EditSettlementDeltaMethod) => {
-    if (submittingRef.current) return;
+    if (submittingRef.current || !permits(method)) return;
     submittingRef.current = true;
     setSubmitting(true);
     try {
@@ -148,7 +159,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
           <button
             type="button"
             onClick={() => void handlePick('cash')}
-            disabled={submitting}
+            disabled={submitting || !permits('cash')}
+            aria-disabled={submitting || !permits('cash')}
             className={`flex flex-col items-center gap-2 rounded-2xl border px-4 py-5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
               isRefund
                 ? 'border-orange-400/30 bg-orange-500/10 text-orange-900 dark:text-orange-200 active:border-orange-400/50 active:bg-orange-500/15'
@@ -163,7 +175,8 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
           <button
             type="button"
             onClick={() => void handlePick('card')}
-            disabled={submitting}
+            disabled={submitting || !permits('card')}
+            aria-disabled={submitting || !permits('card')}
             className={`flex flex-col items-center gap-2 rounded-2xl border px-4 py-5 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
               isRefund
                 ? 'border-orange-400/30 bg-orange-500/10 text-orange-900 dark:text-orange-200 active:border-orange-400/50 active:bg-orange-500/15'
@@ -175,6 +188,26 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
             <span>{cardLabel}</span>
           </button>
         </div>
+
+        {/* A tender this terminal may not record is never offered. */}
+        {restricted && (
+          <div
+            role="note"
+            data-testid="edit-settlement-delta-method-policy"
+            className="flex items-start gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-200/90"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              {!permits('cash')
+                ? t('modals.editSettlementDelta.cashDisabled', {
+                    defaultValue: 'Cash is turned off for this terminal, so it cannot be recorded here.',
+                  })
+                : t('modals.editSettlementDelta.cardDisabled', {
+                    defaultValue: 'Card is turned off for this terminal, so it cannot be recorded here.',
+                  })}
+            </span>
+          </div>
+        )}
 
         {/* Refund caveat */}
         {isRefund && (

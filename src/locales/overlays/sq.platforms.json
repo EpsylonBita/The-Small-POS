@@ -158,6 +158,17 @@
       "wrongProductPrice": "Çmim i gabuar produkti",
       "closingSoon": "Po mbyllemi së shpejti",
       "badWeather": "Për shkak të motit të keq"
+    },
+    "decisionClosed": "BOX e mbylli këtë porosi. Nuk mund ta pranosh apo ta refuzosh më nga këtu.",
+    "manualCheckTitle": "Kontrolloje porosinë me BOX",
+    "manualCheck": "BOX nuk e konfirmoi këtë porosi në kohë dhe mund ta ketë pranuar gjithsesi. Kontrollo me BOX para se ta përgatitësh ose ta mbyllësh këtu.",
+    "closeOrder": "Mbyll porosinë",
+    "closingOrder": "Po mbyllet…",
+    "closeOrderFailed": "Porosia nuk u mbyll. Kontrollo lidhjen dhe provo sërish.",
+    "closedReasons": {
+      "box_decision_expired": "U mbyll nga BOX: nuk u mor vendim në kohë",
+      "box_decision_refused": "U mbyll nga BOX: vendimi u refuzua",
+      "box_manual_check_closed": "U mbyll këtu pas kontrollit me BOX"
     }
   }
 }

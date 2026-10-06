@@ -11,6 +11,12 @@ export interface SplitOrderFinancials {
 export interface SettlementPortion {
   id: string;
   discountAmount: number;
+  /**
+   * The portion's amount before its discount. When present, no more discount
+   * than this is ever persisted to the order (C2, 06/10/2026: the modal keeps
+   * the cashier's requested discount while the amount is retyped).
+   */
+  grossAmount?: number;
 }
 
 export interface TerminalSettlementEffects {
@@ -45,6 +51,17 @@ export interface DraftSettlementResult {
 const round2 = (value: number) => Math.round(value * 100) / 100;
 
 /**
+ * The discount a settled portion may add to the order: never negative and
+ * never more than the portion's own gross, whatever discount the cashier asked
+ * for (C2, 06/10/2026).
+ */
+export const settledPortionDiscount = (portion: SettlementPortion): number => {
+  const discount = Math.max(0, Number(portion.discountAmount) || 0);
+  if (portion.grossAmount === undefined || portion.grossAmount === null) return round2(discount);
+  return round2(Math.min(discount, Math.max(0, Number(portion.grossAmount) || 0)));
+};
+
+/**
  * Compute the financial state after granting an additional split discount.
  * Returns null when the delta is below one cent — callers skip the DB write
  * entirely for undiscounted portions.
@@ -77,7 +94,7 @@ export async function settleTerminalPortion(
 ): Promise<TerminalSettlementResult> {
   const { transactionId } = await effects.processPayment();
   const paymentId = await effects.recordPayment(transactionId);
-  const next = applyAdditionalDiscount(financials, portion.discountAmount);
+  const next = applyAdditionalDiscount(financials, settledPortionDiscount(portion));
   let current = financials;
   let discountPersistFailed = false;
   if (next) {
@@ -171,7 +188,7 @@ export async function settleDraftPortions<P extends SettlementPortion>(
     const paymentId = await effects.recordPayment(portion);
     paymentIds.push(paymentId);
     settledPortionIds.push(portion.id);
-    const next = applyAdditionalDiscount(current, portion.discountAmount);
+    const next = applyAdditionalDiscount(current, settledPortionDiscount(portion));
     if (next) {
       try {
         await effects.persistFinancials(next);

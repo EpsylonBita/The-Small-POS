@@ -2,6 +2,8 @@ import { shiftSummaryCurrency } from '../../utils/shift-currency';
 import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import { recordedFolioCurrency } from '../../utils/folio-currency';
 import { submitSatelliteHandover } from '../../utils/satellite-handover';
+import { satelliteHandoverMessage } from '../../utils/satelliteHandoverText';
+import { SatelliteHandoverReleasePanel } from './SatelliteHandoverReleasePanel';
 import React, { useState, useEffect, useRef } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { toast } from 'react-hot-toast';
@@ -688,6 +690,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     staffName: string;
     currency: string;
   } | null>(null);
+  // The cashier shift whose close a refused satellite handover holds: a
+  // manager can release it there (fix review 06/10/2026).
+  const [satelliteReleaseShiftId, setSatelliteReleaseShiftId] = useState<string | null>(null);
 
   // Variance result state
   const [lastShiftResult, setLastShiftResult] = useState<{
@@ -2375,10 +2380,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           if (payload?.success && payload.figures) {
             setSatellitePreview({ loading: false, error: null, figures: payload.figures });
           } else {
+            // The server's refusal in till language, never its raw code.
             setSatellitePreview({
               loading: false,
               error:
-                payload?.error ||
+                satelliteHandoverMessage(payload?.error, t)?.text ||
                 t('modals.staffShift.satelliteCheckout.previewFailed', {
                   defaultValue: 'Could not load the shift figures from the server.',
                 }),
@@ -2389,7 +2395,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         .catch((previewError: unknown) => {
           setSatellitePreview({
             loading: false,
-            error: String((previewError as Error)?.message || previewError),
+            error:
+              satelliteHandoverMessage(previewError, t)?.text ||
+              t('modals.staffShift.satelliteCheckout.previewFailed', {
+                defaultValue: 'Could not load the shift figures from the server.',
+              }),
             figures: null,
           });
         });
@@ -3487,7 +3497,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       } else {
         const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
         setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-        setError(result.error?.includes('SHIFT_CURRENCY_SETTLEMENT_REQUIRED') ? t('modals.staffShift.currencySettlementRequired') : result.error || t('modals.staffShift.closeShiftFailed'));
+        const handover = satelliteHandoverMessage(result.error, t);
+        if (handover?.refused) setSatelliteReleaseShiftId(String(effectiveShift.id));
+        setError(handover ? handover.text : result.error?.includes('SHIFT_CURRENCY_SETTLEMENT_REQUIRED') ? t('modals.staffShift.currencySettlementRequired') : result.error || t('modals.staffShift.closeShiftFailed'));
         if (readRefusalCode(result, '').startsWith('GIFT_CLOSING_')) {
           rediscoverGiftClose();
         }
@@ -3495,7 +3507,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     } catch (err) {
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
       setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
-      setError(extractErrorMessage(err, t('modals.staffShift.closeShiftFailed')));
+      // A satellite handover holding this close: said in till language, and a
+      // refused one offers the manager's release (fix review 06/10/2026).
+      // Any other rejection keeps its raw IPC text.
+      const handover = satelliteHandoverMessage(err, t);
+      if (handover?.refused) setSatelliteReleaseShiftId(String(effectiveShift.id));
+      if (handover) setError(handover.text);
+      else setError(extractErrorMessage(err, t('modals.staffShift.closeShiftFailed')));
     } finally {
       setLoading(false);
     }
@@ -3537,9 +3555,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setSuccess('');
     setCheckoutPaymentBlockers([]);
     let result: unknown;
+    // A satellite cash handover holds this close before anything is captured
+    // (fix review 06/10/2026): its own till text, never a gift close refusal.
+    let handover: ReturnType<typeof satelliteHandoverMessage> = null;
     try {
       result = await bridge.shifts.close(payload);
     } catch (err) {
+      handover = satelliteHandoverMessage(err, t);
       result = { success: false, code: readRefusalCode(err, 'LOCAL_STORE_FAILED') };
     }
     // The native close stays durable; a retired intent only drops its UI effects.
@@ -3583,6 +3605,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     if (outcome.kind === 'refused') {
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
       setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
+      handover ??= satelliteHandoverMessage(result, t);
+      if (handover) {
+        if (handover.refused) setSatelliteReleaseShiftId(shiftId);
+        setError(handover.text);
+        return;
+      }
       if (GIFT_CLOSE_TERMS_CODES.has(outcome.code)) {
         setClosingCash('');
       }
@@ -4337,7 +4365,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         variance: outcome.variance, staffName: satelliteCheckout.staff.name });
       void loadStaff();
     } catch (failure) {
-      setError(String((failure as Error)?.message || failure));
+      setError(
+        satelliteHandoverMessage(failure, t)?.text
+          || String((failure as Error)?.message || failure),
+      );
     } finally {
       setSatelliteSubmitting(false);
     }
@@ -7052,6 +7083,18 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {/* Error/Success Messages */}
           {error && <ErrorAlert title={t('modals.error.title', 'Error')} message={error} onClose={() => setError('')} className="mb-4" />}
           {success && <ErrorAlert title={t('modals.success.title', 'Success')} message={success} severity="success" onClose={() => setSuccess('')} className="mb-4" />}
+          {satelliteReleaseShiftId && effectiveShift && String(effectiveShift.id) === satelliteReleaseShiftId && (
+            <SatelliteHandoverReleasePanel
+              cashierShiftId={satelliteReleaseShiftId}
+              onReleased={() => {
+                setSatelliteReleaseShiftId(null);
+                setError('');
+                setSuccess(t('modals.staffShift.satelliteHandover.released', {
+                  defaultValue: 'Released. The satellite cash was not added to this drawer. You can close the shift now.',
+                }));
+              }}
+            />
+          )}
           {checkoutPaymentBlockers.length > 0 && (
             <UnsettledPaymentBlockersPanel
               blockers={checkoutPaymentBlockers}

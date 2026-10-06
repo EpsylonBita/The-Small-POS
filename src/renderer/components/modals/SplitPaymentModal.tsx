@@ -19,6 +19,13 @@ import { isPaymentSetAsideError, PAYMENT_SET_ASIDE_TOAST_MS, throwIfPaymentSetAs
 import { isPaymentNotSavedError, PAYMENT_NOT_SAVED_TOAST_MS, pendingNotSavedMessage, throwIfPaymentNotSaved, useUnsavedChargedPayments } from '../../utils/unsavedPayments';
 import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
 import {
+  admitManualCard,
+  lookupCardTerminal,
+  manualCardNoticeText,
+  manualCardRecordRefusalText,
+  terminalLookupNotice,
+} from '../../services/ManualCardAdmissionService';
+import {
   claimOrdinaryCollectionOwner,
   classifyOrdinaryTerminalReply,
   classifyOrdinaryWrite,
@@ -51,7 +58,19 @@ export interface SplitPortion {
   items: CartItem[]; status: PortionStatus; cashReceived?: number; changeGiven?: number; paymentId?: string;
   transactionRef?: string; paymentOrigin?: PaymentOrigin; terminalDeviceId?: string; paidAt?: string;
   collectedBy?: 'cashier_drawer' | 'driver_shift';
+  /**
+   * A card taken on the shop's own machine, recorded by hand. Set only after
+   * the manual card admission (no terminal on this till and a fresh server
+   * "no provider connected"); Confirm asks that admission again before it
+   * records, and books no other draft card portion (06/10/2026).
+   */
   manualCardFallback?: boolean;
+  /**
+   * The discount the cashier asked for. `discountAmount` is the effective
+   * part of it, never more than `grossAmount` (C2, 06/10/2026: digit entry of
+   * the amount passes through 0,02 on its way to 25,00).
+   */
+  requestedDiscountAmount?: number;
 }
 
 export interface SplitPaymentResult {
@@ -102,7 +121,6 @@ let nextGeneratedPortionId = 1;
 // Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
 // rounded on the binary product, so it sent 1.005 to 1.00.
 const round2 = (value: number) => roundMoney(value);
-const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 const nextPortionId = () => `portion-${nextGeneratedPortionId++}-${Date.now()}`;
 const unwrapBridgeArray = <T,>(result: any): T[] => Array.isArray(result) ? result : Array.isArray(result?.data) ? result.data : [];
 const isCompletedPaymentRecord = (payment: any) => ['completed', 'paid'].includes(String(payment?.status || '').toLowerCase());
@@ -118,10 +136,29 @@ const extractTransactionDetails = (raw: any) => {
   const tx = raw?.transaction ?? raw?.data?.transaction ?? raw?.data ?? raw ?? {};
   return { success: raw?.success === true, status: String(tx?.status || raw?.status || '').toLowerCase(), transactionId: tx?.transactionId ?? tx?.id ?? raw?.transactionId ?? raw?.id ?? '', errorMessage: tx?.errorMessage ?? raw?.error ?? raw?.data?.error };
 };
-const applyPortionFinancials = (portion: SplitPortion, grossAmount: number, discountAmount = portion.discountAmount): SplitPortion => {
+// C2 (06/10/2026): the cashier's discount is kept as asked and only its
+// effective part follows the gross. Digit entry passes through 0,02 / 0,25 /
+// 2,50 on the way to 25,00; clamping the stored discount at each keystroke
+// turned a 5,00 discount into 0,02 for good.
+const applyPortionFinancials = (portion: SplitPortion, grossAmount: number, requestedDiscount = portion.requestedDiscountAmount ?? portion.discountAmount): SplitPortion => {
   const gross = round2(Math.max(0, grossAmount));
-  const discount = round2(clamp(discountAmount, 0, gross));
-  return { ...portion, grossAmount: gross, discountAmount: discount, amount: round2(gross - discount) };
+  const requested = round2(Math.max(0, Number.isFinite(requestedDiscount) ? requestedDiscount : 0));
+  const discount = round2(Math.min(requested, gross));
+  return { ...portion, grossAmount: gross, requestedDiscountAmount: requested, discountAmount: discount, amount: round2(gross - discount) };
+};
+// C1 (06/10/2026): only a terminal reply with the exact transaction and a
+// final `declined` status proves the card was declined and no money moved
+// (native also stops counting such a SALE). Those refusals are marked so the
+// portion can say "declined, nothing charged"; any other failure may hide a
+// charge and keeps its own message.
+const provenCardDeclines = new WeakSet<Error>();
+const isProvenDeclineReply = (raw: unknown, threw = false): boolean => !threw
+  && classifyOrdinaryTerminalReply(raw, threw).verdict === 'not_sent'
+  && extractTransactionDetails(raw).status.trim() === 'declined';
+const cardNotApproved = (message: string | null | undefined, provenDecline: boolean): Error => {
+  const error = new Error(message || 'Card payment was not approved');
+  if (provenDecline) provenCardDeclines.add(error);
+  return error;
 };
 const createPortion = (label: string, grossAmount: number): SplitPortion => applyPortionFinancials({ id: nextPortionId(), label, method: 'cash', amount: round2(grossAmount), grossAmount: round2(grossAmount), discountAmount: 0, items: [], status: 'draft', paymentOrigin: 'manual' }, grossAmount);
 // Round 298 (third correction): a by-items portion is "compact-eligible" when it is an untouched draft --
@@ -284,7 +321,11 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const remaining = useMemo(() => round2(adjustedDue - assignedDraftAmount), [adjustedDue, assignedDraftAmount]);
   const hasPositiveAssignment = useMemo(() => portions.some((portion) => portion.status !== 'paid' && portion.amount > 0.009), [portions]);
   const anyItemsAssigned = useMemo(() => activeTab !== 'by-items' || availableItems.some((item) => itemAssignments[Number(item.itemIndex ?? 0)] !== undefined), [activeTab, availableItems, itemAssignments]);
-  const canConfirm = useMemo(() => hasPositiveAssignment && anyItemsAssigned && remaining >= -0.01 && !unsavedLocked && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending && !platformHeld, [anyItemsAssigned, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, platformHeld, processingPortionId, remaining, unsavedLocked]);
+  // C1 (06/10/2026): Confirm books a card portion only as an admitted manual
+  // card (its notice is on screen). A card the terminal refused, or one not
+  // charged yet, is never a confirmable draft.
+  const hasCardDraftWithoutManualNotice = useMemo(() => portions.some((portion) => portion.status === 'draft' && portion.amount > 0.009 && portion.method === 'card' && portion.manualCardFallback !== true), [portions]);
+  const canConfirm = useMemo(() => hasPositiveAssignment && !hasCardDraftWithoutManualNotice && anyItemsAssigned && remaining >= -0.01 && !unsavedLocked && !isInitializing && !isProcessing && !processingPortionId && !isTerminalChargeInFlight && !isReconciliationPending && !platformHeld, [anyItemsAssigned, hasCardDraftWithoutManualNotice, hasPositiveAssignment, isInitializing, isProcessing, isReconciliationPending, isTerminalChargeInFlight, platformHeld, processingPortionId, remaining, unsavedLocked]);
 
   const getPortion = useCallback((portionId: string) => portions.find((portion) => portion.id === portionId) ?? null, [portions]);
   const updatePortion = useCallback((portionId: string, updater: (portion: SplitPortion) => SplitPortion) => setPortions((current) => current.map((portion) => portion.id === portionId ? updater(portion) : portion)), []);
@@ -397,8 +438,12 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const removePerson = useCallback((portionId: string) => { setPortions((current) => current.filter((portion) => portion.id !== portionId)); setItemAssignments((current) => Object.fromEntries(Object.entries(current).filter(([, value]) => value !== portionId))); if (discountEditorPortionId === portionId) { setDiscountEditorPortionId(null); setDiscountDraftValue(''); } }, [discountEditorPortionId]);
   const updatePortionGrossAmount = useCallback((portionId: string, grossAmount: number) => updatePortion(portionId, (portion) => portion.status !== 'draft' ? portion : applyPortionFinancials(portion, grossAmount)), [updatePortion]);
   const setPortionMethod = useCallback((portionId: string, method: 'cash' | 'card') => updatePortion(portionId, (portion) => portion.status !== 'draft' ? portion : { ...portion, method, manualCardFallback: false, paymentOrigin: 'manual', terminalDeviceId: method === 'card' ? portion.terminalDeviceId : undefined }), [updatePortion]);
+  // C1 (06/10/2026): a Card tap that took no card money puts the portion back
+  // to the method it had before, as a plain draft with no terminal and no
+  // manual-card notice. A paid or charged-not-saved portion is never touched.
+  const restorePortionMethod = useCallback((portionId: string, method: 'cash' | 'card') => updatePortion(portionId, (portion) => (portion.status === 'paid' || portion.status === 'unsaved' ? portion : { ...portion, method, status: 'draft', manualCardFallback: false, paymentOrigin: 'manual', terminalDeviceId: undefined })), [updatePortion]);
   const setPortionCollectedBy = useCallback((portionId: string, collectedBy: 'cashier_drawer' | 'driver_shift') => updatePortion(portionId, (portion) => portion.status !== 'draft' ? portion : { ...portion, collectedBy }), [updatePortion]);
-  const openDiscountEditor = useCallback((portionId: string) => { const portion = getPortion(portionId); if (!portion || portion.status !== 'draft' || portion.grossAmount <= 0.009) return; setDiscountEditorPortionId(portionId); setDiscountDraftValue(portion.discountAmount ? portion.discountAmount.toFixed(2) : ''); }, [getPortion]);
+  const openDiscountEditor = useCallback((portionId: string) => { const portion = getPortion(portionId); if (!portion || portion.status !== 'draft' || portion.grossAmount <= 0.009) return; const requested = portion.requestedDiscountAmount ?? portion.discountAmount; setDiscountEditorPortionId(portionId); setDiscountDraftValue(requested ? requested.toFixed(2) : ''); }, [getPortion]);
   const saveDiscount = useCallback((portionId: string) => { const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; updatePortion(portionId, (current) => applyPortionFinancials(current, current.grossAmount, round2(Number.parseFloat(discountDraftValue) || 0))); setDiscountEditorPortionId(null); setDiscountDraftValue(''); }, [discountDraftValue, getPortion, updatePortion]);
   const assignItem = useCallback((itemIndex: number, portionId: string | null) => { setItemAssignments((current) => { const next = { ...current }; if (portionId) next[itemIndex] = portionId; else delete next[itemIndex]; return next; }); setOpenAssignmentItemIndex(null); }, []);
 
@@ -451,7 +496,6 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     onClose();
   }, [activeTab, alreadyPaidAmount, onClose, onSplitComplete, printFinalOrderDocuments, receiptMode, t]);
 
-  const resolveReadyTerminal = useCallback(async () => { const raw: any = await bridge.ecr.getDefaultTerminal(); const device = raw?.device ?? raw?.data?.device ?? null; const deviceId = typeof device?.id === 'string' ? device.id : ''; if (!deviceId) return null; const status: any = await bridge.ecr.getDeviceStatus(deviceId); return status?.connected === true && status?.ready === true && status?.busy !== true ? { deviceId, name: device?.name || deviceId } : null; }, [bridge]);
   const ordinaryRefusalText = useCallback((code: string) => (code === 'GIFT_CARD_TERMINAL_SCOPE_REQUIRED'
     ? t('giftCardCheckout.refusal.scope', 'This terminal has no confirmed organization or terminal identity. Pair the POS again.')
     : t('giftCardCheckout.refusal.admission', 'Earlier gift card attempts must be checked first.')), [t]);
@@ -476,7 +520,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             try { rawPayment = await bridge.ecr.processPayment(cardPortion.amount, { deviceId: terminal.deviceId, orderId, reference: `${orderId}:${cardPortion.id}` }); } catch { threw = true; }
             const charge = classifyOrdinaryTerminalReply(rawPayment, threw);
             seen.charge = charge;
-            if (charge.verdict !== 'approved') throw new Error(charge.message || 'Card payment was not approved');
+            if (charge.verdict !== 'approved') throw cardNotApproved(charge.message, isProvenDeclineReply(rawPayment, threw));
             noteOrdinaryTerminalTransaction(owner, charge.transactionId);
             return { transactionId: charge.transactionId };
           },
@@ -531,6 +575,8 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const startedEpoch = viewEpoch.current;
     const isCurrent = () => isOpen && viewEpoch.current === startedEpoch;
     const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; if (portion.amount <= 0.009) return;
+    // C1: the method this portion had before the tap; any outcome that takes no card money puts it back.
+    const methodBeforeTap = portion.method;
     // Gap review P0-01: the guard must be armed synchronously BEFORE the first
     // await. The pre-flight IPC below yields long enough for a double-tap to
     // re-enter with portion.status still 'draft', and the ECR device mutex
@@ -609,10 +655,25 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       setPortionMethod(portionId, 'card');
       let terminal: { deviceId: string; name: string } | null = sale?.recoverable && sale.deviceId
         ? { deviceId: sale.deviceId, name: sale.deviceId } : null;
-      if (!terminal) { try { terminal = await resolveReadyTerminal(); } catch (error) { console.warn('[SplitPaymentModal] Failed to resolve terminal:', error); } }
       if (!terminal) {
-        updatePortion(portionId, (current) => ({ ...current, manualCardFallback: true }));
-        return;
+        const lookup = await lookupCardTerminal();
+        if (!isCurrent()) return;
+        if (lookup.kind !== 'ready') {
+          // D (06/10/2026, Android parity): a configured terminal that is busy,
+          // disconnected or unreadable takes no card and never turns into a
+          // manual card. With no terminal at all, only a fresh server admission
+          // offers one, and Confirm asks again before it records.
+          const admission = lookup.kind === 'none' ? await admitManualCard() : null;
+          if (!isCurrent()) return;
+          if (admission?.admitted) {
+            updatePortion(portionId, (current) => (current.status !== 'draft' ? current : { ...current, method: 'card', manualCardFallback: true, paymentOrigin: 'manual', terminalDeviceId: undefined }));
+            return;
+          }
+          restorePortionMethod(portionId, methodBeforeTap);
+          toast.error(manualCardNoticeText(t, admission ? admission.reason : terminalLookupNotice(lookup) ?? 'terminal_check_failed'));
+          return;
+        }
+        terminal = { deviceId: lookup.deviceId, name: lookup.name };
       }
       // Gap review P0-02: `portion` was captured before the setPortionMethod
       // write above landed in state, so recording from it persisted an approved
@@ -629,7 +690,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             if (sale?.recoverable && sale.id) return { transactionId: sale.id };
             const rawPayment: any = await bridge.ecr.processPayment(cardPortion.amount, { deviceId: terminal!.deviceId, orderId, reference: `${orderId}:${cardPortion.id}` });
             const tx = extractTransactionDetails(rawPayment);
-            if (!tx.success || tx.status !== 'approved' || !tx.transactionId) throw new Error(tx.errorMessage || 'Card payment was not approved');
+            if (!tx.success || tx.status !== 'approved' || !tx.transactionId) throw cardNotApproved(tx.errorMessage, isProvenDeclineReply(rawPayment));
             return { transactionId: tx.transactionId };
           },
           recordPayment: (transactionId) => {
@@ -660,8 +721,15 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           return;
         }
         console.error('[SplitPaymentModal] Terminal card payment failed:', error);
-        updatePortion(portionId, (current) => ({ ...current, status: 'draft', paymentOrigin: 'manual' }));
-        toast.error(error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
+        // C1 (06/10/2026): the portion never stays a card draft that Confirm
+        // could book as a manual card for money the terminal refused. Only a
+        // proven decline says nothing was charged; any other failure may hide
+        // a charge (native then holds the order's unresolved SALE) and keeps
+        // its own message.
+        restorePortionMethod(portionId, methodBeforeTap);
+        toast.error(error instanceof Error && provenCardDeclines.has(error)
+          ? t('payment.messages.cardDeclinedNothingCharged', { defaultValue: 'The card was declined. Nothing was charged.' })
+          : error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
         return;
       }
       if (!isCurrent()) return;
@@ -681,13 +749,18 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       terminalChargeGuard.release(portionId);
       setIsTerminalChargeInFlight(false);
     }
-  }, [activeTab, alreadyPaidAmount, applySplitStateSnapshot, bridge, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, getPortion, isOpen, isReconciliationPending, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, platformHeld, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, settleOrdinaryTerminalPortion, t, unsaved, unsavedLocked, updatePortion]);
+  }, [activeTab, alreadyPaidAmount, applySplitStateSnapshot, bridge, collectionScope, completeAndClose, ensureLatestOutstanding, fetchLatestSplitState, getPortion, isOpen, isReconciliationPending, orderFinancials, orderId, ordinaryRefusalText, persistFinancials, platformHeld, processingPortionId, receiptMode, recordPortionPayment, restorePortionMethod, safePrintSplitReceipt, setPortionMethod, settleOrdinaryTerminalPortion, t, unsaved, unsavedLocked, updatePortion]);
 
   const handleConfirm = useCallback(async () => {
     if (!canConfirm) return;
     const startedEpoch = viewEpoch.current;
     const isCurrent = () => isOpen && viewEpoch.current === startedEpoch;
     const draftPortions = portions.filter((portion) => portion.status === 'draft' && portion.amount > 0.009); if (!draftPortions.length) return;
+    // C1 (06/10/2026), defensively behind canConfirm: Confirm books a card
+    // portion only as an admitted manual card, never a card the terminal
+    // refused or did not charge.
+    if (draftPortions.some((portion) => portion.method === 'card' && portion.manualCardFallback !== true)) return;
+    const manualCardIds = new Set(draftPortions.filter((portion) => portion.method === 'card').map((portion) => portion.id));
     // Review round 2 P0: Confirm must hold the SAME synchronous guard as the
     // terminal charge. During a Card tap's pre-flight IPC the portion is still
     // 'draft' and canConfirm's state checks pass, so an un-guarded Confirm
@@ -711,6 +784,20 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       if (!isCurrent()) return;
       await ensureLatestOutstanding(round2(draftPortions.reduce((sum, portion) => sum + portion.amount, 0)), activeTab);
       if (!isCurrent()) return;
+      if (manualCardIds.size > 0) {
+        // D (06/10/2026): the manual card admission is asked again right
+        // before it is recorded. A refusal records nothing at all; a definite
+        // one (a terminal or a provider is now there) withdraws the offer.
+        const admission = await admitManualCard();
+        if (!isCurrent()) return;
+        if (!admission.admitted) {
+          if (admission.reason !== 'unavailable') {
+            setPortions((current) => current.map((portion) => (manualCardIds.has(portion.id) && portion.status === 'draft' ? { ...portion, manualCardFallback: false } : portion)));
+          }
+          toast.error(manualCardRecordRefusalText(t, admission.reason));
+          return;
+        }
+      }
       const portionOrigins = new Map<string, PaymentOrigin>(draftPortions.map((portion) => [portion.id, portion.method === 'card' ? (portion.paymentOrigin || 'manual') : 'manual']));
       const settleDrafts = (onReply?: (raw: unknown, threw: boolean, transactionRef: string | null) => void) => settleDraftPortions(orderFinancials, draftPortions, {
         recordPayment: async (portion) => {
@@ -892,7 +979,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           {portion.method === 'card' && portion.manualCardFallback ? (
             <div role="status" className="split-payment-card-notice">
               <CreditCard aria-hidden="true" />
-              <p>{t('splitPayment.manualCardFallback', { defaultValue: 'No ready payment terminal. This portion will be recorded as a manual card payment on confirm.' })}</p>
+              <p>{t('payment.manualCard.portionNotice', { defaultValue: "No card terminal is connected to this till. Take this amount on the shop's own card machine; on confirm it is recorded as a manual card payment." })}</p>
             </div>
           ) : null}
         </>

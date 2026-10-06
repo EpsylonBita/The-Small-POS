@@ -2,6 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import i18next from 'i18next';
+
+import {
+  MONEY_NOT_SYNCED_BLOCKER_REASON,
+  formatSyncCloseoutError,
+} from '../../src/lib/payment-integrity';
 
 const projectRoot = process.cwd();
 const zReportModalPath = path.join(
@@ -89,8 +95,10 @@ test('sync closeout translations exist in every POS locale', () => {
     'blockerReasons.parent_payment_not_synced',
     'blockerReasons.parent_payment_missing_canonical_remote_id',
     'blockerReasons.ambiguous_canonical_remote_payment',
+    'blockerReasons.money_not_synced',
     'closeoutBlocked.single',
     'closeoutBlocked.multiple',
+    'closeoutBlocked.moneyNotSynced',
   ];
 
   const localeFiles = readdirSync(localesDir)
@@ -333,5 +341,46 @@ test('Round 334: cash-drawer closeout copy is fully localized (no English "check
   for (let i = 0; i < elCopy.length; i += 1) {
     assert.notEqual(elCopy[i], enCopy[i], 'Greek cash-drawer closeout copy must differ from English');
     assert.doesNotMatch(elCopy[i], /cashDrawer/i, 'Greek cash-drawer closeout copy must not leak the dotted key');
+  }
+});
+
+// Release 1.4.124 (06/10/2026): a Z erased a refund that was still waiting to
+// reach the server. The pre-Z gate now refuses with `money_not_synced`
+// blockers, and the cashier reads what to do in the till's language.
+test('unsent money of the day refuses the close in plain words in every POS locale', async () => {
+  const refusal = {
+    success: false,
+    errorCode: 'SYNC_CLOSEOUT_BLOCKED',
+    stage: 'pre-Z-report sync',
+    stageCode: 'pre_z_report_sync',
+    syncItemCount: 2,
+    blockersSummary: 'money_not_synced:payment_adjustment:pending x2',
+    syncBlockerDetails: ['adj-1', 'adj-2'].map((id) => ({
+      queueId: 0,
+      entityType: 'payment_adjustment',
+      entityId: id,
+      operation: 'INSERT',
+      queueStatus: 'pending',
+      blockerReason: MONEY_NOT_SYNCED_BLOCKER_REASON,
+      orderNumber: 'A-17',
+      lastError: null,
+    })),
+  };
+  for (const file of readdirSync(localesDir).filter(name => name.endsWith('.json')).sort()) {
+    const locale = file.replace('.json', '');
+    const messages = JSON.parse(source(path.join(localesDir, file)));
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: locale,
+      resources: { [locale]: { translation: messages } },
+      interpolation: { escapeValue: false },
+    });
+    const message = formatSyncCloseoutError(refusal, 'fallback', i18n.t.bind(i18n));
+    assert.equal(
+      message,
+      messages.sync.closeoutBlocked.moneyNotSynced.replace('{{count}}', '2'),
+      `${file} names the unsent money`,
+    );
+    assert.doesNotMatch(message, /\{\{|money_not_synced/, file);
   }
 });

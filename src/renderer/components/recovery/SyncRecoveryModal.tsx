@@ -13,6 +13,7 @@ import {
 } from '../../../lib';
 import { getSyncQueueBridge } from '../../services/SyncQueueBridge';
 import { RecoveryCenterPanel } from './RecoveryCenterPanel';
+import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import {
   buildSyncRecoveryIssues,
   type BuildSyncRecoveryIssuesResult,
@@ -263,10 +264,14 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
     return null;
   }
 
+  // Sync recovery is reached from Health and must stay usable while the cashier
+  // day is locked; its confirmations render inside the same recovery context.
   return ReactDOM.createPortal(
+    <CashierRecovery>
     <div
       className="fixed inset-0 z-[10040] px-4 py-6 sm:px-6 sm:py-8"
       style={{ isolation: 'isolate' }}
+      data-cashier-recovery="true"
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-md" onClick={onClose} />
 
@@ -363,7 +368,8 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
           </div>
         </div>
       </div>
-    </div>,
+    </div>
+    </CashierRecovery>,
     document.body,
   );
 };

@@ -23,7 +23,7 @@ import { GiftCardTender } from '../payment/GiftCardTender';
 import { TwintManualQrTender } from '../payment/TwintManualQrTender';
 import { loadTwintManualConfiguration, twintManualMetadata, type TwintManualConfiguration, type TwintConfirmationAction } from '../../services/TwintManualQrService';
 import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
-import { loadPendingTwintReceipts, saveOriginalTwintReceipt } from '../../services/TwintReceiptRecoveryService';
+import { admitTwintCollection, loadPendingTwintReceipts, saveOriginalTwintReceipt, twintAdmissionReason } from '../../services/TwintReceiptRecoveryService';
 import { useOrderStore } from '../../hooks/useOrderStore';
 import type { UnsavedChargedPaymentSummary } from '../../../lib/ipc-adapter';
 import {
@@ -254,6 +254,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [pendingTwintReceipts,setPendingTwintReceipts] = useState<UnsavedChargedPaymentSummary[]>([]);
   const [twintRecoveryChecked,setTwintRecoveryChecked] = useState(false);
   const [twintRecovering,setTwintRecovering] = useState(false);
+  // Fix review 06/10/2026: the QR is shown only after its admission (fresh
+  // configuration, durable receipts, the order's native admission and its
+  // ordinary claim). An existing order's claim is held while the QR is shown,
+  // so no other collection can start on it, and the confirm reuses it.
+  const [twintAdmitting, setTwintAdmitting] = useState(false);
+  const twintAdmissionRef = useRef<{ owner?: OrdinaryCollectionOwner } | null>(null);
   const twintModule = hasModule('plugin_integrations');
   useEffect(() => {
     let current = true;
@@ -464,10 +470,85 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setSelectedPaymentMethod(null);
     setCurrentStep('gift');
   };
-  const handleTwintConfirm = async (action: TwintConfirmationAction, idempotencyKey: string): Promise<boolean> => {
-    if (!canUseTwint || twintSendRef.current || giftReceiptRecovery || isProcessingPayment) return false;
-    let ordinaryOwner: OrdinaryCollectionOwner | undefined;
+  const twintRefusalText = (code: string): string => {
+    switch (twintAdmissionReason(code)) {
+      case 'pending':
+        return t('twintPayment.receiptRecovery', 'A TWINT receipt is confirmed but its payment is not saved. Save the original receipt before taking another payment.');
+      case 'notSaved':
+        return t('twintPayment.admission.notSaved', 'A payment of this order is not saved yet. Save it again before taking TWINT. Nothing was charged.');
+      case 'reconcile':
+        return t('twintPayment.admission.reconcile', 'An earlier payment step of this order must be checked first. Nothing was charged.');
+      case 'platformHeld':
+        return t('twintPayment.admission.platformHeld', "The delivery platform holds this order's money. Nothing is collected at the till.");
+      case 'amountChanged':
+        return t('twintPayment.admission.amountChanged', 'The amount left to pay on this order changed. Check the order and try again. Nothing was charged.');
+      default:
+        return t('twintPayment.admission.unavailable', "TWINT can't be taken right now. Check the connection or choose another payment. Nothing was charged.");
+    }
+  };
+
+  /** Ends an admission nothing was sent under (cancel, close, refusal). */
+  const releaseTwintAdmission = () => {
+    const admission = twintAdmissionRef.current;
+    twintAdmissionRef.current = null;
+    if (admission?.owner && ordinaryCollectionView(admission.owner)?.phase === 'held') {
+      releaseOrdinaryOwnerBeforeSend(admission.owner);
+    }
+  };
+
+  // The QR is shown only once this order could take the receipt: every
+  // refusal comes before the customer pays, never after (fix review 06/10/2026).
+  const handleTwintSelect = async () => {
+    if (!canUseTwint || twintAdmitting || twintSendRef.current || giftReceiptRecovery || isProcessingPayment) return;
+    releaseTwintAdmission();
+    let owner: OrdinaryCollectionOwner | undefined;
     if (existingOrder) {
+      // Synchronous, before any await: no other collection starts meanwhile.
+      const claim = claimOrdinaryCollectionOwner(existingOrder.scope, existingOrder.orderId);
+      if (!claim.claimed) { toast.error(ordinaryClaimRefusalText(claim.code)); return; }
+      owner = claim.owner;
+    }
+    setTwintAdmitting(true);
+    let admittedHere = false;
+    try {
+      const admission = await admitTwintCollection({
+        orderId: existingOrder?.orderId,
+        amount: payableTotal,
+        hold: owner?.hold ?? null,
+      });
+      if (!admission.admitted) {
+        toast.error(twintRefusalText(admission.code));
+        if (admission.code === 'TWINT_RECEIPT_PENDING') {
+          const pending = await loadPendingTwintReceipts(existingOrder?.orderId).catch(() => []);
+          if (pending.length) setPendingTwintReceipts(pending);
+        }
+        return;
+      }
+      twintAdmissionRef.current = { owner };
+      admittedHere = true;
+      setTwintConfiguration(admission.configuration);
+      setCurrentStep('twint');
+    } catch {
+      toast.error(twintRefusalText('TWINT_ADMISSION_UNAVAILABLE'));
+    } finally {
+      if (!admittedHere && owner && ordinaryCollectionView(owner)?.phase === 'held') releaseOrdinaryOwnerBeforeSend(owner);
+      setTwintAdmitting(false);
+    }
+  };
+
+  const handleTwintCancel = () => {
+    releaseTwintAdmission();
+    setCurrentStep('payment_selection');
+  };
+
+  const handleTwintConfirm = async (action: TwintConfirmationAction, idempotencyKey: string): Promise<boolean> => {
+    // Confirmed means the customer paid: once the QR was admitted, nothing
+    // here may refuse the receipt before it reaches the native journal.
+    if (twintSendRef.current || giftReceiptRecovery) return false;
+    let ordinaryOwner: OrdinaryCollectionOwner | undefined = twintAdmissionRef.current?.owner;
+    twintAdmissionRef.current = null;
+    if (existingOrder && !ordinaryOwner) {
+      // A second press of the same receipt (same key) after a failed first one.
       const claim = claimOrdinaryCollectionOwner(existingOrder.scope, existingOrder.orderId);
       if (!claim.claimed) { toast.error(ordinaryClaimRefusalText(claim.code)); return false; }
       ordinaryOwner = claim.owner;
@@ -483,11 +564,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         if(pending.length) { setPendingTwintReceipts(pending);setCurrentStep('payment_selection'); }
       }
       return result !== false && !isRoomChargeFallbackPrompt(result);
-    } catch {
+    } catch (failure) {
       const pending=await loadPendingTwintReceipts(existingOrder?.orderId).catch(()=>null);
       if (pending?.length) { setPendingTwintReceipts(pending);setCurrentStep('payment_selection'); }
       if (!pending) { setTwintRecoveryChecked(false);setCurrentStep('payment_selection'); }
-      toast.error(t('twintPayment.saveFailed','The payment could not be saved. Check its status before trying again.'));
+      // The customer paid: never an invitation to collect again. A receipt
+      // this till could not even journal must stay with the cashier.
+      const notRetained = (failure as { manualReceiptRetained?: unknown } | null)?.manualReceiptRetained === false;
+      toast.error(notRetained
+        ? t('twintPayment.returned.notRetained', 'The cashier confirmed TWINT receipt, but this till could not retain it. Do not collect again. Keep the receipt and contact a manager before closing or restarting the POS.')
+        : t('twintPayment.confirmNotSaved','The TWINT receipt is not saved yet. Do not collect again. A manager checks it before the POS is closed.'), { duration: 10000 });
       return false;
     } finally {
       if (ordinaryOwner && ordinaryCollectionView(ordinaryOwner)?.phase === 'held') releaseOrdinaryOwnerBeforeSend(ordinaryOwner);
@@ -658,9 +744,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setSelectedPaymentMethod(null);
   };
 
+  // Leaving the QR (closing, unmounting) ends a claim nothing was sent under.
+  useEffect(() => {
+    if (!isOpen) releaseTwintAdmission();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+  useEffect(() => () => releaseTwintAdmission(), []);
+
   const handleClose = () => {
     // Prevent closing while a payment is actively processing
     if (isProcessingPayment) return;
+    releaseTwintAdmission();
     // A receipt reentry keeps only its Tender until the host closes the modal.
     if (!giftReceiptRecovery) resetModal();
     onClose();
@@ -938,7 +1032,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </button>
 
                 {canUseTwint && (
-                  <button type="button" disabled={isProcessingPayment} onClick={() => setCurrentStep('twint')}
+                  <button type="button" disabled={isProcessingPayment || twintAdmitting} aria-busy={twintAdmitting} onClick={() => void handleTwintSelect()}
                     className={`flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 border-amber-400/30 bg-amber-500/10`}>
                     <img src={twintLogo} alt="" className="h-20 max-w-full mb-3 rounded-lg" />
                     <span className={paymentMethodLabelBaseClass}>TWINT</span>
@@ -1053,7 +1147,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {pendingTwintReceipts.length===0 && currentStep === 'twint' && twintConfiguration && (
           <TwintManualQrTender configuration={twintConfiguration} amount={payableTotal}
             externalEnabled={hasModule('customer_display')} onConfirm={handleTwintConfirm}
-            onCancel={() => setCurrentStep('payment_selection')} />
+            onCancel={handleTwintCancel} />
         )}
         {pendingTwintReceipts.length===0 && currentStep === 'cash_input' && (
           <div className="space-y-6">

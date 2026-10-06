@@ -9640,8 +9640,32 @@ fn prepare_frozen_attempt_with_hooks(
     }))
 }
 
+/// Stable reason codes of a food print waiting for its structured items. The
+/// renderer translates them (`settings.printQueue.issue.*`, PrintQueuePanel);
+/// the English messages stay as support evidence. The pending code is also
+/// matched literally by `commands::orders::release_food_item_waiting_prints`
+/// and by the bounded item hydration in `sync.rs`.
+pub(crate) const FOOD_ITEMS_PENDING_CODE: &str = "food_order_items_pending";
+pub(crate) const FOOD_ITEMS_UNAVAILABLE_CODE: &str = "food_order_items_unavailable";
+
+/// One bounded wait for structured food items, measured from its first
+/// deferral; Retry starts a new one. Automatic hydration (6 claims at the 15 s
+/// sync cadence, about 90 s) and an operator's open-order refresh fit inside,
+/// and it ends before Health's 5-minute print stall alarm
+/// (`PRINT_STALL_ATTENTION_MS`) would report the printer as stopped. After it
+/// the job is failed, visible and retryable, not pending until a Z deletes it.
+const FOOD_ITEMS_WAIT_LIMIT_SECONDS: i64 = 240;
+const FOOD_ITEMS_UNAVAILABLE_MESSAGE: &str = "Food order items did not arrive within 4 minutes, so this job was not printed. Open the order to refresh its items, then retry it from the print queue.";
+
 /// A fresh food document waits before profile association, rendering, freezing
 /// or claiming transport. Stored snapshots take the earlier immutable branch.
+///
+/// The wait is bounded. Its first deferral stamps `updated_at` and later
+/// deferrals of the same wait keep it, so `updated_at` is the wait's anchor;
+/// a release (`release_food_item_waiting_prints`) or Retry clears the code and
+/// the next deferral starts a new wait. Past the bound the job fails with
+/// `FOOD_ITEMS_UNAVAILABLE_CODE` and no transport attempt; it never retries
+/// itself, the operator retries it from the print queue.
 fn defer_incomplete_food_print(
     db: &DbState,
     job_id: &str,
@@ -9706,17 +9730,66 @@ fn defer_incomplete_food_print(
             |row| row.get(0),
         )
         .map_err(|error| format!("read food item hydration attempts: {error}"))?;
+    let now = Utc::now().to_rfc3339();
+    // An unreadable anchor counts as expired, so even a damaged row stays bounded.
+    let expired = conn
+        .execute(
+            "UPDATE print_jobs
+             SET status = 'failed', next_retry_at = NULL,
+                 warning_code = ?1, warning_message = ?2, last_error = ?2,
+                 completed_at = ?3, history_expires_at = datetime(?3, '+30 days'),
+                 updated_at = ?3
+             WHERE id = ?4 AND status = 'pending' AND document_snapshot_zlib IS NULL
+               AND warning_code = ?5
+               AND (julianday(?3) - COALESCE(julianday(updated_at), 0)) * 86400.0 >= ?6",
+            params![
+                FOOD_ITEMS_UNAVAILABLE_CODE,
+                FOOD_ITEMS_UNAVAILABLE_MESSAGE,
+                now,
+                job_id,
+                FOOD_ITEMS_PENDING_CODE,
+                FOOD_ITEMS_WAIT_LIMIT_SECONDS
+            ],
+        )
+        .map_err(|error| format!("fail expired food print wait: {error}"))?;
+    if expired > 0 {
+        warn!(
+            job_id = %job_id,
+            entity_id = %entity_id,
+            wait_limit_seconds = FOOD_ITEMS_WAIT_LIMIT_SECONDS,
+            "Food print items did not arrive in time; job failed for operator retry"
+        );
+        return Ok(true);
+    }
     let message = if attempts >= 6 {
         "Food order items are still unavailable after automatic recovery. Open this order to refresh its items, then retry printing."
     } else {
         "Waiting for structured food order items. Automatic recovery will retry; open this order to refresh its items if it remains pending."
     };
+    // A wait already under way keeps its anchor and is never rescheduled past
+    // its own deadline; a new wait anchors now.
     conn.execute(
-        "UPDATE print_jobs SET next_retry_at = datetime('now', ?1),
-         warning_code = 'food_order_items_pending', warning_message = ?2, updated_at = datetime('now')
-         WHERE id = ?3 AND status = 'pending' AND document_snapshot_zlib IS NULL",
-        params![if attempts >= 6 { "+60 seconds" } else { "+10 seconds" }, message, job_id],
-    ).map_err(|error| format!("defer incomplete food print: {error}"))?;
+        "UPDATE print_jobs
+         SET next_retry_at = CASE WHEN warning_code = ?4
+                 THEN MIN(datetime(?3, ?1), COALESCE(datetime(updated_at, ?6), datetime(?3)))
+                 ELSE datetime(?3, ?1) END,
+             updated_at = CASE WHEN warning_code = ?4 THEN updated_at ELSE ?3 END,
+             warning_code = ?4, warning_message = ?2
+         WHERE id = ?5 AND status = 'pending' AND document_snapshot_zlib IS NULL",
+        params![
+            if attempts >= 6 {
+                "+60 seconds"
+            } else {
+                "+10 seconds"
+            },
+            message,
+            now,
+            FOOD_ITEMS_PENDING_CODE,
+            job_id,
+            format!("+{FOOD_ITEMS_WAIT_LIMIT_SECONDS} seconds")
+        ],
+    )
+    .map_err(|error| format!("defer incomplete food print: {error}"))?;
     Ok(true)
 }
 
@@ -15371,6 +15444,234 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM print_jobs WHERE id = ?1 AND status = 'pending' AND warning_code IS NULL AND next_retry_at IS NULL",
             [&job_id], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    /// Symptom (desktop 1.4.123): a food print whose structured items never
+    /// arrived sat `pending` with an English-only reason until the next Z
+    /// deleted it, so nothing told the operator it would never print. The
+    /// wait is bounded: it keeps one stable anchor while it waits, ends in a
+    /// visible failed job with its own reason code, and Retry starts a fresh
+    /// bounded wait instead of failing again at once.
+    #[test]
+    fn food_item_wait_is_bounded_then_fails_visibly_and_retry_restarts_the_wait() {
+        let db = test_db();
+        let job_id = Uuid::new_v4().to_string();
+        let remote_id = Uuid::new_v4().to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "food-bounded", "F-Bound", 10.0);
+            conn.execute(
+                "UPDATE orders SET plugin = 'efood', supabase_id = ?1, items = '[]' WHERE id = 'food-bounded'",
+                [&remote_id],
+            )
+            .unwrap();
+            insert_managed_network_profile(
+                &conn,
+                "food-bound-profile",
+                "printer.local",
+                9100,
+                true,
+            );
+            // Queued an hour ago but never prepared (a paused queue, a closed
+            // till): the wait is measured from its first deferral, not creation.
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'food-bounded', 'pending',
+                         datetime('now', '-1 hour'), datetime('now', '-1 hour'))",
+                [&job_id],
+            )
+            .unwrap();
+        }
+        let data_dir = std::env::temp_dir().join(format!("food-bounded-{}", Uuid::new_v4()));
+        let raw = CapturingManagedRaw::default();
+        let spooler: Arc<dyn WindowsSpooler> = Arc::new(FakeWindowsSpooler::new(73));
+        let manager = DispatchManager::isolated_for_test();
+        let tick = || {
+            process_pending_jobs_with_adapters(
+                &db,
+                &data_dir,
+                &manager,
+                &raw,
+                Arc::clone(&spooler),
+                Duration::from_secs(10),
+            )
+            .unwrap()
+        };
+        type JobState = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        );
+        let read = || -> JobState {
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status, warning_code, last_error, next_retry_at, completed_at,
+                            history_expires_at,
+                            (SELECT COUNT(*) FROM print_job_attempts WHERE print_job_id = ?1)
+                     FROM print_jobs WHERE id = ?1",
+                    [&job_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        let sql_bool = |sql: &str| -> bool {
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(sql, [&job_id], |row| row.get::<_, bool>(0))
+                .unwrap()
+        };
+        let clear_schedule = || {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE print_jobs SET next_retry_at = NULL WHERE id = ?1",
+                    [&job_id],
+                )
+                .unwrap();
+        };
+        let anchor = || -> String {
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT updated_at FROM print_jobs WHERE id = ?1",
+                    [&job_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        let backdate_anchor = |seconds: i64| {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE print_jobs SET updated_at = datetime('now', ?2), next_retry_at = NULL
+                     WHERE id = ?1",
+                    params![job_id, format!("-{seconds} seconds")],
+                )
+                .unwrap();
+        };
+        let limit = FOOD_ITEMS_WAIT_LIMIT_SECONDS;
+
+        // First deferral: waiting, anchored now, never attempted.
+        assert_eq!(tick(), 1);
+        let first = read();
+        assert_eq!(first.0, "pending");
+        assert_eq!(first.1.as_deref(), Some(FOOD_ITEMS_PENDING_CODE));
+        assert_eq!(first.6, 0);
+        assert!(sql_bool(
+            "SELECT julianday('now') - julianday(updated_at) < (60.0 / 86400.0)
+             FROM print_jobs WHERE id = ?1"
+        ));
+
+        // A later deferral of the same wait keeps its anchor (it is not
+        // refreshed to "now") and never schedules the next check past the end
+        // of the wait.
+        backdate_anchor(100);
+        let waiting_since = anchor();
+        assert_eq!(tick(), 1);
+        assert_eq!(read().0, "pending");
+        assert_eq!(anchor(), waiting_since);
+        assert!(sql_bool(&format!(
+            "SELECT julianday(next_retry_at) <= julianday(datetime(updated_at, '+{limit} seconds'))
+             FROM print_jobs WHERE id = ?1"
+        )));
+
+        // Automatic hydration exhausted (slow +60 s cadence) with 30 s left:
+        // the next check lands on the deadline, not 60 s later.
+        {
+            let conn = db.conn.lock().unwrap();
+            for _ in 0..6 {
+                conn.execute(
+                    "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_id, payload_json)
+                     VALUES (?1, 'hydrate_food_print_items', 'food_order_items_pending', 'food-bounded', ?2)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        serde_json::json!({"remoteOrderId": remote_id, "version": 1}).to_string()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        backdate_anchor(limit - 30);
+        assert_eq!(tick(), 1);
+        assert_eq!(read().0, "pending");
+        assert!(sql_bool(
+            "SELECT julianday(next_retry_at) <= julianday('now', '+35 seconds')
+             FROM print_jobs WHERE id = ?1"
+        ));
+
+        // Past the bound: a visible failed job with its own stable reason,
+        // still without any transport attempt, and retryable from the queue.
+        backdate_anchor(limit + 1);
+        assert_eq!(tick(), 1);
+        let failed = read();
+        assert_eq!(failed.0, "failed");
+        assert_eq!(failed.1.as_deref(), Some(FOOD_ITEMS_UNAVAILABLE_CODE));
+        assert!(
+            failed.2.is_some(),
+            "a failed job keeps an English support detail"
+        );
+        assert_eq!(failed.3, None);
+        assert!(failed.4.is_some() && failed.5.is_some());
+        assert_eq!(failed.6, 0);
+        assert!(raw.calls.lock().unwrap().is_empty());
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(
+                crate::print_history::print_history_eligibility(&conn, &job_id, Utc::now())
+                    .unwrap()
+                    .retryable
+            );
+        }
+        // A failed job is no longer worked on automatically.
+        assert_eq!(tick(), 0);
+        assert_eq!(read().0, "failed");
+
+        // Retry restarts a fresh bounded wait instead of failing again at once.
+        crate::print_history::retry_failed_print_job(&db, &job_id, Utc::now()).unwrap();
+        assert_eq!(tick(), 1);
+        let retried = read();
+        assert_eq!(retried.0, "pending");
+        assert_eq!(retried.1.as_deref(), Some(FOOD_ITEMS_PENDING_CODE));
+        assert!(sql_bool(
+            "SELECT julianday('now') - julianday(updated_at) < (60.0 / 86400.0)
+             FROM print_jobs WHERE id = ?1"
+        ));
+
+        // Items arrive: the same job prints exactly once.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET items = ?1 WHERE id = 'food-bounded'",
+                [r#"[{"name":"Waffle","quantity":1,"price":8,"total_price":8},{"name":"Drink","quantity":1,"price":2,"total_price":2}]"#],
+            )
+            .unwrap();
+        clear_schedule();
+        assert_eq!(tick(), 1);
+        assert_eq!(read().0, "dispatched");
+        assert_eq!(raw.calls.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

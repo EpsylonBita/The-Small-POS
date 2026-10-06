@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   confirmationError: false,
   draftFreezeError: false,
   editOrder: null as any,
+  inspect: null as any,
+  applyEditSettlement: vi.fn(),
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -135,7 +137,7 @@ vi.mock('../../../../lib', async (importOriginal) => {
         mocks.legacyAdmission = false;
         return { success: true };
       }
-      if (command === 'checkout_draft_inspect') return { success: true, outcome: 'not_found', canCollect: false };
+      if (command === 'checkout_draft_inspect') return mocks.inspect ?? { success: true, outcome: 'not_found', canCollect: false };
       if (command === 'checkout_draft_put') {
         if (mocks.draftFreezeError && input.draft.phase === 'checkout_pending') throw new Error('DISK_UNAVAILABLE');
         draftStorage.draft = input.draft; draftStorage.generation++;
@@ -145,7 +147,7 @@ vi.mock('../../../../lib', async (importOriginal) => {
         ...(draftStorage.invalidated ? { invalidation: { reason: 'edit_target_cancelled', orderId: 'cancelled-order' } } : {}) };
     }),
     settings: { get: vi.fn(async () => null) },
-    orders: { getById: vi.fn(async () => mocks.editOrder) },
+    orders: { getById: vi.fn(async () => mocks.editOrder), applyEditSettlement: (...args: any[]) => mocks.applyEditSettlement(...args) },
     loyalty: {
       getSettings: vi.fn(async () => null),
       getCustomerBalance: vi.fn(async () => null),
@@ -185,6 +187,7 @@ vi.mock('../PaymentModal', () => ({
 vi.mock('../LoyaltyRedeemModal', () => ({ LoyaltyRedeemModal: () => null }));
 
 import { MenuModal } from '../MenuModal';
+import { menuService } from '../../../services/MenuService';
 
 const customer = { id: 'customer-1', name: 'Test Customer', phone: '6900000000' };
 
@@ -209,6 +212,8 @@ beforeEach(() => {
   mocks.confirmationError = false;
   mocks.editOrder = null;
   mocks.draftFreezeError = false;
+  mocks.inspect = null;
+  mocks.applyEditSettlement.mockReset();
 });
 
 afterEach(() => {
@@ -493,5 +498,119 @@ describe('MenuModal when the store discount cap cannot be read', () => {
     await waitFor(() => expect(screen.getByTestId('payment-modal')).toBeTruthy());
     expect(mocks.toastError).not.toHaveBeenCalled();
     expect(mocks.cartMaxDiscount.at(-1)).toBe(30);
+  });
+});
+
+describe('MenuModal paid edit corrections (06/10/2026)', () => {
+  const editOrder = (items: any[], extra: Record<string, unknown> = {}) => {
+    mocks.settings.unavailable = false;
+    mocks.editOrder = { id: 'paid-order', version: 1, order_type: 'pickup', items, ...extra };
+  };
+
+  it('keeps each retained line\u2019s recorded VAT class in the correction', async () => {
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6,
+      vat_category_code: 'gr_reduced_13', price_includes_vat: false, vat_rate_percent: 13, fiscal_document_profile: 'retail' }]);
+    const preflight = vi.fn(async () => ({ kind: 'ordinary' as const }));
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={preflight} onEditComplete={vi.fn(async () => undefined)} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    await waitFor(() => expect(preflight).toHaveBeenCalledOnce());
+    expect(preflight.mock.calls[0][0].items[0]).toMatchObject({ vat_category_code: 'gr_reduced_13', price_includes_vat: false,
+      vat_rate_percent: 13, fiscal_document_profile: 'retail' });
+  });
+
+  it('a fulfillment conversion makes the new tier price the original, never a manual override', async () => {
+    vi.mocked(menuService.getMenuItemById).mockImplementation(async () => ({ id: 'espresso', name: 'Espresso', price: 6, pickup_price: 6, delivery_price: 7 }) as any);
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    const preflight = vi.fn(async () => ({ kind: 'ordinary' as const }));
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="delivery" editMode editOrderId="paid-order" editSourceOrderType="pickup"
+      onEditPreflight={preflight} onEditComplete={vi.fn(async () => undefined)} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems?.[0]?.unitPrice).toBe(7));
+    fireEvent.click(screen.getByText('Checkout'));
+    await waitFor(() => expect(preflight).toHaveBeenCalledOnce());
+    expect(preflight.mock.calls[0][0].items[0]).toMatchObject({ unit_price: 7, original_unit_price: 7, is_price_overridden: false });
+    vi.mocked(menuService.getMenuItemById).mockReset();
+    vi.mocked(menuService.getMenuItemById).mockImplementation(async () => null);
+  });
+
+  const refusedDraft = () => {
+    draftStorage.generation = 4;
+    draftStorage.draft = { schemaVersion: 1, draftId: 'frozen-edit', checkoutRequestId: 'refused-event', phase: 'checkout_pending',
+      cartItems: [{ id: 'original-line', menuItemId: 'espresso', name: 'Espresso', quantity: 1, unitPrice: 6, totalPrice: 6 }],
+      state: {}, context: { editMode: true, editOrderId: 'paid-order', editExpectedVersion: 1, orderType: 'pickup' },
+      submission: { action: 'edit_settlement', orderId: 'paid-order', client_event_id: 'refused-event', expected_version: 1,
+        expected_local_version: 1, items: [], settlementAction: { type: 'collect', payments: [] }, settlementRequest: {} } };
+    mocks.inspect = { success: true, outcome: 'uncertain', canCollect: false,
+      recovery: { state: 'refused', response: { success: false, code: 'EDIT_SETTLEMENT_NOT_APPLIED', requoteAllowed: true } } };
+  };
+
+  it('a confirmed correction proven never applied is prepared again under a new event that replaces it', async () => {
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    refusedDraft();
+    const complete = vi.fn(async (data: any) => { if (data.action === 'edit_settlement') throw new Error('EDIT_CANONICAL_ORIGINAL_CHANGED'); });
+    const preflight = vi.fn(async () => ({ kind: 'ordinary' as const }));
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={preflight} onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await screen.findByTestId('menu-edit-not-applied');
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    fireEvent.click(screen.getByTestId('menu-edit-requote'));
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(draftStorage.draft.checkoutRequestId).not.toBe('refused-event');
+    expect(draftStorage.draft.context.supersedesEditEvent).toBe('refused-event');
+    expect(draftStorage.draft.cartItems).toHaveLength(1);
+    await waitFor(() => expect(screen.queryByTestId('menu-edit-not-applied')).toBeNull());
+    fireEvent.click(screen.getByText('Checkout'));
+    await waitFor(() => expect(preflight).toHaveBeenCalledOnce());
+    expect(preflight.mock.calls[0][0]).toMatchObject({ supersedes_client_event_id: 'refused-event' });
+    expect(preflight.mock.calls[0][0].client_event_id).not.toBe('refused-event');
+    expect(mocks.applyEditSettlement).not.toHaveBeenCalled();
+  });
+
+  it('a manager closes a correction proven never applied without recording money', async () => {
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    refusedDraft();
+    mocks.applyEditSettlement.mockResolvedValue({ success: true, state: 'reconciled' });
+    const complete = vi.fn(async () => { throw new Error('EDIT_SETTLEMENT_METHOD_UNAVAILABLE'); });
+    const close = vi.fn();
+    render(<MenuModal isOpen onClose={close} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => ({ kind: 'ordinary' as const }))} onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('menu-edit-close-without-money'));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(mocks.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({ orderId: 'paid-order', client_event_id: 'refused-event',
+      reconcile: expect.objectContaining({ decision: 'close_without_money' }) }));
+    expect(draftStorage.draft).toBeNull();
+  });
+
+  it('a refused correction that is not proven never applied keeps the original held', async () => {
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    refusedDraft();
+    mocks.inspect = { success: true, outcome: 'uncertain', canCollect: false, recovery: { state: 'prepared', response: null } };
+    const complete = vi.fn(async () => { throw new Error('IPC_RESPONSE_LOST'); });
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => ({ kind: 'ordinary' as const }))} onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The original checkout could not be verified. Its saved cart remains protected.'));
+    expect(screen.queryByTestId('menu-edit-not-applied')).toBeNull();
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    expect(draftStorage.draft.checkoutRequestId).toBe('refused-event');
+  });
+
+  it.each([
+    ['LEGACY_EDIT_REVIEW_REQUIRED', 'modals.menu.legacyEditReview'],
+    ['EDIT_TOO_MANY_LINES', 'modals.menu.editTooManyLines'],
+    ['EDIT_SETTLEMENT_METHOD_UNAVAILABLE', 'modals.menu.editMethodUnavailable'],
+  ])('explains %s before any money is confirmed', async (code, key) => {
+    const commit = vi.fn();
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={async () => { throw new Error(code); }} onEditComplete={commit} />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(key));
+    expect(commit).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
   });
 });

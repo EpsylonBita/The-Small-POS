@@ -142,6 +142,24 @@ describe('incoming-order alert loop', () => {
     expect(log[0]).toMatchObject({ orderId: 'ef-1', platform: 'efood', view: 'new-order' })
   })
 
+  it('never rings for a BOX order whose decision the server closed, but still rings for the others', () => {
+    configureIncomingOrderAlertLoop({ enabled: true, view: 'new-order' })
+    release = startIncomingOrderAlertLoop()
+    const closedBox: TestOrder = {
+      id: 'box-1', order_number: 'ORD-box-1', status: 'pending', plugin: 'box', external_plugin_order_id: 'BOX-1',
+      created_at: '2026-09-30T14:17:23Z',
+      ghost_metadata: JSON.stringify({ _the_small_box_decision: { version: 1, state: 'closed',
+        closure: { outcome: 'unknown', manual_check: true, code: 'BOX_DECISION_MANUAL_CHECK' } } }),
+    }
+    setPending([closedBox])
+    expect(getIncomingOrderAlertQueue()).toEqual([])
+    expect(h.playSelectedPlatformSound).not.toHaveBeenCalled()
+
+    setPending([closedBox, efoodOrder('ef-1')])
+    expect(getIncomingOrderAlertQueue().map((order) => order.id)).toEqual(['ef-1'])
+    expect(h.playSelectedPlatformSound).toHaveBeenCalledTimes(1)
+  })
+
   it('is reference-counted: one holder releasing does not stop the ringing of another', () => {
     release = startIncomingOrderAlertLoop()
     const second = startIncomingOrderAlertLoop()

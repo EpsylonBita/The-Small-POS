@@ -17,7 +17,7 @@ import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersistence';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
-import { deriveMenuEditChanges, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
+import { deriveMenuEditChanges, MENU_EDIT_MAX_LINES, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
 import { LegacyShiftCurrencyConfirmationRequired } from '../../services/CheckoutDraftStore';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
@@ -86,6 +86,32 @@ type MenuModalCartItem = MenuCartItem & {
   categoryId?: string | null;
   category?: { id?: string | null } | string | null;
 } & Partial<OfferRewardLineMetadata>;
+
+/**
+ * Fix 7 (06/10/2026): a retained line keeps its recorded fiscal class. The
+ * edit used to drop `vat_category_code` / `price_includes_vat` (and their
+ * siblings), so the server re-priced the retained line with the branch
+ * default. Android copies the original values (`PaidOrderEditService`).
+ */
+const RETAINED_LINE_FISCAL_FIELDS = [
+  ['vat_category_code', 'vatCategoryCode'],
+  ['price_includes_vat', 'priceIncludesVat'],
+  ['vat_rate_percent', 'vatRatePercent'],
+  ['tax_exemption_reason', 'taxExemptionReason'],
+  ['fiscal_document_profile', 'fiscalDocumentProfile'],
+] as const;
+
+export const retainedLineFiscalFields = (item: Record<string, any>): Record<string, unknown> => {
+  const fields: Record<string, unknown> = {};
+  for (const [snake, camel] of RETAINED_LINE_FISCAL_FIELDS) {
+    const value = item?.[snake] !== undefined ? item[snake] : item?.[camel];
+    if (value !== undefined && value !== null) {
+      fields[snake] = value;
+      fields[camel] = value;
+    }
+  }
+  return fields;
+};
 
 type IngredientLookup = Map<string, Ingredient>;
 type MenuItemLookup = Map<string, {
@@ -519,6 +545,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const editOriginalOrderRef = useRef<Record<string, any> | null>(null);
   const editExpectedVersionRef = useRef<number | undefined>(undefined);
   const [draftRecoveryBusy, setDraftRecoveryBusy] = useState(false);
+  // Fix 4 (06/10/2026): a confirmed correction the till proved was never
+  // applied (its journal is refused and nothing carries its event) can be
+  // prepared again under a new event that replaces it, or closed by a manager
+  // without recording money. Neither collects or returns anything again.
+  const [refusedEdit, setRefusedEdit] = useState<{ event: string; orderId: string } | null>(null);
+  const supersedesEditEventRef = useRef<string | undefined>(undefined);
   const [legacyCurrency, setLegacyCurrency] = useState<{ shiftId: string; currency: string; orderId?: string } | null>(null);
   const [legacyCurrencyPin, setLegacyCurrencyPin] = useState('');
   const [legacyCurrencyBusy, setLegacyCurrencyBusy] = useState(false);
@@ -1000,6 +1032,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       hasLoadedItemsRef.current = false;
       lastEditOrderIdRef.current = undefined;
       repricedForOrderTypeRef.current = null;
+      supersedesEditEventRef.current = undefined;
+      setRefusedEdit(null);
       // Reset cart when modal closes to ensure clean state for next open
       setCartItems([]);
       // Clear locally fetched delivery zone info and default minimum
@@ -1309,6 +1343,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               is_manual: normalizedItem.is_manual === true,
               categoryName: normalizedItem.categoryName || normalizedItem.category_name || catalogMenuItem?.categoryName || undefined,
               category_id: normalizedItem.category_id || normalizedItem.categoryId || catalogMenuItem?.categoryId || null,
+              ...retainedLineFiscalFields(item),
             };
           });
           // Items supplied by the caller are already priced for the current
@@ -1387,6 +1422,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   is_manual: normalizedItem.is_manual === true,
                   categoryName: normalizedItem.categoryName || normalizedItem.category_name || catalogMenuItem?.categoryName || undefined,
                   category_id: normalizedItem.category_id || normalizedItem.categoryId || catalogMenuItem?.categoryId || null,
+                  ...retainedLineFiscalFields(item),
                 };
               });
               // Pre-arm the reprice guard: a plain edit (source type equals
@@ -1494,12 +1530,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         prev.map((item) => {
           const update = priceById.get(String(item.id));
           if (update === undefined) return item;
+          // Fix 6 (06/10/2026): a conversion to another fulfillment tier
+          // reprices the line automatically; that new tier price is its
+          // original, as on Android (`CartContext`). Keeping the old tier as
+          // `originalUnitPrice` sent `is_price_overridden: true` and made a
+          // later reverse conversion skip the line as a manual override.
           return {
             ...item,
             price: update.unitPrice,
             basePrice: update.basePrice,
             unitPrice: update.unitPrice,
             totalPrice: update.unitPrice * (item.quantity || 1),
+            originalUnitPrice: update.unitPrice,
+            original_unit_price: update.unitPrice,
+            isPriceOverridden: false,
+            is_price_overridden: false,
           };
         }),
       );
@@ -2340,7 +2385,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     cartItems,
     context: { ...draftContext, orderType, selectedCustomer, selectedAddress, roomChargeContext,
       editMode, editOrderId, editSupabaseId, editSourceOrderType, editHeaders,
-      editExpectedVersion: editExpectedVersionRef.current, editOriginalOrder: editOriginalOrderRef.current },
+      editExpectedVersion: editExpectedVersionRef.current, editOriginalOrder: editOriginalOrderRef.current,
+      supersedesEditEvent: supersedesEditEventRef.current },
     state: { manualDiscountMode, manualDiscountValue, manualDeliveryFee, pickupCustomerDraft, pickupCustomerEdited: pickupCustomerEditedRef.current,
       appliedCoupon, appliedLoyaltyRedemption },
   };
@@ -2386,6 +2432,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setAppliedLoyaltyRedemption(saved.state.appliedLoyaltyRedemption || null);
       editExpectedVersionRef.current = saved.context.editExpectedVersion;
       editOriginalOrderRef.current = saved.context.editOriginalOrder ?? null;
+      supersedesEditEventRef.current = typeof saved.context.supersedesEditEvent === 'string' && saved.context.supersedesEditEvent
+        ? saved.context.supersedesEditEvent : undefined;
       repricedForOrderTypeRef.current = saved.context.orderType;
       editSourceOrderTypeRef.current = saved.context.editSourceOrderType || saved.context.orderType;
       if (saved.context.editMode) {
@@ -2430,7 +2478,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // A renewed permission or an ambiguous response can retry this original
         // mutation. Settlement replay retains the exact confirmed action and
         // amount; it never opens another picker or starts a provider charge.
-        await onEditComplete({ ...original, orderId: original.orderId, total: original.total ?? original.items.reduce((sum: number, item: any) => sum + Number(item.totalPrice || item.total_price || 0), 0) } as any);
+        try {
+          await onEditComplete({ ...original, orderId: original.orderId, total: original.total ?? original.items.reduce((sum: number, item: any) => sum + Number(item.totalPrice || item.total_price || 0), 0) } as any);
+        } catch (failure) {
+          // Fix 4: the exact retry was refused again. When the native journal
+          // proves the confirmed attempt never applied (rolled back, nothing
+          // recorded), offer a re-quote or a manager close instead of a
+          // permanently disabled menu.
+          const after = original.action === 'edit_settlement' ? await draftPersistence.inspect().catch(() => null) : null;
+          const recovery = (after as { recovery?: { state?: string; response?: { requoteAllowed?: boolean } } } | null)?.recovery;
+          if (recovery?.state === 'refused' && recovery.response?.requoteAllowed === true &&
+            typeof original.client_event_id === 'string' && original.client_event_id) {
+            setRefusedEdit({ event: original.client_event_id, orderId: original.orderId });
+            return;
+          }
+          throw failure;
+        }
         await draftPersistence.clear(true);
         onClose();
         return;
@@ -2463,6 +2526,48 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       onClose();
     } catch { toast.error(t('modals.menu.draftRecoveryUnavailable', { defaultValue: 'The original checkout could not be verified. Its saved cart remains protected.' })); }
     finally { setDraftRecoveryBusy(false); }
+  };
+
+  // Re-quote: keep the cart, renew the draft identity and let the next save
+  // replace the refused attempt. The picker then records the money already
+  // received once; the banner says not to collect or return it twice.
+  const requoteRefusedEdit = async () => {
+    if (!refusedEdit || draftRecoveryBusy) return;
+    setDraftRecoveryBusy(true);
+    try {
+      // The renewed draft is rehydrated through the ordinary restore effect
+      // (parent context first, then the retained cart and form state).
+      await draftPersistence.renewRefusedEdit(refusedEdit.event);
+      supersedesEditEventRef.current = refusedEdit.event;
+      setRefusedEdit(null);
+      toast.success(t('modals.menu.editRequoteReady', { defaultValue: 'Review the cart and save the correction again. Record only the money already received; do not collect or return it twice.' }));
+    } catch {
+      toast.error(t('modals.menu.draftRecoveryUnavailable', { defaultValue: 'The original checkout could not be verified. Its saved cart remains protected.' }));
+    } finally { setDraftRecoveryBusy(false); }
+  };
+
+  // A manager closes the refused attempt without recording money. Native
+  // re-proves non-application before asking for approval and under its lock.
+  const closeRefusedEdit = async () => {
+    if (!refusedEdit || draftRecoveryBusy) return;
+    setDraftRecoveryBusy(true);
+    try {
+      const target = refusedEdit;
+      const result: any = await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: () => bridge.orders.applyEditSettlement({
+          orderId: target.orderId, client_event_id: target.event, items: [], action: { type: 'none' },
+          reconcile: { decision: 'close_without_money', reason: String(t('modals.menu.editCloseWithoutMoneyReason', { defaultValue: 'Correction not saved; closed by a manager without recording money' })) },
+        } as any),
+      });
+      if (result?.success !== true || result?.state !== 'reconciled') throw new Error('EDIT_RECONCILIATION_NOT_PROVEN');
+      setRefusedEdit(null);
+      await draftPersistence.clear(true);
+      toast.success(t('modals.menu.editClosedWithoutMoney', { defaultValue: 'The unsaved correction was closed. No money was recorded; count the drawer to confirm.' }));
+      onClose();
+    } catch {
+      toast.error(t('modals.menu.editCloseWithoutMoneyFailed', { defaultValue: 'The correction could not be closed. It stays held; nothing was recorded.' }));
+    } finally { setDraftRecoveryBusy(false); }
   };
 
   const handleCheckout = async () => {
@@ -2504,6 +2609,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         const total = changes.total;
         const orderData: MenuOrderEditData = {
           orderId: editOrderId, client_event_id: draftPersistence.identity(), expected_version: editExpectedVersionRef.current!,
+          ...(supersedesEditEventRef.current ? { supersedes_client_event_id: supersedesEditEventRef.current } : {}),
           expected_local_version: undefined as number | undefined,
           renderer_local_version: Number.isSafeInteger(original.version) ? original.version : undefined,
           items: normalizedItems, ...changes, orderType,
@@ -2554,6 +2660,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         if (!draftPersistence.isPending() && (error instanceof Error ? error.message : String(error)) === 'EDIT_SETTLEMENT_CANCELLED') return;
         console.error('Error saving order edit:', error);
         const code = error instanceof Error ? error.message : String(error);
+        // Fix 1/5: refusals that waiting cannot heal get their own message,
+        // decided before any money is confirmed.
+        const specific = code.includes('LEGACY_EDIT_REVIEW_REQUIRED') ? 'legacyEditReview'
+          : code.includes('EDIT_TOO_MANY_LINES') ? 'editTooManyLines'
+          : code.includes('EDIT_SETTLEMENT_METHOD_UNAVAILABLE') ? 'editMethodUnavailable'
+          : code.includes('ORDER_EDIT_SETTLEMENT_PENDING') ? 'editPreviousNotSaved'
+          : null;
+        if (specific) {
+          toast.error(t(`modals.menu.${specific}`, { maxLines: MENU_EDIT_MAX_LINES }));
+          return;
+        }
         const message = code.includes('POS_ORDER_SETTLEMENT_UNAVAILABLE') ? 'editServerUpdate'
           : !draftPersistence.isPending() && /(?:ORDER_HEADER_SYNC_REQUIRED|EDIT_(?:CANONICAL_ORIGINAL_CHANGED|CANONICAL_QUOTE_CHANGED|CANONICAL_QUOTE_REQUIRED|SETTLEMENT_VERSION_CHANGED|ORIGINAL_ITEMS_UNAVAILABLE|CANONICAL_SNAPSHOT_INVALID))/.test(code) ? 'editCanonicalChanged'
           : /EDIT_(?:PREVIOUS_SETTLEMENT|ORIGINAL_PAYMENT)_SYNC_REQUIRED/.test(code) ? 'editSyncRequired' : 'editFailed';
@@ -3010,9 +3127,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             {(draftPersistence.error ? t(`modals.menu.${draftPersistence.error}`) : null) || (draftPersistence.isPending()
               ? t('modals.menu.draftPending', { defaultValue: 'The original checkout is retained. Confirm its result before starting another payment.' })
               : t('modals.menu.draftLoading', { defaultValue: 'Loading the saved cart…' }))}
-            {draftPersistence.isPending() && <button type="button" disabled={draftRecoveryBusy} onClick={recoverSavedCheckout} className="ml-3 underline">
+            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy} onClick={recoverSavedCheckout} className="ml-3 underline">
               {t('modals.menu.draftRecover', { defaultValue: 'Check original checkout' })}
             </button>}
+          </div>
+        )}
+        {refusedEdit && draftPersistence.isPending() && (
+          <div role="alert" data-testid="menu-edit-not-applied" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
+            <p>{t('modals.menu.editNotApplied', { defaultValue: 'This correction was not saved, so its difference was not recorded anywhere. If money already changed hands, prepare the correction again and record that same money once; never collect or return it twice. Otherwise a manager can close it without recording money.' })}</p>
+            <div className="flex flex-wrap gap-3">
+              <button type="button" disabled={draftRecoveryBusy} onClick={requoteRefusedEdit} className="underline font-semibold" data-testid="menu-edit-requote">
+                {t('modals.menu.editRequote', { defaultValue: 'Prepare the correction again' })}
+              </button>
+              <button type="button" disabled={draftRecoveryBusy} onClick={closeRefusedEdit} className="underline" data-testid="menu-edit-close-without-money">
+                {t('modals.menu.editCloseWithoutMoney', { defaultValue: 'Close without recording money (manager)' })}
+              </button>
+            </div>
           </div>
         )}
         <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0" style={draftPersistence.status !== 'ready' || draftPersistence.isPending() ? { pointerEvents: 'none', opacity: 0.6 } : undefined}>

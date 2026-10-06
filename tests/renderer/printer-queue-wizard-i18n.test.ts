@@ -65,6 +65,8 @@ const queueNoVariable = [
   'hideIssueDetails',
   'initialLoadFailedSafe',
   'issue.genericAttention',
+  'issue.foodOrderItemsPending',
+  'issue.foodOrderItemsUnavailable',
   'keepOriginal',
   'keepPrinting',
   'loadFailedSafe',

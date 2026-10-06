@@ -158,6 +158,17 @@
       "wrongProductPrice": "Wrong product price",
       "closingSoon": "Closing soon",
       "badWeather": "Due to bad weather"
+    },
+    "decisionClosed": "BOX has closed this order. It can no longer be accepted or declined here.",
+    "manualCheckTitle": "Check this order with BOX",
+    "manualCheck": "BOX did not confirm this order in time and may still have accepted it. Check with BOX before you prepare it or close it here.",
+    "closeOrder": "Close order",
+    "closingOrder": "Closing…",
+    "closeOrderFailed": "The order could not be closed. Check the connection and try again.",
+    "closedReasons": {
+      "box_decision_expired": "Closed by BOX: no decision in time",
+      "box_decision_refused": "Closed by BOX: the decision was refused",
+      "box_manual_check_closed": "Closed here after checking with BOX"
     }
   }
 }

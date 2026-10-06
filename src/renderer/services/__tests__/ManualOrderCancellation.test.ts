@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { prepareManualOrderCancellation, commitManualOrderCancellation } from '../ManualOrderCancellation';
+import { prepareManualOrderCancellation, commitManualOrderCancellation, manualCancellationFailureKey, manualCancellationFailureOptions } from '../ManualOrderCancellation';
 
 describe('manual return and cancellation IPC', () => {
   it('retains the same original plan and request on retry; no payment or provider call', async () => {
@@ -46,4 +46,20 @@ it('keeps an unpaid canonical table on the reason-only approved route', async ()
   expect(plan).toMatchObject({requiresReturn:false,tableSessionId:'session',requestId:'event'});
   await expect(commitManualOrderCancellation({invoke},plan,'Mistake','cash_drawer')).rejects.toThrow('TABLE_CANONICAL_CANCELLATION_REQUIRED');
   expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+// Review 06/10/2026: each new refusal has its own plain explanation.
+it('names the platform, mirrored-receipt and saved-attempt refusals', () => {
+  const key = (code: string) => manualCancellationFailureKey(new Error(code));
+  expect(key('PLATFORM_ORDER_RETURN_REQUIRED')).toBe('modals.orderCancellation.platformOrderReturn');
+  expect(key('ORIGINAL_RECEIPT_CHECK_UNAVAILABLE')).toBe('modals.orderCancellation.receiptCheckUnavailable');
+  expect(key('TABLE_CANCELLATION_REFUSED: refused')).toBe('modals.orderCancellation.refusedByServer');
+  expect(key('TABLE_CANCELLATION_PENDING')).toBe('modals.orderCancellation.cancellationPending');
+  expect(key('TABLE_CANCELLATION_COMMITTED: done')).toBe('modals.orderCancellation.releaseCommitted');
+  expect(manualCancellationFailureKey('TABLE_CANCELLATION_RELEASE_WAIT:12')).toBe('modals.orderCancellation.releaseWait');
+  expect(manualCancellationFailureOptions('TABLE_CANCELLATION_RELEASE_WAIT:12')).toEqual({ minutes: 12 });
+  expect(manualCancellationFailureOptions(new Error('PAYMENT_SYNC_REQUIRED'))).toEqual({});
+  // Existing codes keep their messages.
+  expect(key('ORIGINAL_PROVIDER_RETURN_REQUIRED')).toBe('modals.orderCancellation.originalReturnRequired');
+  expect(key('PAYMENT_CONNECTION_STATUS_UNAVAILABLE')).toBe('modals.orderCancellation.connectionUnavailable');
 });

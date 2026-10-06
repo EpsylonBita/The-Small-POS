@@ -5,7 +5,12 @@ import { emitCompatEvent, getBridge } from '../../lib';
 import { useI18n } from '../contexts/i18n-context';
 import { TableReleaseOwedModal } from '../components/tables/TableReleaseOwedModal';
 import { OrderCancellationModal, type CancellationReturnChannel } from '../components/modals/OrderCancellationModal';
-import { prepareTableCancellation, tableCancellationFields, type TableCancellationPlan } from '../services/TableManualCancellation';
+import {
+  prepareTableCancellation,
+  releaseRefusedTableCancellation,
+  tableCancellationFields,
+  type TableCancellationPlan,
+} from '../services/TableManualCancellation';
 import type { RestaurantTable } from '../types/tables';
 import { extractPrivilegedActionError } from '../utils/privileged-actions';
 import { formatTableDisplayNumber } from '../utils/table-display';
@@ -84,6 +89,41 @@ export function isOwingCancelDismissed(error: unknown): boolean {
  * shift to approve it, or a plain failure. The table stays as it was.
  */
 export function owingCancelFailureMessage(error: unknown, t: Translate): string {
+  const text = errorText(error);
+  // A saved table cancellation (review 06/10/2026): refused by the server and
+  // never sent again, still waiting for the server, or being cleared.
+  if (text.includes('TABLE_CANCELLATION_REFUSED')) {
+    return String(t('modals.orderCancellation.refusedByServer', {
+      defaultValue: 'The server refused this cancellation. No money was returned and nothing was cancelled. A manager can clear the refused attempt, then cancel again.',
+    }));
+  }
+  const wait = /TABLE_CANCELLATION_RELEASE_WAIT:(\d+)/.exec(text);
+  if (wait) {
+    return String(t('modals.orderCancellation.releaseWait', {
+      minutes: Number(wait[1]),
+      defaultValue: 'This cancellation was sent less than 15 minutes ago and may still be recorded. Try clearing it again in {{minutes}} min.',
+    }));
+  }
+  if (text.includes('TABLE_CANCELLATION_COMMITTED')) {
+    return String(t('modals.orderCancellation.releaseCommitted', {
+      defaultValue: 'The server already recorded this cancellation. Sync this till to finish it. Nothing was cleared.',
+    }));
+  }
+  if (text.includes('TABLE_CANCELLATION_PENDING')) {
+    return String(t('modals.orderCancellation.cancellationPending', {
+      defaultValue: 'A saved cancellation of this order is waiting for the server. Resume it with its original reason and approver, or ask a manager to clear it.',
+    }));
+  }
+  if (text.includes('PLATFORM_ORDER_RETURN_REQUIRED')) {
+    return String(t('modals.orderCancellation.platformOrderReturn', {
+      defaultValue: 'This order came from a delivery platform. Its money is returned through the platform, so the till does not record a return for it.',
+    }));
+  }
+  if (text.includes('ORIGINAL_RECEIPT_CHECK_UNAVAILABLE')) {
+    return String(t('modals.orderCancellation.receiptCheckUnavailable', {
+      defaultValue: 'This payment was taken on another till. Connect to the internet so this till can check the original payment, then try again. Nothing was returned.',
+    }));
+  }
   if (errorText(error).includes('ORIGINAL_CANCEL_APPROVER_REQUIRED')) {
     return String(t('tableCheckManager.errors.originalCancelApproverRequired', {
       defaultValue: 'A cancellation attempt is pending. Its original approving staff member must retry after reconnecting. The table was not released.',
@@ -291,8 +331,17 @@ export function useTableReleaseGuard({
     [pending, cancelPlan, runWithPrivilegedConfirmation, t],
   );
 
+  // Only a table with a check session has a canonical check to prepare. A
+  // table without one (legacy, or not synced yet) uses the release question's
+  // own reason step: an unpaid order is cancelled with a reason and the
+  // approval; a paid one is refused with a reason instead of a dead button
+  // (review 06/10/2026, the button did nothing at all).
   const requestCancel = async () => {
-    if (!pending?.orderId || !pending.table.tableSessionId || busy) return;
+    if (!pending?.orderId || busy) return;
+    if (!pending.table.tableSessionId) {
+      toast.error(owingCancelFailureMessage('TABLE_CANCEL_SYNC_REQUIRED', t));
+      return;
+    }
     setBusy(true);
     try {
       const plan = await prepareTableCancellation(pending.orderId, pending.table.tableSessionId);
@@ -302,10 +351,48 @@ export function useTableReleaseGuard({
     finally { setBusy(false); }
   };
 
+  // A manager clears a saved cancellation that never applied money, then the
+  // check is read again for a new attempt. Nothing is charged or returned.
+  const releaseSavedAttempt = async () => {
+    const current = pending;
+    const plan = cancelPlan;
+    if (!current?.orderId || !plan) return;
+    setBusy(true);
+    try {
+      await runWithPrivilegedConfirmation({
+        scope: 'cash_drawer_control',
+        action: (managerPin) => releaseRefusedTableCancellation(plan, managerPin),
+        title: t('tableRelease.clearAttemptTitle', {
+          defaultValue: 'Approve clearing the saved cancellation',
+        }),
+        subtitle: t('tableRelease.clearAttemptSubtitle', {
+          defaultValue: 'A manager enters their own PIN. Nothing is charged or returned.',
+        }),
+      });
+      toast.success(String(t('modals.orderCancellation.attemptCleared', {
+        defaultValue: 'The saved cancellation was cleared. No money was returned. You can cancel the order again.',
+      })));
+      cancelOriginalRef.current = null;
+      try {
+        setCancelPlan(await prepareTableCancellation(current.orderId, plan.tableSessionId));
+      } catch (error) {
+        setCancelPlan(null);
+        toast.error(owingCancelFailureMessage(error, t));
+      }
+    } catch (error) {
+      if (!isOwingCancelDismissed(error)) toast.error(owingCancelFailureMessage(error, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Keyed by the plan's request: a fresh plan after a clear starts with no
+  // channel or reason chosen.
   const modal = pending && cancelPlan ? (
-    <OrderCancellationModal isOpen orderCount={1}
+    <OrderCancellationModal key={cancelPlan.requestId} isOpen orderCount={1}
       recovery={cancelPlan.pending ? { reason: cancelPlan.reason!, returnChannel: cancelPlan.returnChannel } : undefined}
       manualReturn={cancelPlan.requiresReturn ? { amountCents: cancelPlan.amountCents, currency: cancelPlan.currency } : undefined}
+      savedAttempt={cancelPlan.pending ? { refused: Boolean(cancelPlan.refused), onRelease: releaseSavedAttempt } : undefined}
       onConfirmCancel={cancelOrder} onClose={close} />
   ) : pending ? (
     <TableReleaseOwedModal
@@ -322,7 +409,7 @@ export function useTableReleaseGuard({
       onCancelOrder={(reason) => {
         void cancelOrder(reason);
       }}
-      onRequestCancel={() => { void requestCancel(); }}
+      onRequestCancel={pending.table.tableSessionId ? () => { void requestCancel(); } : undefined}
       onClose={close}
     />
   ) : null;

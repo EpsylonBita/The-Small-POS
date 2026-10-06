@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Banknote, CreditCard, Loader2 } from 'lucide-react';
@@ -40,6 +40,13 @@ import {
   type OrdinaryCollectionVerdict,
 } from '../../hooks/useOrderStore';
 import { loadPersistedSplitDismissal } from '../../utils/splitCheckoutRecovery';
+import {
+  admitManualCard,
+  lookupCardTerminal,
+  manualCardNoticeText,
+  manualCardRecordRefusalText,
+  terminalLookupNotice,
+} from '../../services/ManualCardAdmissionService';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { UnsavedChargedPaymentBanner } from '../ui/UnsavedChargedPaymentBanner';
 import {
@@ -91,6 +98,9 @@ interface SinglePaymentCollectionModalProps {
    */
   collectionScope?: OrdinaryCollectionScope | null;
 }
+
+/** `manualCardConfirmed`: the cashier confirmed a manual card offered by an earlier collect. */
+type CollectOptions = { manualCardConfirmed?: boolean };
 
 // Module audit closure (2026-09-16): one rounding rule for the renderer. The local copy
 // rounded on the binary product, so it sent 1.005 to 1.00.
@@ -163,18 +173,18 @@ export const SinglePaymentCollectionModal: React.FC<
   const unsaved = useUnsavedChargedPayments(orderId, isOpen, t, formatCurrency, onUnsavedSaved);
   const unsavedLocked = unsaved.payments.length > 0;
 
-  const resolveReadyTerminal = useCallback(async () => {
-    const raw: any = await bridge.ecr.getDefaultTerminal();
-    const device = raw?.device ?? raw?.data?.device ?? null;
-    const deviceId = typeof device?.id === 'string' ? device.id : '';
-    if (!deviceId) return null;
-    const status: any = await bridge.ecr.getDeviceStatus(deviceId);
-    return status?.connected === true &&
-      status?.ready === true &&
-      status?.busy !== true
-      ? { deviceId, name: device?.name || deviceId }
-      : null;
-  }, [bridge]);
+  // D (06/10/2026, Android parity): a manual card (taken on the shop's own
+  // card machine) is offered only when this till has no card terminal and a
+  // fresh server admission says no payment provider is connected. The cashier
+  // then confirms it here, and that confirm asks the admission again before
+  // anything is recorded. Nothing is held while the cashier decides: the
+  // offering collect ends its claim (nothing was sent), and the confirm is a
+  // fresh collect with its own claim and every preflight.
+  const [manualCardPrompt, setManualCardPrompt] = useState<{ amount: number } | null>(null);
+  const manualCardPromptId = useId();
+  useEffect(() => {
+    setManualCardPrompt(null);
+  }, [isOpen, orderId, method, amountToCollect, collectionScope?.organizationId, collectionScope?.terminalId]);
 
   const recordCollectedPayment = useCallback(
     async (
@@ -221,10 +231,13 @@ export const SinglePaymentCollectionModal: React.FC<
     [amountToCollect, bridge, method, onPaymentCollected, orderId, t],
   );
 
-  const handleCollect = useCallback(async () => {
+  const handleCollect = useCallback(async (options?: CollectOptions) => {
     if (isProcessing || amountToCollect <= 0.009) {
       return;
     }
+    const manualCardConfirmed = method === 'card' && options?.manualCardConfirmed === true;
+    // The confirm consumes the offer, whatever happens next.
+    if (manualCardConfirmed) setManualCardPrompt(null);
 
     setIsProcessing(true);
     try {
@@ -239,23 +252,13 @@ export const SinglePaymentCollectionModal: React.FC<
         return;
       }
       if (method === 'card') {
-        let terminal: { deviceId: string; name: string } | null = null;
-        try {
-          terminal = await resolveReadyTerminal();
-        } catch (error) {
-          console.warn(
-            '[SinglePaymentCollectionModal] Failed to resolve terminal:',
-            error,
-          );
-        }
-
-        if (!terminal) {
-          toast(
-            t('splitPayment.manualCardFallback', {
-              defaultValue:
-                'No ready payment terminal. Recording a manual card payment instead.',
-            }),
-          );
+        if (manualCardConfirmed) {
+          // Asked again on the confirm that records it.
+          const admission = await admitManualCard();
+          if (!admission.admitted) {
+            toast.error(manualCardRecordRefusalText(t, admission.reason));
+            return;
+          }
           await recordCollectedPayment('manual');
           toast.success(
             t('orderDashboard.cardPaymentRecorded', {
@@ -264,6 +267,25 @@ export const SinglePaymentCollectionModal: React.FC<
           );
           return;
         }
+
+        const lookup = await lookupCardTerminal();
+        if (lookup.kind !== 'ready') {
+          // A configured terminal that is busy, disconnected or unreadable
+          // takes no card and is never replaced by a manual card.
+          const admission = lookup.kind === 'none' ? await admitManualCard() : null;
+          if (admission?.admitted) {
+            setManualCardPrompt({ amount: amountToCollect });
+            return;
+          }
+          toast.error(
+            manualCardNoticeText(
+              t,
+              admission ? admission.reason : terminalLookupNotice(lookup) ?? 'terminal_check_failed',
+            ),
+          );
+          return;
+        }
+        const terminal = { deviceId: lookup.deviceId, name: lookup.name };
 
         const rawPayment: any = await bridge.ecr.processPayment(amountToCollect, {
           deviceId: terminal.deviceId,
@@ -336,7 +358,6 @@ export const SinglePaymentCollectionModal: React.FC<
     onClose,
     orderId,
     recordCollectedPayment,
-    resolveReadyTerminal,
     t,
     unsaved,
   ]);
@@ -378,10 +399,13 @@ export const SinglePaymentCollectionModal: React.FC<
     [amountToCollect, bridge, method, onClose, orderId, t, totalAmount],
   );
 
-  const handleGuardedCollect = useCallback(async () => {
+  const handleGuardedCollect = useCallback(async (options?: CollectOptions) => {
     if (isProcessing || amountToCollect <= 0.009) {
       return;
     }
+    const manualCardConfirmed = method === 'card' && options?.manualCardConfirmed === true;
+    // The confirm consumes the offer, whatever happens next.
+    if (manualCardConfirmed) setManualCardPrompt(null);
     const startedEpoch = viewEpoch.current;
     const isCurrent = () => isOpen && viewEpoch.current === startedEpoch;
     const claim = claimOrdinaryCollectionOwner(collectionScope, orderId);
@@ -444,22 +468,41 @@ export const SinglePaymentCollectionModal: React.FC<
         return;
       }
       let terminal: { deviceId: string; name: string } | null = null;
+      // A card is written without a terminal only as the manual card admitted on this very confirm.
+      let manualCardAdmitted = false;
       if (method === 'card' && !sale) {
-        try {
-          terminal = await resolveReadyTerminal();
-        } catch (error) {
-          console.warn(
-            '[SinglePaymentCollectionModal] Failed to resolve terminal:',
-            error,
-          );
-        }
-        if (!terminal) {
-          toast(
-            t('splitPayment.manualCardFallback', {
-              defaultValue:
-                'No ready payment terminal. Recording a manual card payment instead.',
-            }),
-          );
+        if (manualCardConfirmed) {
+          // Asked again on the confirm that records it.
+          const admission = await admitManualCard();
+          if (!isCurrent()) return;
+          if (!admission.admitted) {
+            toast.error(manualCardRecordRefusalText(t, admission.reason));
+            return;
+          }
+          manualCardAdmitted = true;
+        } else {
+          const lookup = await lookupCardTerminal();
+          if (!isCurrent()) return;
+          if (lookup.kind !== 'ready') {
+            // A configured terminal that is busy, disconnected or unreadable
+            // takes no card and is never replaced by a manual card.
+            const admission = lookup.kind === 'none' ? await admitManualCard() : null;
+            if (!isCurrent()) return;
+            if (admission?.admitted) {
+              // Nothing was sent: the claim ends in `finally`, and the
+              // cashier's confirm runs a fresh guarded collect.
+              setManualCardPrompt({ amount: amountToCollect });
+              return;
+            }
+            toast.error(
+              manualCardNoticeText(
+                t,
+                admission ? admission.reason : terminalLookupNotice(lookup) ?? 'terminal_check_failed',
+              ),
+            );
+            return;
+          }
+          terminal = { deviceId: lookup.deviceId, name: lookup.name };
         }
       }
 
@@ -524,7 +567,15 @@ export const SinglePaymentCollectionModal: React.FC<
             const written = await writeCollected('terminal', sale.id, sale.deviceId);
             return { ...written, verdict: written.verdict === 'completed' ? 'completed' as const : 'unknown' as const };
           }
-          if (!terminal) return writeCollected('manual');
+          if (!terminal) {
+            if (method === 'card' && !manualCardAdmitted) {
+              return {
+                verdict: 'not_sent' as const,
+                value: { paymentId: null, paymentOrigin: 'manual' as const, message: manualCardNoticeText(t, 'unavailable') },
+              };
+            }
+            return writeCollected('manual');
+          }
           let rawPayment: unknown;
           let threw = false;
           try {
@@ -629,12 +680,14 @@ export const SinglePaymentCollectionModal: React.FC<
     orderId,
     ordinaryRefusalText,
     probeRetainedCollection,
-    resolveReadyTerminal,
     t,
     unsaved,
   ]);
 
   const collect = collectionScope === undefined ? handleCollect : handleGuardedCollect;
+  const confirmManualCard = () => {
+    void collect({ manualCardConfirmed: true });
+  };
 
   const platformHeldNotice = usePlatformHeldNoticeForOrderId(orderId, isOpen);
 
@@ -645,7 +698,8 @@ export const SinglePaymentCollectionModal: React.FC<
       title=""
       onEnterKey={collect}
       enterKeyEnabled={
-        !isProcessing && amountToCollect > 0.009 && platformHeldNotice === null && !unsavedLocked
+        // A manual card is recorded only by its own Confirm button, never by Enter.
+        !isProcessing && amountToCollect > 0.009 && platformHeldNotice === null && !unsavedLocked && manualCardPrompt === null
       }
     >
       <div className="liquid-glass-modal-text space-y-5">
@@ -735,10 +789,58 @@ export const SinglePaymentCollectionModal: React.FC<
           </div>
         ) : null}
 
+        {manualCardPrompt ? (
+          <div
+            role="group"
+            aria-labelledby={`${manualCardPromptId}-title`}
+            aria-describedby={`${manualCardPromptId}-body`}
+            data-testid="manual-card-confirmation"
+            className="space-y-3 rounded-2xl border border-amber-400/40 bg-amber-500/10 p-4"
+          >
+            <p id={`${manualCardPromptId}-title`} className="liquid-glass-modal-text flex items-center gap-2 text-base font-semibold">
+              <CreditCard className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />
+              {t('payment.manualCard.confirmTitle', {
+                defaultValue: 'Record a manual card payment?',
+              })}
+            </p>
+            <p id={`${manualCardPromptId}-body`} className="liquid-glass-modal-text-muted text-sm">
+              {t('payment.manualCard.confirmBody', {
+                defaultValue:
+                  "No card terminal is connected to this till. Record {{amount}} only if the card was already taken on the shop's own card machine.",
+                amount: formatCurrency(manualCardPrompt.amount),
+              })}
+            </p>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={confirmManualCard}
+                disabled={isProcessing || platformHeldNotice !== null || unsavedLocked}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-800 transition active:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60 dark:text-emerald-100"
+              >
+                {isProcessing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CreditCard className="h-4 w-4" />
+                )}
+                {t('payment.manualCard.confirmAction', {
+                  defaultValue: 'Confirm manual card',
+                })}
+              </button>
+              <button
+                type="button"
+                onClick={() => setManualCardPrompt(null)}
+                disabled={isProcessing}
+                className="liquid-glass-modal-button inline-flex items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {t('common.cancel', { defaultValue: 'Cancel' })}
+              </button>
+            </div>
+          </div>
+        ) : (
         <div className="flex flex-col gap-3 sm:flex-row">
           <button
             type="button"
-            onClick={collect}
+            onClick={() => void collect()}
             disabled={
               isProcessing || amountToCollect <= 0.009 || platformHeldNotice !== null || unsavedLocked
             }
@@ -768,6 +870,7 @@ export const SinglePaymentCollectionModal: React.FC<
             {t('common.cancel', { defaultValue: 'Cancel' })}
           </button>
         </div>
+        )}
       </div>
     </LiquidGlassModal>
   );

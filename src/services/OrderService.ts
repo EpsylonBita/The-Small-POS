@@ -49,6 +49,36 @@ const normalizeDriverFields = <T extends Record<string, unknown>>(order: T): T =
   };
 };
 
+const TWINT_REFUSAL_CODE = /\bTWINT_[A-Z_]+\b/;
+
+/**
+ * A cashier-confirmed TWINT checkout that native did not save (fix review
+ * 06/10/2026). The customer already paid: the only safe recorder is the native
+ * receipt journal, so this is final. It never becomes an offline retry save or
+ * an Admin API create, which would write the order and its TWINT row without
+ * the journal, the Z blocker or the recovery.
+ */
+const twintCheckoutFailure = (
+  message: string,
+  details: { errorCode?: unknown; manualReceiptRetained?: unknown; unsavedPayment?: unknown } = {},
+): Error => {
+  const code =
+    typeof details.errorCode === 'string' && details.errorCode.trim()
+      ? details.errorCode.trim()
+      : message.match(TWINT_REFUSAL_CODE)?.[0] ?? 'TWINT_RECEIPT_NOT_SAVED';
+  return Object.assign(ErrorFactory.system(message), {
+    code,
+    errorCode: code,
+    retryable: false,
+    twintReceipt: true,
+    manualReceiptConfirmed: true,
+    manualReceiptRetained:
+      typeof details.manualReceiptRetained === 'boolean' ? details.manualReceiptRetained : null,
+    orderPersisted: false,
+    unsavedPayment: details.unsavedPayment,
+  });
+};
+
 const currencyAdmissionError = (error: unknown): Error | null => {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
   const code = message?.match(/(?:STORE|SHIFT|ORDER|FOLIO|OPERATING)_CURRENCY_(?:UNAVAILABLE|MISMATCH|BRANCH_MISMATCH)|FOLIO_ROOM_MISMATCH/)?.[0];
@@ -982,6 +1012,9 @@ export class OrderService {
 
       let bridgeCreateError: Error | null = null;
       let bridgeCreateHardFailure = false;
+      // The customer already paid a TWINT checkout when the cashier confirmed
+      // it: every refusal of its native write is final (see twintCheckoutFailure).
+      const twintCheckout = normalizedInitialPayment?.method === 'twint';
 
       // 1) Try local-first via IPC (native Rust backend)
       const bridge = this.getBridge();
@@ -1080,6 +1113,15 @@ export class OrderService {
                 checkoutInProgress: true,
               },
             );
+          } else if (
+            twintCheckout ||
+            (typeof resp?.errorCode === 'string' && resp.errorCode.startsWith('TWINT_'))
+          ) {
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = twintCheckoutFailure(
+              typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
+              resp ?? {},
+            );
           } else if (!this.allowAdminApiFallback()) {
             bridgeCreateError = ErrorFactory.system(
               typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError),
@@ -1089,9 +1131,14 @@ export class OrderService {
           }
         } catch (ipcErr) {
           const currencyError = currencyAdmissionError(ipcErr);
+          const ipcMessage = (ipcErr as any)?.message || String(ipcErr);
           if (currencyError) {
             bridgeCreateHardFailure = true;
             bridgeCreateError = currencyError;
+          } else if (twintCheckout || TWINT_REFUSAL_CODE.test(ipcMessage)) {
+            debugLogger.error('Native TWINT checkout was refused', ipcErr, 'OrderService');
+            bridgeCreateHardFailure = true;
+            bridgeCreateError = twintCheckoutFailure(ipcMessage);
           } else if (!this.allowAdminApiFallback()) {
             const errMsg = (ipcErr as any)?.message || String(ipcErr);
             debugLogger.error('Native bridge order create failed', ipcErr, 'OrderService');
@@ -1392,8 +1439,8 @@ export class OrderService {
 
       return newOrder;
     } catch (error) {
-      const retained = error as { paymentNotSaved?: boolean; checkoutInProgress?: boolean; code?: string } | null;
-      if (retained?.paymentNotSaved === true || retained?.checkoutInProgress === true) throw error;
+      const retained = error as { paymentNotSaved?: boolean; checkoutInProgress?: boolean; twintReceipt?: boolean; code?: string } | null;
+      if (retained?.paymentNotSaved === true || retained?.checkoutInProgress === true || retained?.twintReceipt === true) throw error;
       const currencyError = currencyAdmissionError(error);
       if (currencyError && retained?.code !== 'FISCAL_CHECKOUT_NOT_APPROVED') throw currencyError;
       if ((error as { code?: string } | null)?.code === 'FISCAL_CHECKOUT_NOT_APPROVED') {

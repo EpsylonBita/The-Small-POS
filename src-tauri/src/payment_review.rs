@@ -54,6 +54,11 @@ pub(crate) enum SetAsideReason {
     /// The server refused it (`409 PLATFORM_HELD_ORDER`): the delivery
     /// platform already holds this order's money (item D, 30/09/2026).
     PlatformHeld,
+    /// The server refused it because the order changed on the server after
+    /// this money was taken (`409 PAYMENT_ADMISSION_CONFLICT` or
+    /// `PAYMENT_REPLAY_CONFLICT` with `reconciliation_required`), for example
+    /// an offline cash receipt for an order another till cancelled.
+    ReconciliationRequired,
 }
 
 impl SetAsideReason {
@@ -63,8 +68,43 @@ impl SetAsideReason {
             Self::OrderAlreadyCovered => "order_already_covered",
             Self::ExceedsAmountDue => "exceeds_amount_due",
             Self::PlatformHeld => "platform_held",
+            Self::ReconciliationRequired => "reconciliation_required",
         }
     }
+}
+
+/// The server's typed refusals of a payment whose order changed on the server
+/// after the money was taken (`admin-dashboard/src/lib/ordinary-payment-admission.ts`).
+pub(crate) const PAYMENT_RECONCILIATION_CODES: [&str; 2] =
+    ["PAYMENT_ADMISSION_CONFLICT", "PAYMENT_REPLAY_CONFLICT"];
+
+fn body_reports_reconciliation_required(body: &Value) -> bool {
+    body.get("code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| PAYMENT_RECONCILIATION_CODES.contains(&code))
+        && body.get("reconciliation_required").and_then(Value::as_bool) == Some(true)
+}
+
+/// Does a `POST /api/pos/payments` answer refuse the payment because the
+/// canonical order changed and the original attempt must be reconciled? Only
+/// a 409 whose body names one of [`PAYMENT_RECONCILIATION_CODES`] with
+/// `reconciliation_required: true`; any other answer keeps its own handling.
+pub(crate) fn response_reports_reconciliation_required(status: u16, body: &str) -> bool {
+    status == 409
+        && serde_json::from_str::<Value>(body)
+            .ok()
+            .is_some_and(|body| body_reports_reconciliation_required(&body))
+}
+
+/// The same refusal read from the legacy queue's typed admin error.
+pub(crate) fn admin_error_reports_reconciliation_required(
+    error: &crate::api::AdminFetchError,
+) -> bool {
+    error.status() == Some(409)
+        && error
+            .code()
+            .is_some_and(|code| PAYMENT_RECONCILIATION_CODES.contains(&code))
+        && error.app_error_field("reconciliation_required") == Some(&Value::Bool(true))
 }
 
 /// The server's refusal code for a new cash/card row on money the delivery
@@ -537,6 +577,43 @@ pub(crate) fn set_aside_platform_held_payment(
             payment_id = %payment_id,
             order_id = %order_id,
             "Server refused a payment on platform-held money, but this terminal cannot record a set-aside payment; the payment is held unsent"
+        ),
+        _ => {}
+    }
+    Ok(outcome)
+}
+
+/// The server refused the payment because the order changed on the server
+/// after this money was taken (`409 PAYMENT_ADMISSION_CONFLICT` or
+/// `PAYMENT_REPLAY_CONFLICT`, `reconciliation_required: true`), for example
+/// an offline cash receipt for an order another till cancelled. The money
+/// already moved at this till, so the payment is never retried until its
+/// budget burns out and fails (the legacy path) or parked as a conflict (the
+/// parity path): it is set aside for review like a platform-held refusal, its
+/// queue rows closed in the same step, and the Z holds the day on it until a
+/// manager records the money given back. The ledger restore that follows
+/// every set-aside mirrors the order's server payments.
+pub(crate) fn set_aside_reconciliation_required_payment(
+    conn: &Connection,
+    payment_id: &str,
+    detected_at: &str,
+) -> Result<SetAsideOutcome, String> {
+    let outcome = set_aside_payment_in_connection(
+        conn,
+        payment_id,
+        SetAsideReason::ReconciliationRequired,
+        None,
+        detected_at,
+    )?;
+    match &outcome {
+        SetAsideOutcome::NotEligible => warn!(
+            payment_id = %payment_id,
+            "Server refused a payment whose order changed; the local payment is no longer completed money, so nothing was set aside"
+        ),
+        SetAsideOutcome::StatusUnavailable { order_id } => error!(
+            payment_id = %payment_id,
+            order_id = %order_id,
+            "Server refused a payment whose order changed, but this terminal cannot record a set-aside payment; the payment is held unsent"
         ),
         _ => {}
     }

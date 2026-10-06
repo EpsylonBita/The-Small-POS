@@ -548,3 +548,114 @@ test('a platform-held order is offered the server restore, never the payment scr
   assert.ok(issue.actions.length > 0, 'the issue still says what to do');
   assert.equal(issue.knownSolution, undefined, 'no payment recipe is suggested');
 });
+
+// Release 1.4.124 (06/10/2026): the server refuses a money write against a
+// shift that was closed on another device (`REMOTE_HANDOVER_SNAPSHOT_FROZEN`).
+// The till parks it as a conflict and never retries it; the operator reads
+// why in plain words instead of a raw conflict code, in every POS locale.
+const frozenRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
+  id: 'frozen-expense-queue', tableName: 'shift_expenses', recordId: 'expense-1',
+  operation: 'INSERT', data: '{"amount":12.5}', organizationId: 'org-1',
+  createdAt: '2026-10-06T08:00:00Z', attempts: 0, lastAttempt: '2026-10-06T08:00:05Z',
+  errorMessage: 'SERVER_CONFLICT_REMOTE_HANDOVER_SNAPSHOT_FROZEN: The shift was closed remotely',
+  nextRetryAt: null, retryDelayMs: 1000, priority: 1, moduleType: 'financial',
+  conflictStrategy: 'manual', version: 1, status: 'conflict', ...overrides,
+});
+const frozenResult = (rows: SyncQueueItem[], total = rows.length) => buildSyncRecoveryIssues({
+  systemHealth: baseSystemHealth({parityQueueStatus: {total, failed:0, pending:0, conflicts:total}}),
+  lastParitySync: {status:'failed', error:'PARITY_SYNC_PARTIAL', processed:0, remaining:total} as any,
+  parityItems: rows,
+});
+
+test('a money record frozen by a remote shift close says so in plain words, with no retry', () => {
+  const result = frozenResult([frozenRow(), frozenRow({id: 'frozen-2', recordId: 'expense-2'})]);
+  const issue = result.issues.find(item => item.code === 'remote_handover_snapshot_frozen');
+  assert.ok(issue, 'the frozen refusal has its own card');
+  assert.equal(issue.status, 'blocking');
+  assert.equal(issue.params?.count, 2);
+  assert.equal(issue.titleKey, 'recovery.issues.remoteHandoverSnapshotFrozen.title');
+  assert.equal(issue.actions.some(action => action.id === 'retryParityItem'), false);
+  assert.equal(issue.actions.some(action => action.id === 'retryParityModule'), false);
+  assert.equal(
+    result.issues.some(item => item.code === 'parity_module_conflict_items'),
+    false,
+    'the raw conflict card is replaced, not shown next to it',
+  );
+  // Any other conflict keeps its own card.
+  assert.equal(
+    frozenResult([frozenRow({errorMessage: 'SERVER_CONFLICT_PAYMENT_CONFLICT: other'})])
+      .issues.some(item => item.code === 'remote_handover_snapshot_frozen'),
+    false,
+  );
+});
+
+test('the frozen-shift card reads in every POS locale', async () => {
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
+    const messages = JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${locale}.json`), 'utf8'));
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: locale,
+      resources: {[locale]: {translation: messages}},
+      interpolation: {escapeValue: false},
+    });
+    for (const field of ['title', 'summary', 'guidance']) {
+      const key = `recovery.issues.remoteHandoverSnapshotFrozen.${field}`;
+      const text = i18n.t(key, {count: 2});
+      assert.notEqual(text, key, `${locale} ${field}`);
+      assert.doesNotMatch(text, /\{\{|REMOTE_HANDOVER/, `${locale} ${field}`);
+    }
+    assert.match(i18n.t('recovery.issues.remoteHandoverSnapshotFrozen.summary', {count: 2}), /\b2\b/);
+  }
+});
+
+// Release 1.4.124 (06/10/2026): a paid edit saved by desktop 1.4.122 without
+// its identity that the server refused for good is marked
+// LEGACY_EDIT_REVIEW_REQUIRED and never sent again. The operator reads it in
+// plain words with what a manager does, never the raw English conflict.
+const legacyEditRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
+  id: 'legacy-edit-queue', tableName: 'orders', recordId: 'order-84',
+  operation: 'UPDATE', data: '{"order_number":"ORD-06102026-00084","items":[{"menu_item_id":"m1"}]}',
+  organizationId: 'org-1', createdAt: '2026-10-06T08:00:00Z', attempts: 3, lastAttempt: '2026-10-06T09:00:00Z',
+  errorMessage: 'LEGACY_EDIT_REVIEW_REQUIRED: POS_ORDER_EDIT_CONFLICT: A newer canonical edit exists | An order edit saved by an older version of this till was refused by the server.',
+  nextRetryAt: null, retryDelayMs: 1000, priority: 1, moduleType: 'orders',
+  conflictStrategy: 'manual', version: 1, status: 'conflict', ...overrides,
+});
+
+test('a refused legacy order edit gets its own manager card instead of the raw conflict', () => {
+  const result = frozenResult([legacyEditRow()]);
+  const issue = result.issues.find(item => item.code === 'legacy_edit_review_required');
+  assert.ok(issue, 'the refused legacy edit has its own card');
+  assert.equal(issue.status, 'blocking');
+  assert.equal(issue.titleKey, 'recovery.issues.legacyEditReview.title');
+  assert.equal(issue.params?.orderNumber, 'ORD-06102026-00084');
+  assert.equal(issue.actions.some(action => action.id === 'retryParityItem'), false);
+  assert.equal(
+    result.issues.some(item => item.code === 'parity_module_conflict_items'),
+    false,
+    'the raw conflict card is replaced, not shown next to it',
+  );
+  // An order conflict without the marker keeps the ordinary card.
+  assert.equal(
+    frozenResult([legacyEditRow({errorMessage: 'SERVER_CONFLICT_ORDER: other'})])
+      .issues.some(item => item.code === 'legacy_edit_review_required'),
+    false,
+  );
+});
+
+test('the legacy edit review card reads in every POS locale', async () => {
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
+    const messages = JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${locale}.json`), 'utf8'));
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: locale,
+      resources: {[locale]: {translation: messages}},
+      interpolation: {escapeValue: false},
+    });
+    for (const field of ['title', 'summary', 'guidance']) {
+      const key = `recovery.issues.legacyEditReview.${field}`;
+      const text = i18n.t(key, {count: 1});
+      assert.notEqual(text, key, `${locale} ${field}`);
+      assert.doesNotMatch(text, /\{\{|LEGACY_EDIT/, `${locale} ${field}`);
+    }
+  }
+});

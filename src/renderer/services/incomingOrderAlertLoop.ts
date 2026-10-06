@@ -22,6 +22,7 @@ import { playSelectedPlatformSound } from './platformNotificationSound';
 import {
   INCOMING_ORDER_ALERT_REPEAT_MS,
   INCOMING_ORDER_SAFETY_REFRESH_MS,
+  isIncomingOrderAlertExempt,
   recordIncomingOrderAlertEvent,
   type IncomingOrderAlertEvent,
   type IncomingOrderAlertLogEntry,
@@ -194,6 +195,10 @@ function computeQueue(): readonly Order[] {
   const filter = config.orderFilter;
   const next = (pending as Order[]).filter((order) => {
     if (!order || typeof order.id !== 'string' || !order.id) return false;
+    // A BOX order whose decision the server closed takes no accept/decline
+    // any more (06/10/2026): its approval panel shows the closed state, but
+    // it never rings.
+    if (isIncomingOrderAlertExempt(order)) return false;
     if (!filter) return true;
     try {
       return filter(order);

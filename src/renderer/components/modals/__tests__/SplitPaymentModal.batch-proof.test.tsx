@@ -19,6 +19,9 @@ const mocks = vi.hoisted(() => {
         })),
         redeemForOrder: vi.fn(),
       },
+      // 06/10/2026: a manual card needs a fresh server admission (no payment
+      // provider connected for this exact organization, branch and terminal).
+      adminApi: { fetchFromAdmin: vi.fn() },
       payments: {
         listUnsavedPayments: vi.fn(async () => ({ payments: [] })),
         getOrderPayments: vi.fn(async () => []),
@@ -80,8 +83,19 @@ vi.mock('../../../hooks/usePaymentPrintPrompt', () => ({
 
 import { SplitPaymentModal } from '../SplitPaymentModal';
 import { probeOrdinaryOwner, retainedOrdinaryOwner } from '../../../hooks/useOrderStore';
+import { clearTerminalCredentialCache, updateTerminalCredentialCache } from '../../../services/terminal-credentials';
 
 const SCOPE = { organizationId: 'org-split', terminalId: 'term-split' };
+const BRANCH = 'branch-split';
+const MANUAL_CARD_ADMITTED = {
+  success: true,
+  status: 200,
+  meta: { source: 'remote' },
+  data: {
+    success: true, admission_version: 1, organization_id: SCOPE.organizationId,
+    branch_id: BRANCH, terminal_id: SCOPE.terminalId, provider_connected: false,
+  },
+};
 const ORDER_ID = 'order-split-batch';
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const ledgerRow = (id: string) => ({ id, status: 'completed', method: 'cash', amount: 10, transactionRef: null });
@@ -97,6 +111,9 @@ describe('split batch proof through the real ordinary controller', () => {
     mocks.bridge.ecr.processPayment.mockReset();
     mocks.bridge.ecr.getDefaultTerminal.mockReset();
     mocks.bridge.ecr.getDeviceStatus.mockReset();
+    mocks.bridge.adminApi.fetchFromAdmin.mockReset();
+    mocks.bridge.adminApi.fetchFromAdmin.mockResolvedValue(MANUAL_CARD_ADMITTED);
+    updateTerminalCredentialCache({ organizationId: SCOPE.organizationId, branchId: BRANCH, terminalId: SCOPE.terminalId });
     mocks.bridge.payments.getSettlementSnapshot.mockImplementation(async (orderId: string) => ({
       success: true, orderId, orderTotal: 20, netPaid: 0, outstandingAmount: 20,
       completedPayments: [], generation: '0'.repeat(64), unresolvedDirectSale: null,
@@ -113,6 +130,7 @@ describe('split batch proof through the real ordinary controller', () => {
 
   afterEach(() => {
     cleanup();
+    clearTerminalCredentialCache();
   });
 
   it.each([true, false])('formats cent entry and books the numeric values without charging a missing terminal (discounts=%s)', async (allowDiscounts) => {
@@ -130,11 +148,15 @@ describe('split batch proof through the real ordinary controller', () => {
     expect(first).toHaveValue('10,50');
     const firstGroup = screen.getByRole('group', { name: 'Person 1' });
     fireEvent.click(firstGroup.querySelectorAll('button')[1]);
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('manual card payment on confirm'));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('recorded as a manual card payment'));
     expect(mocks.bridge.ecr.processPayment).not.toHaveBeenCalled();
     expect(mocks.recordPayment).not.toHaveBeenCalled();
+    expect(mocks.bridge.adminApi.fetchFromAdmin).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
     fireEvent.click(confirmButton());
     await waitFor(() => expect(mocks.recordPayment).toHaveBeenCalledTimes(2));
+    // Confirm asked the admission again before it recorded the manual card.
+    expect(mocks.bridge.adminApi.fetchFromAdmin).toHaveBeenCalledTimes(2);
     expect(mocks.recordPayment).toHaveBeenNthCalledWith(1, expect.objectContaining({ method: 'card', amount: 10.5, paymentOrigin: 'manual' }));
     expect(mocks.recordPayment).toHaveBeenNthCalledWith(2, expect.objectContaining({ method: 'cash', amount: 9.5 }));
   });
