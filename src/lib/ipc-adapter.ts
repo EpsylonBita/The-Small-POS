@@ -1550,6 +1550,25 @@ export interface EcrDiscoveryResponse {
   warnings?: string[];
 }
 
+/**
+ * `ecr:get-device-admission` (founder rule 08/10/2026). A card terminal is
+ * admitted only while a payment plugin is licensed and configured for the
+ * branch; a cash register only while MyData is in `fiscal_device` mode with
+ * status `connected`. `refresh: true` re-fetches both server answers first
+ * (a network failure keeps the last known answer); never fetched = not admitted.
+ */
+export interface EcrDeviceAdmissionResult {
+  success: boolean;
+  cardTerminal: { admitted: boolean; fetchedAt: string | null };
+  cashRegister: {
+    admitted: boolean;
+    fetchedAt: string | null;
+    mode: string | null;
+    status: string | null;
+  };
+  error?: string;
+}
+
 // -- Cap Driver setup assistance ---------------------------------------------
 
 /**
@@ -2453,6 +2472,7 @@ export interface PlatformBridge {
     updateDevice(deviceId: string, updates: any): Promise<IpcResult>;
     removeDevice(deviceId: string): Promise<IpcResult>;
     getDefaultTerminal(): Promise<any>;
+    getDeviceAdmission(options?: { refresh?: boolean }): Promise<EcrDeviceAdmissionResult>;
     connectDevice(deviceId: string): Promise<IpcResult>;
     disconnectDevice(deviceId: string): Promise<IpcResult>;
     getDeviceStatus(deviceId: string): Promise<any>;
@@ -3059,6 +3079,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "ecr:update-device": "ecr.updateDevice",
   "ecr:remove-device": "ecr.removeDevice",
   "ecr:get-default-terminal": "ecr.getDefaultTerminal",
+  "ecr:get-device-admission": "ecr.getDeviceAdmission",
   "ecr:connect-device": "ecr.connectDevice",
   "ecr:disconnect-device": "ecr.disconnectDevice",
   "ecr:get-device-status": "ecr.getDeviceStatus",
@@ -4226,6 +4247,8 @@ export class TauriBridge implements PlatformBridge {
     updateDevice: (id: string, u: any) => this.inv("ecr:update-device", id, u),
     removeDevice: (id: string) => this.inv("ecr:remove-device", id),
     getDefaultTerminal: () => this.inv("ecr:get-default-terminal"),
+    getDeviceAdmission: (options?: { refresh?: boolean }) =>
+      this.inv("ecr:get-device-admission", options),
     connectDevice: (id: string) => this.inv("ecr:connect-device", id),
     disconnectDevice: (id: string) => this.inv("ecr:disconnect-device", id),
     getDeviceStatus: (id: string) => this.inv("ecr:get-device-status", id),

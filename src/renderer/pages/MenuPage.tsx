@@ -22,6 +22,7 @@ import { Utensils } from 'lucide-react';
 import { getBridge, onEvent, offEvent } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 import { getPosMenuImageUrl } from '../utils/menuImages';
+import { readOwnerVatRatePercent } from '../utils/printedVat';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -81,7 +82,9 @@ const MenuPage: React.FC = () => {
   const bootstrapSyncAttemptedRef = useRef(false);
 
   // Tax rate from terminal settings (percentage, e.g., 24 for 24%)
-  const taxRatePercentage = getSetting<number>('tax', 'tax_rate_percentage', 24) ?? 24;
+  // The owner's VAT rate for the cart preview; the order's own VAT is computed
+  // natively from its lines (07/10/2026).
+  const ownerVatRatePercent = readOwnerVatRatePercent(getSetting);
 
   // Delivery fee from URL params (set by delivery zone validation)
   const deliveryFeeParam = searchParams.get('deliveryFee');
@@ -422,23 +425,18 @@ const MenuPage: React.FC = () => {
       // Calculate subtotal from cart items (already priced by order type using PricingService)
       const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || item.price * item.quantity), 0);
 
-      // Use configured tax rate from terminal settings (percentage, e.g., 24 for 24%)
-      const taxRate = taxRatePercentage / 100; // Convert percentage to decimal
-      const taxAmount = Number((subtotal * taxRate).toFixed(2));
-
       // Delivery fee from delivery zone (only for delivery orders)
       const deliveryFee = orderType === 'delivery' ? deliveryFeeFromZone : 0;
 
-      // Final total = subtotal + tax + delivery fee
-      const finalTotal = Number((subtotal + taxAmount + deliveryFee).toFixed(2));
+      // Prices include VAT: the total is the items plus the delivery fee and
+      // never gains tax on top (07/10/2026).
+      const finalTotal = Number((subtotal + deliveryFee).toFixed(2));
 
       const orderData = {
         items: normalizePosOrderItems(cartItems as any[]),
         // Pass all financial fields explicitly so backend doesn't need to derive them
         total_amount: finalTotal,
         subtotal: subtotal,
-        tax_amount: taxAmount,
-        tax_rate: taxRatePercentage, // Store the tax rate used (percentage)
         delivery_fee: deliveryFee,
         status: 'pending' as const,
         order_type: orderType,
@@ -621,6 +619,7 @@ const MenuPage: React.FC = () => {
               onPlaceOrder={handlePlaceOrder}
               isPlacingOrder={isPlacingOrder}
               deliveryFee={deliveryFeeFromZone}
+              ownerVatRatePercent={ownerVatRatePercent}
             />
           </motion.div>
         </motion.div>

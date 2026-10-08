@@ -2,6 +2,12 @@ import React, { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal, POSGlassSwitch } from '../ui/pos-glass-components'
+import {
+  type EcrDeviceType,
+  ecrTypeRequiredMessage,
+  hasFiscalCashRegisterIdentity,
+  resolveEcrDeviceType,
+} from '../../utils/ecr-device-type'
 
 type ConnectionType = 'bluetooth' | 'serial_usb' | 'network'
 type Protocol = 'generic' | 'zvt' | 'pax'
@@ -10,6 +16,7 @@ interface ECRDevice {
   id: string
   name: string
   deviceType: string
+  brand?: string
   connectionType: ConnectionType
   connectionDetails: Record<string, unknown>
   protocol: Protocol
@@ -39,6 +46,13 @@ interface Props {
   onSave: (device: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'>) => Promise<void>
   device?: ECRDevice // For editing existing device
   discoveredDevice?: DiscoveredDevice // For creating from discovery
+  /** Opens Settings > Cash Register / Fiscal Printer (a fiscal register is never saved here). */
+  onOpenCashRegisterSetup?: () => void
+  /**
+   * Shown while "enabled" is on and the card terminal is not admitted (no active,
+   * configured payment plugin for this store). The parent also refuses the save.
+   */
+  notAdmittedNotice?: string
 }
 
 // Round 295: the print-on-terminal / default / enabled switches use the shared POSGlassSwitch (one
@@ -51,6 +65,8 @@ export const TerminalConfigModal: React.FC<Props> = ({
   onSave,
   device,
   discoveredDevice,
+  onOpenCashRegisterSetup,
+  notAdmittedNotice,
 }) => {
   const { t } = useTranslation()
   const isEdit = !!device
@@ -63,6 +79,9 @@ export const TerminalConfigModal: React.FC<Props> = ({
   const [merchantId, setMerchantId] = useState('')
   const [isDefault, setIsDefault] = useState(false)
   const [enabled, setEnabled] = useState(true)
+  // Founder rule 08/10/2026: the device type is never defaulted silently. A new
+  // or unknown device needs an explicit choice; RBS / ELIO is a fiscal register.
+  const [deviceType, setDeviceType] = useState<EcrDeviceType | null>(null)
 
   // Connection details
   const [btAddress, setBtAddress] = useState('')
@@ -84,6 +103,21 @@ export const TerminalConfigModal: React.FC<Props> = ({
     'Bluetooth payment terminals are not available in this version. Use USB/Serial or Network (TCP).'
   )
 
+  // A fiscal identity in the typed name, the stored brand or the discovered
+  // manufacturer/model always wins: such a device is never a card terminal.
+  const identityIsFiscal = hasFiscalCashRegisterIdentity({
+    name,
+    brand: device?.brand,
+    manufacturer: discoveredDevice?.manufacturer,
+    model: discoveredDevice?.model,
+  })
+  const effectiveDeviceType: EcrDeviceType | null = identityIsFiscal ? 'cash_register' : deviceType
+  const fiscalRegisterMessage = t('ecr.admission.fiscalNotCardTerminal', {
+    defaultValue:
+      'A fiscal cash register (such as RBS or ELIO) is not a card terminal. Set it up under Cash Register / Fiscal Printer.',
+  })
+  const typeRequiredMessage = ecrTypeRequiredMessage(t)
+
   // Initialize form values
   useEffect(() => {
     if (device) {
@@ -94,6 +128,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
       setMerchantId(device.merchantId || '')
       setIsDefault(device.isDefault)
       setEnabled(device.enabled)
+      setDeviceType(resolveEcrDeviceType(device))
 
       const details = device.connectionDetails
       if (device.connectionType === 'bluetooth') {
@@ -113,6 +148,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
     } else if (discoveredDevice) {
       setName(discoveredDevice.name || '')
       setConnectionType(discoveredDevice.connectionType)
+      setDeviceType(resolveEcrDeviceType(discoveredDevice))
 
       const details = discoveredDevice.connectionDetails
       if (discoveredDevice.connectionType === 'bluetooth') {
@@ -142,6 +178,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
       setMerchantId('')
       setIsDefault(false)
       setEnabled(true)
+      setDeviceType(null)
       setBtAddress('')
       setBtChannel(1)
       setSerialPort('')
@@ -158,6 +195,15 @@ export const TerminalConfigModal: React.FC<Props> = ({
 
     if (bluetoothUnavailable) {
       toast.error(bluetoothUnavailableMessage)
+      return
+    }
+
+    if (effectiveDeviceType === null) {
+      toast.error(typeRequiredMessage)
+      return
+    }
+    if (effectiveDeviceType !== 'payment_terminal') {
+      toast.error(fiscalRegisterMessage)
       return
     }
 
@@ -193,7 +239,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
 
     const deviceConfig: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'> = {
       name: name.trim(),
-      deviceType: 'payment_terminal',
+      deviceType: effectiveDeviceType,
       connectionType,
       connectionDetails,
       protocol,
@@ -232,6 +278,12 @@ export const TerminalConfigModal: React.FC<Props> = ({
         ? serialPort
         : networkIp
   const requiredFieldsComplete = name.trim().length > 0 && requiredConnectionField.trim().length > 0
+  const deviceTypeBlocked = effectiveDeviceType !== 'payment_terminal'
+  const showNotAdmittedNotice =
+    Boolean(notAdmittedNotice) &&
+    enabled &&
+    effectiveDeviceType === 'payment_terminal' &&
+    (!device || !device.enabled || device.deviceType !== 'payment_terminal')
 
   return (
     <LiquidGlassModal
@@ -252,7 +304,12 @@ export const TerminalConfigModal: React.FC<Props> = ({
               {bluetoothUnavailableMessage}
             </p>
           )}
-          {!bluetoothUnavailable && !requiredFieldsComplete && !isSaving && (
+          {!bluetoothUnavailable && effectiveDeviceType === null && !isSaving && (
+            <p role="status" className="mb-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+              {typeRequiredMessage}
+            </p>
+          )}
+          {!bluetoothUnavailable && !deviceTypeBlocked && !requiredFieldsComplete && !isSaving && (
             <p
               data-terminal-required-hint
               className="mb-2 text-xs font-medium text-amber-700 dark:text-amber-300"
@@ -271,7 +328,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             <button
               type="submit"
               form="terminal-config-form"
-              disabled={isSaving || bluetoothUnavailable || !requiredFieldsComplete}
+              disabled={isSaving || bluetoothUnavailable || deviceTypeBlocked || !requiredFieldsComplete}
               className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-green-600 active:bg-green-700 text-white font-medium border border-green-600 shadow-sm shadow-green-600/25 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSaving
@@ -299,6 +356,60 @@ export const TerminalConfigModal: React.FC<Props> = ({
               placeholder={t('ecr.config.namePlaceholder', 'e.g., Main Terminal')}
               className="w-full px-4 py-2 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-amber-500 focus:border-transparent"
             />
+          </div>
+
+          <div>
+            <span
+              id="terminal-config-device-type"
+              className="block text-sm font-medium liquid-glass-modal-text mb-2"
+            >
+              {t('settings.peripherals.cashRegister.deviceType', 'Device Type')} *
+            </span>
+            <div
+              role="radiogroup"
+              aria-labelledby="terminal-config-device-type"
+              className="grid grid-cols-2 gap-2"
+            >
+              {(['payment_terminal', 'cash_register'] as const).map((option) => {
+                const selected = effectiveDeviceType === option
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={option === 'payment_terminal' && identityIsFiscal}
+                    onClick={() => setDeviceType(option)}
+                    className={`min-h-[44px] rounded-xl border px-3 py-2 text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50 ${
+                      selected
+                        ? 'border-green-600 bg-green-600/15 text-green-800 dark:text-green-200'
+                        : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text'
+                    }`}
+                  >
+                    {option === 'payment_terminal'
+                      ? t('settings.peripherals.cashRegister.paymentTerminal', 'Payment Terminal')
+                      : t('settings.peripherals.cashRegister.cashRegister', 'Fiscal Cash Register')}
+                  </button>
+                )
+              })}
+            </div>
+            {effectiveDeviceType === 'cash_register' && (
+              <div
+                role="alert"
+                className="mt-2 space-y-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200"
+              >
+                <p>{fiscalRegisterMessage}</p>
+                {onOpenCashRegisterSetup && (
+                  <button
+                    type="button"
+                    onClick={onOpenCashRegisterSetup}
+                    className="inline-flex min-h-[36px] items-center rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 font-medium active:bg-amber-500/25"
+                  >
+                    {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -523,6 +634,11 @@ export const TerminalConfigModal: React.FC<Props> = ({
               aria-label={t('ecr.config.enabled', 'Terminal enabled')}
             />
           </div>
+          {showNotAdmittedNotice && (
+            <p role="status" className="text-xs font-medium text-amber-700 dark:text-amber-300">
+              {notAdmittedNotice}
+            </p>
+          )}
         </div>
 
       </form>

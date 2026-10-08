@@ -30,9 +30,11 @@ const MIRRORED_RECEIPT_ORIGIN: &str = "sync_reconstructed";
 /// order of authority as Android's `resolvePrivilegedStaffId(['void_orders'])`:
 /// the terminal's own session when it carries the right (the desktop admin
 /// session today), else the cashier or manager checked in at this till when
-/// their store role grants `pos.orders.cancel`. Ordinary manual cancellation
-/// asks no manager PIN on either app; the canonical table lifecycle keeps its
-/// own staff-PIN approval.
+/// their store role grants `pos.orders.cancel`, else a staff member who holds
+/// it and approves with their own PIN (founder 07/10/2026). Neither of the
+/// last two needs a terminal session: the session expires after two hours
+/// while the till stays open, and the store could not cancel at all. The
+/// canonical table lifecycle keeps its own staff-PIN approval.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CancellationActor {
     /// The identity kept in this till's audit rows.
@@ -106,26 +108,28 @@ fn staff_holds_store_permission(
     })
 }
 
-pub(crate) fn cancellation_actor(
+/// The session or the cashier on shift when either may cancel, without using
+/// a manager's approval.
+fn standing_cancellation_actor(
     conn: &Connection,
     auth: &auth::AuthState,
-) -> Result<CancellationActor, String> {
+) -> Result<Option<CancellationActor>, String> {
     let session = auth::get_session_json(auth);
-    let session_staff = session["staffId"]
+    if let Some(session_staff) = session["staffId"]
         .as_str()
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .ok_or("AUTHENTICATION_REQUIRED")?
-        .to_owned();
-    if ["delete_order", "pos.orders.cancel", "void_orders"]
-        .iter()
-        .any(|permission| auth::has_permission(auth, Some(permission)))
     {
-        let staff_id = uuid_text(session["databaseStaffId"].as_str());
-        return Ok(CancellationActor {
-            audit_id: staff_id.clone().unwrap_or(session_staff),
-            staff_id,
-        });
+        if ["delete_order", "pos.orders.cancel", "void_orders"]
+            .iter()
+            .any(|permission| auth::has_permission(auth, Some(permission)))
+        {
+            let staff_id = uuid_text(session["databaseStaffId"].as_str());
+            return Ok(Some(CancellationActor {
+                audit_id: staff_id.clone().unwrap_or_else(|| session_staff.to_owned()),
+                staff_id,
+            }));
+        }
     }
     let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
     if let Some((_, cashier)) = crate::order_ownership::resolve_active_cashier_assignment(
@@ -140,14 +144,63 @@ pub(crate) fn cancellation_actor(
                 &cashier,
                 STORE_CANCEL_PERMISSION,
             ) {
-                return Ok(CancellationActor {
+                return Ok(Some(CancellationActor {
                     audit_id: cashier.clone(),
                     staff_id: Some(cashier),
-                });
+                }));
             }
         }
     }
+    Ok(None)
+}
+
+/// The till asks for an approver's own PIN; the screen shows the PIN prompt
+/// and sends the cancellation again. The text keeps the permission code, so
+/// a screen that cannot ask still says why.
+fn approval_required() -> String {
+    let error = auth::PrivilegedActionError::manager_approval(
+        auth::MoneyApproval::VoidOrders,
+        format!(
+            "{PERMISSION_REQUIRED}: a staff member who may cancel paid orders approves it with their own PIN"
+        ),
+    );
+    serde_json::to_string(&error).unwrap_or_else(|_| PERMISSION_REQUIRED.into())
+}
+
+/// Whether this till can cancel a paid order now or after an approver's PIN.
+/// The plan is shown only then; nothing is used up.
+pub(crate) fn cancellation_possible(
+    conn: &Connection,
+    auth: &auth::AuthState,
+) -> Result<(), String> {
+    if standing_cancellation_actor(conn, auth)?.is_some() {
+        return Ok(());
+    }
+    let scope = OpeningScope::resolve(conn).ok_or("TERMINAL_SCOPE_UNAVAILABLE")?;
+    if auth::manager_approval_available(conn, &scope.branch_id, auth::MoneyApproval::VoidOrders) {
+        return Ok(());
+    }
     Err(PERMISSION_REQUIRED.into())
+}
+
+/// Who cancels: see [`CancellationActor`]. An approver's PIN is used once.
+pub(crate) fn cancellation_actor(
+    conn: &Connection,
+    auth: &auth::AuthState,
+) -> Result<CancellationActor, String> {
+    if let Some(actor) = standing_cancellation_actor(conn, auth)? {
+        return Ok(actor);
+    }
+    // Only a server staff identity approves: the server checks its rights.
+    match auth::take_manager_approval(auth, auth::MoneyApproval::VoidOrders)
+        .and_then(|approver| uuid_text(Some(&approver)))
+    {
+        Some(approver) => Ok(CancellationActor {
+            audit_id: approver.clone(),
+            staff_id: Some(approver),
+        }),
+        None => Err(approval_required()),
+    }
 }
 
 /// The fresh, terminal-authenticated answer to "is a bank transport
@@ -354,6 +407,18 @@ pub(crate) async fn fetch_return_evidence(
     } else {
         ProviderAdmission::NotChecked
     };
+    // The same answer admits or retires this till's card terminal
+    // (`crate::device_admission`); only a definite answer is kept.
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if OpeningScope::resolve(&conn).as_ref() == Some(&scope) {
+            if let Err(error) =
+                crate::device_admission::record_card_admission(&conn, &scope, admission)
+            {
+                tracing::warn!(error = %error, "card terminal admission was not saved");
+            }
+        }
+    }
     let receipts = if !needs.mirrored_receipts {
         CanonicalReceipts::NotChecked
     } else {
@@ -383,22 +448,15 @@ pub(crate) async fn fetch_return_evidence(
     })
 }
 
-/// No bank transport may own the return. A card terminal configured on this
-/// till blocks it whether or not it is connected right now (Android blocks
-/// any enabled ECR device; its only kind is the card terminal, while a
-/// desktop `cash_register` is a fiscal register, not a bank transport). The
-/// branch's providers are judged by the fresh admission only.
-fn no_connected_bank(conn: &Connection, admission: ProviderAdmission) -> Result<(), String> {
-    let configured: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ecr_devices WHERE device_type='payment_terminal' AND enabled=1)",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if configured {
-        return Err(PROVIDER_REQUIRED.into());
-    }
+/// No bank transport may own the return. The branch's providers are judged by
+/// the fresh admission only. A card terminal saved on this till counts only
+/// through that same admission (founder rule 08/10/2026, Android parity): it
+/// is admitted exactly when a payment plugin is connected, which already
+/// refuses here. A terminal whose plugin is not active, configured and
+/// finished is inert and never blocks a manual return (08/10/2026: a fiscal
+/// cash register saved as an enabled `payment_terminal`, with no payment
+/// plugin in the store, refused every manual return of a paid card order).
+fn no_connected_bank(admission: ProviderAdmission) -> Result<(), String> {
     match admission {
         ProviderAdmission::NotConnected => Ok(()),
         ProviderAdmission::Connected => Err(PROVIDER_REQUIRED.into()),
@@ -590,7 +648,7 @@ pub(crate) fn prepare_validated(
     if !order_source_allows_manual_return(conn, id)? {
         return Err(PLATFORM_ORDER_RETURN_REQUIRED.into());
     }
-    no_connected_bank(conn, admission)?;
+    no_connected_bank(admission)?;
     let provider_attempt: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM ecr_transactions WHERE order_id=?1 AND LOWER(transaction_type)='sale' )",[&id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if provider_attempt {
         return Err(PROVIDER_REQUIRED.into());
@@ -930,9 +988,30 @@ pub async fn order_prepare_manual_cancel(
 ) -> Result<Value, String> {
     let _binding = crate::repairs::acquire_terminal_binding_lease()?;
     let raw = arg0["orderId"].as_str().ok_or("Missing orderId")?;
+    let permitted = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        cancellation_possible(&conn, &auth)
+    };
+    if permitted.is_err() {
+        // The rights come from the staff directory this till keeps, read
+        // again only when a shift screen opens: a right given on the
+        // dashboard (06/10/2026) was refused until then. Read it once more,
+        // bounded; offline, the stored directory decides.
+        if let Ok(Err(error)) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            auth::refresh_staff_auth_directory(&db, None),
+        )
+        .await
+        {
+            tracing::debug!(error = %error, "Staff directory refresh before a cancellation failed");
+        }
+    }
     let (id, table_session, table_candidate) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        cancellation_actor(&conn, &auth)?;
+        // The approver's PIN, when one is needed, is asked at the commit.
+        if permitted.is_err() {
+            cancellation_possible(&conn, &auth)?;
+        }
         if let Some(pending) = crate::table_manual_cancellation::pending_plan(&conn, raw)? {
             return Ok(pending);
         }
@@ -1879,30 +1958,64 @@ pub(crate) mod tests {
         assert_eq!(count(&conn, "payment_adjustments"), 0);
     }
 
+    /// Founder rule 08/10/2026 (Android parity): a saved card terminal counts
+    /// only through the payment plugin behind it. 08/10/2026: the fiscal cash
+    /// register "Rbs Elio CR" was saved as an enabled `payment_terminal` in a
+    /// store with no payment plugin, and every manual return of a paid card
+    /// order was refused with ORIGINAL_PROVIDER_RETURN_REQUIRED.
     #[test]
-    fn any_enabled_card_terminal_blocks_like_android_but_a_fiscal_register_does_not() {
-        for (device_type, enabled, status, blocks) in [
-            ("payment_terminal", 1, "disconnected", true),
+    fn a_saved_card_terminal_without_its_payment_plugin_never_blocks_a_manual_return() {
+        for (device_type, enabled, status, stale_admitted) in [
+            ("payment_terminal", 1, "disconnected", false),
+            ("payment_terminal", 1, "connected", false),
+            // A stale "admitted" answer never outvotes the fresh one.
             ("payment_terminal", 1, "connected", true),
             ("payment_terminal", 0, "connected", false),
-            ("cash_register", 1, "connected", false),
+            ("cash_register", 1, "connected", true),
         ] {
             let conn = setup();
-            conn.execute("INSERT INTO ecr_devices(id,name,device_type,connection_type,status,enabled) VALUES('device','Device',?1,'network',?2,?3)",params![device_type,status,enabled]).unwrap();
-            let result = prepare(&conn, "order");
-            if blocks {
-                assert_eq!(
-                    result.unwrap_err(),
-                    PROVIDER_REQUIRED,
-                    "{device_type} {status}"
-                );
-            } else {
-                assert_eq!(
-                    result.unwrap()["amountCents"],
-                    600,
-                    "{device_type} {enabled}"
-                );
+            conn.execute("INSERT INTO ecr_devices(id,name,brand,device_type,connection_type,status,enabled) VALUES('device','Rbs Elio CR','RBS',?1,'network',?2,?3)",params![device_type,status,enabled]).unwrap();
+            if stale_admitted {
+                let scope = OpeningScope::resolve(&conn).unwrap();
+                crate::device_admission::record(&conn, device_type, &scope, true, None, None)
+                    .unwrap();
             }
+            assert_eq!(
+                prepare(&conn, "order").unwrap()["amountCents"],
+                600,
+                "{device_type} enabled={enabled} {status}"
+            );
+            // The fresh answer also retires the saved terminal on this till.
+            let evidence = admitted(&conn);
+            crate::device_admission::record_card_admission(
+                &conn,
+                evidence.scope.as_ref().unwrap(),
+                evidence.admission,
+            )
+            .unwrap();
+            assert!(!crate::device_admission::is_admitted(
+                &conn,
+                crate::device_admission::CARD_TERMINAL
+            ));
+        }
+    }
+
+    /// A connected payment plugin still owns the return, with or without a
+    /// card terminal saved on this till.
+    #[test]
+    fn a_connected_payment_plugin_still_requires_the_provider_return() {
+        for device in [false, true] {
+            let conn = setup();
+            if device {
+                conn.execute_batch("INSERT INTO ecr_devices(id,name,device_type,connection_type,status,enabled) VALUES('device','Card','payment_terminal','network','connected',1);").unwrap();
+            }
+            let mut evidence = admitted(&conn);
+            evidence.admission = ProviderAdmission::Connected;
+            assert_eq!(
+                super::prepare(&conn, "order", &evidence).unwrap_err(),
+                PROVIDER_REQUIRED,
+                "device={device}"
+            );
         }
     }
 
@@ -1973,17 +2086,28 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn paid_label_without_payment_still_cannot_cancel_and_unauthenticated_is_denied() {
+    fn paid_label_without_payment_still_cannot_cancel_and_nobody_unauthorized_cancels() {
         let conn = setup();
         conn.execute_batch("DELETE FROM order_payments").unwrap();
         assert_eq!(
             prepare(&conn, "order").unwrap_err(),
             orders::ORDER_PAYMENT_NOT_RECORDED
         );
+        // No session, no right on shift, and nobody in the directory who
+        // could approve: refused before the plan is shown.
+        let auth = auth::AuthState::new();
         assert_eq!(
-            cancellation_actor(&conn, &auth::AuthState::new()).unwrap_err(),
-            "AUTHENTICATION_REQUIRED"
+            cancellation_possible(&conn, &auth).unwrap_err(),
+            PERMISSION_REQUIRED
         );
+        let asked: Value =
+            serde_json::from_str(&cancellation_actor(&conn, &auth).unwrap_err()).unwrap();
+        assert_eq!(asked["code"], "REAUTH_REQUIRED");
+        assert_eq!(asked["approval"], "void_orders");
+        assert!(asked["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with(PERMISSION_REQUIRED));
     }
     #[test]
     fn retry_survives_restart_and_cannot_cross_terminal_scope() {
@@ -2481,9 +2605,16 @@ pub(crate) mod tests {
             db_path: std::path::PathBuf::from(":memory:"),
         };
         let auth = auth::AuthState::new();
+        let cashier = CancellationActor {
+            audit_id: CASHIER.into(),
+            staff_id: Some(CASHIER.into()),
+        };
+        // 07/10/2026: the terminal session had expired (two hours) while the
+        // till stayed open, and the store could not cancel a paid order. The
+        // cashier on shift needs no session.
         assert_eq!(
-            cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap_err(),
-            "AUTHENTICATION_REQUIRED"
+            cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap(),
+            cashier
         );
         assert_eq!(
             auth::login(Some(json!({"pin":"2468"})), &db, &auth).unwrap()["success"],
@@ -2491,10 +2622,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap(),
-            CancellationActor {
-                audit_id: CASHIER.into(),
-                staff_id: Some(CASHIER.into())
-            }
+            cashier
         );
         for refused in [
             directory(CASHIER, json!(["pos.orders.view"]), true, "branch"),
@@ -2504,12 +2632,92 @@ pub(crate) mod tests {
         ] {
             let conn = db.conn.lock().unwrap();
             db::set_setting(&conn, "staff_auth_cache", "branch_branch", &refused).unwrap();
+            // Nobody listed has a PIN to approve with: refused before the plan.
             assert_eq!(
-                cancellation_actor(&conn, &auth).unwrap_err(),
+                cancellation_possible(&conn, &auth).unwrap_err(),
                 PERMISSION_REQUIRED,
                 "{refused}"
             );
+            assert!(
+                cancellation_actor(&conn, &auth)
+                    .unwrap_err()
+                    .contains(PERMISSION_REQUIRED),
+                "{refused}"
+            );
         }
+    }
+
+    #[test]
+    fn an_approver_pin_cancels_a_paid_order_once_without_a_session() {
+        // Founder 07/10/2026: when nobody at the till may cancel a paid order,
+        // a staff member who may approves it with their own PIN, as the table
+        // cancellation does. The terminal session may have expired.
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = setup();
+        canonical_cashier(&conn);
+        let directory = json!({"version":1,"branch_id":"branch","staff":[
+            {"id":CASHIER,"isActive":true,"canLoginPos":true,"hasPin":true,
+             "pinHash":bcrypt::hash("2468",4).unwrap(),"permissions":["pos.orders.view"]},
+            {"id":APPROVER,"isActive":true,"canLoginPos":true,"hasPin":true,
+             "pinHash":bcrypt::hash("1357",4).unwrap(),"permissions":["pos.orders.cancel"]}
+        ]});
+        db::set_setting(
+            &conn,
+            "staff_auth_cache",
+            "branch_branch",
+            &directory.to_string(),
+        )
+        .unwrap();
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+        let auth = auth::AuthState::new();
+        let confirm = |pin: &str| {
+            auth::confirm_privileged_action(
+                Some(json!({"pin":pin,"scope":"cash_drawer_control","approval":"void_orders"})),
+                &db,
+                &auth,
+            )
+        };
+        let asks = || {
+            let error = cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap_err();
+            let asked: Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(asked["code"], "REAUTH_REQUIRED", "{error}");
+            assert_eq!(asked["approval"], "void_orders", "{error}");
+        };
+
+        // The plan is shown: someone can approve it.
+        cancellation_possible(&db.conn.lock().unwrap(), &auth).unwrap();
+        asks();
+        // The cashier's own PIN does not hold the right.
+        assert_eq!(confirm("2468").unwrap_err().reason, "Invalid PIN");
+        asks();
+        let approved = confirm("1357").unwrap();
+        assert_eq!(approved["approvedBy"], APPROVER);
+        assert_eq!(approved["sessionId"], Value::Null);
+        assert_eq!(
+            cancellation_actor(&db.conn.lock().unwrap(), &auth).unwrap(),
+            CancellationActor {
+                audit_id: APPROVER.into(),
+                staff_id: Some(APPROVER.into())
+            }
+        );
+        // Used once.
+        asks();
+        let audited: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM recovery_action_log
+                 WHERE action_id='manager_approval' AND issue_code='void_orders'
+                   AND actor_staff_id=?1",
+                [APPROVER],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 1);
     }
 
     #[test]
@@ -2673,5 +2881,128 @@ pub(crate) mod tests {
             super::prepare(&conn, "order", &evidence).unwrap_err(),
             PROVIDER_REQUIRED
         );
+    }
+
+    // Store incident 07/10/2026 (desktop 1.4.125): a paid delivery order (one
+    // manual card receipt with a 0.75 tip) went to a driver, was marked
+    // delivered, then reset to pending; its cancellation was refused. The
+    // path runs on the real local halves (`commands::orders::driver_restore_tests`).
+
+    fn refunds(conn: &Connection) -> (i64, i64, String) {
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM payment_adjustments WHERE adjustment_type='refund'),
+                    (SELECT COALESCE(SUM(amount_cents),0) FROM payment_adjustments WHERE adjustment_type='refund'),
+                    (SELECT status FROM orders WHERE id=?1)",
+            [crate::commands::orders::driver_restore_tests::ORDER],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_paid_delivery_reset_from_delivered_cancels_with_one_manual_return() {
+        use crate::commands::orders::driver_restore_tests as restore;
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = restore::test_conn();
+        restore::paid_delivery_order(&conn);
+        let mut server = restore::assign_and_deliver(&conn);
+        restore::reset_to_pending(&mut conn);
+        // RESET replays the receipt without its driver: until the server took
+        // it, no return of that original is recorded (the cashier is told to
+        // sync, never to charge again).
+        assert_eq!(
+            prepare(&conn, restore::ORDER).unwrap_err(),
+            "PAYMENT_SYNC_REQUIRED"
+        );
+        server.sync(&conn);
+        let plan = prepare(&conn, restore::ORDER).unwrap();
+        assert_eq!(plan["requiresReturn"], true, "{plan}");
+        assert_eq!(plan["requiresHandback"], false);
+        assert_eq!(plan["cashReturns"], json!([]));
+        assert_eq!(plan["amountCents"], 1075);
+        assert_eq!(
+            plan["payments"],
+            json!([{"paymentId":restore::PAYMENT,"amountCents":1075}])
+        );
+        let input = json!({"orderId":restore::ORDER,"reason":"Customer cancelled","returnChannel":"bank",
+            "requestId":"restored-cancel","generation":plan["generation"]});
+        assert_eq!(
+            commit(&conn, &input, "operator").unwrap()["amountCents"],
+            1075
+        );
+        assert_eq!(
+            commit(&conn, &input, "operator").unwrap()["duplicate"],
+            true
+        );
+        assert_eq!(refunds(&conn), (1, 1075, "cancelled".into()));
+        assert_eq!(count(&conn, "staff_order_cash_returns"), 0);
+    }
+
+    #[test]
+    fn an_untipped_delivery_order_cancels_after_a_driver_run_and_reset() {
+        // Without a driver tip nothing re-sent the receipt, yet driver
+        // assignment and RESET marked it unsynced: refused forever with
+        // PAYMENT_SYNC_REQUIRED before the fix.
+        use crate::commands::orders::driver_restore_tests as restore;
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = restore::test_conn();
+        restore::paid_delivery_order(&conn);
+        restore::without_tip(&conn);
+        let mut server = restore::assign_and_deliver(&conn);
+        // A delivered order with its driver cancels too (history cancel).
+        assert_eq!(prepare(&conn, restore::ORDER).unwrap()["amountCents"], 1000);
+        restore::reset_to_pending(&mut conn);
+        assert_eq!(prepare(&conn, restore::ORDER).unwrap()["amountCents"], 1000);
+        server.sync(&conn);
+        let plan = prepare(&conn, restore::ORDER).unwrap();
+        let input = json!({"orderId":restore::ORDER,"reason":"Customer cancelled","returnChannel":"bank",
+            "requestId":"untipped-cancel","generation":plan["generation"]});
+        commit(&conn, &input, "operator").unwrap();
+        assert_eq!(refunds(&conn), (1, 1000, "cancelled".into()));
+    }
+
+    #[test]
+    fn a_reset_delivery_order_corrected_after_reset_cancels_all_its_money_once() {
+        use crate::commands::orders::driver_restore_tests as restore;
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = restore::test_conn();
+        restore::paid_delivery_order(&conn);
+        let mut server = restore::assign_deliver_and_restore(&mut conn);
+        let mut request = restore::correction_request("restored-edit");
+        restore::preflight_correction(&conn, &server, &mut request).unwrap();
+        assert_eq!(
+            restore::save_correction(&conn, &request).unwrap()["success"],
+            true
+        );
+        // The collected difference is not returned before it synced either.
+        assert_eq!(
+            prepare(&conn, restore::ORDER).unwrap_err(),
+            "PAYMENT_SYNC_REQUIRED"
+        );
+        restore::sync_correction(&conn, &mut server, "9a8b7c6d-5e4f-4a3b-9c2d-1e0f2a3b4c5d");
+        assert!(
+            restore::queued(&conn).is_empty(),
+            "{:?}",
+            restore::queued(&conn)
+        );
+        let plan = prepare(&conn, restore::ORDER).unwrap();
+        assert_eq!(plan["amountCents"], 1275, "{plan}");
+        assert_eq!(plan["payments"].as_array().unwrap().len(), 2);
+        let input = json!({"orderId":restore::ORDER,"reason":"Customer cancelled","returnChannel":"cash_drawer",
+            "requestId":"restored-edited-cancel","generation":plan["generation"]});
+        commit(&conn, &input, "operator").unwrap();
+        assert_eq!(
+            commit(&conn, &input, "operator").unwrap()["duplicate"],
+            true
+        );
+        assert_eq!(refunds(&conn), (2, 1275, "cancelled".into()));
+        let drawer_refunds: i64 = conn
+            .query_row(
+                "SELECT total_refunds_cents FROM cash_drawer_sessions WHERE id='cashier-drawer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(drawer_refunds, 1275);
     }
 }

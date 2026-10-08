@@ -48,9 +48,14 @@ export function customerInfoEditUpdate(info: EditCustomerInfoFormData, original:
   const metadataOnly = info.destinationChanged === false;
   const sameDestination = metadataOnly || (info.destinationChanged !== true && isSameCustomerEditDestination(info, original));
   const point = toValidLatLng(info.coordinates, info.latitude, info.longitude);
+  // The editor corrects the linked customer's contact; it never re-links the
+  // order. Without the id the server was asked to create a customer for a
+  // phone that already belonged to this one and refused the edit (06/10/2026).
+  const customerId = resolvePersistedCustomerId(original.customerId);
   return {
     expectedVersion: original.expectedVersion ?? info.expectedVersion,
     ...(original.expectedLocalVersion === undefined ? {} : { expectedLocalVersion: original.expectedLocalVersion }),
+    ...(customerId ? { customerId } : {}),
     customerName: info.name.trim(), customerPhone: info.phone.trim(), deliveryAddress: metadataOnly ? original.address.trim() : info.address.trim(),
     deliveryFloor: info.delivery_floor?.trim() || null, nameOnRinger: info.name_on_ringer?.trim() || null,
     deliveryNotes: info.notes?.trim() || null,

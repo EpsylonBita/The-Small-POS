@@ -1599,13 +1599,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         ),
       );
 
-      // Prices are entered gross for Greece, so VAT is extracted from the discounted amount.
+      // Prices are entered gross. The order's VAT is computed natively from its
+      // lines, as the server computes it (07/10/2026); the store's checkout
+      // rate above only gates readiness and is never the order's VAT.
       const subtotalAfterDiscount = orderData.total; // Already includes discount
-      const taxDivisor = 1 + taxRatePercentage / 100;
-      const tax =
-        taxDivisor > 0
-          ? Math.round((subtotalAfterDiscount - subtotalAfterDiscount / taxDivisor) * 100) / 100
-          : 0;
       const tipAmount = Math.max(
         0,
         Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
@@ -1796,7 +1793,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         // Use total_amount instead of total (matching shared types)
         total_amount: total_amount,
         subtotal: subtotalAfterDiscount,
-        tax_amount: tax,
         country_code: 'GR',
         pricing_mode: 'tax_inclusive',
         delivery_fee: deliveryFee,

@@ -30,7 +30,7 @@
     }
   },
   "checkoutRecovery": {
-    "title": "Operazioni dei tavoli in attesa di recupero",
+    "title": "Operazioni in attesa di recupero",
     "guidance": "Le richieste originali restano salvate. Servono Internet e autorizzazioni attuali. Non ripetere un pagamento incerto.",
     "unavailable": "Lo stato di recupero non può essere letto. Le operazioni in sospeso vengono conservate.",
     "pending": "In attesa di riconnessione",

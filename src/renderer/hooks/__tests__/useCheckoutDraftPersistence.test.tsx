@@ -191,3 +191,21 @@ describe('a refused order correction (06/10/2026)', () => {
     expect(native.mock.calls.map(call => call[0])).toEqual(['checkout_draft_get', 'checkout_draft_delete', 'checkout_draft_put']);
   });
 });
+
+describe('closing the order menu (1.4.125, stuck edit)', () => {
+  it('reports a recorded submission and a renewed refused correction from the hydrated draft', async () => {
+    const renewed = { ...createCheckoutDraft(), ...snapshot, context: { editMode: true, editOrderId: 'paid-order', supersedesEditEvent: 'refused' } };
+    const native = vi.fn(async (command: string, input: any) => command === 'checkout_draft_inspect'
+      ? { success: true, outcome: 'not_found', canCollect: false }
+      : { success: true, scope, generation: 2, draft: command === 'checkout_draft_get' ? renewed : input.draft });
+    mocks.getStore.mockResolvedValue(new CheckoutDraftStore(scope, native));
+    const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+    await waitFor(() => expect(result.current.status).toBe('loaded'));
+    act(() => result.current.markHydrated());
+    expect(result.current.supersedesEdit()).toBe(true);
+    expect(result.current.hasSubmission()).toBe(false);
+    await act(async () => { await result.current.freeze(snapshot, { action: 'edit_settlement' }); });
+    expect(result.current.hasSubmission()).toBe(true);
+    expect(result.current.supersedesEdit()).toBe(false);
+  });
+});

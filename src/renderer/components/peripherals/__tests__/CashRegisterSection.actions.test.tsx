@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { bridge, notices, translation } = vi.hoisted(() => ({
   bridge: { ecr: { getDevices: vi.fn(), getAllStatuses: vi.fn(), updateDevice: vi.fn(), addDevice: vi.fn(), removeDevice: vi.fn(),
-    testConnection: vi.fn(), testPrint: vi.fn(), connectDevice: vi.fn(), disconnectDevice: vi.fn() },
+    testConnection: vi.fn(), testPrint: vi.fn(), connectDevice: vi.fn(), disconnectDevice: vi.fn(), getDeviceAdmission: vi.fn() },
   settings: { get: vi.fn(), set: vi.fn() } },
   notices: { success: vi.fn(), error: vi.fn() },
-  translation: { t: (key: string, fallback?: string) => fallback ?? key },
+  translation: { t: (key: string, fallback?: string | { defaultValue?: string }) =>
+    typeof fallback === 'string' ? fallback : fallback?.defaultValue ?? key },
 }));
 vi.mock('../../../../lib', () => ({ getBridge: () => bridge, onEvent: vi.fn(), offEvent: vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => translation }));
@@ -20,6 +21,11 @@ import { CashRegisterSection } from '../CashRegisterSection';
 
 const device = { id: 'cash-1', name: 'Register A', deviceType: 'cash_register', brand: 'Generic', protocol: 'generic',
   connectionType: 'network', connectionDetails: { ip: '127.0.0.1', port: 9100 }, printMode: 'pos_sends_receipt', status: 'disconnected', enabled: true };
+const admissionAnswer = (cashAdmitted: boolean) => ({
+  success: true,
+  cardTerminal: { admitted: false, fetchedAt: '2026-10-08T09:00:00Z' },
+  cashRegister: { admitted: cashAdmitted, fetchedAt: '2026-10-08T09:00:00Z', mode: 'fiscal_device', status: cashAdmitted ? 'connected' : 'pending' },
+});
 async function open() {
   render(<CashRegisterSection />);
   await screen.findByText('Register A');
@@ -36,6 +42,7 @@ describe('cash register device actions', () => {
     bridge.ecr.connectDevice.mockResolvedValue({ success: true });
     bridge.ecr.disconnectDevice.mockResolvedValue({ success: true });
     bridge.ecr.testPrint.mockResolvedValue({ success: true });
+    bridge.ecr.getDeviceAdmission.mockResolvedValue(admissionAnswer(true));
   });
   afterEach(cleanup);
 
@@ -155,5 +162,75 @@ describe('cash register device actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByText('Register A');
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  // Founder rule 08/10/2026: a cash register is inert until MyData is in
+  // fiscal-device mode with its setup finished (status connected).
+  it('shows a non-admitted register with its plugin state and lets it be disabled', async () => {
+    bridge.ecr.getDeviceAdmission.mockResolvedValue(admissionAnswer(false));
+    bridge.ecr.updateDevice.mockResolvedValue({ success: true });
+    await open();
+    expect(bridge.ecr.getDeviceAdmission).toHaveBeenCalledWith({ refresh: true });
+    expect(await screen.findByText(/Needs its plugin: fiscal cash registers stay inactive/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Disable', exact: true }));
+    await waitFor(() => expect(bridge.ecr.updateDevice).toHaveBeenCalledExactlyOnceWith('cash-1', { enabled: false }));
+    await waitFor(() => expect(notices.success).toHaveBeenCalledWith('Device disabled'));
+    expect(screen.getByText('Disabled')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Disable', exact: true })).toBeNull();
+  });
+
+  it('shows no plugin warning for an admitted register', async () => {
+    await open();
+    await waitFor(() => expect(bridge.ecr.getDeviceAdmission).toHaveBeenCalled());
+    expect(screen.queryByText(/Needs its plugin/)).toBeNull();
+  });
+
+  async function fillNewRegister() {
+    fireEvent.click(screen.getByRole('button', { name: 'Add Device', exact: true }));
+    fireEvent.change(screen.getByPlaceholderText('e.g., Main Cash Register'), { target: { value: 'Register B' } });
+    fireEvent.change(screen.getByDisplayValue('Choose verified protocol…'), { target: { value: 'generic' } });
+    fireEvent.change(screen.getByPlaceholderText('COM3'), { target: { value: 'COM6' } });
+  }
+  const saveNewRegister = () =>
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add Device', exact: true }).at(-1)!);
+
+  it('refuses adding an enabled register before native while MyData is not admitted, but saves it disabled', async () => {
+    bridge.ecr.getDeviceAdmission.mockResolvedValue(admissionAnswer(false));
+    bridge.ecr.addDevice.mockResolvedValue({ success: true });
+    await open();
+    await fillNewRegister();
+    saveNewRegister();
+    await waitFor(() => expect(notices.error).toHaveBeenCalledWith(expect.stringMatching(/This cash register cannot be enabled/)));
+    expect(bridge.ecr.addDevice).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Enabled' }));
+    saveNewRegister();
+    await waitFor(() => expect(bridge.ecr.addDevice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      deviceType: 'cash_register', enabled: false, name: 'Register B',
+    })));
+  });
+
+  it('maps a native DEVICE_NOT_ADMITTED refusal to the localized message', async () => {
+    bridge.ecr.addDevice.mockResolvedValue({ success: false, code: 'DEVICE_NOT_ADMITTED', deviceType: 'cash_register', error: 'Device type cash_register is not admitted' });
+    await open();
+    await fillNewRegister();
+    saveNewRegister();
+    await waitFor(() => expect(notices.error).toHaveBeenCalledWith(expect.stringMatching(/needs the store's MyData plugin in fiscal device mode/)));
+    expect(screen.getByDisplayValue('Register B')).toBeInTheDocument();
+  });
+
+  it('keeps renaming an enabled, non-admitted register possible without resending enabled', async () => {
+    bridge.ecr.getDeviceAdmission.mockResolvedValue(admissionAnswer(false));
+    bridge.ecr.updateDevice.mockResolvedValue({ success: true });
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit', exact: true }));
+    fireEvent.change(screen.getByDisplayValue('Register A'), { target: { value: 'Register A2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(bridge.ecr.updateDevice).toHaveBeenCalledTimes(1));
+    const [id, updates] = bridge.ecr.updateDevice.mock.calls[0];
+    expect(id).toBe('cash-1');
+    expect(updates).toMatchObject({ name: 'Register A2' });
+    // Native refuses `enabled` / a device type for an enabled, non-admitted device: neither is re-sent unchanged.
+    expect(updates).not.toHaveProperty('enabled');
+    expect(updates).not.toHaveProperty('deviceType');
   });
 });

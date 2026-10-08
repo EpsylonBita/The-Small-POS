@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
+import { ownerVatIncludedIn } from '../../utils/printedVat';
 
 /**
  * CartSummary Component
@@ -14,7 +15,9 @@ import { useDiscountSettings } from '../../hooks/useDiscountSettings';
  * This component handles:
  * - Subtotal calculation from pre-priced items
  * - Discount application
- * - Tax calculation
+ * - The VAT included in the total, as the slip prints it without a fiscal
+ *   plugin (founder rule 07/10/2026): the owner's configured rate, 0 when no
+ *   rate is set. It is never added to the total.
  * - Delivery fee (only for delivery orders per Requirements 9.5)
  */
 
@@ -54,6 +57,8 @@ interface CartSummaryProps {
   isPlacingOrder?: boolean;
   /** Delivery fee from delivery zone (only used for delivery orders) */
   deliveryFee?: number;
+  /** The owner's VAT rate (`tax.default_tax_rate`), null when not set. */
+  ownerVatRatePercent?: number | null;
 }
 
 export const CartSummary: React.FC<CartSummaryProps> = ({
@@ -65,13 +70,15 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
   onRemoveItem,
   onPlaceOrder,
   isPlacingOrder = false,
-  deliveryFee: deliveryFeeProp = 0
+  deliveryFee: deliveryFeeProp = 0,
+  ownerVatRatePercent = null
 }) => {
   const { t } = useTranslation();
 
   // Discount state and settings
   const [discountPercentage, setDiscountPercentage] = useState<string>('0');
-  const { maxDiscountPercentage, taxRatePercentage, isLoading: isLoadingSettings } = useDiscountSettings();
+  // `general.tax_rate` only gates the money settings' readiness; it is no VAT source.
+  const { maxDiscountPercentage, isLoading: isLoadingSettings } = useDiscountSettings();
 
   const subtotal = cartItems.reduce((sum, item) => {
     // Always use totalPrice if available (includes customizations)
@@ -92,14 +99,14 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
   const discountAmount = isDiscountValid ? subtotal * (discountValue / 100) : 0;
   const subtotalAfterDiscount = subtotal - discountAmount;
 
-  const inclusiveDivisor = 1 + taxRatePercentage / 100;
-  const tax =
-    inclusiveDivisor > 0
-      ? Math.max(0, subtotalAfterDiscount - subtotalAfterDiscount / inclusiveDivisor)
-      : 0;
   // Use delivery fee from prop (from delivery zone) only for delivery orders
   const deliveryFee = orderType === 'delivery' ? deliveryFeeProp : 0;
   const total = subtotalAfterDiscount + deliveryFee;
+  // The VAT inside the total at the owner's rate; prices include VAT.
+  const vatRatePercent = ownerVatRatePercent !== null && ownerVatRatePercent > 0 && ownerVatRatePercent <= 100
+    ? ownerVatRatePercent
+    : 0;
+  const tax = ownerVatIncludedIn(total, ownerVatRatePercent);
 
   if (cartItems.length === 0) {
     return (
@@ -257,7 +264,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
         </div>
 
         <div className="flex justify-between text-sm">
-          <span className="text-gray-600">{t('menu.cart.tax', { percent: taxRatePercentage })}</span>
+          <span className="text-gray-600">{t('menu.cart.tax', { percent: vatRatePercent })}</span>
           <span className="text-gray-900">{formatCurrency(tax)}</span>
         </div>
         {orderType === 'delivery' && (

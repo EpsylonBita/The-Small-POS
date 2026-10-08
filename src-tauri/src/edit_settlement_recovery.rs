@@ -305,11 +305,15 @@ pub(crate) fn remember_canonical_preflight(
     {
         return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
     }
+    // Tax is not compared: the server derives it from the lines and totals
+    // checked here, and a till may hold a different or missing figure for it.
+    // 06/10/2026 (1.4.123): a delivery order made from the dashboard was kept
+    // with tax 0 while the server computed 4.37 of VAT, and every paid
+    // correction of it was refused as "changed" before the refund question.
     for field in [
         "total_amount",
         "subtotal",
         "discount_amount",
-        "tax_amount",
         "delivery_fee",
         "tip_amount",
     ] {

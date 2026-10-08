@@ -10,11 +10,18 @@ import { getCachedTerminalCredentials } from './terminal-credentials';
  *
  * A manual card records a card the shop took on its own card machine, with no
  * terminal answer behind it. It is admitted only when this till has NO enabled
- * ECR card terminal AND a fresh, terminal-authenticated server answer for this
- * exact organization, branch and terminal says no payment provider is
- * connected. A cached or offline answer, a scope change during the read, a
- * malformed reply or any lookup error never admits: the caller refuses and
- * records nothing. Callers ask again right before they record.
+ * AND admitted ECR card terminal AND a fresh, terminal-authenticated server
+ * answer for this exact organization, branch and terminal says no payment
+ * provider is connected. A cached or offline answer, a scope change during the
+ * read, a malformed reply or any lookup error never admits: the caller refuses
+ * and records nothing. Callers ask again right before they record.
+ *
+ * Founder rule 08/10/2026: a device whose plugin is not active, configured and
+ * finished has no effect. Native `ecr_get_default_terminal` returns only an
+ * enabled card terminal that is admitted (a payment plugin is licensed and
+ * configured for the branch), so a disabled or non-admitted terminal (e.g. a
+ * fiscal register mistakenly saved as `payment_terminal`) reads as `none` and
+ * never refuses the manual card with `terminal_configured`.
  */
 export const MANUAL_CARD_ADMISSION_PATH = '/api/pos/payments/manual-admission';
 
@@ -29,7 +36,7 @@ export type CardTerminalLookup =
   | { kind: 'ready'; deviceId: string; name: string }
   /** An enabled ECR terminal exists but cannot take a card now (busy, disconnected, status unreadable). */
   | { kind: 'not_ready'; deviceId: string; name: string }
-  /** Native reported no enabled ECR device on this till. */
+  /** Native reported no enabled, admitted ECR card terminal on this till. */
   | { kind: 'none' }
   /** The device lookup failed or answered something unreadable: never "no terminal". */
   | { kind: 'unavailable' };
@@ -40,7 +47,7 @@ const isRow = (value: unknown): value is Row =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
 /**
- * The enabled default ECR device from `ecr.getDefaultTerminal()`: the device
+ * The enabled, admitted default ECR card terminal from `ecr.getDefaultTerminal()`: the device
  * row, `null` only for an explicit "no device" answer, `undefined` for
  * anything else (an error reply or another shape is not proof of absence).
  */
@@ -55,7 +62,7 @@ function readDefaultDevice(raw: unknown): Row | null | undefined {
 
 const trimmed = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 
-/** This till's enabled ECR card terminal and whether it can take a card now. Never throws. */
+/** This till's enabled, admitted ECR card terminal and whether it can take a card now. Never throws. */
 export async function lookupCardTerminal(): Promise<CardTerminalLookup> {
   const bridge = getBridge();
   let device: Row | null | undefined;

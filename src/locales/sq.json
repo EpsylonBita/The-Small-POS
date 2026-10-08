@@ -4247,6 +4247,7 @@
       "editTooManyLines": "Një korrigjim mund të ketë deri në {{maxLines}} rreshta. Hiqni rreshta, ose anuloni porosinë dhe krijoni një të re. Nuk u arkëtuan para.",
       "editMethodUnavailable": "Ky terminal nuk mund të regjistrojë para në dorë ose kartë për diferencën. Kërkojini një menaxheri të aktivizojë një mënyrë pagese për këtë terminal. Nuk u arkëtuan para.",
       "editPreviousNotSaved": "Një korrigjim i mëparshëm i kësaj porosie u konfirmua, por nuk u ruajt. Hapeni nga shporta e ruajtur për ta përgatitur sërish, ose kërkojini një menaxheri ta mbyllë. Mos arkëtoni e mos ktheni para sërish.",
+      "editProviderRefundRequired": "Kjo porosi ka një pagesë me kartë që kaloi nga një terminal kartash ose nga një ofrues pagesash, ndaj nuk mund ta korrigjosh në këtë arkë. Nuk ndryshoi asgjë.",
       "emptyEditHint": "Për të hequr të gjithë artikujt, mbyllni redaktuesin dhe anuloni porosinë.",
       "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash."
     },
@@ -5301,7 +5302,7 @@
       "attemptCleared": "Anulimi i ruajtur u fshi. Nuk u kthyen para. Mund ta anuloni përsëri porosinë.",
       "staffCashUnavailable": "Anulimi me dorëzim parash nuk është përkohësisht i disponueshëm. Kontrolloni lidhjen dhe provoni përsëri pas përditësimit të serverit.",
       "connectionUnavailable": "Gjendja e lidhjes së pagesave nuk është e disponueshme. Rifreskoni integrimet dhe provoni përsëri.",
-      "permissionRequired": "Kjo llogari nuk ka leje të anulojë porosi të paguara.",
+      "permissionRequired": "Askush këtu nuk mund të anulojë porosi të paguara: as arkëtari në turn, as dikush me këtë të drejtë dhe PIN në këtë arkë. Jepini të drejtën e anulimit një roli në panelin e adminit, pastaj provoni përsëri me internet.",
       "paymentSyncRequired": "Pagesa origjinale duhet të sinkronizohet para regjistrimit të kthimit. Sinkronizoni dhe provoni përsëri, pa tarifuar sërish.",
       "paymentChanged": "Pagesa ka ndryshuar. Mbyllni dritaren dhe zgjidhni përsëri Anulo për të kontrolluar shumën aktuale.",
       "drawerUnavailable": "Kërkohet një arkë e hapur për të regjistruar kthimin e parave në dorë.",
@@ -5335,7 +5336,9 @@
         "bad_weather": "Mot i keq",
         "duplicate_order": "Porosi e dyfishtë",
         "test_order": "Porosi prove"
-      }
+      },
+      "managerApprovalTitle": "Mirato anulimin",
+      "managerApprovalSubtitle": "Anulimi i një porosie të paguar kërkon të drejtën e anulimit. Një menaxher që e ka fut PIN-in e vet. Nuk tarifohet asgjë."
     },
     "addCustomer": {
       "title": "Shto klient të ri",
@@ -8327,6 +8330,20 @@
       "enabled": "Terminali i aktivizuar",
       "saveFailed": "Terminali nuk u ruajt"
     },
+    "admission": {
+      "cardTerminalNeedsPlugin": "Kërkon integrimin e vet: terminalet e kartave mbeten joaktive derisa për këtë dyqan të jetë aktiv dhe i konfiguruar një integrim pagesash.",
+      "cashRegisterNeedsPlugin": "Kërkon integrimin e vet: kasat fiskale mbeten joaktive derisa integrimi MyData i dyqanit të jetë në modalitetin e pajisjes fiskale dhe konfigurimi i tij të përfundojë.",
+      "cardTerminalRefused": "Ky terminal kartash nuk mund të aktivizohet: i duhet një integrim pagesash aktiv dhe i konfiguruar për këtë dyqan. Mund ta ruash të çaktivizuar.",
+      "cashRegisterRefused": "Kjo kasë nuk mund të aktivizohet: i duhet integrimi MyData i dyqanit në modalitetin e pajisjes fiskale, me konfigurimin të përfunduar. Mund ta ruash të çaktivizuar.",
+      "deviceRefused": "Kjo pajisje nuk mund të aktivizohet derisa integrimi i saj të jetë aktiv, i konfiguruar dhe i përfunduar për këtë dyqan.",
+      "typeRequired": "Zgjidh llojin e pajisjes: terminal pagesash ose kasë fiskale.",
+      "fiscalNotCardTerminal": "Një kasë fiskale (si RBS ose ELIO) nuk është terminal kartash. Konfiguroje te «Kasë fiskale / Printer fiskal».",
+      "savedAsCardTerminal": "Kjo duket si kasë fiskale (RBS / ELIO), por është ruajtur si terminal kartash. Çaktivizoje ose hiqe këtu, pastaj konfiguroje te «Kasë fiskale / Printer fiskal».",
+      "disable": "Çaktivizo",
+      "disabledBadge": "Çaktivizuar",
+      "disableSuccess": "Pajisja u çaktivizua",
+      "disableFailed": "Pajisja nuk mund të çaktivizohej"
+    },
     "status": {
       "connected": "Lidhur",
       "disconnected": "Shkëputur",
@@ -8789,6 +8806,7 @@
       "capTargetMismatch": "Destinacioni i shërbimit CAP mungon ose është ndryshe nga ky formular. Hap konfigurimin e lidhjes, vendos këtë IP ose portë COM te shërbimi i prodhuesit dhe pastaj rifresko statusin e mbështetjes.",
       "capServiceTarget": "Destinacioni i shërbimit të prodhuesit",
       "configSaved": "Konfigurimi i MyData u ruajt",
+      "deviceAwaitingSetup": "Pajisja fiskale u verifikua, por mbetet joaktive derisa të konfirmohet që konfigurimi MyData i dyqanit ka përfunduar. Pastaj aktivizoje te «Kasë fiskale / Printer fiskal».",
       "dashboardBanner": {
         "title": "myDATA konfigurohet te paneli i adminit",
         "body": "Pasi të konfigurohet myDATA, kuponët i dërgohen vetë zyrës së taksave (AADE). Vetë konfigurimi (kredencialet, të dhënat e TVSH-së, aktivizimi) bëhet te paneli yt i adminit: hap Integrime → MyData dhe ndiq hapat. Ky ekran duhet vetëm nëse lidh një printer fiskal (ΦΗΜ) me këtë arkë.",
@@ -10068,5 +10086,10 @@
     "waiterBody": "Arka kryesore është e mbyllur. Një arkëtar ose menaxher duhet të fillojë turnin në arkën kryesore të lidhur me këtë pajisje. Pastaj mund të filloni turnin tuaj dhe të vazhdoni.",
     "checking": "Po kontrollohet turni i arkëtarit…",
     "recheck": "Kontrollo përsëri"
+  },
+  "zReportOffline": {
+    "refusal": "Pa lidhje dita nuk mbyllet dot. Vazhdo të shesësh: dita mbetet e hapur dhe e mbyll sapo të kthehet lidhja. Për ta numëruar arkën tani, bëj mbylljen e turnit të arkëtarit, që printohet edhe pa internet, dhe shiko paraparjen në këtë ekran.",
+    "status": "Pa lidhje: dita mbyllet sapo të kthehet",
+    "checklist": "Nuk ka lidhje me serverin. Vazhdo të shesësh dhe mbyll ditën sapo të kthehet lidhja."
   }
 }

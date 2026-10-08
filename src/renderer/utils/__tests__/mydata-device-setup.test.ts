@@ -13,9 +13,15 @@ const custom = {
 };
 const connection = { type: 'network', host: '192.168.1.50', port: 1234, protocol: 'cap_driver', brand: 'RBS', model: 'configured model' };
 const device = () => ({ id: MYDATA_FISCAL_DEVICE_ID, connectionType: 'network', settings: buildMyDataDeviceSettings('cap_driver', 'configured model', null, custom) });
+const admissionAnswer = (cashAdmitted: boolean, status = cashAdmitted ? 'connected' : 'pending') => ({
+  success: true,
+  cardTerminal: { admitted: false, fetchedAt: '2026-10-08T09:00:00Z' },
+  cashRegister: { admitted: cashAdmitted, fetchedAt: '2026-10-08T09:00:00Z', mode: 'fiscal_device', status },
+});
 const setup = () => ({
   addDevice: vi.fn().mockResolvedValue({ success: true }), updateDevice: vi.fn().mockResolvedValue({ success: true }),
   connectDevice: vi.fn().mockResolvedValue({ success: true }), testConnection: vi.fn().mockResolvedValue({ success: true, connected: true }),
+  getDeviceAdmission: vi.fn().mockResolvedValue(admissionAnswer(true)),
 });
 
 describe('myDATA local device setup', () => {
@@ -55,6 +61,136 @@ describe('myDATA local device setup', () => {
     expect(remote.device_connection).not.toHaveProperty('settings');
     expect(remote.device_connection.verification).toMatchObject({ terminal_id: 'terminal-a', protocol_handshake: true });
     expect(ecr.testConnection.mock.invocationCallOrder[0]).toBeLessThan(save.mock.invocationCallOrder[0]);
+  });
+
+  // Founder rule 08/10/2026: an unfinished MyData plugin has no effect. Incident:
+  // a cash register was enabled while MyData (fiscal_device) was still `pending`.
+  it('saves the fiscal device disabled and enables it only after the server admits MyData', async () => {
+    const ecr = setup();
+    const save = vi.fn().mockResolvedValue({ success: true, data: { config: { mode: 'fiscal_device', status: 'connected' } } });
+    const result = await verifyAndSaveMyDataDevice(ecr, device(), false, 'terminal-a', connection, save);
+    expect(ecr.addDevice).toHaveBeenCalledWith(expect.objectContaining({ id: MYDATA_FISCAL_DEVICE_ID, enabled: false, isDefault: false }));
+    expect(ecr.getDeviceAdmission).toHaveBeenCalledWith({ refresh: true });
+    expect(ecr.updateDevice).toHaveBeenCalledExactlyOnceWith(MYDATA_FISCAL_DEVICE_ID, { enabled: true, isDefault: true });
+    // Order: native save (disabled) -> connect -> handshake -> server save -> admission -> enable.
+    expect(ecr.addDevice.mock.invocationCallOrder[0]).toBeLessThan(ecr.connectDevice.mock.invocationCallOrder[0]);
+    expect(ecr.connectDevice.mock.invocationCallOrder[0]).toBeLessThan(ecr.testConnection.mock.invocationCallOrder[0]);
+    expect(ecr.testConnection.mock.invocationCallOrder[0]).toBeLessThan(save.mock.invocationCallOrder[0]);
+    expect(save.mock.invocationCallOrder[0]).toBeLessThan(ecr.getDeviceAdmission.mock.invocationCallOrder[0]);
+    expect(ecr.getDeviceAdmission.mock.invocationCallOrder[0]).toBeLessThan(ecr.updateDevice.mock.invocationCallOrder[0]);
+    expect(result).toEqual({ saved: { success: true, data: { config: { mode: 'fiscal_device', status: 'connected' } } }, activated: true });
+  });
+
+  it('re-verifies an existing device disabled first, so native never refuses the save', async () => {
+    const ecr = setup();
+    const save = vi.fn().mockResolvedValue({ success: true });
+    await verifyAndSaveMyDataDevice(ecr, device(), true, 'terminal-a', connection, save);
+    expect(ecr.updateDevice.mock.calls[0]).toEqual([MYDATA_FISCAL_DEVICE_ID, expect.objectContaining({ enabled: false, isDefault: false })]);
+    expect(ecr.updateDevice.mock.calls[1]).toEqual([MYDATA_FISCAL_DEVICE_ID, { enabled: true, isDefault: true }]);
+    expect(ecr.addDevice).not.toHaveBeenCalled();
+  });
+
+  // Review of PR #335: re-verifying an already active register cleared its
+  // flags first, so any transient failure left a working register disabled.
+  describe('re-verifying an already active register', () => {
+    const activeRow = () => ({
+      id: MYDATA_FISCAL_DEVICE_ID, deviceType: 'cash_register', name: 'RBS old', brand: 'RBS', protocol: 'cap_driver',
+      connectionType: 'network', connectionDetails: { ip: '192.168.1.40' }, printMode: 'register_prints',
+      taxRates: [{ code: 'A', rate: 24 }], settings: { mydataManaged: true, capturePath: 'C:\\Capture' },
+      terminalId: null, enabled: 1, isDefault: 1, admitted: true,
+    });
+    const previousConfig = {
+      name: 'RBS old', brand: 'RBS', protocol: 'cap_driver', connectionType: 'network',
+      connectionDetails: { ip: '192.168.1.40' }, printMode: 'register_prints', taxRates: [{ code: 'A', rate: 24 }],
+      settings: { mydataManaged: true, capturePath: 'C:\\Capture' }, enabled: false, isDefault: false,
+    };
+
+    it.each([
+      ['the connection', (ecr: ReturnType<typeof setup>) => ecr.connectDevice.mockResolvedValue({ success: false, error: 'offline' })],
+      ['the handshake', (ecr: ReturnType<typeof setup>) => ecr.testConnection.mockResolvedValue({ success: true, connected: false })],
+      ['the server save', (ecr: ReturnType<typeof setup>) => ecr.testConnection.mockResolvedValue({ success: true, connected: true })],
+    ])('a failure of %s before the server holds the new setup puts the previous register back', async (label, arrange) => {
+      const ecr = setup();
+      arrange(ecr);
+      const save = label === 'the server save' ? vi.fn().mockRejectedValue(new Error('network')) : vi.fn();
+      await expect(verifyAndSaveMyDataDevice(ecr, device(), activeRow(), 'terminal-a', connection, save)).rejects.toThrow();
+      expect(ecr.updateDevice.mock.calls.slice(1)).toEqual([
+        [MYDATA_FISCAL_DEVICE_ID, previousConfig],
+        [MYDATA_FISCAL_DEVICE_ID, { enabled: true, isDefault: true }],
+      ]);
+    });
+
+    it('a refused server save puts the previous register back and reports whether it is active', async () => {
+      const ecr = setup();
+      const refused = vi.fn().mockResolvedValue({ success: false, error: 'Server refused' });
+      expect(await verifyAndSaveMyDataDevice(ecr, device(), activeRow(), 'terminal-a', connection, refused))
+        .toEqual({ saved: { success: false, error: 'Server refused' }, activated: false });
+      expect(ecr.updateDevice.mock.calls.slice(1)).toEqual([
+        [MYDATA_FISCAL_DEVICE_ID, previousConfig],
+        [MYDATA_FISCAL_DEVICE_ID, { enabled: true, isDefault: true }],
+      ]);
+      expect(ecr.getDeviceAdmission).not.toHaveBeenCalled();
+    });
+
+    it('an unreadable admission after the save keeps the verified setup with the previous flags; native decides', async () => {
+      const ecr = setup();
+      ecr.getDeviceAdmission.mockRejectedValue(new Error('ipc failed'));
+      const save = vi.fn().mockResolvedValue({ success: true });
+      expect((await verifyAndSaveMyDataDevice(ecr, device(), activeRow(), 'terminal-a', connection, save)).activated).toBe(true);
+      expect(ecr.updateDevice.mock.calls.slice(1)).toEqual([[MYDATA_FISCAL_DEVICE_ID, { enabled: true, isDefault: true }]]);
+
+      const notAdmitted = setup();
+      notAdmitted.getDeviceAdmission.mockResolvedValue(admissionAnswer(false));
+      notAdmitted.updateDevice.mockResolvedValueOnce({ success: true })
+        .mockResolvedValue({ success: false, code: 'DEVICE_NOT_ADMITTED', error: 'not admitted' });
+      expect((await verifyAndSaveMyDataDevice(notAdmitted, device(), activeRow(), 'terminal-a', connection, save)).activated).toBe(false);
+    });
+
+    it('a register that was not active is never enabled by a failed verification', async () => {
+      const ecr = setup();
+      ecr.testConnection.mockResolvedValue({ success: false, error: 'handshake failed' });
+      await expect(verifyAndSaveMyDataDevice(ecr, device(), { ...activeRow(), enabled: 0 }, 'terminal-a', connection, vi.fn()))
+        .rejects.toThrow('handshake failed');
+      expect(ecr.updateDevice).toHaveBeenCalledOnce();
+      expect(ecr.updateDevice.mock.calls[0][1]).toMatchObject({ enabled: false, isDefault: false });
+    });
+  });
+
+  it.each(['pending', 'inactive', 'error'])('leaves a verified device inactive while MyData is %s', async status => {
+    const ecr = setup();
+    ecr.getDeviceAdmission.mockResolvedValue(admissionAnswer(false, status));
+    const save = vi.fn().mockResolvedValue({ success: true });
+    const result = await verifyAndSaveMyDataDevice(ecr, device(), false, 'terminal-a', connection, save);
+    expect(result.activated).toBe(false);
+    expect(ecr.updateDevice).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('stays inactive when the admission cannot be read, and falls back to the last known answer', async () => {
+    const ecr = setup();
+    ecr.getDeviceAdmission.mockRejectedValue(new Error('ipc failed'));
+    const save = vi.fn().mockResolvedValue({ success: true });
+    expect((await verifyAndSaveMyDataDevice(ecr, device(), false, 'terminal-a', connection, save)).activated).toBe(false);
+    expect(ecr.updateDevice).not.toHaveBeenCalled();
+
+    const fallback = setup();
+    fallback.getDeviceAdmission.mockRejectedValueOnce(new Error('refresh failed')).mockResolvedValueOnce(admissionAnswer(true));
+    expect((await verifyAndSaveMyDataDevice(fallback, device(), false, 'terminal-a', connection, save)).activated).toBe(true);
+    expect(fallback.getDeviceAdmission.mock.calls).toEqual([[{ refresh: true }], []]);
+  });
+
+  it('does not ask for admission or enable when the server save failed, nor report an enable native refused', async () => {
+    const ecr = setup();
+    const failed = vi.fn().mockResolvedValue({ success: false, error: 'Server refused' });
+    expect(await verifyAndSaveMyDataDevice(ecr, device(), false, 'terminal-a', connection, failed))
+      .toEqual({ saved: { success: false, error: 'Server refused' }, activated: false });
+    expect(ecr.getDeviceAdmission).not.toHaveBeenCalled();
+    expect(ecr.updateDevice).not.toHaveBeenCalled();
+
+    const refused = setup();
+    refused.updateDevice.mockResolvedValue({ success: false, code: 'DEVICE_NOT_ADMITTED', deviceType: 'cash_register', error: 'not admitted' });
+    const save = vi.fn().mockResolvedValue({ success: true });
+    expect((await verifyAndSaveMyDataDevice(refused, device(), false, 'terminal-a', connection, save)).activated).toBe(false);
   });
 
   it('reads legacy native settings without resetting configured values', () => {

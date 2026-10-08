@@ -40,6 +40,10 @@ mod parity_g8;
 // W4c — temporary dual-write smoke test. Removed in 4e.
 mod w4c_dual_write_smoke;
 
+// 07/10/2026: every order stores its canonical VAT; Tomikro-like and
+// unset-rate stores see nothing visible or financial change.
+mod vat_upgrade_safety;
+
 // B1 (fix review 30/09/2026): payments set aside for review, end to end.
 mod payment_set_aside;
 

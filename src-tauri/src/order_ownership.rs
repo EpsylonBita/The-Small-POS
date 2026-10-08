@@ -1217,11 +1217,17 @@ pub fn apply_order_attribution(
     .map_err(|e| format!("apply order attribution: {e}"))?;
 
     if reassign_financial_owner {
+        // The owner is local drawer attribution: the payment's wire body
+        // never carries it (`sync_queue::prepare_payment_request`), so moving
+        // a receipt between shifts leaves its sync state as it was. Marking
+        // it `pending` here queued nothing, so a synced receipt never synced
+        // again, and the manual cancellation (`manual_order_cancellation`)
+        // and the staff cash custody plan refused it as an unsynced original
+        // forever (driver assignment and RESET from delivered, 07/10/2026).
         conn.execute(
             "UPDATE order_payments
              SET staff_id = ?1,
                  staff_shift_id = ?2,
-                 sync_status = 'pending',
                  updated_at = ?3
              WHERE order_id = ?4
                AND status = 'completed'",

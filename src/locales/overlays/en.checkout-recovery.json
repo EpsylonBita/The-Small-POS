@@ -30,7 +30,7 @@
     }
   },
   "checkoutRecovery": {
-    "title": "Table operations awaiting recovery",
+    "title": "Operations awaiting recovery",
     "guidance": "Original requests remain saved. Internet and current permissions are required. Do not repeat an uncertain payment.",
     "unavailable": "Recovery status could not be read. Pending operations have been retained.",
     "pending": "Waiting to reconnect",

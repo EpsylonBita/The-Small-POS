@@ -42,6 +42,9 @@ fn seed_terminal(conn: &rusqlite::Connection) {
         [],
     )
     .expect("seed the fiscal device");
+    // Its MyData plugin is finished, so a checkout would reach it (founder
+    // rule 08/10/2026: otherwise the register is inert).
+    crate::device_admission::admit_for_test(conn, &[crate::device_admission::CASH_REGISTER]);
 }
 
 /// The terminal approved this checkout's card (13.00) on the first press.

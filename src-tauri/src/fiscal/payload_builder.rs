@@ -15,13 +15,20 @@
 //!
 //! This revision populates every field by reading from local SQLite:
 //!
-//!   * **lines**       — parsed from `orders.items` JSON (its existing
-//!     on-disk shape: `[{menu_item_id, name, quantity,
-//!     total_price}, ...]`).
-//!   * **payments**    — `order_payments WHERE order_id=? AND status='completed'`.
-//!   * **vatBreakdown** — single aggregated entry derived from
-//!     stored order tax + order gross, with legacy amount conversion
-//!     only when the corresponding integer cents are absent.
+//!   * **lines**       — the order's Greek VAT computation
+//!     ([`super::greece_vat`], the server's `computeOrderTotals`) over the
+//!     items, discount and delivery fee of the local order row, normalized as
+//!     the create request sends them: one line per item (its share of the
+//!     order discount already deducted) plus a delivery-fee and a service-fee
+//!     line, each with its real net, VAT and gross (07/10/2026). The tip is
+//!     outside VAT and is no line.
+//!   * **totals**      — the sums of the lines: the order total without its
+//!     tip.
+//!   * **payments**    — `order_payments WHERE order_id=? AND status='completed'`,
+//!     each tender without its tip (a tender's amount includes its tip, the
+//!     `payments.rs` principal rule), so the payments settle the totals.
+//!   * **vatBreakdown** — one entry per rate (`rateBasisPoints` = rate * 100),
+//!     each the sum of its lines.
 //!   * **metadata**    — country-agnostic `kind` + HR/GR-friendly
 //!     `operatorOib` (looked up via local_settings),
 //!     `sequenceNumber` (allocated atomically via
@@ -35,11 +42,10 @@
 //!     and immutable per-line VAT snapshot are unresolved. Populating this
 //!     generic payload does not establish GR production readiness.
 //!
-//!   * **Single-rate VAT** — pos-tauri's `orders` row carries one
-//!     `tax_rate` for the whole order. Multi-rate baskets (e.g. food at
-//!     13% + drink at 24%) are aggregated into a single `vatBreakdown`
-//!     entry. A future revision that wires per-line VAT lookup would
-//!     split this — not in scope for the audit #1 partial fix.
+//!   * **Item categories** — the create request carries no per-item VAT
+//!     category, so every item is at the branch default category, exactly as
+//!     the server computes the order. A zero-rate line would also need an
+//!     AADE exemption category, which no line carries yet.
 //!   * **operatorOib via local_settings** — HR's per-cashier OIB is
 //!     read from `local_settings(category='fiscalization.hr',
 //!     key='operator_oib_for_<staff_id>')` with a fallback to
@@ -49,35 +55,14 @@
 //!     is required` with a clear remediation message.
 //!   * **Mobile parallel** — `POSSystemMobile/src/services/fiscal/`
 //!     reads actual completed payment rows and populates the generic
-//!     payload, but shares the unresolved per-line VAT snapshot limitation.
+//!     payload; its lines follow the same shared VAT computation.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::fiscal::greece_vat::{FiscalLineKind, GreeceOrderVatResult};
 use crate::money::Cents;
-
-/// Shape of one element of `orders.items` JSON, derived from the existing
-/// representative INSERT at `pos-tauri/src-tauri/src/print.rs:6078`:
-/// `[{"menu_item_id":"sub-waffle","name":"Βάφλα","quantity":1,"total_price":8.8}]`.
-/// Extra fields (category names, modifiers, etc.) are tolerated via
-/// `serde(default)` + ignoring unknown keys.
-#[derive(Debug, Deserialize)]
-struct ParsedOrderItem {
-    #[serde(default)]
-    menu_item_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default = "default_quantity")]
-    quantity: i64,
-    #[serde(default)]
-    total_price: f64,
-}
-
-fn default_quantity() -> i64 {
-    1
-}
 
 /// Order header columns we read in one round-trip.
 ///
@@ -94,10 +79,12 @@ struct OrderHeader {
     receipt_number: String,
     issued_at: String,
     total_cents: i64,
-    tax_cents: i64,
+    tip_cents: i64,
     items_json: String,
     staff_id: Option<String>,
-    tax_rate: Option<f64>,
+    discount_amount: f64,
+    discount_percentage: f64,
+    delivery_fee: f64,
 }
 
 /// One completed payment row, ready to map into FiscalReceiptInput.payments.
@@ -121,25 +108,48 @@ pub fn build_fiscal_receipt_input(
     branch_id: &str,
 ) -> Result<Value, String> {
     let header = read_order_header(conn, order_id)?;
-    let parsed_items = parse_items_json(&header.items_json);
-    let payments = read_completed_payments(conn, order_id)?;
+    let ReceiptTenders {
+        rows: mut payments,
+        carried_tip_cents,
+    } = read_completed_payments(conn, order_id)?;
 
     // A partial settlement must never reduce the invoice to the paid amount.
     // Keep actual payments separate so adapter validation can detect a mismatch.
-    let gross_cents = header.total_cents;
-
-    let tax_cents = if header.tax_cents > 0 {
-        header.tax_cents.min(gross_cents)
-    } else {
-        0
+    let order_vat = order_vat_for_receipt(conn, &header);
+    let lines = build_lines(order_vat.as_ref());
+    let (net_cents, tax_cents, gross_cents) = match order_vat.as_ref() {
+        Some(_) => lines
+            .iter()
+            .fold((0_i64, 0_i64, 0_i64), |(net, vat, gross), line| {
+                (
+                    net + line["netCents"].as_i64().unwrap_or(0),
+                    vat + line["vatCents"].as_i64().unwrap_or(0),
+                    gross + line["grossCents"].as_i64().unwrap_or(0),
+                )
+            }),
+        // No lines to compute: the order total without its tip, VAT unknown.
+        None => {
+            let gross = (header.total_cents - header.tip_cents).max(0);
+            (gross, 0, gross)
+        }
     };
-    let net_cents = gross_cents - tax_cents;
+    let expected_gross_cents = (header.total_cents - header.tip_cents).max(0);
+    if gross_cents != expected_gross_cents {
+        tracing::warn!(
+            order_id = %order_id,
+            lines_gross_cents = gross_cents,
+            order_gross_cents = expected_gross_cents,
+            "[fiscal.payload] the computed lines differ from the order total without its tip"
+        );
+    }
+    exclude_uncarried_order_tip(
+        &mut payments,
+        expected_gross_cents,
+        header.tip_cents - carried_tip_cents,
+    );
 
-    let rate_basis_points = compute_rate_basis_points(net_cents, tax_cents, header.tax_rate);
-
-    let lines = build_lines(&parsed_items, rate_basis_points);
     let payments_json = build_payments_json(&payments);
-    let vat_breakdown = build_vat_breakdown(net_cents, tax_cents, gross_cents, rate_basis_points);
+    let vat_breakdown = build_vat_breakdown(&lines);
 
     // Audit round 4 P0 fix (2026-05-25): single source of truth for payment
     // method is completed order_payments rows. derive_payment_method
@@ -200,10 +210,12 @@ fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, S
             COALESCE(receipt_number, id),
             COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             total_amount_cents, COALESCE(total_amount, 0.0),
-            tax_amount_cents, COALESCE(tax_amount, 0.0),
+            tip_amount_cents, COALESCE(tip_amount, 0.0),
             COALESCE(items, '[]'),
             staff_id,
-            tax_rate
+            discount_amount_cents, COALESCE(discount_amount, 0.0),
+            COALESCE(discount_percentage, 0.0),
+            delivery_fee_cents, COALESCE(delivery_fee, 0.0)
          FROM orders
          WHERE id = ?1",
         params![order_id],
@@ -213,10 +225,12 @@ fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, S
                 receipt_number: row.get(1)?,
                 issued_at: row.get(2)?,
                 total_cents: read_cents(row, 3, 4)?,
-                tax_cents: read_cents(row, 5, 6)?,
+                tip_cents: read_cents(row, 5, 6)?,
                 items_json: row.get(7)?,
                 staff_id: row.get(8)?,
-                tax_rate: row.get(9)?,
+                discount_amount: Cents::new(read_cents(row, 9, 10)?).to_f64_dp2(),
+                discount_percentage: row.get(11)?,
+                delivery_fee: Cents::new(read_cents(row, 12, 13)?).to_f64_dp2(),
             })
         },
     )
@@ -269,11 +283,28 @@ fn parse_issued_at(raw: &str) -> Option<DateTime<Utc>> {
         .map(|naive| Utc.from_utc_datetime(&naive))
 }
 
-fn parse_items_json(json_text: &str) -> Vec<ParsedOrderItem> {
-    serde_json::from_str::<Vec<ParsedOrderItem>>(json_text).unwrap_or_default()
+/// The order's VAT computation for its receipt: the local row's items,
+/// discount and delivery fee as the create request sends them, with the
+/// branch VAT settings the till holds. `None` when the order has no lines.
+fn order_vat_for_receipt(conn: &Connection, header: &OrderHeader) -> Option<GreeceOrderVatResult> {
+    let order = json!({
+        "items": header.items_json,
+        "discount_amount": header.discount_amount,
+        "discount_percentage": header.discount_percentage,
+        "delivery_fee": header.delivery_fee,
+    });
+    let settings = super::greece_vat::branch_vat_settings(conn);
+    crate::sync_queue::order_json_vat(&order, &settings).ok()
 }
 
-fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<PaymentRow>, String> {
+/// The completed tenders as the receipt reads them.
+struct ReceiptTenders {
+    rows: Vec<PaymentRow>,
+    /// The tips the tenders still carry, taken out of their amounts.
+    carried_tip_cents: i64,
+}
+
+fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<ReceiptTenders, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, method, amount_cents, amount, transaction_ref,
@@ -282,7 +313,8 @@ fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<Paym
                         FROM payment_adjustments pa
                         WHERE pa.payment_id = order_payments.id
                           AND pa.adjustment_type IN ('refund', 'void')
-                    ), 0)
+                    ), 0),
+                    MAX(COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0), 0)
              FROM order_payments
              WHERE order_id = ?1 AND status = 'completed'
              ORDER BY created_at ASC",
@@ -296,15 +328,16 @@ fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<Paym
                 amount_cents: read_cents(row, 2, 3)?,
                 transaction_ref: row.get(4)?,
             };
-            Ok((payment, row.get::<_, i64>(5)?))
+            Ok((payment, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?))
         })
         .map_err(|e| format!("query_map read_completed_payments: {e}"))?;
 
     let mut out = Vec::new();
+    let mut carried_tip_cents = 0;
     for r in rows {
-        let (mut payment, adjusted_cents) = r.map_err(|e| format!("read payment row: {e}"))?;
-        // tip_amount_cents is separate from the amount applied to the order;
-        // refunds and voids recorded as adjustments are not tendered, nor is a
+        let (mut payment, adjusted_cents, tip_cents) =
+            r.map_err(|e| format!("read payment row: {e}"))?;
+        // Refunds and voids recorded as adjustments are not tendered, nor is a
         // gift card row's proven return floor (the larger of the two, once).
         let reversed_cents = crate::payments::effective_reversed_cents(
             conn,
@@ -314,61 +347,108 @@ fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<Vec<Paym
             payment.amount_cents,
             adjusted_cents,
         )?;
-        payment.amount_cents = (payment.amount_cents - reversed_cents).max(0);
-        // A tender refunded or voided in full is not part of the receipt.
-        if !(reversed_cents > 0 && payment.amount_cents == 0) {
+        let kept_cents = (payment.amount_cents - reversed_cents).max(0);
+        // A tender's amount includes its tip (the principal rule of
+        // `payments.rs`, a refund coming off the principal first). The tip is
+        // no line and outside the totals, so the tender pays only its
+        // principal (07/10/2026): the AADE and HR validators want the
+        // payments equal to the receipt total.
+        let tip_cents = tip_cents.min(kept_cents);
+        carried_tip_cents += tip_cents;
+        payment.amount_cents = kept_cents - tip_cents;
+        // A tender refunded or voided in full, or all tip, is not part of the
+        // receipt.
+        if !((reversed_cents > 0 || tip_cents > 0) && payment.amount_cents == 0) {
             out.push(payment);
         }
     }
-    Ok(out)
+    Ok(ReceiptTenders {
+        rows: out,
+        carried_tip_cents,
+    })
+}
+
+/// The part of the order's tip no tender carries (a tip recorded on the order
+/// alone) is outside the receipt too: it comes off the latest tenders, never
+/// below the order total without its tip.
+fn exclude_uncarried_order_tip(
+    payments: &mut Vec<PaymentRow>,
+    receipt_total_cents: i64,
+    uncarried_tip_cents: i64,
+) {
+    let paid_cents: i64 = payments.iter().map(|payment| payment.amount_cents).sum();
+    let mut excess_cents = (paid_cents - receipt_total_cents)
+        .min(uncarried_tip_cents)
+        .max(0);
+    let mut index = payments.len();
+    while excess_cents > 0 && index > 0 {
+        index -= 1;
+        let taken_cents = excess_cents.min(payments[index].amount_cents);
+        if taken_cents == 0 {
+            continue;
+        }
+        payments[index].amount_cents -= taken_cents;
+        excess_cents -= taken_cents;
+        if payments[index].amount_cents == 0 {
+            payments.remove(index);
+        }
+    }
 }
 
 /// rateBasisPoints encoding: 100% = 10000 (1 basis point = 1/10000 of unity).
 /// Per `admin-dashboard/src/services/fiscal/adapters/hr/xml-builder.ts:250`,
 /// the renderer divides by 100 + .toFixed(2), so 2400 → "24.00".
-///
-/// Strategy: if both net + tax are positive, derive the empirical ratio
-/// (handles arbitrary stored tax_rate conventions). Otherwise fall back
-/// to the stored `orders.tax_rate`, autodetecting decimal-vs-percent
-/// based on magnitude (<=1.0 → decimal, >1.0 → percent).
-fn compute_rate_basis_points(net_cents: i64, tax_cents: i64, tax_rate: Option<f64>) -> i64 {
-    if net_cents > 0 && tax_cents > 0 {
-        return ((tax_cents as f64 / net_cents as f64) * 10000.0).round() as i64;
-    }
-    match tax_rate {
-        Some(r) if r > 0.0 && r <= 1.0 => (r * 10000.0).round() as i64,
-        Some(r) if r > 1.0 => (r * 100.0).round() as i64,
-        _ => 0,
-    }
+fn rate_basis_points(rate_percent: f64) -> i64 {
+    (rate_percent * 100.0).round() as i64
 }
 
-fn build_lines(items: &[ParsedOrderItem], rate_basis_points: i64) -> Vec<Value> {
-    items
+/// One receipt line per item and per delivery or service fee, from the
+/// order's VAT computation: net + VAT = gross on every line, and the VAT is
+/// the line's own rate applied to its net (the AADE invoice validator's
+/// per-line checks). The tip is outside VAT and is no line. Line ids are the
+/// computation's (menu item, `manual-item-N`, `delivery-fee`), made unique
+/// when one product appears on two lines.
+fn build_lines(order_vat: Option<&GreeceOrderVatResult>) -> Vec<Value> {
+    let Some(order_vat) = order_vat else {
+        return Vec::new();
+    };
+    let mut seen_ids: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    order_vat
+        .breakdown
+        .lines
         .iter()
         .enumerate()
-        .map(|(idx, item)| {
-            let line_gross = Cents::round_half_even(item.total_price).as_i64();
-            let quantity = if item.quantity > 0 { item.quantity } else { 1 };
-            let unit_price = line_gross.checked_div(quantity).unwrap_or(line_gross);
-            // Per-line vat omitted from the line shape — the HR validator
-            // checks vatBreakdown aggregate sums, not per-line invariants
-            // (xml-builder.ts:153-162). Setting netCents=grossCents per
-            // line keeps the line shape self-consistent.
+        .filter(|(_, line)| line.line_kind != FiscalLineKind::Tip)
+        .map(|(index, line)| {
+            let occurrence = seen_ids.entry(line.id.clone()).or_insert(0);
+            *occurrence += 1;
+            let line_id = if *occurrence == 1 {
+                line.id.clone()
+            } else {
+                format!("{}#{}", line.id, occurrence)
+            };
+            let quantity = if line.quantity.fract() == 0.0 {
+                json!(line.quantity as i64)
+            } else {
+                json!(line.quantity)
+            };
+            let unit_price_cents = if line.quantity > 0.0 {
+                (line.gross_cents as f64 / line.quantity).round() as i64
+            } else {
+                line.gross_cents
+            };
             json!({
-                "lineId": item
-                    .menu_item_id
+                "lineId": line_id,
+                "description": line
+                    .description
                     .clone()
-                    .unwrap_or_else(|| format!("line-{}", idx + 1)),
-                "description": item
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("Item {}", idx + 1)),
+                    .unwrap_or_else(|| format!("Item {}", index + 1)),
                 "quantity": quantity,
-                "unitPriceCents": unit_price,
-                "netCents": line_gross,
-                "vatCents": 0,
-                "grossCents": line_gross,
-                "rateBasisPoints": rate_basis_points,
+                "unitPriceCents": unit_price_cents,
+                "netCents": line.net_cents,
+                "vatCents": line.vat_cents,
+                "grossCents": line.gross_cents,
+                "rateBasisPoints": rate_basis_points(line.vat_rate),
             })
         })
         .collect()
@@ -388,22 +468,37 @@ fn build_payments_json(payments: &[PaymentRow]) -> Vec<Value> {
         .collect()
 }
 
-/// Single aggregated entry that satisfies the HR validator's
-/// `vatBreakdown.sum(netCents) === totals.netCents` and
-/// `vatBreakdown.sum(vatCents) === totals.vatCents` invariants by
-/// construction.
-fn build_vat_breakdown(
-    net_cents: i64,
-    tax_cents: i64,
-    gross_cents: i64,
-    rate_basis_points: i64,
-) -> Vec<Value> {
-    vec![json!({
-        "rateBasisPoints": rate_basis_points,
-        "netCents": net_cents,
-        "vatCents": tax_cents,
-        "grossCents": gross_cents,
-    })]
+/// One entry per rate, each the sum of its lines, highest rate first: the
+/// AADE validator wants exactly the rates of the lines with their totals, and
+/// the HR validator the entry sums equal to the receipt totals.
+fn build_vat_breakdown(lines: &[Value]) -> Vec<Value> {
+    let mut buckets: Vec<(i64, i64, i64, i64)> = Vec::new();
+    for line in lines {
+        let rate = line["rateBasisPoints"].as_i64().unwrap_or(0);
+        let net = line["netCents"].as_i64().unwrap_or(0);
+        let vat = line["vatCents"].as_i64().unwrap_or(0);
+        let gross = line["grossCents"].as_i64().unwrap_or(0);
+        match buckets.iter_mut().find(|bucket| bucket.0 == rate) {
+            Some(bucket) => {
+                bucket.1 += net;
+                bucket.2 += vat;
+                bucket.3 += gross;
+            }
+            None => buckets.push((rate, net, vat, gross)),
+        }
+    }
+    buckets.sort_by(|left, right| right.0.cmp(&left.0));
+    buckets
+        .into_iter()
+        .map(|(rate, net, vat, gross)| {
+            json!({
+                "rateBasisPoints": rate,
+                "netCents": net,
+                "vatCents": vat,
+                "grossCents": gross,
+            })
+        })
+        .collect()
 }
 
 /// Map the derived completed-payment method (cash/card/other) to CIS NacinPlac
@@ -614,6 +709,13 @@ mod audit_1_tests {
                 tax_amount REAL DEFAULT 0,
                 tax_amount_cents INTEGER,
                 subtotal REAL DEFAULT 0,
+                discount_percentage REAL DEFAULT 0,
+                discount_amount REAL DEFAULT 0,
+                discount_amount_cents INTEGER,
+                tip_amount REAL DEFAULT 0,
+                tip_amount_cents INTEGER,
+                delivery_fee REAL DEFAULT 0,
+                delivery_fee_cents INTEGER,
                 staff_id TEXT,
                 tax_rate REAL,
                 created_at TEXT
@@ -625,6 +727,7 @@ mod audit_1_tests {
                 amount REAL NOT NULL,
                 amount_cents INTEGER,
                 currency TEXT DEFAULT 'EUR',
+                tip_amount REAL DEFAULT 0,
                 tip_amount_cents INTEGER,
                 status TEXT NOT NULL DEFAULT 'completed',
                 transaction_ref TEXT,
@@ -782,10 +885,13 @@ mod audit_1_tests {
     fn stored_cents_override_legacy_amounts_and_exclude_separate_tips() {
         let conn = make_test_db();
         seed_simple_order(&conn);
+        // A 7.00 tender with a 2.00 tip on top of the 5.00 order (a table
+        // check keeps the order's tip at 0): the tender's amount includes its
+        // tip, and the receipt tender is its 5.00 principal.
         conn.execute_batch(
             "UPDATE orders SET total_amount_cents = 500, tax_amount_cents = 97,
                  total_amount = 99.99, tax_amount = 9.99 WHERE id = 'ord-1';
-             UPDATE order_payments SET amount_cents = 500, amount = 88.88,
+             UPDATE order_payments SET amount_cents = 700, amount = 88.88,
                  tip_amount_cents = 200, transaction_ref = 'terminal-reference' WHERE id = 'pay-1';",
         ).unwrap();
         let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
@@ -796,18 +902,207 @@ mod audit_1_tests {
         assert_eq!(payload["payments"][0]["reference"], "terminal-reference");
     }
 
+    /// The shared vector `delivery_order_full`: three items, a 0.75 discount,
+    /// a 1.80 delivery fee and a 1.00 tip inside the 24.65 total.
+    fn seed_tipped_delivery(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO orders
+                (id, organization_id, receipt_number, items, total_amount, total_amount_cents,
+                 tax_amount, tax_amount_cents, subtotal, discount_amount, discount_amount_cents,
+                 delivery_fee, delivery_fee_cents, tip_amount, tip_amount_cents, staff_id,
+                 created_at)
+             VALUES
+                ('ord-del', 'org-1', 'R-2001',
+                 '[{\"menu_item_id\":\"a\",\"name\":\"Item a\",\"quantity\":1,\"unit_price\":8.5,\"total_price\":8.5},
+                   {\"menu_item_id\":\"b\",\"name\":\"Item b\",\"quantity\":1,\"unit_price\":9.4,\"total_price\":9.4},
+                   {\"menu_item_id\":\"c\",\"name\":\"Item c\",\"quantity\":2,\"unit_price\":2.35,\"total_price\":4.7}]',
+                 24.65, 2465, 4.44, 444, 22.6, 0.75, 75, 1.8, 180, 1.0, 100, 'staff-1',
+                 '2026-10-07T10:00:00Z')",
+            [],
+        )
+        .expect("insert tipped delivery");
+    }
+
+    fn insert_tender(
+        conn: &Connection,
+        id: &str,
+        method: &str,
+        amount_cents: i64,
+        tip_cents: i64,
+        second: u32,
+    ) {
+        conn.execute(
+            "INSERT INTO order_payments
+                (id, order_id, method, amount, amount_cents, tip_amount, tip_amount_cents,
+                 status, created_at)
+             VALUES (?1, 'ord-del', ?2, ?3, ?4, ?5, ?6, 'completed', ?7)",
+            params![
+                id,
+                method,
+                amount_cents as f64 / 100.0,
+                amount_cents,
+                tip_cents as f64 / 100.0,
+                tip_cents,
+                format!("2026-10-07T10:00:{second:02}Z"),
+            ],
+        )
+        .expect("insert tender");
+    }
+
+    /// The AADE invoice validator's checks
+    /// (admin-dashboard/src/services/fiscal/adapters/gr/aade-invoice.ts).
+    fn assert_aade_invariants(payload: &Value) {
+        let lines = payload["lines"].as_array().unwrap();
+        let (mut net, mut vat, mut gross) = (0, 0, 0);
+        for line in lines {
+            let (line_net, line_vat, line_gross, bps) = (
+                line["netCents"].as_i64().unwrap(),
+                line["vatCents"].as_i64().unwrap(),
+                line["grossCents"].as_i64().unwrap(),
+                line["rateBasisPoints"].as_i64().unwrap(),
+            );
+            assert_eq!(line_net + line_vat, line_gross, "{line}");
+            let at_rate = (line_net as f64 * bps as f64 / 10_000.0).round() as i64;
+            assert!((at_rate - line_vat).abs() <= 1, "{line}");
+            net += line_net;
+            vat += line_vat;
+            gross += line_gross;
+        }
+        let totals = &payload["totals"];
+        assert_eq!(
+            (net, vat, gross),
+            (
+                totals["netCents"].as_i64().unwrap(),
+                totals["vatCents"].as_i64().unwrap(),
+                totals["grossCents"].as_i64().unwrap()
+            )
+        );
+        for bucket in payload["vatBreakdown"].as_array().unwrap() {
+            let rate = bucket["rateBasisPoints"].as_i64().unwrap();
+            let of_rate = |key: &str| -> i64 {
+                lines
+                    .iter()
+                    .filter(|line| line["rateBasisPoints"] == rate)
+                    .map(|line| line[key].as_i64().unwrap())
+                    .sum()
+            };
+            assert_eq!(bucket["netCents"], of_rate("netCents"));
+            assert_eq!(bucket["vatCents"], of_rate("vatCents"));
+            assert_eq!(bucket["grossCents"], of_rate("grossCents"));
+        }
+        let paid: i64 = payload["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|payment| {
+                let amount = payment["amountCents"].as_i64().unwrap();
+                assert!(amount > 0, "{payment}");
+                amount
+            })
+            .sum();
+        assert_eq!(paid, gross, "the payments equal the receipt total");
+    }
+
+    #[test]
+    fn a_tipped_delivery_receipt_has_its_fee_line_and_settles_without_the_tip() {
+        let conn = make_test_db();
+        seed_tipped_delivery(&conn);
+        // A desktop checkout: one card tender of the whole total, its tip inside.
+        insert_tender(&conn, "card-1", "card", 2465, 100, 1);
+        let payload = build_fiscal_receipt_input(&conn, "ord-del", "branch-1").unwrap();
+
+        let lines = payload["lines"].as_array().unwrap();
+        assert_eq!(
+            lines.len(),
+            4,
+            "three items and the delivery fee, no tip line"
+        );
+        let fee = &lines[3];
+        assert_eq!(fee["lineId"], "delivery-fee");
+        assert_eq!(fee["rateBasisPoints"], 1300);
+        assert_eq!(
+            (&fee["netCents"], &fee["vatCents"], &fee["grossCents"]),
+            (&json!(159), &json!(21), &json!(180))
+        );
+        assert_eq!(payload["totals"]["grossCents"], 2365);
+        assert_eq!(payload["totals"]["vatCents"], 444);
+        assert_eq!(payload["totals"]["netCents"], 1921);
+        let rates: Vec<i64> = payload["vatBreakdown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket["rateBasisPoints"].as_i64().unwrap())
+            .collect();
+        assert_eq!(rates, vec![2400, 1300]);
+        assert_eq!(payload["payments"][0]["amountCents"], 2365);
+        assert_aade_invariants(&payload);
+    }
+
+    #[test]
+    fn split_tenders_and_an_order_only_tip_still_settle_the_receipt_total() {
+        // Cash without a tip, then the card carrying the tip.
+        let conn = make_test_db();
+        seed_tipped_delivery(&conn);
+        insert_tender(&conn, "cash-1", "cash", 1000, 0, 1);
+        insert_tender(&conn, "card-2", "card", 1465, 100, 2);
+        let payload = build_fiscal_receipt_input(&conn, "ord-del", "branch-1").unwrap();
+        let amounts: Vec<i64> = payload["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|payment| payment["amountCents"].as_i64().unwrap())
+            .collect();
+        assert_eq!(amounts, vec![1000, 1365]);
+        assert_aade_invariants(&payload);
+
+        // The tip recorded on the order alone: it comes off the latest tender.
+        let conn = make_test_db();
+        seed_tipped_delivery(&conn);
+        insert_tender(&conn, "cash-1", "cash", 1000, 0, 1);
+        insert_tender(&conn, "card-2", "card", 1465, 0, 2);
+        let payload = build_fiscal_receipt_input(&conn, "ord-del", "branch-1").unwrap();
+        let amounts: Vec<i64> = payload["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|payment| payment["amountCents"].as_i64().unwrap())
+            .collect();
+        assert_eq!(amounts, vec![1000, 1365]);
+        assert_aade_invariants(&payload);
+
+        // A tender that was all tip is no tender of the receipt.
+        let conn = make_test_db();
+        seed_tipped_delivery(&conn);
+        insert_tender(&conn, "card-1", "card", 2365, 0, 1);
+        insert_tender(&conn, "tip-2", "cash", 100, 100, 2);
+        let payload = build_fiscal_receipt_input(&conn, "ord-del", "branch-1").unwrap();
+        let amounts: Vec<i64> = payload["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|payment| payment["amountCents"].as_i64().unwrap())
+            .collect();
+        assert_eq!(amounts, vec![2365]);
+        assert_aade_invariants(&payload);
+    }
+
     #[test]
     fn stored_zero_cents_do_not_fall_back_to_legacy_amounts() {
         let conn = make_test_db();
         seed_simple_order(&conn);
+        // A stale REAL discount, fee and tip behind zero cents: the cents win.
         conn.execute_batch(
-            "UPDATE orders SET total_amount_cents = 0, tax_amount_cents = 0;
+            "UPDATE orders SET discount_amount = 2.0, discount_amount_cents = 0,
+                 delivery_fee = 3.0, delivery_fee_cents = 0,
+                 tip_amount = 1.0, tip_amount_cents = 0,
+                 total_amount_cents = 500;
              UPDATE order_payments SET amount_cents = 0;",
         )
         .unwrap();
         let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
-        assert_eq!(payload["totals"]["grossCents"], 0);
-        assert_eq!(payload["totals"]["vatCents"], 0);
+        assert_eq!(payload["totals"]["grossCents"], 500);
+        assert_eq!(payload["totals"]["vatCents"], 97);
+        assert_eq!(payload["lines"].as_array().unwrap().len(), 1, "no fee line");
         assert_eq!(payload["payments"][0]["amountCents"], 0);
     }
 
@@ -1220,7 +1515,7 @@ mod audit_1_tests {
             "INSERT INTO orders (id, items, total_amount, tax_amount, tax_rate, created_at)
              VALUES (
                 'ord-multi',
-                '[{\"menu_item_id\":\"a\",\"name\":\"Aaa\",\"quantity\":2,\"total_price\":10.00},
+                '[{\"menu_item_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"name\":\"Aaa\",\"quantity\":2,\"total_price\":10.00},
                   {\"menu_item_id\":\"b\",\"name\":\"Bbb\",\"quantity\":1,\"total_price\":7.50}]',
                 17.50, 3.39, 0.24, '2026-05-25T10:00:00Z'
              )",
@@ -1237,7 +1532,10 @@ mod audit_1_tests {
         let payload = build_fiscal_receipt_input(&conn, "ord-multi", "branch-1").unwrap();
         let lines = payload["lines"].as_array().unwrap();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["lineId"], "a");
+        // The server line ids: the menu item, else a manual line (a stale,
+        // non-UUID reference is sent as no menu item).
+        assert_eq!(lines[0]["lineId"], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        assert_eq!(lines[1]["lineId"], "manual-item-2");
         assert_eq!(lines[0]["description"], "Aaa");
         assert_eq!(lines[0]["quantity"], 2);
         assert_eq!(lines[0]["grossCents"], 1000);
@@ -1271,23 +1569,18 @@ mod audit_1_tests {
         seed_simple_order(&conn);
         let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
 
-        // Order: subtotal €4.03 + tax €0.97 = gross €5.00 → ratio
-        // 97/403 ≈ 24.07% → rateBasisPoints ≈ 2407 (empirical, slightly
-        // off from 2400 due to cent rounding — acceptable because the
-        // validator's only invariant on rateBasisPoints is per-entry
-        // shape; the sums-of-cents invariant is the load-bearing one).
-        let bp = payload["vatBreakdown"][0]["rateBasisPoints"]
-            .as_i64()
-            .unwrap();
-        assert!(
-            (2300..=2500).contains(&bp),
-            "rateBasisPoints should be ~2400 for 24% VAT, got {bp}"
-        );
+        // The computed rate itself, not the ratio of rounded cents
+        // (97/403 used to give 2407): the AADE validator maps 2400 to its
+        // VAT category 1 and refuses any other value.
+        assert_eq!(payload["vatBreakdown"][0]["rateBasisPoints"], 2400);
+        assert_eq!(payload["lines"][0]["rateBasisPoints"], 2400);
     }
 
     #[test]
     fn audit_1_zero_tax_order_still_valid() {
         let conn = make_test_db();
+        // A branch whose default category carries no VAT.
+        set_setting(&conn, "tax", "vat_default_category_code", "gr_exempt");
         conn.execute(
             "INSERT INTO orders (id, items, total_amount, tax_amount, created_at)
              VALUES (

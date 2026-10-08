@@ -7487,50 +7487,54 @@ pub fn ecr_list_devices_by_type(conn: &Connection, device_type: &str) -> Vec<ser
     )
 }
 
-/// Get the default ECR device (optionally filtered by type).
+/// The default-device query over the device types this till admits
+/// (`crate::device_admission`, founder rule 08/10/2026): a device whose
+/// plugin is not active, configured and finished is never the default device
+/// of anything. `None` when the requested type is not admitted.
+///
+/// An untyped lookup is a card-terminal lookup, never "any device": a fiscal
+/// cash register admitted by MyData must not answer as the default terminal
+/// when the payment plugin is off, or manual card entry is refused and a card
+/// checkout could send the register's id to `ecr_process_payment` (Android
+/// admits card terminals only, `PaymentTerminalManager`).
+fn ecr_default_device_sql(
+    conn: &Connection,
+    device_type: Option<&str>,
+) -> Option<(&'static str, &'static str)> {
+    let requested = device_type
+        .map(str::trim)
+        .unwrap_or(crate::device_admission::CARD_TERMINAL);
+    let admitted = crate::device_admission::admitted_types(conn)
+        .into_iter()
+        .find(|admitted| *admitted == requested)?;
+    Some((
+        "SELECT * FROM ecr_devices WHERE device_type = ?1 AND enabled = 1
+         ORDER BY is_default DESC LIMIT 1",
+        admitted,
+    ))
+}
+
+/// Get the default ECR device of `device_type` (a card terminal when `None`):
+/// enabled and of an admitted type only.
 pub fn ecr_get_default_device(
     conn: &Connection,
     device_type: Option<&str>,
 ) -> Option<serde_json::Value> {
-    if let Some(dt) = device_type {
-        ecr_query_one(
-            conn,
-            "SELECT * FROM ecr_devices WHERE device_type = ?1 AND enabled = 1
-             ORDER BY is_default DESC LIMIT 1",
-            params![dt],
-        )
-    } else {
-        ecr_query_one(
-            conn,
-            "SELECT * FROM ecr_devices WHERE enabled = 1
-             ORDER BY is_default DESC LIMIT 1",
-            [],
-        )
-    }
+    let (sql, admitted) = ecr_default_device_sql(conn, device_type)?;
+    ecr_query_one(conn, sql, params![admitted])
 }
 
-/// Fallible [`ecr_get_default_device`]: the same enabled/default selection,
-/// but `Ok(None)` only when no such device exists. A SQLite prepare, query or
-/// row failure is an error, never "no device".
+/// Fallible [`ecr_get_default_device`]: the same enabled, admitted, default
+/// selection, but `Ok(None)` only when no such device exists. A SQLite
+/// prepare, query or row failure is an error, never "no device".
 pub fn ecr_try_get_default_device(
     conn: &Connection,
     device_type: Option<&str>,
 ) -> Result<Option<serde_json::Value>, String> {
-    if let Some(dt) = device_type {
-        ecr_try_query_one(
-            conn,
-            "SELECT * FROM ecr_devices WHERE device_type = ?1 AND enabled = 1
-             ORDER BY is_default DESC LIMIT 1",
-            params![dt],
-        )
-    } else {
-        ecr_try_query_one(
-            conn,
-            "SELECT * FROM ecr_devices WHERE enabled = 1
-             ORDER BY is_default DESC LIMIT 1",
-            [],
-        )
-    }
+    let Some((sql, admitted)) = ecr_default_device_sql(conn, device_type) else {
+        return Ok(None);
+    };
+    ecr_try_query_one(conn, sql, params![admitted])
 }
 
 /// Insert an ECR transaction record.

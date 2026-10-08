@@ -6,7 +6,46 @@
 
 use crate::ecr::protocol::{FiscalLineItem, FiscalPayment, FiscalReceiptData, TaxRateConfig};
 use crate::escpos::{EscPosBuilder, PaperWidth};
+use crate::fiscal::greece_vat::{
+    calculate_greece_order_vat, FiscalLineKind, GreeceOrderVatInput, GreeceOrderVatItem,
+    GreeceVatSettings,
+};
 use tracing::debug;
+
+/// What the cash register's lines need beyond the order JSON: the branch VAT
+/// settings that give every line its rate, and the receipt language for the
+/// delivery-fee line's description.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FiscalLineContext {
+    pub vat_settings: GreeceVatSettings,
+    pub language: String,
+}
+
+impl FiscalLineContext {
+    /// Read the context under the caller's database lock.
+    pub fn load(conn: &rusqlite::Connection) -> Self {
+        Self {
+            vat_settings: crate::fiscal::greece_vat::branch_vat_settings(conn),
+            language: crate::db::get_setting(conn, "general", "language").unwrap_or_default(),
+        }
+    }
+}
+
+/// The device tax code of a VAT rate: the configured code of that rate, else
+/// an unmapped code at that rate, which a register that needs a department
+/// for it refuses (never another rate's code).
+fn tax_code_for_rate(tax_rates: &[TaxRateConfig], rate: f64) -> TaxRateConfig {
+    tax_rates
+        .iter()
+        .find(|tc| (tc.rate - rate).abs() < 0.01)
+        .cloned()
+        .unwrap_or(TaxRateConfig {
+            code: "A".to_string(),
+            rate,
+            label: "Default".to_string(),
+            department: None,
+        })
+}
 
 fn str_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
@@ -46,13 +85,19 @@ fn optional_discount_cents(value: Option<f64>) -> Result<Option<i64>, String> {
 
 /// Build fiscal receipt data from an order and its payments.
 ///
-/// Maps each order item to its tax code using the configured tax rates, and
-/// aggregates payments by method.
+/// Every line carries its computed VAT rate (07/10/2026): the items at their
+/// category rate (the branch default, as the server computes the order), the
+/// order discount shared across the items as the server allocates it, and the
+/// delivery fee as its own 13% line, described in the receipt language. The
+/// tip carries no VAT and is no line. Each rate maps to the device code of
+/// that rate; a register without that rate refuses the line rather than book
+/// it at another rate. Payments are aggregated by method.
 pub fn build_fiscal_data(
     order: &serde_json::Value,
     payments: &[serde_json::Value],
     tax_rates: &[TaxRateConfig],
     operator_id: Option<&str>,
+    context: &FiscalLineContext,
 ) -> Result<FiscalReceiptData, String> {
     let items_arr = order
         .get("items")
@@ -62,8 +107,14 @@ pub fn build_fiscal_data(
         return Err("Order has empty 'items' array".to_string());
     }
 
-    let mut fiscal_items = Vec::with_capacity(items_arr.len());
-
+    struct RegisterItem {
+        name: String,
+        quantity: f64,
+        unit_price: i64,
+        own_discount: Option<i64>,
+        menu_item_id: Option<String>,
+    }
+    let mut register_items = Vec::with_capacity(items_arr.len());
     for (index, item) in items_arr.iter().enumerate() {
         let name = str_field(item, &["name", "name_en", "product_name", "title"])
             .ok_or_else(|| format!("Fiscal item {index} is missing a non-empty name"))?;
@@ -78,43 +129,86 @@ pub fn build_fiscal_data(
             .or_else(|| f64_field(item, &["totalPrice", "total_price"]).map(|total| total / qty))
             .ok_or_else(|| format!("Fiscal item {index} is missing unit price"))?;
         let unit_price = positive_cents(price_f, &format!("item {index} unit price"))?;
-
-        // Determine tax code: use item's taxRate if present, otherwise default to "A"
-        let item_tax_rate = item.get("taxRate").and_then(|v| v.as_f64());
-
-        let tax = if let Some(rate) = item_tax_rate {
-            // Find matching tax code by rate
-            tax_rates
-                .iter()
-                .find(|tc| (tc.rate - rate).abs() < 0.01)
-                .cloned()
-                .unwrap_or(TaxRateConfig {
-                    code: "A".to_string(),
-                    rate,
-                    label: "Default".to_string(),
-                    department: None,
-                })
-        } else {
-            // Default to first tax rate or "A"
-            tax_rates.first().cloned().unwrap_or(TaxRateConfig {
-                code: "A".to_string(),
-                rate: 24.0,
-                label: "Default".to_string(),
-                department: None,
-            })
-        };
-
         // Item-level discount
-        let discount = optional_discount_cents(f64_field(item, &["discount", "discountAmount"]))?;
-
-        fiscal_items.push(FiscalLineItem {
-            description: name.to_string(),
+        let own_discount =
+            optional_discount_cents(f64_field(item, &["discount", "discountAmount"]))?;
+        register_items.push(RegisterItem {
+            name: name.to_string(),
             quantity: qty,
             unit_price,
+            own_discount,
+            menu_item_id: str_field(item, &["menu_item_id", "menuItemId"]).map(str::to_string),
+        });
+    }
+
+    // The order discount and delivery fee exactly as the server reads them
+    // from this till's order body.
+    let order_vat = crate::sync_queue::order_json_vat(order, &context.vat_settings).ok();
+    let order_discount_cents = order_vat
+        .as_ref()
+        .map(|vat| vat.breakdown.total_discount_cents)
+        .unwrap_or(0);
+    let delivery_fee_cents: i64 = order_vat
+        .as_ref()
+        .map(|vat| {
+            vat.breakdown
+                .lines
+                .iter()
+                .filter(|line| line.line_kind == FiscalLineKind::DeliveryFee)
+                .map(|line| line.gross_cents)
+                .sum()
+        })
+        .unwrap_or(0);
+    // The computed rate and discount share of each register line.
+    let register_vat = calculate_greece_order_vat(&GreeceOrderVatInput {
+        settings: context.vat_settings.clone(),
+        items: register_items
+            .iter()
+            .map(|item| GreeceOrderVatItem {
+                menu_item_id: item.menu_item_id.clone(),
+                name: Some(item.name.clone()),
+                quantity: item.quantity,
+                unit_price: item.unit_price as f64 / 100.0,
+                ..Default::default()
+            })
+            .collect(),
+        discount_amount: Some(order_discount_cents as f64 / 100.0),
+        delivery_fee: Some(delivery_fee_cents as f64 / 100.0),
+        service_fee: None,
+        tip_amount: None,
+    });
+
+    let mut fiscal_items = Vec::with_capacity(register_items.len() + 1);
+    for (index, item) in register_items.into_iter().enumerate() {
+        let line = &register_vat.breakdown.lines[index];
+        let tax = tax_code_for_rate(tax_rates, line.vat_rate);
+        let discount_cents = item.own_discount.unwrap_or(0) + line.discount_cents;
+        fiscal_items.push(FiscalLineItem {
+            description: item.name,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
             tax_code: tax.code,
             tax_rate: tax.rate,
             department: tax.department,
-            discount,
+            discount: (discount_cents > 0).then_some(discount_cents),
+        });
+    }
+    for line in register_vat
+        .breakdown
+        .lines
+        .iter()
+        .filter(|line| line.line_kind == FiscalLineKind::DeliveryFee && line.gross_cents > 0)
+    {
+        let tax = tax_code_for_rate(tax_rates, line.vat_rate);
+        fiscal_items.push(FiscalLineItem {
+            description: crate::receipt_renderer::receipt_label(&context.language, "Delivery")
+                .to_string(),
+            quantity: 1.0,
+            unit_price: line.gross_cents,
+            tax_code: tax.code,
+            tax_rate: tax.rate,
+            department: tax.department,
+            discount: None,
         });
     }
 
@@ -168,12 +262,14 @@ pub fn build_fiscal_data_for_checkout(
     intended_payment: &serde_json::Value,
     tax_rates: &[TaxRateConfig],
     operator_id: Option<&str>,
+    context: &FiscalLineContext,
 ) -> Result<FiscalReceiptData, String> {
     build_fiscal_data(
         order,
         std::slice::from_ref(intended_payment),
         tax_rates,
         operator_id,
+        context,
     )
 }
 
@@ -208,6 +304,7 @@ pub fn build_fiscal_data_for_outstanding_checkout(
     intended_payment: &serde_json::Value,
     tax_rates: &[TaxRateConfig],
     operator_id: Option<&str>,
+    context: &FiscalLineContext,
 ) -> Result<FiscalReceiptData, String> {
     let mut prior_cash_cents = 0_i64;
     let mut prior_card_cents = 0_i64;
@@ -306,7 +403,7 @@ pub fn build_fiscal_data_for_outstanding_checkout(
         ));
     }
 
-    build_fiscal_data(order, &tenders, tax_rates, operator_id)
+    build_fiscal_data(order, &tenders, tax_rates, operator_id, context)
 }
 
 /// Build the one fiscal receipt of an order whose tenders are all already
@@ -319,6 +416,7 @@ pub fn build_fiscal_data_for_settled_gift_checkout(
     completed_payments: &[serde_json::Value],
     tax_rates: &[TaxRateConfig],
     operator_id: Option<&str>,
+    context: &FiscalLineContext,
 ) -> Result<FiscalReceiptData, String> {
     let mut cash_cents = 0_i64;
     let mut gift_cents = 0_i64;
@@ -389,7 +487,7 @@ pub fn build_fiscal_data_for_settled_gift_checkout(
         "method": "gift_card",
         "amount": gift_cents as f64 / 100.0,
     }));
-    build_fiscal_data(order, &tenders, tax_rates, operator_id)
+    build_fiscal_data(order, &tenders, tax_rates, operator_id, context)
 }
 
 /// Format fiscal receipt data as ESC/POS binary for direct printing.
@@ -498,6 +596,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn ctx() -> FiscalLineContext {
+        FiscalLineContext::default()
+    }
+
     fn sample_tax_rates() -> Vec<TaxRateConfig> {
         vec![
             TaxRateConfig {
@@ -534,7 +636,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let build = |rows: &[serde_json::Value]| {
-            build_fiscal_data_for_settled_gift_checkout(&order, rows, &sample_tax_rates(), None)
+            build_fiscal_data_for_settled_gift_checkout(
+                &order,
+                rows,
+                &sample_tax_rates(),
+                None,
+                &ctx(),
+            )
         };
 
         let full = build(&[json!({"method": "gift_card", "amount": 20.00, "status": "completed"})])
@@ -593,14 +701,19 @@ mod tests {
         });
         let payments = vec![json!({"method": "cash", "amount": 9.00})];
 
-        let data = build_fiscal_data(&order, &payments, &sample_tax_rates(), Some("1")).unwrap();
+        let data =
+            build_fiscal_data(&order, &payments, &sample_tax_rates(), Some("1"), &ctx()).unwrap();
 
         assert_eq!(data.items.len(), 2);
         assert_eq!(data.items[0].description, "Coffee");
         assert_eq!(data.items[0].quantity, 2.0);
         assert_eq!(data.items[0].unit_price, 350);
+        // Every line carries its computed rate: the branch default category
+        // (24% mainland), as the server computes the order. A renderer
+        // `taxRate` on an item is no VAT source.
         assert_eq!(data.items[0].tax_code, "A");
-        assert_eq!(data.items[1].tax_code, "B");
+        assert_eq!(data.items[1].tax_code, "A");
+        assert_eq!(data.items[1].tax_rate, 24.0);
         assert_eq!(data.payments.len(), 1);
         assert_eq!(data.payments[0].amount, 900);
         assert_eq!(data.operator_id, Some("1".into()));
@@ -612,7 +725,7 @@ mod tests {
             "items": [{"name": "Item", "quantity": 1, "price": 5.00}],
             "total_amount": 5.00
         });
-        let data = build_fiscal_data(&order, &[], &sample_tax_rates(), None).unwrap();
+        let data = build_fiscal_data(&order, &[], &sample_tax_rates(), None, &ctx()).unwrap();
         assert_eq!(data.payments.len(), 1);
         assert_eq!(data.payments[0].method, "cash");
         assert_eq!(data.payments[0].amount, 500);
@@ -626,9 +739,14 @@ mod tests {
         });
         let intended_payment = json!({"method": "card", "amount": 5.00});
 
-        let data =
-            build_fiscal_data_for_checkout(&order, &intended_payment, &sample_tax_rates(), None)
-                .unwrap();
+        let data = build_fiscal_data_for_checkout(
+            &order,
+            &intended_payment,
+            &sample_tax_rates(),
+            None,
+            &ctx(),
+        )
+        .unwrap();
 
         assert_eq!(data.payments.len(), 1);
         assert_eq!(data.payments[0].method, "card");
@@ -648,6 +766,7 @@ mod tests {
             &json!({"method": "cash", "amount": 30.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .unwrap();
         let tenders: Vec<(String, i64)> = data
@@ -667,6 +786,7 @@ mod tests {
             &json!({"method": "gift_card", "amount": 50.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .is_err());
     }
@@ -684,6 +804,7 @@ mod tests {
             &json!({"method": "card", "amount": 30.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .unwrap();
         let mut tenders: Vec<(String, i64)> = data
@@ -718,6 +839,7 @@ mod tests {
             &intended_payment,
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .expect("build final split tender fiscal data");
 
@@ -748,6 +870,7 @@ mod tests {
             &json!({"method": "card", "amount": 30.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .expect("net prior tender plus new tender matches total");
         assert_eq!(data.payments[0].amount, 2000);
@@ -759,6 +882,7 @@ mod tests {
             &json!({"method": "card", "amount": 29.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .expect_err("combined tenders must equal the order total exactly");
         assert_eq!(
@@ -784,6 +908,7 @@ mod tests {
             &json!({"method": "card", "amount": 30.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .expect("repeated prior cash rows must collapse into one fiscal tender");
 
@@ -806,6 +931,7 @@ mod tests {
             &json!({"method": "cash", "amount": 30.00}),
             &sample_tax_rates(),
             None,
+            &ctx(),
         )
         .expect_err("a prior approved card must never be sent to paired EFT again");
 
@@ -822,14 +948,14 @@ mod tests {
             "total_amount": 7.50
         });
         let payments = vec![json!({"method": "card", "amount": 7.50})];
-        let data = build_fiscal_data(&order, &payments, &sample_tax_rates(), None).unwrap();
+        let data = build_fiscal_data(&order, &payments, &sample_tax_rates(), None, &ctx()).unwrap();
         assert_eq!(data.items[0].discount, Some(250));
     }
 
     #[test]
     fn test_build_fiscal_data_no_items_errors() {
         let order = json!({"total_amount": 5.00});
-        let result = build_fiscal_data(&order, &[], &sample_tax_rates(), None);
+        let result = build_fiscal_data(&order, &[], &sample_tax_rates(), None, &ctx());
         assert!(result.is_err());
     }
 
@@ -839,7 +965,7 @@ mod tests {
             "items": [{"quantity": 1, "price": 5.00}],
             "total_amount": 5.00
         });
-        let result = build_fiscal_data(&order, &[], &sample_tax_rates(), None);
+        let result = build_fiscal_data(&order, &[], &sample_tax_rates(), None, &ctx());
         assert!(result.unwrap_err().contains("missing a non-empty name"));
     }
 
@@ -850,8 +976,137 @@ mod tests {
             "total_amount": 5.00
         });
         let payments = vec![json!({"method": "card", "amount": 0.0})];
-        let result = build_fiscal_data(&order, &payments, &sample_tax_rates(), None);
+        let result = build_fiscal_data(&order, &payments, &sample_tax_rates(), None, &ctx());
         assert!(result.unwrap_err().contains("must be positive"));
+    }
+
+    #[test]
+    fn every_line_carries_its_computed_rate_and_the_delivery_fee_is_a_13_percent_line() {
+        let order = json!({
+            "items": [
+                {"name": "Crepe", "quantity": 1, "price": 8.50},
+                {"name": "Waffle", "quantity": 1, "price": 9.40},
+                {"name": "Juice", "quantity": 2, "price": 2.35}
+            ],
+            "discount_amount": 0.75,
+            "delivery_fee": 1.80,
+            "tip_amount": 1.00,
+            "total_amount": 24.65
+        });
+        let context = FiscalLineContext {
+            vat_settings: GreeceVatSettings::default(),
+            language: "el".into(),
+        };
+        // The register is paid what it lists (the tip stays off the receipt).
+        let payments = vec![json!({"method": "cash", "amount": 23.65})];
+        let data =
+            build_fiscal_data(&order, &payments, &sample_tax_rates(), None, &context).unwrap();
+
+        assert_eq!(
+            data.items.len(),
+            4,
+            "three items and the delivery fee, no tip"
+        );
+        for item in &data.items[..3] {
+            assert_eq!((item.tax_code.as_str(), item.tax_rate), ("A", 24.0));
+            assert_eq!(item.department, Some(3));
+        }
+        let fee = &data.items[3];
+        assert_eq!(
+            fee.description,
+            "\u{039C}\u{03B5}\u{03C4}\u{03B1}\u{03C6}\u{03BF}\u{03C1}\u{03B9}\u{03BA}\u{03AC}"
+        );
+        assert_eq!((fee.tax_code.as_str(), fee.tax_rate), ("B", 13.0));
+        assert_eq!(
+            (fee.quantity, fee.unit_price, fee.discount),
+            (1.0, 180, None)
+        );
+        // The 0.75 discount is shared as the server allocates it (the shared
+        // vector `delivery_order_full`: 28/31/16 cents).
+        let shares: Vec<Option<i64>> = data.items[..3].iter().map(|item| item.discount).collect();
+        assert_eq!(shares, vec![Some(28), Some(31), Some(16)]);
+        let receipt_total: i64 = data
+            .items
+            .iter()
+            .map(|item| {
+                (item.quantity * item.unit_price as f64).round() as i64 - item.discount.unwrap_or(0)
+            })
+            .sum();
+        assert_eq!(
+            receipt_total, 2365,
+            "items - discount + fee, the total without its tip"
+        );
+        assert_eq!(data.payments[0].amount, 2365);
+    }
+
+    #[test]
+    fn delivery_fee_description_follows_the_receipt_language() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 10.00}],
+            "deliveryFee": 2.00,
+            "totalAmount": 12.00
+        });
+        for (language, expected) in [
+            ("en", "Delivery"),
+            ("de", "Lieferung"),
+            ("fr", "Livraison"),
+            ("it", "Consegna"),
+            ("sq", "D\u{00EB}rgesa"),
+        ] {
+            let context = FiscalLineContext {
+                vat_settings: GreeceVatSettings::default(),
+                language: language.into(),
+            };
+            let data = build_fiscal_data(&order, &[], &sample_tax_rates(), None, &context).unwrap();
+            assert_eq!(data.items[1].description, expected, "{language}");
+        }
+    }
+
+    #[test]
+    fn island_branch_lines_carry_the_island_rate_and_an_unprogrammed_rate_is_refused() {
+        let order = json!({
+            "items": [{"name": "Item", "quantity": 1, "price": 11.70}],
+            "total_amount": 11.70
+        });
+        let context = FiscalLineContext {
+            vat_settings: GreeceVatSettings {
+                default_vat_category_code: Some("gr_island_reduced_17".into()),
+                vat_region_profile: Some("islands_reduced".into()),
+            },
+            language: "el".into(),
+        };
+        let data = build_fiscal_data(&order, &[], &sample_tax_rates(), None, &context).unwrap();
+        // The register has no 17% code: the line keeps its 17% and no
+        // department, which a department register refuses, rather than
+        // being booked at the first configured rate as before.
+        assert_eq!(data.items[0].tax_rate, 17.0);
+        assert_eq!(data.items[0].department, None);
+        let mut rates = sample_tax_rates();
+        rates.push(TaxRateConfig {
+            code: "E".into(),
+            rate: 17.0,
+            label: "Island".into(),
+            department: Some(5),
+        });
+        let data = build_fiscal_data(&order, &[], &rates, None, &context).unwrap();
+        assert_eq!(
+            (data.items[0].tax_code.as_str(), data.items[0].department),
+            ("E", Some(5))
+        );
+    }
+
+    #[test]
+    fn a_pickup_order_without_fee_or_discount_keeps_its_lines() {
+        // Tomikro-like pickup: one line per item, nothing added.
+        let order = json!({
+            "items": [{"name": "Crepe", "quantity": 2, "price": 6.50}],
+            "totalAmount": 13.00,
+            "taxAmount": 2.52
+        });
+        let data = build_fiscal_data(&order, &[], &sample_tax_rates(), None, &ctx()).unwrap();
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].discount, None);
+        assert_eq!(data.payments[0].amount, 1300);
     }
 
     #[test]

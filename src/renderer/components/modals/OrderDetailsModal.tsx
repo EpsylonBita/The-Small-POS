@@ -24,6 +24,7 @@ import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
 import { getBridge } from '../../../lib';
 import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
+import { readPrintedVatAmount } from '../../utils/printedVat';
 import { menuService, type Ingredient, type MenuCategory, type MenuItem } from '../../services/MenuService';
 import { AddCustomerModal } from './AddCustomerModal';
 import { isGiftCardPayment } from '../../lib/gift-card-returns';
@@ -842,7 +843,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const recentOrders = sortedCustomerOrders.filter((entry) => !orderMatchesCurrent(entry)).slice(0, 4);
 
   const subtotal = displayOrder.subtotal || 0;
-  const tax = displayOrder.tax || displayOrder.tax_amount || displayOrder.taxAmount || 0;
+  // The VAT its slip prints (founder rule 07/10/2026): every order stores its
+  // computed VAT, which a store without a fiscal plugin or an owner rate never
+  // shows. Prices include VAT, so it is never added to the total.
+  const tax = readPrintedVatAmount(displayOrder);
   const deliveryFee = displayOrder.delivery_fee ?? displayOrder.deliveryFee ?? 0;
   const discountAmount = displayOrder.discount_amount || displayOrder.discountAmount || 0;
   const discountPercentage = displayOrder.discount_percentage || displayOrder.discountPercentage || 0;
@@ -2343,10 +2347,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           orderTotal: total,
           deliveryFee,
           discountAmount,
-          taxAmount: tax,
+          // VAT is inside the item prices: never a separate line to pay.
           deliveryFeeLabel: t('payment.fields.deliveryFee', { defaultValue: 'Delivery Fee' }),
           discountLabel: t('modals.payment.discount', { defaultValue: 'Discount' }),
-          taxLabel: t('modals.orderDetails.tax', { defaultValue: 'Tax' }),
           adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
         })}
         initialMode="by-items"

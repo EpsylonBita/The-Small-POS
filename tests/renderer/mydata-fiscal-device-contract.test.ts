@@ -43,7 +43,8 @@ test('MyData fiscal-device setup supports LAN and performs a native protocol tes
     /'usb_serial'\s*\|\s*'bluetooth'\s*\|\s*'network'/,
     'MyData connection type must include network',
   );
-  assert.match(integrationsSource, /await verifyAndSaveMyDataDevice\(\s*bridge\.ecr, nativeDevice, Boolean\(existing\), terminalId, deviceConnection/);
+  // The stored row, so a failed re-verification can put an active register back.
+  assert.match(integrationsSource, /await verifyAndSaveMyDataDevice\(\s*bridge\.ecr, nativeDevice, existing \?\? false, terminalId, deviceConnection/);
   assert.match(deviceSetupSource, /ecr\.(addDevice|updateDevice)/);
   assert.match(deviceSetupSource, /ecr\.connectDevice/);
   assert.match(deviceSetupSource, /ecr\.testConnection/);

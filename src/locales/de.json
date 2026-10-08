@@ -4247,6 +4247,7 @@
       "editTooManyLines": "Eine Korrektur darf höchstens {{maxLines}} Positionen haben. Entfernen Sie Positionen oder stornieren Sie die Bestellung und legen Sie eine neue an. Es wurde kein Geld kassiert.",
       "editMethodUnavailable": "Dieses Terminal darf für die Differenz weder Bargeld noch Karte erfassen. Bitten Sie eine Führungskraft, für dieses Terminal eine Zahlungsart zu aktivieren. Es wurde kein Geld kassiert.",
       "editPreviousNotSaved": "Eine frühere Korrektur dieser Bestellung wurde bestätigt, aber nicht gespeichert. Öffnen Sie sie aus dem gespeicherten Warenkorb, um sie erneut vorzubereiten, oder bitten Sie eine Führungskraft, sie zu schließen. Kassieren oder erstatten Sie kein Geld erneut.",
+      "editProviderRefundRequired": "Diese Bestellung hat eine Kartenzahlung über ein Kartenterminal oder einen Zahlungsanbieter, daher kann sie an dieser Kasse nicht korrigiert werden. Es wurde nichts geändert.",
       "emptyEditHint": "Um alle Artikel zu entfernen, schließen Sie den Editor und stornieren Sie die Bestellung.",
       "editCanonicalChanged": "Die Bestelldaten müssen aktualisiert werden. Aktualisieren Sie die Bestellung, bevor Sie eine Zahlung oder Rückerstattung bestätigen."
     },
@@ -5301,7 +5302,7 @@
       "attemptCleared": "Die gespeicherte Stornierung wurde gelöscht. Es wurde kein Geld zurückgegeben. Sie können die Bestellung erneut stornieren.",
       "staffCashUnavailable": "Die Stornierung mit Bargeldübergabe ist vorübergehend nicht verfügbar. Prüfen Sie die Verbindung und versuchen Sie es nach dem Serverupdate erneut.",
       "connectionUnavailable": "Der Zahlungs-Verbindungsstatus ist nicht verfügbar. Aktualisieren Sie Integrationen und versuchen Sie es erneut.",
-      "permissionRequired": "Dieses Konto darf bezahlte Bestellungen nicht stornieren.",
+      "permissionRequired": "Niemand hier darf bezahlte Bestellungen stornieren: weder der Kassierer der Schicht noch jemand mit dieser Berechtigung und einer PIN an dieser Kasse. Geben Sie einer Rolle im Admin-Dashboard die Stornoberechtigung und versuchen Sie es online erneut.",
       "paymentSyncRequired": "Die ursprüngliche Zahlung muss vor der Rückgabe synchronisiert werden. Synchronisieren und erneut versuchen; nicht erneut belasten.",
       "paymentChanged": "Die Zahlung hat sich geändert. Schließen Sie das Fenster und wählen Sie erneut Stornieren, um den aktuellen Betrag zu prüfen.",
       "drawerUnavailable": "Für eine Bargeldrückgabe muss eine Kasse geöffnet sein.",
@@ -5335,7 +5336,9 @@
         "bad_weather": "Schlechtes Wetter",
         "duplicate_order": "Doppelte Bestellung",
         "test_order": "Testbestellung"
-      }
+      },
+      "managerApprovalTitle": "Stornierung freigeben",
+      "managerApprovalSubtitle": "Das Stornieren einer bezahlten Bestellung erfordert die Stornoberechtigung. Ein Manager, der sie hat, gibt seine eigene PIN ein. Es wird nichts belastet."
     },
     "addCustomer": {
       "title": "Neuen Kunden hinzufügen",
@@ -8327,6 +8330,20 @@
       "enabled": "Terminal aktiviert",
       "saveFailed": "Terminal konnte nicht gespeichert werden"
     },
+    "admission": {
+      "cardTerminalNeedsPlugin": "Benötigt sein Plugin: Kartenterminals bleiben inaktiv, bis für diese Filiale ein Zahlungs-Plugin aktiv und eingerichtet ist.",
+      "cashRegisterNeedsPlugin": "Benötigt sein Plugin: Fiskalkassen bleiben inaktiv, bis das MyData-Plugin der Filiale im Modus „Fiskalgerät“ läuft und seine Einrichtung abgeschlossen ist.",
+      "cardTerminalRefused": "Dieses Kartenterminal kann nicht aktiviert werden: Es benötigt ein aktives, eingerichtetes Zahlungs-Plugin für diese Filiale. Sie können es deaktiviert speichern.",
+      "cashRegisterRefused": "Diese Kasse kann nicht aktiviert werden: Sie benötigt das MyData-Plugin der Filiale im Modus „Fiskalgerät“ mit abgeschlossener Einrichtung. Sie können sie deaktiviert speichern.",
+      "deviceRefused": "Dieses Gerät kann erst aktiviert werden, wenn sein Plugin für diese Filiale aktiv, eingerichtet und abgeschlossen ist.",
+      "typeRequired": "Wählen Sie den Gerätetyp: Zahlungsterminal oder Fiskalregistrierkasse.",
+      "fiscalNotCardTerminal": "Eine Fiskalkasse (z. B. RBS oder ELIO) ist kein Kartenterminal. Richten Sie sie unter „Registrierkasse / Fiskaldrucker“ ein.",
+      "savedAsCardTerminal": "Dies sieht aus wie eine Fiskalkasse (RBS / ELIO), ist aber als Kartenterminal gespeichert. Deaktivieren oder entfernen Sie sie hier und richten Sie sie dann unter „Registrierkasse / Fiskaldrucker“ ein.",
+      "disable": "Deaktivieren",
+      "disabledBadge": "Deaktiviert",
+      "disableSuccess": "Gerät deaktiviert",
+      "disableFailed": "Das Gerät konnte nicht deaktiviert werden"
+    },
     "status": {
       "connected": "Verbunden",
       "disconnected": "Getrennt",
@@ -8789,6 +8806,7 @@
       "capTargetMismatch": "Das Ziel des CAP-Dienstes ist unbekannt oder weicht vom Formular ab. Verbindungseinrichtung öffnen, diese IP oder diesen COM-Port im Herstellerdienst einstellen und den Support-Status aktualisieren.",
       "capServiceTarget": "Ziel des Herstellerdienstes",
       "configSaved": "MyData-Konfiguration gespeichert",
+      "deviceAwaitingSetup": "Das Fiskalgerät wurde geprüft, bleibt aber inaktiv, bis bestätigt ist, dass die MyData-Einrichtung der Filiale abgeschlossen ist. Aktivieren Sie es dann unter „Registrierkasse / Fiskaldrucker“.",
       "dashboardBanner": {
         "title": "Die myDATA-Einrichtung erfolgt im Admin-Dashboard",
         "body": "Sobald myDATA eingerichtet ist, werden Belege automatisch an das Finanzamt (AADE) übermittelt. Die Einrichtung selbst (Zugangsdaten, USt-Angaben, Aktivierung) erfolgt in Ihrem Admin-Dashboard: Öffnen Sie Plugins → MyData und folgen Sie den Schritten. Dieser Bildschirm wird nur benötigt, wenn Sie einen Fiskaldrucker (ΦΗΜ) mit dieser Kasse verbinden.",
@@ -10068,5 +10086,10 @@
     "waiterBody": "Die Hauptkasse ist geschlossen. Ein Kassierer oder Manager muss sich an der zugeordneten Hauptkasse anmelden. Danach können Sie Ihre eigene Schicht beginnen und fortfahren.",
     "checking": "Kassierer-Schicht wird geprüft…",
     "recheck": "Erneut prüfen"
+  },
+  "zReportOffline": {
+    "refusal": "Ohne Verbindung lässt sich der Tag nicht abschließen. Verkaufen Sie weiter: Der Tag bleibt offen, und Sie schließen ihn, sobald die Verbindung zurück ist. Um die Kasse jetzt zu zählen, nutzen Sie den Kassiererabschluss, der auch ohne Internet druckt, und die Vorschau auf diesem Bildschirm.",
+    "status": "Keine Verbindung: Der Tag wird abgeschlossen, sobald sie zurück ist",
+    "checklist": "Keine Verbindung zum Server. Verkaufen Sie weiter und schließen Sie den Tag, sobald die Verbindung zurück ist."
   }
 }

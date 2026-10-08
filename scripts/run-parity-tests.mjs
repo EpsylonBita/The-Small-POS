@@ -84,6 +84,8 @@ const entryPoints = [
   path.join(testsRoot, 'renderer', 'split-payment-terminal-card-integrity.test.ts'),
   path.join(testsRoot, 'renderer', 'split-payment-currency.test.ts'),
   path.join(testsRoot, 'renderer', 'checkout-failure-contract.test.ts'),
+  // 07/10/2026: order VAT is native; screens show the printed VAT only.
+  path.join(testsRoot, 'renderer', 'order-vat-contract.test.ts'),
   path.join(testsRoot, 'renderer', 'split-checkout-dismissal.test.ts'),
   // THE-324: retail checkout money/order-item seam — fee-exclusive total
   // contract with OrderFlow and offer-reward lines mapped to real UUIDs.

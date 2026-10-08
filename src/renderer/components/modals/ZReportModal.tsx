@@ -245,6 +245,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const [twintReturned, setTwintReturned] = useState<TwintReturnedReceipt[]>([]);
   const [retryingFiscalQueue, setRetryingFiscalQueue] = useState(false);
   const [reportReloadVersion, setReportReloadVersion] = useState(0);
+  // The till's own connection (native health probe). Offline the day cannot
+  // close, so the checklist must not read "No sync blocker detected" (offline
+  // audit 07/10/2026). Informational: the native Z refusal decides.
+  const [serverReachable, setServerReachable] = useState<boolean | null>(null);
   const wasOpenRef = useRef(false);
   const pendingOpenDateRef = useRef<string | null>(null);
   // Async results (print, submit, blocker resolve) belong to the open + branch + business day that
@@ -839,6 +843,25 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const submitButtonLabel = t('modals.zReport.commitZReport');
   const resolvedBusinessDate = zReport?.date || selectedDate;
   const resolvedPeriod = useMemo(() => resolveZReportPeriod(zReport), [zReport]);
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    let current = true;
+    const applyNetworkStatus = (payload: unknown) => {
+      if (!current || !payload || typeof payload !== 'object') return;
+      const isOnline = (payload as { isOnline?: unknown }).isOnline;
+      if (typeof isOnline === 'boolean') setServerReachable(isOnline);
+    };
+    onEvent<unknown>('network:status', applyNetworkStatus);
+    const probe = bridge.sync?.getNetworkStatus?.();
+    if (probe && typeof probe.then === 'function') {
+      // Unknown stays unknown: the checklist keeps its report-based line.
+      void probe.then(applyNetworkStatus).catch(() => undefined);
+    }
+    return () => {
+      current = false;
+      offEvent<unknown>('network:status', applyNetworkStatus);
+    };
+  }, [bridge, isOpen, reportReloadVersion]);
   // TWINT receipts a manager recorded as returned outside the POS during this
   // Z's window: shown for what they are, never in sales, TWINT or drawer cash.
   useEffect(() => {
@@ -1301,6 +1324,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     !error;
   const closeoutStatusLabel = loading
     ? t('modals.zReport.closeoutLoading')
+    : serverReachable === false
+      ? t('zReportOffline.status', { defaultValue: 'No connection: the day closes once it is back' })
     : closeoutReady
       ? t('modals.zReport.readyToClose')
       : closeoutNeedsStaffCheckout
@@ -1325,10 +1350,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       label: t('modals.zReport.adminSync'),
       description: loading
         ? t('modals.zReport.syncChecking')
-        : error
-          ? t('modals.zReport.syncNeedsRetry')
-          : t('modals.zReport.syncReady'),
-      state: loading ? 'pending' : error ? 'error' : 'ready',
+        : serverReachable === false
+          ? t('zReportOffline.checklist', {
+            defaultValue: 'No connection to the server. Keep selling; close the day once the connection is back.',
+          })
+          : error
+            ? t('modals.zReport.syncNeedsRetry')
+            : t('modals.zReport.syncReady'),
+      state: loading ? 'pending' : serverReachable === false || error ? 'error' : 'ready',
     },
     {
       key: 'payments',

@@ -86,6 +86,32 @@ fn nested_value_number_string(v: &serde_json::Value, pointers: &[&str]) -> Optio
     None
 }
 
+/// The server says the branch has NO value for `field`: `branch_info.<field>`
+/// is present and null (or blank). An absent field means "not known" (an older
+/// server, or a branch row read without that column) and keeps the cached
+/// value, so only an explicit clear removes a receipt-header line.
+fn branch_info_field_cleared(resp: &serde_json::Value, field: &str) -> bool {
+    match resp.get("branch_info").and_then(|info| info.get(field)) {
+        Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// Removes cached settings and reports each one that existed.
+fn delete_cached_settings(
+    conn: &rusqlite::Connection,
+    keys: &[(&str, &str)],
+    updated: &mut Vec<String>,
+) -> Result<(), String> {
+    for (category, key) in keys {
+        if db::delete_setting(conn, category, key)? > 0 {
+            updated.push(format!("{category}.{key}"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn extract_org_id_from_terminal_settings_response(
     resp: &serde_json::Value,
 ) -> Option<String> {
@@ -448,6 +474,21 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 if normalized_category == "terminal" && is_local_only_terminal_setting(key) {
                     continue;
                 }
+                // The owner's VAT rate decides the printed VAT. The server
+                // sends an explicit null when it verified that no rate is
+                // configured anywhere (absent means it could not tell), so a
+                // null clears a rate cached earlier, e.g. the old 8.25
+                // default every till received before 07/10/2026.
+                if normalized_category
+                    == crate::fiscal::receipt_vat::OWNER_VAT_RATE_SETTING_CATEGORY
+                    && key == crate::fiscal::receipt_vat::OWNER_VAT_RATE_SETTING_KEY
+                    && raw_value.is_null()
+                {
+                    if db::delete_setting(&transaction, category, key)? > 0 {
+                        updated.push(format!("{category}.{key}"));
+                    }
+                    continue;
+                }
                 let Some(serialized) = setting_value_to_string(raw_value) else {
                     continue;
                 };
@@ -615,6 +656,14 @@ pub(crate) fn cache_terminal_settings_snapshot(
         db::set_setting(&transaction, "restaurant", "address", &full_address)?;
         db::set_setting(&transaction, "terminal", "store_address", &full_address)?;
         updated.push("restaurant.address".to_string());
+    } else if branch_info_field_cleared(resp, "address") {
+        // The owner cleared the branch address and nothing else supplies one:
+        // the receipt header loses it too, instead of printing the old one.
+        delete_cached_settings(
+            &transaction,
+            &[("restaurant", "address"), ("terminal", "store_address")],
+            &mut updated,
+        )?;
     }
     if let Some(store_phone) = nested_value_str(
         resp,
@@ -628,6 +677,12 @@ pub(crate) fn cache_terminal_settings_snapshot(
         db::set_setting(&transaction, "restaurant", "phone", &store_phone)?;
         db::set_setting(&transaction, "terminal", "store_phone", &store_phone)?;
         updated.push("restaurant.phone".to_string());
+    } else if branch_info_field_cleared(resp, "phone") {
+        delete_cached_settings(
+            &transaction,
+            &[("restaurant", "phone"), ("terminal", "store_phone")],
+            &mut updated,
+        )?;
     }
 
     // The branch's ISO-3166 country, resolved server-side from the branch row
@@ -696,12 +751,24 @@ pub(crate) fn cache_terminal_settings_snapshot(
     ) {
         db::set_setting(&transaction, "organization", "vat_number", &tax_id)?;
         updated.push("organization.vat_number".to_string());
+    } else if branch_info_field_cleared(resp, "tax_id") {
+        delete_cached_settings(
+            &transaction,
+            &[("organization", "vat_number")],
+            &mut updated,
+        )?;
     }
 
     // Branch tax_office → organization.tax_office (for receipt header).
     if let Some(tax_office) = nested_value_str(resp, &["/branch_info/tax_office"]) {
         db::set_setting(&transaction, "organization", "tax_office", &tax_office)?;
         updated.push("organization.tax_office".to_string());
+    } else if branch_info_field_cleared(resp, "tax_office") {
+        delete_cached_settings(
+            &transaction,
+            &[("organization", "tax_office")],
+            &mut updated,
+        )?;
     }
 
     transaction.commit().map_err(|e| e.to_string())?;
@@ -1380,6 +1447,56 @@ mod tests {
     }
 
     #[test]
+    fn owner_vat_rate_null_clears_the_cached_rate_and_absent_keeps_it() {
+        let db = test_db();
+        let read = |db: &db::DbState| {
+            let conn = db.conn.lock().unwrap();
+            (
+                db::get_setting(&conn, "tax", "default_tax_rate"),
+                db::get_setting(&conn, "tax", "vat_default_category_code"),
+                db::get_setting(&conn, "tax", "vat_region_profile"),
+            )
+        };
+        // Every till cached the old 8.25 default before 07/10/2026.
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"settings": {"tax": {
+                "default_tax_rate": 8.25, "tax_inclusive": true,
+                "vat_default_category_code": "gr_standard_24", "vat_region_profile": "mainland"
+            }}}),
+        )
+        .unwrap();
+        assert_eq!(read(&db).0.as_deref(), Some("8.25"));
+        // Absent: the server could not tell; the cached values stay.
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"settings": {"tax": {"tax_inclusive": true}}}),
+        )
+        .unwrap();
+        assert_eq!(read(&db).0.as_deref(), Some("8.25"));
+        cache_terminal_settings_snapshot(&db, &serde_json::json!({})).unwrap();
+        assert_eq!(read(&db).0.as_deref(), Some("8.25"));
+        // An explicit null: no rate is configured anywhere.
+        let updated = cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"settings": {"tax": {"default_tax_rate": null, "tax_inclusive": true}}}),
+        )
+        .unwrap();
+        assert!(updated.contains(&"tax.default_tax_rate".to_string()));
+        let (rate, category, region) = read(&db);
+        assert_eq!(rate, None);
+        assert_eq!(category.as_deref(), Some("gr_standard_24"));
+        assert_eq!(region.as_deref(), Some("mainland"));
+        // Tomikro's 0 is a configured rate and is kept as such.
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"settings": {"tax": {"default_tax_rate": 0}}}),
+        )
+        .unwrap();
+        assert_eq!(read(&db).0.as_deref(), Some("0"));
+    }
+
+    #[test]
     fn country_currency_snapshot_replaces_stale_aliases_and_persists_unknown() {
         let db = test_db();
         set_terminal_setting(&db, "branch_id", "branch-ch");
@@ -1521,6 +1638,94 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "organization", "tax_office").as_deref(),
             Some("DOY ATHENS")
+        );
+    }
+
+    #[test]
+    fn cleared_branch_address_phone_and_tax_details_leave_the_receipt_header() {
+        let db = test_db();
+        let read = |db: &db::DbState| {
+            let conn = db.conn.lock().unwrap();
+            [
+                ("restaurant", "address"),
+                ("terminal", "store_address"),
+                ("restaurant", "phone"),
+                ("terminal", "store_phone"),
+                ("organization", "vat_number"),
+                ("organization", "tax_office"),
+            ]
+            .map(|(category, key)| db::get_setting(&conn, category, key))
+        };
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"branch_info": {
+                "name": "Kifisia Branch", "address": "Main St 42", "city": "Athens",
+                "phone": "2101234567", "tax_id": "123456789", "tax_office": "DOY ATHENS"
+            }}),
+        )
+        .unwrap();
+        assert!(read(&db).iter().all(Option::is_some));
+
+        // Absent fields: an older server, or a branch row read without those
+        // columns. Nothing is known, so nothing is removed.
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"branch_info": {"name": "Kifisia Branch"}}),
+        )
+        .unwrap();
+        assert!(read(&db).iter().all(Option::is_some));
+
+        // The owner cleared all four on the branch card: the server sends nulls.
+        let updated = cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"branch_info": {
+                "name": "Kifisia Branch", "address": null, "city": null,
+                "phone": null, "tax_id": null, "tax_office": null
+            }}),
+        )
+        .unwrap();
+        assert_eq!(read(&db), [None, None, None, None, None, None]);
+        for key in [
+            "restaurant.address",
+            "terminal.store_address",
+            "restaurant.phone",
+            "terminal.store_phone",
+            "organization.vat_number",
+            "organization.tax_office",
+        ] {
+            assert!(updated.contains(&key.to_string()), "{key} not reported");
+        }
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "name").as_deref(),
+            Some("Kifisia Branch")
+        );
+    }
+
+    #[test]
+    fn cleared_branch_tax_id_falls_back_to_the_organization_like_a_new_till() {
+        let db = test_db();
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"branch_info": {"name": "B", "tax_id": "111111111", "phone": "210"}}),
+        )
+        .unwrap();
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({
+                "organization_branding": {"vat_number": "999999999", "phone": "2310"},
+                "branch_info": {"name": "B", "tax_id": null, "phone": ""}
+            }),
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "organization", "vat_number").as_deref(),
+            Some("999999999")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "phone").as_deref(),
+            Some("2310")
         );
     }
 

@@ -5302,6 +5302,28 @@ fn kiosk_payment_intent(raw: &str) -> Option<String> {
     }
 }
 
+/// The VAT a customer slip prints for an order, `None` for no VAT line. The
+/// one gate for both the «ΦΠΑ» totals line and the displayed Subtotal
+/// (founder rule 07/10/2026, [`crate::fiscal::receipt_vat`]): with a
+/// connected fiscal plugin or a myDATA fiscal device the order's computed
+/// VAT, otherwise the VAT of the owner's configured rate, none when the owner
+/// set no rate or 0%. A store without either prints exactly what a tax-0
+/// order always printed, whatever VAT the order stores.
+fn printed_receipt_vat(
+    conn: &rusqlite::Connection,
+    branch_id: Option<&str>,
+    total_amount: f64,
+    tip_amount: f64,
+    computed_vat_amount: f64,
+) -> Option<f64> {
+    crate::fiscal::receipt_vat::PrintedVatContext::load(conn).order_vat_amount(
+        branch_id,
+        total_amount,
+        tip_amount,
+        Some(computed_vat_amount),
+    )
+}
+
 pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     // W6: `orders.payment_method` was dropped in v55. Derive the method
@@ -5428,6 +5450,25 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
             |row| row.get::<_, String>(0),
         )
         .unwrap_or_default();
+    let (order_branch_id, tax_amount_cents): (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT branch_id, tax_amount_cents FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None));
+    // The order's computed VAT: the cents column wins (W4c), the REAL value
+    // for a row written before the cents existed.
+    let computed_vat_amount = tax_amount_cents
+        .map(|cents| crate::money::Cents::new(cents).to_f64_dp2())
+        .unwrap_or(tax_amount);
+    let printed_vat = printed_receipt_vat(
+        &conn,
+        order_branch_id.as_deref(),
+        total_amount,
+        tip_amount,
+        computed_vat_amount,
+    );
 
     let menu_lookup = build_menu_category_lookup(&conn);
 
@@ -5491,8 +5532,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     }
 
     let effective_discount = discount_amount.max(0.0);
+    // The printed VAT, never the stored one: a slip without a VAT line keeps
+    // the Subtotal it always had (founder rule 07/10/2026).
     let computed_subtotal =
-        total_amount - tax_amount - delivery_fee - tip_amount + effective_discount;
+        total_amount - printed_vat.unwrap_or(0.0) - delivery_fee - tip_amount + effective_discount;
     let display_subtotal = if computed_subtotal.is_finite() && computed_subtotal > 0.0 {
         computed_subtotal
     } else {
@@ -5518,10 +5561,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
             },
         });
     }
-    if tax_amount > 0.0 {
+    if let Some(vat) = printed_vat {
         totals.push(TotalsLine {
             label: "Tax".to_string(),
-            amount: tax_amount,
+            amount: vat,
             emphasize: false,
             discount_percent: None,
         });
@@ -19086,6 +19129,162 @@ mod tests {
             .expect("discount total line");
         assert!((discount_line.amount + 1.40).abs() < 0.001);
         assert_eq!(discount_line.discount_percent, Some(10.0));
+    }
+
+    /// A delivery with a discount and a tip (the shared vector
+    /// `delivery_order_full`, computed VAT 4.44), storing `vat_cents`.
+    fn seed_printed_vat_order(db: &DbState, id: &str, vat_cents: Option<i64>) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, branch_id, items, total_amount, total_amount_cents,
+                subtotal, subtotal_cents, discount_amount, discount_amount_cents,
+                delivery_fee, delivery_fee_cents, tip_amount, tip_amount_cents,
+                tax_amount, tax_amount_cents, status, order_type, sync_status,
+                created_at, updated_at
+             ) VALUES (
+                ?1, 'ORD-VAT', 'branch-slip',
+                '[{\"name\":\"Crepe\",\"quantity\":1,\"total_price\":8.5},{\"name\":\"Waffle\",\"quantity\":1,\"total_price\":9.4},{\"name\":\"Juice\",\"quantity\":2,\"total_price\":4.7}]',
+                24.65, 2465, 22.6, 2260, 0.75, 75, 1.8, 180, 1.0, 100,
+                ?2, ?3, 'completed', 'delivery', 'pending',
+                '2026-10-07T10:00:00Z', '2026-10-07T10:00:00Z'
+             )",
+            params![
+                id,
+                vat_cents.map(|cents| cents as f64 / 100.0).unwrap_or(0.0),
+                vat_cents
+            ],
+        )
+        .unwrap();
+    }
+
+    fn slip(db: &DbState, id: &str) -> (Value, Vec<u8>) {
+        let doc = build_order_receipt_doc(db, id).unwrap();
+        let bytes = receipt_renderer::render_escpos(
+            &ReceiptDocument::OrderReceipt(doc.clone()),
+            &receipt_renderer::LayoutConfig::default(),
+        )
+        .bytes;
+        (serde_json::to_value(&doc).unwrap(), bytes)
+    }
+
+    fn slip_line(doc: &Value, label: &str) -> Option<f64> {
+        doc["totals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|line| line["label"] == label)
+            .map(|line| line["amount"].as_f64().unwrap())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn slips_without_a_plugin_or_an_owner_rate_are_unchanged_by_the_stored_vat() {
+        crate::fiscal::active_cache::reset_for_tests();
+        // Tomikro (owner rate 0) and a store without a rate (Le Petit Paris).
+        for rate in [Some("0"), None] {
+            let db = test_db();
+            if let Some(rate) = rate {
+                let conn = db.conn.lock().unwrap();
+                db::set_setting(&conn, "tax", "default_tax_rate", rate).unwrap();
+            }
+            // Today: an order-dashboard order stored tax 0 and no cents.
+            seed_printed_vat_order(&db, "slip-vat", None);
+            let (before_doc, before_bytes) = slip(&db, "slip-vat");
+            // This release: the same order stores its computed VAT.
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE orders SET tax_amount = 4.44, tax_amount_cents = 444 WHERE id = 'slip-vat'",
+                    [],
+                )
+                .unwrap();
+            }
+            let (after_doc, after_bytes) = slip(&db, "slip-vat");
+            assert_eq!(after_doc, before_doc, "rate {rate:?}");
+            assert_eq!(after_bytes, before_bytes, "rate {rate:?}: byte for byte");
+            assert_eq!(slip_line(&after_doc, "Tax"), None, "no ΦΠΑ line");
+            // Subtotal = total - delivery - tip + discount, as always.
+            assert_eq!(
+                slip_line(&after_doc, "Subtotal"),
+                Some(24.65 - 1.8 - 1.0 + 0.75)
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_active_fiscal_plugin_prints_the_computed_vat() {
+        crate::fiscal::active_cache::reset_for_tests();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "tax", "default_tax_rate", "0").unwrap();
+        }
+        seed_printed_vat_order(&db, "slip-plugin", Some(444));
+        // An unknown, stale or non-dispatching verdict prints nothing.
+        crate::fiscal::active_cache::update_with_status(
+            "branch-slip",
+            true,
+            Some("fiscalization_gr".into()),
+            Some("certification_missing".into()),
+        );
+        assert_eq!(slip_line(&slip(&db, "slip-plugin").0, "Tax"), None);
+        crate::fiscal::active_cache::update_with_status(
+            "branch-slip",
+            true,
+            Some("fiscalization_gr".into()),
+            Some("active".into()),
+        );
+        let (doc, _) = slip(&db, "slip-plugin");
+        crate::fiscal::active_cache::reset_for_tests();
+        assert_eq!(slip_line(&doc, "Tax"), Some(4.44));
+        let subtotal = slip_line(&doc, "Subtotal").unwrap();
+        assert!((subtotal - (24.65 - 4.44 - 1.8 - 1.0 + 0.75)).abs() < 1e-9);
+        assert_eq!(
+            slip_line(&doc, "TOTAL"),
+            Some(24.65),
+            "the total never changes"
+        );
+    }
+
+    #[test]
+    fn a_mydata_fiscal_device_prints_the_computed_vat() {
+        let db = test_db();
+        seed_printed_vat_order(&db, "slip-device", Some(444));
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO ecr_devices (id, name, device_type, protocol, connection_type, enabled)
+                 VALUES ('mydata-fiscal-device', 'Cashier', 'cash_register', 'cap_driver', 'network', 1)",
+                [],
+            )
+            .unwrap();
+            // Only with its MyData plugin finished (founder rule 08/10/2026).
+            crate::device_admission::admit_for_test(
+                &conn,
+                &[crate::device_admission::CASH_REGISTER],
+            );
+        }
+        assert_eq!(slip_line(&slip(&db, "slip-device").0, "Tax"), Some(4.44));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_owner_rate_prints_the_vat_included_in_the_total_without_the_tip() {
+        crate::fiscal::active_cache::reset_for_tests();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "tax", "default_tax_rate", "24").unwrap();
+        }
+        seed_printed_vat_order(&db, "slip-owner", Some(444));
+        let (doc, _) = slip(&db, "slip-owner");
+        // (24.65 - 1.00 tip) = 23.65; 2365 * 24 / 124 = 457.74 -> 4.58.
+        assert_eq!(slip_line(&doc, "Tax"), Some(4.58));
+        let subtotal = slip_line(&doc, "Subtotal").unwrap();
+        assert!((subtotal - (24.65 - 4.58 - 1.8 - 1.0 + 0.75)).abs() < 1e-9);
+        assert_eq!(slip_line(&doc, "TOTAL"), Some(24.65));
     }
 
     #[test]

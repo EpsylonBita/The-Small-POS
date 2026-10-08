@@ -3147,7 +3147,10 @@ test('dashboard cancellation prepares paid returns and preserves protected-order
     "the till's refusals must be told as such",
   );
   assert.match(source, /if \(manualPlan\.requiresReturn && !returnChannel\) return;/);
-  assert.match(source, /await commitManualOrderCancellation\(bridge, manualPlan, trimmedReason, returnChannel \|\| "cash_drawer"\);\s*\}\s*continue;/, 'a planned return uses the atomic command and skips generic status cancellation');
+  assert.match(source, /await runTableReleaseApproval\(\{\s*scope: "cash_drawer_control",\s*action: \(\) => commitManualOrderCancellation\(bridge, manualPlan, trimmedReason, returnChannel \|\| "cash_drawer"\),[\s\S]*?approvalSubtitle: t\("modals\.orderCancellation\.managerApprovalSubtitle"\),\s*\}\);\s*\}\s*continue;/, 'a planned return uses the atomic command, asks an approver when the till needs one, and skips generic status cancellation');
+  // Founder 07/10/2026: closing the approver's PIN prompt cancels nothing and
+  // is not reported as a failure.
+  assert.match(source, /catch \(error\) \{\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(error instanceof Error && error\.message === "Privileged action confirmation cancelled"\) return;\s*console\.error\("Failed to cancel orders:", error\);/);
   assert.match(source, /t\("orderDashboard\.cancelRefusedPaid"/);
   assert.match(source, /t\("orderDashboard\.cancelRefusedNotRecorded"/);
 });

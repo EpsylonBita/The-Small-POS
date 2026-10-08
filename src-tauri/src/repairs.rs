@@ -3147,7 +3147,19 @@ pub(crate) fn retain_verified_access_after_network_failure(
     if !scope_matches_identity(&scope, &runtime.0, &runtime.1, &runtime.2) {
         return Err("REPAIR_OFFLINE_ACCESS_UNAVAILABLE".to_string());
     }
-    require_entitlement(&scope)?;
+    if let Err(error) = require_entitlement(&scope) {
+        // This verified scope holds no Repairs entitlement: there is no repair
+        // access to retain, and repair transport keeps refusing on its own.
+        // Release the barrier as an authoritative "disabled" answer does.
+        // Left blocked, every identity-bound write (order edits and
+        // cancellations, checkout drafts, fiscal checkout, parity sync, the
+        // table recovery status) failed with REPAIR_SCOPE_TRANSITION_PENDING
+        // until the next successful modules fetch (Tomikro, 06/10/2026).
+        if error == "REPAIR_MODULE_REQUIRED" {
+            unblock_at_epoch_for_decision(scope.scope_epoch, decision)?;
+        }
+        return Err(error);
+    }
     crate::repair_transport::authorize_any_repair_actor_for_scope(
         &crate::repair_transport::NativeRepairScope {
             organization_id: scope.organization_id.clone(),
@@ -16238,6 +16250,44 @@ mod tests {
         assert!(
             retain_verified_access_after_network_failure(&database.state, mismatched_decision)
                 .is_err()
+        );
+    }
+
+    // Tomikro, 06/10/2026: a store without the Repairs module kept the
+    // lifecycle blocked after every failed modules fetch, so identity-bound
+    // writes and the table recovery status failed until the next good fetch.
+    #[test]
+    fn network_failure_without_repair_entitlement_releases_the_lifecycle() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let initial = scope();
+        let _keyring = install_native_state(&initial);
+        let disabled = RepairEntitlementState {
+            version: ENTITLEMENT_VERSION,
+            organization_id: initial.organization_id.clone(),
+            branch_id: initial.branch_id.clone(),
+            terminal_id: initial.terminal_id.clone(),
+            scope_epoch: initial.scope_epoch,
+            enabled: false,
+            verified_at: "2026-10-06T00:00:00Z".to_string(),
+        };
+        crate::storage::set_credential(
+            crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
+            &serde_json::to_string(&disabled).expect("serialize disabled entitlement"),
+        )
+        .expect("store disabled entitlement");
+        let database = crate::tests::harness::TestDb::open();
+        let decision = start_authoritative_access_decision().expect("start refresh decision");
+
+        assert_eq!(
+            retain_verified_access_after_network_failure(&database.state, decision)
+                .expect_err("no repair access to retain"),
+            "REPAIR_MODULE_REQUIRED"
+        );
+        drop(acquire_terminal_binding_lease().expect("identity-bound writes are not held"));
+        assert_eq!(
+            acquire_transport_lease().unwrap_err().code(),
+            "REPAIR_MODULE_REQUIRED"
         );
     }
 

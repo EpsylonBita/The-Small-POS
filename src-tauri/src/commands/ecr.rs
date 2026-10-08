@@ -8,7 +8,7 @@ use std::time::Duration;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, ecr, payload_arg0_as_string, value_str};
+use crate::{db, device_admission, ecr, payload_arg0_as_string, value_str};
 
 /// A direct EFT sale whose exact card payment is not in the ledger.
 /// Legacy rows are held too, but only a pre-dispatch v89 original can be
@@ -1595,11 +1595,346 @@ pub async fn ecr_get_devices(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let devices = db::ecr_list_devices(&conn);
+    let devices = with_admission(&conn, db::ecr_list_devices(&conn));
     Ok(serde_json::json!({
         "success": true,
         "devices": devices
     }))
+}
+
+/// Each device carries `admitted`: whether its plugin is active, configured
+/// and finished for this till (`crate::device_admission`). Settings shows a
+/// device that is not as needing its plugin.
+fn with_admission(conn: &rusqlite::Connection, devices: Vec<Value>) -> Vec<Value> {
+    devices
+        .into_iter()
+        .map(|mut device| {
+            let admitted = device_admission::device_admitted(conn, &device);
+            if let Some(object) = device.as_object_mut() {
+                object.insert("admitted".into(), Value::Bool(admitted));
+            }
+            device
+        })
+        .collect()
+}
+
+/// The device type a device payload names (`deviceType` or `device_type`).
+fn payload_device_type(payload: &Value) -> Option<&str> {
+    payload
+        .get("deviceType")
+        .or_else(|| payload.get("device_type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+}
+
+/// A device row's stored `enabled` flag (an integer column, a bool in JSON).
+fn device_enabled(device: &Value) -> bool {
+    device
+        .get("enabled")
+        .and_then(|value| value.as_bool().or_else(|| value.as_i64().map(|n| n != 0)))
+        .unwrap_or(false)
+}
+
+/// Founder rule 08/10/2026: enabling a device whose plugin is not active,
+/// configured and finished is refused. `Some(refusal)` when `device_type`
+/// would end up enabled without admission.
+fn refuse_unadmitted_enable(
+    conn: &rusqlite::Connection,
+    device_type: &str,
+    enabled: bool,
+) -> Option<Value> {
+    (enabled && !device_admission::is_admitted(conn, device_type))
+        .then(|| device_admission::not_admitted_response(device_type))
+}
+
+/// A new device is saved only under an explicit, known type (a missing type is
+/// never silently a card terminal: 08/10/2026, a fiscal cash register saved as
+/// one blocked every manual return), and enabled only when admitted. Saving it
+/// disabled stays possible, so a fiscal device can be verified before the
+/// server marks its plugin finished.
+fn admitted_new_device_type(
+    conn: &rusqlite::Connection,
+    config: &Value,
+) -> Result<&'static str, Value> {
+    let device_type = payload_device_type(config)
+        .and_then(device_admission::known_device_type)
+        .ok_or_else(|| device_admission::not_admitted_response(""))?;
+    let enabled = config
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    match refuse_unadmitted_enable(conn, device_type, enabled) {
+        Some(refusal) => Err(refusal),
+        None => Ok(device_type),
+    }
+}
+
+/// Enabling a device, or retyping an enabled one, needs its plugin admitted.
+/// Disabling, renaming and other edits stay possible, so an inert legacy
+/// device can always be corrected or switched off.
+fn refuse_unadmitted_update(
+    conn: &rusqlite::Connection,
+    existing: &Value,
+    updates: &Value,
+) -> Option<Value> {
+    let stored_type = payload_device_type(existing).unwrap_or_default();
+    // An edit form resends the unchanged type; only a different one retypes.
+    let requested_type = payload_device_type(updates).filter(|requested| *requested != stored_type);
+    let requested_enabled = updates.get("enabled").and_then(Value::as_bool);
+    if requested_enabled != Some(true) && requested_type.is_none() {
+        return None;
+    }
+    let resulting_type = match requested_type {
+        Some(requested) => match device_admission::known_device_type(requested) {
+            Some(known) => known,
+            None => return Some(device_admission::not_admitted_response("")),
+        },
+        None => stored_type,
+    };
+    let resulting_enabled = requested_enabled.unwrap_or_else(|| device_enabled(existing));
+    refuse_unadmitted_enable(conn, resulting_type, resulting_enabled)
+}
+
+/// Charging, refunding, voiding or settling goes only through an enabled
+/// device of an admitted type; `Some(refusal)` otherwise. Nothing reaches the
+/// hardware before this answers `None`.
+fn refuse_unadmitted_device(db: &db::DbState, device_id: &str) -> Result<Option<Value>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let device = db::ecr_get_device(&conn, device_id);
+    Ok(match device {
+        Some(device)
+            if device_enabled(&device) && device_admission::device_admitted(&conn, &device) =>
+        {
+            None
+        }
+        Some(device) => Some(device_admission::not_admitted_response(
+            payload_device_type(&device).unwrap_or_default(),
+        )),
+        None => Some(device_admission::not_admitted_response("")),
+    })
+}
+
+/// Both device admissions (card terminal, cash register) with their fetch
+/// times; `{ refresh: true }` re-reads them from the server first (a failed
+/// read keeps the last known answers).
+#[tauri::command]
+pub async fn ecr_get_device_admission(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let refresh = arg0
+        .as_ref()
+        .and_then(|options| options.get("refresh"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if refresh {
+        if let Err(error) = device_admission::refresh(&db).await {
+            tracing::warn!(error = %error, "ECR device admission refresh failed");
+        }
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    Ok(device_admission::snapshot(&conn))
+}
+
+#[cfg(test)]
+mod device_admission_gate_tests {
+    use super::*;
+    use crate::device_admission::{admit_for_test, CARD_TERMINAL, CASH_REGISTER};
+    use serde_json::json;
+
+    fn state() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    /// The store of 08/10/2026: a fiscal cash register saved as an enabled
+    /// card terminal, no payment plugin, MyData in fiscal_device but pending.
+    fn incident_device(conn: &rusqlite::Connection) {
+        db::ecr_insert_device(
+            conn,
+            &json!({ "id": "rbs", "name": "Rbs Elio CR", "deviceType": "payment_terminal",
+                "brand": "RBS", "connectionType": "network", "isDefault": true, "enabled": true }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_device_without_its_plugin_is_never_the_default_device() {
+        let db = state();
+        let conn = db.conn.lock().unwrap();
+        incident_device(&conn);
+        db::ecr_insert_device(
+            &conn,
+            &json!({ "id": "cr", "name": "Register", "deviceType": "cash_register",
+                "protocol": "cap_driver", "enabled": true }),
+        )
+        .unwrap();
+        assert!(db::ecr_get_default_device(&conn, None).is_none());
+        assert!(db::ecr_get_default_device(&conn, Some(CARD_TERMINAL)).is_none());
+        assert!(db::ecr_get_default_device(&conn, Some(CASH_REGISTER)).is_none());
+        assert_eq!(
+            db::ecr_try_get_default_device(&conn, Some(CASH_REGISTER)).unwrap(),
+            None
+        );
+        assert!(!crate::fiscal::receipt_vat::mydata_fiscal_device_configured(&conn));
+        let listed = with_admission(&conn, db::ecr_list_devices(&conn));
+        assert!(listed.iter().all(|device| device["admitted"] == false));
+
+        admit_for_test(&conn, &[CASH_REGISTER]);
+        assert!(db::ecr_get_default_device(&conn, Some(CARD_TERMINAL)).is_none());
+        // An untyped lookup is a card-terminal lookup: the admitted register
+        // is never the default terminal.
+        assert!(db::ecr_get_default_device(&conn, None).is_none());
+        assert_eq!(
+            db::ecr_try_get_default_device(&conn, Some(CASH_REGISTER))
+                .unwrap()
+                .unwrap()["id"],
+            "cr"
+        );
+        assert!(crate::fiscal::receipt_vat::mydata_fiscal_device_configured(
+            &conn
+        ));
+
+        admit_for_test(&conn, &[CARD_TERMINAL]);
+        assert_eq!(
+            db::ecr_get_default_device(&conn, Some(CARD_TERMINAL)).unwrap()["id"],
+            "rbs"
+        );
+    }
+
+    /// Review of PR #335: payment plugin off, MyData admits the register.
+    /// The untyped default lookup (`ecr_get_default_terminal`) must not answer
+    /// with the register, even when it is the default device; with both
+    /// admitted it answers with the card terminal.
+    #[test]
+    fn the_default_terminal_lookup_never_returns_a_cash_register() {
+        let db = state();
+        let conn = db.conn.lock().unwrap();
+        db::ecr_insert_device(
+            &conn,
+            &json!({ "id": "cr", "name": "Register", "deviceType": "cash_register",
+                "protocol": "cap_driver", "isDefault": true, "enabled": true }),
+        )
+        .unwrap();
+        admit_for_test(&conn, &[CASH_REGISTER]);
+        assert!(db::ecr_get_default_device(&conn, None).is_none());
+        assert_eq!(db::ecr_try_get_default_device(&conn, None).unwrap(), None);
+        assert_eq!(
+            db::ecr_get_default_device(&conn, Some(CASH_REGISTER)).unwrap()["id"],
+            "cr"
+        );
+
+        db::ecr_insert_device(
+            &conn,
+            &json!({ "id": "eft", "name": "EFT", "deviceType": "payment_terminal",
+                "isDefault": false, "enabled": true }),
+        )
+        .unwrap();
+        assert!(db::ecr_get_default_device(&conn, None).is_none());
+        admit_for_test(&conn, &[CARD_TERMINAL, CASH_REGISTER]);
+        assert_eq!(
+            db::ecr_get_default_device(&conn, None).unwrap()["id"],
+            "eft"
+        );
+        assert_eq!(
+            db::ecr_try_get_default_device(&conn, None)
+                .unwrap()
+                .unwrap()["id"],
+            "eft"
+        );
+    }
+
+    #[test]
+    fn adding_or_enabling_needs_an_explicit_type_and_an_admitted_plugin() {
+        let db = state();
+        let conn = db.conn.lock().unwrap();
+        let refused =
+            admitted_new_device_type(&conn, &json!({ "name": "Rbs Elio CR" })).unwrap_err();
+        assert_eq!(refused["code"], device_admission::TYPE_REQUIRED_CODE);
+        for device_type in [CARD_TERMINAL, CASH_REGISTER] {
+            let refused =
+                admitted_new_device_type(&conn, &json!({ "deviceType": device_type })).unwrap_err();
+            assert_eq!(refused["code"], device_admission::NOT_ADMITTED_CODE);
+            assert_eq!(refused["deviceType"], device_type);
+            // Saved disabled (verification before the plugin is finished).
+            assert_eq!(
+                admitted_new_device_type(
+                    &conn,
+                    &json!({ "deviceType": device_type, "enabled": false })
+                ),
+                Ok(device_type)
+            );
+        }
+
+        incident_device(&conn);
+        let existing = db::ecr_get_device(&conn, "rbs").unwrap();
+        for updates in [
+            json!({ "enabled": true }),
+            json!({ "deviceType": "cash_register" }),
+            json!({ "deviceType": "cash_register", "enabled": true }),
+        ] {
+            assert_eq!(
+                refuse_unadmitted_update(&conn, &existing, &updates).unwrap()["code"],
+                device_admission::NOT_ADMITTED_CODE,
+                "{updates}"
+            );
+        }
+        assert_eq!(
+            refuse_unadmitted_update(&conn, &existing, &json!({ "deviceType": "other" })).unwrap()
+                ["code"],
+            device_admission::TYPE_REQUIRED_CODE
+        );
+        // Switching it off or correcting it while off is always possible.
+        for updates in [
+            json!({ "enabled": false }),
+            json!({ "enabled": false, "isDefault": false }),
+            json!({ "deviceType": "cash_register", "enabled": false }),
+            json!({ "name": "Rbs Elio" }),
+            // An edit form resending the unchanged type is not a retype.
+            json!({ "name": "Rbs Elio", "deviceType": "payment_terminal" }),
+        ] {
+            assert_eq!(
+                refuse_unadmitted_update(&conn, &existing, &updates),
+                None,
+                "{updates}"
+            );
+        }
+
+        admit_for_test(&conn, &[CASH_REGISTER]);
+        assert_eq!(
+            refuse_unadmitted_update(&conn, &existing, &json!({ "deviceType": "cash_register" })),
+            None
+        );
+        assert!(refuse_unadmitted_update(&conn, &existing, &json!({ "enabled": true })).is_some());
+    }
+
+    #[test]
+    fn a_device_without_its_plugin_never_charges_or_refunds() {
+        let db = state();
+        {
+            let conn = db.conn.lock().unwrap();
+            incident_device(&conn);
+        }
+        let refused = refuse_unadmitted_device(&db, "rbs").unwrap().unwrap();
+        assert_eq!(refused["code"], device_admission::NOT_ADMITTED_CODE);
+        assert_eq!(refused["success"], false);
+        assert!(refuse_unadmitted_device(&db, "missing").unwrap().is_some());
+        {
+            let conn = db.conn.lock().unwrap();
+            admit_for_test(&conn, &[CARD_TERMINAL]);
+        }
+        assert_eq!(refuse_unadmitted_device(&db, "rbs").unwrap(), None);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE ecr_devices SET enabled=0 WHERE id='rbs'", [])
+                .unwrap();
+        }
+        assert!(refuse_unadmitted_device(&db, "rbs").unwrap().is_some());
+    }
 }
 
 #[tauri::command]
@@ -1643,6 +1978,13 @@ pub async fn ecr_add_device(
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let device_type = match admitted_new_device_type(&conn, &config) {
+        Ok(device_type) => device_type,
+        Err(refusal) => return Ok(refusal),
+    };
+    if let Some(object) = config.as_object_mut() {
+        object.insert("deviceType".into(), serde_json::json!(device_type));
+    }
     db::ecr_insert_device(&conn, &config)?;
     let device = db::ecr_get_device(&conn, &device_id);
 
@@ -1664,12 +2006,14 @@ pub async fn ecr_update_device(
     let updates = parsed.updates;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let existing = db::ecr_get_device(&conn, &device_id);
-    if existing.is_none() {
+    let Some(existing) = db::ecr_get_device(&conn, &device_id) else {
         return Ok(serde_json::json!({
             "success": false,
             "error": "Device not found"
         }));
+    };
+    if let Some(refusal) = refuse_unadmitted_update(&conn, &existing, &updates) {
+        return Ok(refusal);
     }
 
     db::ecr_update_device(&conn, &device_id, &updates)?;
@@ -1711,7 +2055,9 @@ pub async fn ecr_get_default_terminal(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let default_device = db::ecr_get_default_device(&conn, None);
+    // The default *card* terminal only: a cash register admitted by MyData is
+    // never a bank terminal (manual card admission, `ecr_process_payment`).
+    let default_device = db::ecr_get_default_device(&conn, Some(device_admission::CARD_TERMINAL));
     Ok(serde_json::json!({
         "success": default_device.is_some(),
         "device": default_device
@@ -2030,6 +2376,13 @@ pub async fn ecr_process_payment(
     };
 
     if let Some(ref did) = resolved_device_id {
+        if let Some(refusal) = refuse_unadmitted_device(&db, did)? {
+            let _ = app.emit(
+                "ecr_event_error",
+                serde_json::json!({ "error": refusal["error"], "deviceId": did }),
+            );
+            return Ok(refusal);
+        }
         if mgr.is_connected(did) {
             let canonical_order_id = if let Some(requested) = order_id.as_deref() {
                 let conn = db.conn.lock().map_err(|error| error.to_string())?;
@@ -2196,6 +2549,13 @@ pub async fn ecr_process_refund(
     };
 
     if let Some(ref did) = resolved_device_id {
+        if let Some(refusal) = refuse_unadmitted_device(&db, did)? {
+            let _ = app.emit(
+                "ecr_event_error",
+                serde_json::json!({ "error": refusal["error"], "deviceId": did }),
+            );
+            return Ok(refusal);
+        }
         if mgr.is_connected(did) {
             let request = ecr::protocol::TransactionRequest {
                 transaction_id: tx_id.clone(),
@@ -2305,6 +2665,9 @@ pub async fn ecr_void_transaction(
     }
     // If a device is specified and connected, try to void through protocol
     if let Some(ref did) = parsed.device_id {
+        if let Some(refusal) = refuse_unadmitted_device(&db, did)? {
+            return Ok(refusal);
+        }
         if mgr.is_connected(did) {
             let request = ecr::protocol::TransactionRequest {
                 transaction_id: format!("void-{}", uuid::Uuid::new_v4()),
@@ -2363,10 +2726,16 @@ pub async fn ecr_cancel_transaction(
 #[tauri::command]
 pub async fn ecr_settlement(
     arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
     mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let device_id = parse_optional_device_id(arg0);
+    if let Some(ref did) = device_id {
+        if let Some(refusal) = refuse_unadmitted_device(&db, did)? {
+            return Ok(refusal);
+        }
+    }
     let _ = app.emit(
         "ecr_event_display_message",
         serde_json::json!({ "message": "Settlement started", "deviceId": device_id.clone() }),
@@ -3092,9 +3461,14 @@ pub(crate) fn load_authoritative_outstanding_fiscal_order(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<serde_json::Value, String> {
+    // The discount and delivery fee are read as `sync::get_order_by_id`
+    // reports them, so the register lines built here (07/10/2026: the
+    // discount share and the 13% delivery line) equal the ones the checkout
+    // built from that order.
     conn.query_row(
         "SELECT items,
-                COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+                COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0),
+                discount_amount, discount_percentage, delivery_fee, subtotal
          FROM orders WHERE id = ?1",
         rusqlite::params![order_id],
         |row| {
@@ -3105,6 +3479,10 @@ pub(crate) fn load_authoritative_outstanding_fiscal_order(
             Ok(serde_json::json!({
                 "items": items,
                 "totalAmount": crate::money::Cents::new(total_cents).to_f64_dp2(),
+                "discountAmount": row.get::<_, Option<f64>>(2)?,
+                "discountPercentage": row.get::<_, Option<f64>>(3)?,
+                "deliveryFee": row.get::<_, Option<f64>>(4)?,
+                "subtotal": row.get::<_, Option<f64>>(5)?,
             }))
         },
     )
@@ -3142,6 +3520,7 @@ fn verify_authoritative_outstanding_fiscal_payload(
         intended_payment,
         tax_rates,
         operator_id,
+        &ecr::fiscal::FiscalLineContext::load(conn),
     )
     .map_err(|error| format!("Outstanding fiscal payload changed: {error}"))?;
     if fiscal_receipt_data_fingerprint(&current_fiscal)?
@@ -3742,17 +4121,20 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
         }));
     }
 
-    let currency = {
+    let (currency, line_context) = {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         let order_id = order_reference
             .split_once(":collect-outstanding:")
             .map(|(id, _)| id)
             .unwrap_or(order_reference);
-        resolve_new_ecr_currency(
-            &conn,
-            Some(order_id),
-            intended_payment.get("currency").and_then(Value::as_str),
-        )?
+        (
+            resolve_new_ecr_currency(
+                &conn,
+                Some(order_id),
+                intended_payment.get("currency").and_then(Value::as_str),
+            )?,
+            ecr::fiscal::FiscalLineContext::load(&conn),
+        )
     };
     let tax_rates: Vec<ecr::protocol::TaxRateConfig> = serde_json::from_value(
         device
@@ -3769,6 +4151,7 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
             intended_payment,
             &tax_rates,
             operator_id,
+            &line_context,
         ) {
             Ok(data) => data,
             Err(error) => return Ok(outstanding_fiscal_build_failure(error)),
@@ -3778,6 +4161,7 @@ pub(crate) async fn fiscal_checkout_for_order_payload(
             intended_payment,
             &tax_rates,
             operator_id,
+            &line_context,
         )?,
     };
     let amount = fiscal_data
@@ -4086,7 +4470,7 @@ pub async fn ecr_fiscal_print(
     // in Phase 3. Previously the lock was held across the entire function,
     // which froze every other SQLite write in the POS for the duration of
     // each fiscal print.
-    let (device, client_request_id) = {
+    let (device, client_request_id, line_context) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
         let device = match db::ecr_get_default_device(&conn, Some("cash_register")) {
@@ -4123,7 +4507,11 @@ pub async fn ecr_fiscal_print(
             .map_err(|e| format!("load order client request id: {e}"))?
             .flatten();
 
-        (device, client_request_id)
+        (
+            device,
+            client_request_id,
+            ecr::fiscal::FiscalLineContext::load(&conn),
+        )
         // MutexGuard drops here; DB lock released.
     };
 
@@ -4201,8 +4589,13 @@ pub async fn ecr_fiscal_print(
         .and_then(|v| v.as_str())
         .unwrap_or("register_prints");
 
-    let fiscal_data =
-        ecr::fiscal::build_fiscal_data(&order, &payments, &tax_rates, operator_id.as_deref())?;
+    let fiscal_data = ecr::fiscal::build_fiscal_data(
+        &order,
+        &payments,
+        &tax_rates,
+        operator_id.as_deref(),
+        &line_context,
+    )?;
 
     if !mgr.is_connected(&device_id) {
         return Ok(serde_json::json!({
@@ -4681,6 +5074,11 @@ mod dto_tests {
             ] {
                 db::set_setting(&conn, "terminal", key, value).unwrap();
             }
+            // The register's MyData plugin is finished (founder rule 08/10/2026).
+            crate::device_admission::admit_for_test(
+                &conn,
+                &[crate::device_admission::CASH_REGISTER],
+            );
             conn.execute_batch(
                 "PRAGMA synchronous=FULL;
                 CREATE TRIGGER initial_require_full_insert BEFORE INSERT ON ecr_transactions
@@ -5847,6 +6245,7 @@ mod dto_tests {
             &intended,
             &tax_rates,
             None,
+            &ecr::fiscal::FiscalLineContext::default(),
         )
         .expect("build expected fiscal payload");
         {

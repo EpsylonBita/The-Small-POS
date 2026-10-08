@@ -6680,7 +6680,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               });
               if (result?.success !== true) throw new Error("ORDER_CANCELLATION_FAILED");
             } else {
-              await commitManualOrderCancellation(bridge, manualPlan, trimmedReason, returnChannel || "cash_drawer");
+              // When nobody here may cancel a paid order, a staff member who
+              // may approves it with their own PIN (founder 07/10/2026); the
+              // till asks and the cancellation is sent again.
+              await runTableReleaseApproval({
+                scope: "cash_drawer_control",
+                action: () => commitManualOrderCancellation(bridge, manualPlan, trimmedReason, returnChannel || "cash_drawer"),
+                title: t("modals.orderCancellation.managerApprovalTitle"),
+                approvalSubtitle: t("modals.orderCancellation.managerApprovalSubtitle"),
+              });
             }
             continue;
           }
@@ -6724,6 +6732,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         clearBulkSelection();
         await loadOrders();
       } catch (error) {
+        // The approver closed the PIN prompt: nothing was cancelled, and the
+        // cancellation stays open to try again.
+        if (error instanceof Error && error.message === "Privileged action confirmation cancelled") return;
         console.error("Failed to cancel orders:", error);
         toast.error(t(manualCancellationFailureKey(error), { orderNumber: describeOrderNumbers(pendingCancelOrders), ...manualCancellationFailureOptions(error) }), { duration: 9000 });
       }

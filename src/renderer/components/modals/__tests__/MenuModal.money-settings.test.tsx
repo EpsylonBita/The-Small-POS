@@ -122,8 +122,12 @@ vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
   validateCatalogOffers: vi.fn(async () => null),
 }));
 
-const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0, invalidated: false }));
-beforeEach(() => { draftStorage.draft = null; draftStorage.generation = 0; draftStorage.invalidated = false; });
+const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0, invalidated: false, deletes: 0, deleteError: false,
+  loadGate: null as Promise<void> | null }));
+beforeEach(() => {
+  draftStorage.draft = null; draftStorage.generation = 0; draftStorage.invalidated = false;
+  draftStorage.deletes = 0; draftStorage.deleteError = false; draftStorage.loadGate = null;
+});
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
     invoke: vi.fn(async (command: string, input: any) => {
@@ -137,12 +141,16 @@ vi.mock('../../../../lib', async (importOriginal) => {
         mocks.legacyAdmission = false;
         return { success: true };
       }
+      if (command === 'checkout_draft_get' && draftStorage.loadGate) await draftStorage.loadGate;
       if (command === 'checkout_draft_inspect') return mocks.inspect ?? { success: true, outcome: 'not_found', canCollect: false };
       if (command === 'checkout_draft_put') {
         if (mocks.draftFreezeError && input.draft.phase === 'checkout_pending') throw new Error('DISK_UNAVAILABLE');
         draftStorage.draft = input.draft; draftStorage.generation++;
       }
-      if (command === 'checkout_draft_delete') { draftStorage.draft = null; draftStorage.generation++; }
+      if (command === 'checkout_draft_delete') {
+        if (draftStorage.deleteError) throw new Error('DISK_UNAVAILABLE');
+        draftStorage.deletes++; draftStorage.draft = null; draftStorage.generation++;
+      }
       return { success: true, scope: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' }, generation: draftStorage.generation, draft: draftStorage.draft,
         ...(draftStorage.invalidated ? { invalidation: { reason: 'edit_target_cancelled', orderId: 'cancelled-order' } } : {}) };
     }),
@@ -316,7 +324,9 @@ describe('MenuModal paid edit lifecycle', () => {
     await act(async () => refuse(new Error('POS_ORDER_SETTLEMENT_UNAVAILABLE')));
     expect(draftStorage.draft?.phase).toBe('editing');
     fireEvent.click(screen.getByRole('button', { name: 'common.actions.close' }));
-    expect(close).toHaveBeenCalledOnce();
+    // 1.4.125: the unsubmitted correction is discarded before the menu closes.
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(draftStorage.draft).toBeNull();
   });
 
   it('retains the editor while its picker waits and permits closing the pending original after a failed save', async () => {
@@ -412,6 +422,136 @@ describe('MenuModal paid edit lifecycle', () => {
     expect(draftStorage.draft?.submission.settlementRequest).toEqual(confirmed.settlementRequest);
     fireEvent.click(screen.getByText('Checkout'));
     expect(commit).toHaveBeenCalledOnce();
+  });
+});
+
+// 1.4.125, stuck edit. Closing an order correction kept its draft
+// (context.editMode), so every new order reopened the same edit screen, also
+// after a restart. An unsubmitted correction is now discarded on close; a
+// correction with a submitted financial step stays protected.
+describe('MenuModal closing an order correction (1.4.125)', () => {
+  const editLine = { id: 'original-line', menuItemId: 'espresso', name: 'Espresso', quantity: 1, unitPrice: 6, totalPrice: 6, price: 6 };
+  const editContext = { editMode: true, editOrderId: 'paid-order', editExpectedVersion: 1, orderType: 'pickup' };
+  const loadEditOrder = () => {
+    mocks.settings.unavailable = false;
+    mocks.editOrder = { id: 'paid-order', version: 1, order_type: 'pickup', items: [
+      { id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 },
+    ] };
+  };
+  const closeButton = () => screen.getByRole('button', { name: 'common.actions.close' });
+
+  it('discards an unsubmitted correction before closing, so the next new order does not reopen it', async () => {
+    loadEditOrder();
+    let draftAtClose: any = 'not closed';
+    const onClose = vi.fn(() => { draftAtClose = draftStorage.draft; });
+    const view = render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    expect(draftStorage.draft).toMatchObject({ phase: 'editing', context: { editMode: true, editOrderId: 'paid-order' } });
+    expect(draftStorage.draft.submission).toBeUndefined();
+    fireEvent.click(closeButton());
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(draftStorage.deletes).toBe(1);
+    expect(draftAtClose).toBeNull();
+    expect(draftStorage.draft).toBeNull();
+
+    // The parent opens the menu for a new order: nothing restores the edit.
+    const restore = vi.fn();
+    view.rerender(<MenuModal isOpen={false} onClose={onClose} orderType="pickup" />);
+    view.rerender(<MenuModal isOpen onClose={onClose} orderType="pickup" onDraftRestore={restore} />);
+    await waitFor(() => {
+      expect(screen.queryByText('Loading the saved cart…')).toBeNull();
+      expect(screen.queryByText('modals.menu.draftSaveFailed')).toBeNull();
+    });
+    expect(restore).not.toHaveBeenCalled();
+    expect(draftStorage.draft).toMatchObject({ phase: 'editing', cartItems: [], context: { editMode: false } });
+  });
+
+  it('keeps a submitted (checkout_pending) correction and just closes', async () => {
+    loadEditOrder();
+    const frozen = { schemaVersion: 1, draftId: 'frozen-edit', checkoutRequestId: 'frozen-attempt', phase: 'checkout_pending',
+      cartItems: [editLine], state: {}, context: editContext,
+      submission: { action: 'edit_settlement', orderId: 'paid-order', client_event_id: 'frozen-attempt' } };
+    draftStorage.generation = 5;
+    draftStorage.draft = structuredClone(frozen);
+    const onClose = vi.fn();
+    render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
+    await screen.findByText('Check original checkout');
+    fireEvent.click(closeButton());
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => { await Promise.resolve(); });
+    expect(draftStorage.deletes).toBe(0);
+    expect(draftStorage.generation).toBe(5);
+    expect(draftStorage.draft).toEqual(frozen);
+  });
+
+  it('keeps a renewed refused correction, which replaces an attempt the journal still holds', async () => {
+    loadEditOrder();
+    draftStorage.generation = 5;
+    draftStorage.draft = { schemaVersion: 1, draftId: 'renewed-edit', checkoutRequestId: 'renewed-attempt', phase: 'editing',
+      cartItems: [editLine], state: {}, context: { ...editContext, supersedesEditEvent: 'refused-attempt' } };
+    const onClose = vi.fn();
+    render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
+    await waitFor(() => expect(screen.queryByText('Loading the saved cart…')).toBeNull());
+    fireEvent.click(closeButton());
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => { await Promise.resolve(); });
+    expect(draftStorage.deletes).toBe(0);
+    expect(draftStorage.draft).toMatchObject({ draftId: 'renewed-edit', phase: 'editing',
+      context: { editMode: true, supersedesEditEvent: 'refused-attempt' } });
+  });
+
+  // Review of PR #335: closing while the persisted edit draft was still
+  // loading called onClose() without the tombstone, so the edit reopened later.
+  it('a close while the saved correction is still loading waits for it, discards it, then closes', async () => {
+    loadEditOrder();
+    draftStorage.generation = 5;
+    draftStorage.draft = { schemaVersion: 1, draftId: 'kept-edit', checkoutRequestId: 'kept-attempt', phase: 'editing',
+      cartItems: [editLine], state: {}, context: editContext };
+    let finishLoad!: () => void;
+    draftStorage.loadGate = new Promise<void>(resolve => { finishLoad = resolve; });
+    let draftAtClose: any = 'not closed';
+    const onClose = vi.fn(() => { draftAtClose = draftStorage.draft; });
+    render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
+    fireEvent.click(closeButton());
+    await act(async () => { await Promise.resolve(); });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(draftStorage.deletes).toBe(0);
+
+    await act(async () => { finishLoad(); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(draftStorage.deletes).toBe(1);
+    expect(draftAtClose).toBeNull();
+    expect(draftStorage.draft).toBeNull();
+  });
+
+  it('a close while a submitted correction is still loading keeps it and just closes', async () => {
+    loadEditOrder();
+    const frozen = { schemaVersion: 1, draftId: 'frozen-edit', checkoutRequestId: 'frozen-attempt', phase: 'checkout_pending',
+      cartItems: [editLine], state: {}, context: editContext,
+      submission: { action: 'edit_settlement', orderId: 'paid-order', client_event_id: 'frozen-attempt' } };
+    draftStorage.generation = 5;
+    draftStorage.draft = structuredClone(frozen);
+    let finishLoad!: () => void;
+    draftStorage.loadGate = new Promise<void>(resolve => { finishLoad = resolve; });
+    const onClose = vi.fn();
+    render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
+    fireEvent.click(closeButton());
+    await act(async () => { finishLoad(); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(draftStorage.deletes).toBe(0);
+    expect(draftStorage.draft).toEqual(frozen);
+  });
+
+  it('retains the correction and stays open when the discard cannot be stored', async () => {
+    loadEditOrder();
+    draftStorage.deleteError = true;
+    const onClose = vi.fn();
+    render(<MenuModal isOpen onClose={onClose} orderType="pickup" editMode editOrderId="paid-order" />);
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(closeButton());
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The saved cart could not be discarded. It has been retained.'));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(draftStorage.draft).toMatchObject({ phase: 'editing', context: { editMode: true } });
   });
 });
 
@@ -602,6 +742,8 @@ describe('MenuModal paid edit corrections (06/10/2026)', () => {
     ['LEGACY_EDIT_REVIEW_REQUIRED', 'modals.menu.legacyEditReview'],
     ['EDIT_TOO_MANY_LINES', 'modals.menu.editTooManyLines'],
     ['EDIT_SETTLEMENT_METHOD_UNAVAILABLE', 'modals.menu.editMethodUnavailable'],
+    // 08/10/2026: shown as the generic "Failed to save changes" before 1.4.125.
+    ['EDIT_ORIGINAL_PROVIDER_REFUND_REQUIRED', 'modals.menu.editProviderRefundRequired'],
   ])('explains %s before any money is confirmed', async (code, key) => {
     const commit = vi.fn();
     editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);

@@ -1,4 +1,5 @@
 import type { getBridge } from '../../lib';
+import { loadEcrDeviceAdmission } from './ecr-device-type';
 
 export const MYDATA_FISCAL_DEVICE_ID = 'mydata-fiscal-device';
 export type MyDataConnectionType = 'network' | 'usb_serial' | 'bluetooth';
@@ -108,17 +109,52 @@ export function buildMyDataDeviceSettings(protocol: string, model: string, exist
   return settings;
 }
 
-type EcrSetupBridge = Pick<ReturnType<typeof getBridge>['ecr'], 'addDevice' | 'updateDevice' | 'connectDevice' | 'testConnection'>;
+type EcrSetupBridge = Pick<ReturnType<typeof getBridge>['ecr'], 'addDevice' | 'updateDevice' | 'connectDevice' | 'testConnection' | 'getDeviceAdmission'>;
 
-/** The only path that may report connected runs the real native protocol test first. */
+export interface MyDataDeviceVerification<T> {
+  /** The server save result (the caller checks its own success shape). */
+  saved: T;
+  /**
+   * True only when the device ends enabled: the server save succeeded, the
+   * refreshed admission says the store's MyData plugin is in fiscal-device
+   * mode with its setup finished, and the device was enabled as the default
+   * cash register (or an already active register got its own flags back,
+   * which native allows only while MyData admits it).
+   */
+  activated: boolean;
+}
+
+/** The local device fields a failed re-verification puts back as they were. */
+const RESTORED_DEVICE_FIELDS = [
+  'name', 'brand', 'protocol', 'connectionType', 'connectionDetails', 'terminalId', 'merchantId',
+  'operatorId', 'printMode', 'taxRates', 'settings',
+] as const;
+const storedFlag = (value: unknown): boolean => value === true || value === 1;
+
+/**
+ * The only path that may report connected runs the real native protocol test first.
+ *
+ * Founder rule 08/10/2026: a plugin that is not activated, configured and
+ * finished has no effect. The managed cash register is saved DISABLED (native
+ * refuses to enable a cash register before MyData is admitted), connected and
+ * handshaken while disabled, reported to the server, and enabled only when the
+ * refreshed admission confirms MyData is in fiscal-device mode and connected.
+ * Otherwise it stays inactive and the caller tells the user why.
+ *
+ * Re-verifying an already active register (`existing` is its stored row) never
+ * leaves it disabled after a transient failure: before the server holds the
+ * new configuration, a failure puts the previous connection, settings and
+ * flags back; after it, the verified configuration keeps the previous flags.
+ * Native still refuses to enable it while MyData does not admit it.
+ */
 export async function verifyAndSaveMyDataDevice<T>(
   ecr: EcrSetupBridge,
   nativeDevice: { id: string; connectionType: string; settings: Record<string, unknown> },
-  existing: boolean,
+  existing: boolean | Record<string, unknown>,
   terminalId: string,
   deviceConnection: Record<string, unknown>,
   save: (payload: { device_connection: Record<string, unknown>; status: 'connected' }) => Promise<T>,
-): Promise<T> {
+): Promise<MyDataDeviceVerification<T>> {
   if (!terminalId.trim()) throw new Error('Terminal identity is unavailable; pair this POS again before verification');
   if (nativeDevice.connectionType === 'bluetooth') throw new Error('Direct Bluetooth is not available; use LAN or serial');
   if (!isMyDataFiscalProtocol(String(deviceConnection.protocol))) throw new Error('Choose an installed fiscal cashier protocol');
@@ -132,21 +168,66 @@ export async function verifyAndSaveMyDataDevice<T>(
   if (normalizeMyDataProtocol(String(deviceConnection.protocol)) === 'cap_driver' && (
     nativeDevice.settings.requireService !== true || !validateMyDataCapSettings(nativeDevice.settings as unknown as MyDataCapSettings)
   )) throw new Error('Invalid CAP Driver settings');
-  const saved = existing ? await ecr.updateDevice(nativeDevice.id, nativeDevice) : await ecr.addDevice(nativeDevice);
+  const previous = existing && typeof existing === 'object' ? existing : null;
+  const wasActive = previous !== null && storedFlag(previous.enabled);
+  // Best effort: a failed restore leaves the register disabled, never enabled wrongly.
+  const restoreFlags = async (): Promise<boolean> => {
+    if (!wasActive || !previous) return false;
+    try {
+      const restored = await ecr.updateDevice(nativeDevice.id, { enabled: true, isDefault: storedFlag(previous.isDefault) });
+      return restored?.success === true;
+    } catch {
+      return false;
+    }
+  };
+  const restorePrevious = async (): Promise<void> => {
+    if (!wasActive || !previous) return;
+    const config = Object.fromEntries(RESTORED_DEVICE_FIELDS
+      .filter(field => previous[field] !== undefined && previous[field] !== null)
+      .map(field => [field, previous[field]]));
+    try {
+      await ecr.updateDevice(nativeDevice.id, { ...config, enabled: false, isDefault: false });
+    } catch {
+      // the flags below are still worth putting back
+    }
+    await restoreFlags();
+  };
+  const inactiveDevice = { ...nativeDevice, enabled: false, isDefault: false };
+  const saved = existing ? await ecr.updateDevice(nativeDevice.id, inactiveDevice) : await ecr.addDevice(inactiveDevice);
   if (saved?.success !== true) throw new Error(saved?.error || 'Failed to save fiscal device locally');
-  const connected = await ecr.connectDevice(nativeDevice.id);
-  if (connected?.success !== true) throw new Error(connected?.error || 'Fiscal device connection failed');
-  const tested = await ecr.testConnection(nativeDevice.id);
-  // Native ecr_test_connection returns `connected` at the top level; the generic
-  // IPC result type does not describe that field, so inspect it at runtime.
-  if (tested?.success !== true || record(tested).connected !== true) throw new Error(tested?.error || 'Fiscal protocol handshake failed');
-  return save({
-    device_connection: {
-      ...deviceConnection,
-      verification: { status: 'verified', terminal_id: terminalId, device_id: nativeDevice.id, verified_at: new Date().toISOString(), protocol_handshake: true },
-    },
-    status: 'connected',
-  });
+  let result: T;
+  try {
+    const connected = await ecr.connectDevice(nativeDevice.id);
+    if (connected?.success !== true) throw new Error(connected?.error || 'Fiscal device connection failed');
+    const tested = await ecr.testConnection(nativeDevice.id);
+    // Native ecr_test_connection returns `connected` at the top level; the generic
+    // IPC result type does not describe that field, so inspect it at runtime.
+    if (tested?.success !== true || record(tested).connected !== true) throw new Error(tested?.error || 'Fiscal protocol handshake failed');
+    result = await save({
+      device_connection: {
+        ...deviceConnection,
+        verification: { status: 'verified', terminal_id: terminalId, device_id: nativeDevice.id, verified_at: new Date().toISOString(), protocol_handshake: true },
+      },
+      status: 'connected',
+    });
+  } catch (error) {
+    await restorePrevious();
+    throw error;
+  }
+  if (record(result).success === false) {
+    await restorePrevious();
+    return { saved: result, activated: false };
+  }
+  // The server now holds the verified device; only its own answer admits it.
+  const admission = await loadEcrDeviceAdmission(ecr);
+  if (!admission?.cashRegister.admitted) return { saved: result, activated: await restoreFlags() };
+  try {
+    const enabled = await ecr.updateDevice(nativeDevice.id, { enabled: true, isDefault: true });
+    if (enabled?.success === true) return { saved: result, activated: true };
+  } catch {
+    // fall through: an active register keeps its own flags
+  }
+  return { saved: result, activated: await restoreFlags() };
 }
 
 export function getMyDataCapPrefill(

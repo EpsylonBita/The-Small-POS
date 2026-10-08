@@ -30,7 +30,7 @@
     }
   },
   "checkoutRecovery": {
-    "title": "Opérations de table en attente de récupération",
+    "title": "Opérations en attente de récupération",
     "guidance": "Les demandes initiales restent enregistrées. Internet et les autorisations actuelles sont nécessaires. Ne répétez pas un paiement incertain.",
     "unavailable": "Le statut de récupération ne peut pas être lu. Les opérations en attente sont conservées.",
     "pending": "En attente de reconnexion",

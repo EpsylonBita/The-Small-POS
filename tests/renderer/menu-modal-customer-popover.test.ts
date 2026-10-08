@@ -20,10 +20,11 @@ const makeCloseHarness = (overrides: Record<string, any> = {}) => {
     checkoutPhase: 'editing',
     editMode: false,
     draftPersistence: {
-      status: 'ready', error: null, isPending: () => false,
+      status: 'ready', error: null, isPending: () => false, hasSubmission: () => false, supersedesEdit: () => false,
       clear: async (completed: boolean) => { assert.equal(completed, false); calls.push('clear'); },
     },
     onClose: () => calls.push('close'),
+    setCloseRequested: (requested: boolean) => { assert.equal(requested, true); calls.push('close-pending'); },
     setCartItems: (items: unknown[]) => { assert.deepEqual(items, []); calls.push('empty-cart'); },
     toast: { error: () => calls.push('error') },
     t: (key: string) => key,
@@ -226,9 +227,14 @@ test('LiquidGlassModal settles a close animation from one animation endpoint onl
 // The current explicit close dismisses editable new carts without another prompt,
 // but must retire their durable draft before clearing UI and preserve pending money.
 test('MenuModal X / Escape tombstones editable carts and preserves protected checkout originals', async () => {
-  const editable = makeCloseHarness();
-  await editable.requestClose();
-  assert.deepEqual(editable.calls, ['clear', 'empty-cart', 'close']);
+  // 1.4.125 (stuck edit): an unsubmitted order correction is dismissed like
+  // any editable cart; its kept draft reopened the same edit on every new order.
+  for (const editableState of [{}, { editMode: true }]) {
+    const editable = makeCloseHarness(editableState);
+    await editable.requestClose();
+    assert.deepEqual(editable.calls, ['clear', 'empty-cart', 'close'], JSON.stringify(editableState));
+  }
+  const idle = { status: 'ready', error: null, hasSubmission: () => false, supersedesEdit: () => false };
 
   for (const protectedState of [
     { isOpen: false },
@@ -236,20 +242,37 @@ test('MenuModal X / Escape tombstones editable carts and preserves protected che
     { editSubmissionInFlight: { current: true } },
     { checkoutPhase: 'payment' },
     { checkoutPhase: 'finishing' },
-    { draftPersistence: { status: 'ready', error: 'draftSaveFailed', isPending: () => true } },
+    { draftPersistence: { ...idle, error: 'draftSaveFailed', isPending: () => true } },
   ]) {
     const guarded = makeCloseHarness(protectedState);
     await guarded.requestClose();
     assert.deepEqual(guarded.calls, [], JSON.stringify(protectedState));
   }
   for (const resumable of [
-    { editMode: true },
-    { draftPersistence: { status: 'ready', error: null, isPending: () => true } },
+    { draftPersistence: { ...idle, isPending: () => true } },
+    { editMode: true, draftPersistence: { ...idle, isPending: () => false, hasSubmission: () => true } },
+    { editMode: true, draftPersistence: { ...idle, isPending: () => false, supersedesEdit: () => true } },
+    { editMode: true, draftPersistence: { ...idle, status: 'loaded', isPending: () => true } },
+    { editMode: true, draftPersistence: { ...idle, status: 'error', isPending: () => false } },
+    // A draft that cannot be hydrated is kept, never waited on forever.
+    { editMode: true, draftPersistence: { ...idle, status: 'loaded', error: 'draftSaveFailed', isPending: () => false } },
   ]) {
     const guarded = makeCloseHarness(resumable);
     await guarded.requestClose();
     assert.deepEqual(guarded.calls, ['close'], 'an idle recoverable original is neither cleared nor discarded');
   }
+  // Review of PR #335: a close while the saved draft is still loading or not
+  // yet hydrated neither closes nor skips the tombstone; it waits for 'ready'.
+  for (const status of ['loading', 'loaded']) {
+    const waiting = makeCloseHarness({ editMode: true, draftPersistence: { ...idle, status, isPending: () => false } });
+    await waiting.requestClose();
+    assert.deepEqual(waiting.calls, ['close-pending'], status);
+  }
+  assert.match(
+    source,
+    /if \(!closeRequested\) return;[\s\S]*?if \(draftPersistence\.status === 'loading' \|\| \(draftPersistence\.status === 'loaded' && !draftPersistence\.error\)\) return;\s*setCloseRequested\(false\);\s*void requestClose\(\);/,
+    'a pending close runs the guarded close once the draft is ready',
+  );
 
   assert.match(
     source,
@@ -277,7 +300,7 @@ test('MenuModal waits for durable dismissal, suppresses a duplicate close, and r
   const pending = new Promise<void>(resolve => { finishClear = resolve; });
   let clearCalls = 0;
   const waiting = makeCloseHarness({ draftPersistence: {
-    status: 'ready', error: null, isPending: () => false,
+    status: 'ready', error: null, isPending: () => false, hasSubmission: () => false, supersedesEdit: () => false,
     clear: async (completed: boolean) => { assert.equal(completed, false); clearCalls += 1; await pending; },
   } });
   const firstClose = waiting.requestClose();
@@ -290,7 +313,7 @@ test('MenuModal waits for durable dismissal, suppresses a duplicate close, and r
   assert.equal(waiting.bindings.closingDraft.current, false);
 
   const failed = makeCloseHarness({ draftPersistence: {
-    status: 'ready', error: null, isPending: () => false,
+    status: 'ready', error: null, isPending: () => false, hasSubmission: () => false, supersedesEdit: () => false,
     clear: async () => { throw new Error('CAS draft clear failed'); },
   } });
   await failed.requestClose();

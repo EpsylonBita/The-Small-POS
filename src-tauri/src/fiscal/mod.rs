@@ -32,6 +32,13 @@
 //!   (29/09/2026: nothing wrote the cache before, so it was always unknown).
 //! - `currency`        — release-safety check: warns (never fails) when the
 //!   branch's active plugin cannot accept the currency its receipts carry.
+//! - `greece_vat`      — the order-level Greek VAT (port of the shared
+//!   `GreeceOrderVat` contract, the server's `computeOrderTotals`): what
+//!   `orders.tax_amount` holds, the fiscal payload lines and the cash
+//!   register's per-line rates.
+//! - `receipt_vat`     — the VAT a slip prints (port of the shared
+//!   `ReceiptVat` contract): computed VAT with an active fiscal plugin or
+//!   myDATA device, else the owner's configured rate, else none.
 //! - `close_day_guard` — T23: z-report close refuses to complete while
 //!   any fiscal row is `pending`/`processing` for the business day under
 //!   a currently active plugin (stale-plugin rows are auto-marked
@@ -46,7 +53,9 @@ pub mod active_cache;
 pub mod close_day_guard;
 pub mod currency;
 pub mod dispatcher;
+pub mod greece_vat;
 pub mod payload_builder;
+pub mod receipt_vat;
 pub mod replay;
 pub mod sequence_counter;
 pub mod status;

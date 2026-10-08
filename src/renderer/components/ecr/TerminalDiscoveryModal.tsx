@@ -12,6 +12,7 @@ import {
   CheckCircle,
 } from 'lucide-react'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
+import { resolveEcrDeviceType } from '../../utils/ecr-device-type'
 
 type ConnectionType = 'bluetooth' | 'serial_usb' | 'network'
 
@@ -255,18 +256,22 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
               {t('ecr.discovery.found', 'Found Devices')} ({devices.length})
             </h3>
             <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-hide">
-              {devices.map((device, index) => (
+              {devices.map((device, index) => {
+                // Founder rule 08/10/2026: an RBS / ELIO (or otherwise fiscal) device is
+                // never added as a card terminal; it is pointed to Cash Register setup.
+                const isFiscalRegister = resolveEcrDeviceType(device) === 'cash_register'
+                return (
                 <div
                   key={`${device.connectionType}-${device.name}-${index}`}
                   className={`flex items-center justify-between p-4 rounded-2xl border transition-colors ${
                     device.isConfigured
                       ? 'bg-gray-700/30 border-gray-700/50 opacity-60'
-                      : device.isSupported
+                      : device.isSupported && !isFiscalRegister
                         ? 'bg-gray-700/50 border-gray-700 active:bg-gray-700/70 cursor-pointer'
                         : 'bg-amber-500/5 border-amber-500/20 opacity-90'
                   }`}
                   onClick={() => {
-                    if (!device.isConfigured && device.isSupported) {
+                    if (!device.isConfigured && device.isSupported && !isFiscalRegister) {
                       onSelect(device)
                     }
                   }}
@@ -284,6 +289,14 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                         {device.manufacturer && `${device.manufacturer} `}
                         {device.model}
                       </p>
+                      {isFiscalRegister && (
+                        <p className="text-xs text-amber-300 mt-1">
+                          {t('ecr.admission.fiscalNotCardTerminal', {
+                            defaultValue:
+                              'A fiscal cash register (such as RBS or ELIO) is not a card terminal. Set it up under Cash Register / Fiscal Printer.',
+                          })}
+                        </p>
+                      )}
                       {!device.isSupported && (
                         <p className="text-xs text-amber-300 mt-1">
                           {t(
@@ -302,6 +315,25 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                         {t('ecr.discovery.configured', 'Configured')}
                       </span>
                     </div>
+                  ) : isFiscalRegister ? (
+                    onOpenCashRegisterSetup ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onOpenCashRegisterSetup()
+                        }}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-300 active:bg-amber-500/30 transition-colors"
+                      >
+                        {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
+                      </button>
+                    ) : (
+                      <button
+                        disabled
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-700/60 text-gray-500 cursor-not-allowed"
+                      >
+                        {t('ecr.discovery.unavailable', 'Unavailable')}
+                      </button>
+                    )
                   ) : !device.isSupported ? (
                     <div className="flex flex-col items-end gap-2">
                       <span className="text-xs px-2 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
@@ -328,7 +360,8 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                     </button>
                   )}
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -342,7 +375,8 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             onClick={() =>
               onSelect({
               name: '',
-              deviceType: 'payment_terminal',
+              // Unknown: the config form requires an explicit type choice (no silent default).
+              deviceType: '',
               connectionType: 'serial_usb',
               connectionDetails: {},
               isConfigured: false,

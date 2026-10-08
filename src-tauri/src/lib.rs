@@ -44,6 +44,7 @@ mod core_helpers;
 mod customer_display;
 mod data_helpers;
 mod db;
+mod device_admission;
 mod diagnostics;
 mod drawer;
 mod ecr;
@@ -1648,6 +1649,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::ecr::ecr_update_device,
             commands::ecr::ecr_remove_device,
             commands::ecr::ecr_get_default_terminal,
+            commands::ecr::ecr_get_device_admission,
             commands::ecr::ecr_connect_device,
             commands::ecr::ecr_disconnect_device,
             commands::ecr::ecr_get_device_status,

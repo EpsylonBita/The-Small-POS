@@ -124,4 +124,63 @@ describe('usePrivilegedActionConfirmation: a manager approves with nobody on shi
       scope: 'cash_drawer_control',
     });
   });
+
+  it("says why a paid cancellation asks for an approver's PIN while a cashier is on shift", async () => {
+    // Founder 07/10/2026: nobody at the till may cancel the paid order, so a
+    // staff member who may approves it; "nobody is checked in" would be false.
+    function CancelHarness({ action, onDone }: { action: () => Promise<string>; onDone: (v: string) => void }) {
+      const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              void runWithPrivilegedConfirmation({
+                scope: 'cash_drawer_control',
+                action,
+                title: 'Approve the cancellation',
+                approvalSubtitle: 'Cancelling a paid order needs the right to cancel.',
+              }).then(onDone, () => undefined)
+            }
+          >
+            Cancel order
+          </button>
+          {confirmationModal}
+        </>
+      );
+    }
+    const action = vi
+      .fn<() => Promise<string>>()
+      // The till's own words, as the Rust command sends them: a JSON string.
+      .mockRejectedValueOnce(
+        JSON.stringify({
+          code: 'REAUTH_REQUIRED',
+          scope: 'cash_drawer_control',
+          reason:
+            'ORDER_CANCELLATION_PERMISSION_REQUIRED: a staff member who may cancel paid orders approves it with their own PIN',
+          ttlSeconds: 300,
+          approval: 'void_orders',
+        }),
+      )
+      .mockResolvedValueOnce('cancelled');
+    const onDone = vi.fn();
+    render(<CancelHarness action={action} onDone={onDone} />);
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'Cancel order' }).click();
+    });
+    expect(screen.getByTestId('pin-subtitle').textContent).toBe(
+      'Cancelling a paid order needs the right to cancel.',
+    );
+    await act(async () => {
+      screen.getByRole('button', { name: 'Enter PIN' }).click();
+    });
+
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('cancelled'));
+    expect(mock.confirmPrivilegedAction).toHaveBeenCalledWith({
+      pin: '2468',
+      scope: 'cash_drawer_control',
+      approval: 'void_orders',
+    });
+  });
 });

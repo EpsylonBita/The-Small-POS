@@ -174,7 +174,8 @@ const extractOrderFinancialState = (order: any, fallbackTotal: number): OrderFin
   const taxAmount = round2(Number(order?.tax_amount ?? order?.taxAmount ?? order?.tax ?? 0));
   const deliveryFee = round2(Number(order?.delivery_fee ?? order?.deliveryFee ?? 0));
   const tipAmount = round2(Number(order?.tip_amount ?? order?.tipAmount ?? 0));
-  const subtotal = round2(Number(order?.subtotal ?? (totalAmount + discountAmount - taxAmount - deliveryFee - tipAmount)));
+  // Prices include VAT: a missing subtotal holds it, nothing sits on top (07/10/2026).
+  const subtotal = round2(Number(order?.subtotal ?? (totalAmount + discountAmount - deliveryFee - tipAmount)));
   return { totalAmount, subtotal, discountAmount, discountPercentage, taxAmount, deliveryFee, tipAmount };
 };
 

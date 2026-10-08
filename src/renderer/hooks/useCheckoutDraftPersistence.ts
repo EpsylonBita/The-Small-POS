@@ -160,6 +160,10 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     },
     identity: () => current.current.checkoutRequestId,
     isPending: () => current.current.phase === 'checkout_pending',
+    hasSubmission: () => Boolean(current.current.submission),
+    /** A renewed refused correction: it supersedes an attempt the native journal still holds. */
+    supersedesEdit: () => typeof current.current.context?.supersedesEditEvent === 'string' &&
+      current.current.context.supersedesEditEvent.length > 0,
     inspect: () => {
       if (!store.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
       return store.current.inspect(current.current.checkoutRequestId);

@@ -30,7 +30,7 @@
     }
   },
   "checkoutRecovery": {
-    "title": "Veprime tavolinash në pritje të rikuperimit",
+    "title": "Veprime në pritje të rikuperimit",
     "guidance": "Kërkesat fillestare mbeten të ruajtura. Nevojiten Internet dhe lejet aktuale. Mos përsëritni një pagesë të pasigurt.",
     "unavailable": "Gjendja e rikuperimit nuk mund të lexohet. Veprimet në pritje janë mbajtur.",
     "pending": "Në pritje të rilidhjes",

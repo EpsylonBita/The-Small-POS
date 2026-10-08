@@ -1779,6 +1779,54 @@ pub async fn report_submit_z_report(
     result
 }
 
+/// The Z the till cannot close because it cannot reach the server (offline
+/// audit 07/10/2026). Typed, so the renderer says it in the store's language
+/// with what to do, instead of the native "pre-Z-report sync failed: reconcile
+/// remote orders: Cannot reach admin dashboard at …" a Greek cashier used to
+/// read. Nothing is generated, deleted or advanced; the day stays open.
+pub(crate) const Z_REPORT_OFFLINE_CODE: &str = "Z_REPORT_OFFLINE";
+
+fn z_report_offline_response(stage: &str) -> serde_json::Value {
+    serde_json::json!({
+        "success": false,
+        "errorCode": Z_REPORT_OFFLINE_CODE,
+        "stage": stage,
+        "error": "No connection to the server: the day cannot be closed now. Keep selling; close the day once the connection is back.",
+    })
+}
+
+/// A closeout drain error that says the server could not be reached: the
+/// transport texts `api::friendly_error` and reqwest produce.
+fn is_server_unreachable_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "cannot reach admin dashboard",
+        "timed out",
+        "network error communicating with",
+        "error sending request",
+        "dns error",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Whether a failed closeout drain failed because this till is offline: its
+/// error names an unreachable server, or a fresh health probe fails. Any other
+/// failure (a server refusal, a local error) keeps its own message.
+async fn closeout_drain_failed_offline(error: &str) -> bool {
+    if is_server_unreachable_error(error) {
+        return true;
+    }
+    !crate::sync::check_network_status()
+        .await
+        .get("isOnline")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// The Z submission itself. `stage` names the step reached, for the attempt
 /// record.
 async fn submit_z_report_through_stages(
@@ -1795,9 +1843,19 @@ async fn submit_z_report_through_stages(
     let _ = crate::fiscal::status::refresh_from_stored_credentials().await;
 
     *stage = "pre_z_sync";
-    let pre_closeout_drain = crate::sync::force_sync_until_closeout_stable(db, sync_state, app)
-        .await
-        .map_err(|error| format!("Cannot close day: pre-Z-report sync failed: {error}"))?;
+    let pre_closeout_drain =
+        match crate::sync::force_sync_until_closeout_stable(db, sync_state, app).await {
+            Ok(state) => state,
+            Err(error) if closeout_drain_failed_offline(&error).await => {
+                warn!(error = %error, "Z refused: the server cannot be reached");
+                return Ok(z_report_offline_response("pre_z_sync"));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Cannot close day: pre-Z-report sync failed: {error}"
+                ))
+            }
+        };
     info!(
         passes_executed = pre_closeout_drain.passes_executed,
         any_progress = pre_closeout_drain.any_progress,
@@ -1872,9 +1930,17 @@ async fn submit_z_report_through_stages(
     };
 
     *stage = "post_submission_sync";
-    let post_submission_drain = crate::sync::force_sync_until_closeout_stable(db, sync_state, app)
-        .await
-        .map_err(|error| format!("Cannot close day: Z-report sync failed: {error}"))?;
+    let post_submission_drain =
+        match crate::sync::force_sync_until_closeout_stable(db, sync_state, app).await {
+            Ok(state) => state,
+            // The prepared Z stays queued and the day open: the next attempt
+            // sends it first, once the connection is back.
+            Err(error) if closeout_drain_failed_offline(&error).await => {
+                warn!(error = %error, "Z refused after prepare: the server cannot be reached");
+                return Ok(z_report_offline_response("post_submission_sync"));
+            }
+            Err(error) => return Err(format!("Cannot close day: Z-report sync failed: {error}")),
+        };
     info!(
         passes_executed = post_submission_drain.passes_executed,
         any_progress = post_submission_drain.any_progress,
@@ -2961,5 +3027,57 @@ mod dto_tests {
             method_by_status["completed@2026-09-05T19:00:00Z"].as_deref(),
             Some("pending")
         );
+    }
+
+    // Offline audit 07/10/2026: with no internet the Z showed the cashier the
+    // native English "pre-Z-report sync failed: reconcile remote orders:
+    // Cannot reach admin dashboard at …". The refusal is now typed.
+    #[test]
+    fn an_unreachable_server_is_recognized_from_the_drain_error() {
+        for error in [
+            "reconcile remote orders: Cannot reach admin dashboard at https://admin.the-small.ai",
+            "reconcile remote orders: Connection to https://admin.the-small.ai timed out",
+            "Network error communicating with https://admin.the-small.ai: error sending request",
+            "dns error: failed to lookup address information",
+        ] {
+            assert!(is_server_unreachable_error(error), "{error}");
+        }
+        for error in [
+            "HTTP 500: Internal Server Error",
+            "lock poisoned",
+            "reconcile remote orders: HTTP 401 invalid_terminal_api_key",
+        ] {
+            assert!(!is_server_unreachable_error(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_offline_refusal_is_typed_and_recorded_with_its_code() {
+        let response = z_report_offline_response("pre_z_sync");
+        assert_eq!(response["success"], false);
+        assert_eq!(response["errorCode"], Z_REPORT_OFFLINE_CODE);
+        assert_eq!(response["stage"], "pre_z_sync");
+        let attempt = zreport::closeout_attempt_from_result(
+            "pre_z_sync",
+            &Ok(response),
+            "2026-10-07T21:00:00Z",
+        );
+        assert_eq!(attempt.code, Z_REPORT_OFFLINE_CODE);
+        assert_eq!(attempt.stage, "pre_z_sync");
+    }
+
+    #[test]
+    fn both_closeout_drains_answer_offline_with_the_typed_refusal() {
+        let source = include_str!("analytics.rs");
+        let stages = source_slice(source, "async fn submit_z_report_through_stages(");
+        assert_eq!(
+            stages
+                .matches("closeout_drain_failed_offline(&error).await")
+                .count(),
+            2,
+            "the pre-Z and the post-submission drains both recognize an offline till"
+        );
+        assert!(stages.contains("z_report_offline_response(\"pre_z_sync\")"));
+        assert!(stages.contains("z_report_offline_response(\"post_submission_sync\")"));
     }
 }

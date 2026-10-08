@@ -2724,6 +2724,33 @@ fn format_datetime_human(iso: &str) -> String {
         })
 }
 
+/// Format a stored timestamp as `HH:MM` in the store's own time: the time
+/// zone of this device (Windows), as `format_datetime_human` does. A value
+/// without an offset is SQLite's `datetime('now')`, which is UTC.
+///
+/// The Z slip printed each staff member's shift times by slicing the stored
+/// UTC text, so a Greek store saw them three hours early (Tomikro, 07/10/2026).
+fn format_time_hm_local(iso: &str) -> Option<String> {
+    let value = iso.trim();
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Some(parsed.with_timezone(&Local).format("%H:%M").to_string());
+    }
+    [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+    ]
+    .iter()
+    .find_map(|format| chrono::NaiveDateTime::parse_from_str(value, format).ok())
+    .map(|naive| {
+        naive
+            .and_utc()
+            .with_timezone(&Local)
+            .format("%H:%M")
+            .to_string()
+    })
+}
+
 fn should_render_shift_checkout_driver_summary(doc: &ShiftCheckoutDoc) -> bool {
     doc.role_type == "driver"
 }
@@ -9423,13 +9450,13 @@ fn render_classic_non_customer_raster_exact_ttf(
                     let ci_display = staff
                         .check_in
                         .as_deref()
-                        .and_then(|v| v.get(11..16))
-                        .unwrap_or("--:--");
+                        .and_then(format_time_hm_local)
+                        .unwrap_or_else(|| "--:--".to_string());
                     let co_display = staff
                         .check_out
                         .as_deref()
-                        .and_then(|v| v.get(11..16))
-                        .unwrap_or("--:--");
+                        .and_then(format_time_hm_local)
+                        .unwrap_or_else(|| "--:--".to_string());
                     let time_range = format!("  {} - {}", ci_display, co_display);
                     canvas.draw_text_line(&time_range, BitmapAlign::Left, preset.item_style);
                     if staff.staff_payment > 0.0 {
@@ -12119,13 +12146,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     let ci_display = staff
                         .check_in
                         .as_deref()
-                        .and_then(|v| v.get(11..16))
-                        .unwrap_or("--:--");
+                        .and_then(format_time_hm_local)
+                        .unwrap_or_else(|| "--:--".to_string());
                     let co_display = staff
                         .check_out
                         .as_deref()
-                        .and_then(|v| v.get(11..16))
-                        .unwrap_or("--:--");
+                        .and_then(format_time_hm_local)
+                        .unwrap_or_else(|| "--:--".to_string());
                     let time_range = format!("{} - {}", ci_display, co_display);
                     builder.text(&format!("  {}", time_range)).lf();
                     if staff.staff_payment > 0.0 {
@@ -14690,6 +14717,81 @@ mod tests {
         assert!(staff_section.contains("Card"));
         assert!(staff_section.contains("TOTAL"));
         assert!(staff_section.contains("82.55"));
+    }
+
+    fn local_hm(iso: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(iso)
+            .expect("parse fixture time")
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string()
+    }
+
+    #[test]
+    fn shift_times_are_the_devices_local_time_never_the_stored_utc_text() {
+        // Tomikro, 07/10/2026: the Z slip showed 16:07 for a 19:07 Greek check-in.
+        let stored = "2026-10-06T16:07:12.689Z";
+        assert_eq!(format_time_hm_local(stored), Some(local_hm(stored)));
+        // The same instant written with an offset prints the same local time.
+        assert_eq!(
+            format_time_hm_local("2026-10-06T19:07:12.689+03:00"),
+            Some(local_hm(stored))
+        );
+        // SQLite's datetime('now') carries no offset and is UTC.
+        assert_eq!(
+            format_time_hm_local("2026-10-06 16:07:12"),
+            Some(local_hm("2026-10-06T16:07:12Z"))
+        );
+        assert_eq!(
+            format_time_hm_local(" 2026-10-06T16:07:12Z "),
+            Some(local_hm(stored))
+        );
+        assert_eq!(format_time_hm_local("not a time"), None);
+        assert_eq!(format_time_hm_local(""), None);
+    }
+
+    #[test]
+    fn z_report_prints_each_shift_in_the_stores_local_time() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let check_in = "2026-10-06T16:07:12.689Z";
+        let check_out = "2026-10-07T00:05:42.767Z";
+        let doc = ReceiptDocument::ZReport(ZReportDoc {
+            staff_reports: vec![
+                ZReportStaffEntry {
+                    name: "Cashier One".to_string(),
+                    role: "cashier".to_string(),
+                    check_in: Some(check_in.to_string()),
+                    check_out: Some(check_out.to_string()),
+                    ..ZReportStaffEntry::default()
+                },
+                ZReportStaffEntry {
+                    name: "Driver Open".to_string(),
+                    role: "driver".to_string(),
+                    check_in: Some(check_in.to_string()),
+                    check_out: None,
+                    ..ZReportStaffEntry::default()
+                },
+            ],
+            ..ZReportDoc::default()
+        });
+
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+
+        let expected = format!("{} - {}", local_hm(check_in), local_hm(check_out));
+        assert!(text.contains(&expected), "missing {expected} in {text}");
+        assert!(text.contains(&format!("{} - --:--", local_hm(check_in))));
+        if local_hm(check_in) != "16:07" {
+            assert!(
+                !text.contains("16:07 - 00:05"),
+                "printed the stored UTC text"
+            );
+        }
     }
 
     #[test]

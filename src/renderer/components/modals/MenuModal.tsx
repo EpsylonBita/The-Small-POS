@@ -644,6 +644,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Customer popover state (for pickup orders)
   const [showCustomerPopover, setShowCustomerPopover] = useState(false);
   const closingDraft = useRef(false);
+  // A close asked for while the saved draft is still loading waits for it.
+  const [closeRequested, setCloseRequested] = useState(false);
   const pickupCustomerEditedRef = useRef(false);
   const [pickupCustomerDraft, setPickupCustomerDraft] = useState(() => readPickupCustomerDraft(selectedCustomer));
   const { name: pickupCustomerName, phone: pickupCustomerPhone, notes: pickupCustomerNotes } = pickupCustomerDraft;
@@ -693,10 +695,22 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Closing an editable cart before payment is an ordinary dismissal. Persist
   // the tombstone before closing; an already submitted original stays recoverable.
+  // 1.4.125: an unsubmitted order correction is dismissed the same way. Its
+  // kept draft (context.editMode) reopened the same edit on every new order,
+  // even after a restart. A submitted financial step (pending phase or a
+  // recorded submission) and a renewed refused correction (it replaces an
+  // attempt the native journal still holds) stay protected: the menu just closes.
+  // A close while the saved draft is still loading (or not yet hydrated) stays
+  // pending until it is ready, then discards it: closing at once wrote no
+  // tombstone and the stored edit reopened later.
   const requestClose = useCallback(async () => {
     if (!isOpen || closingDraft.current || editSubmissionInFlight.current || checkoutPhase !== 'editing') return;
     if (draftPersistence.isPending() && draftPersistence.error === 'draftSaveFailed') return;
-    if (editMode || draftPersistence.isPending()) { onClose(); return; }
+    if (draftPersistence.isPending() || draftPersistence.hasSubmission() || draftPersistence.supersedesEdit()) { onClose(); return; }
+    if (draftPersistence.status === 'loading' || (draftPersistence.status === 'loaded' && !draftPersistence.error)) {
+      setCloseRequested(true);
+      return;
+    }
     if (draftPersistence.status !== 'ready') { onClose(); return; }
     closingDraft.current = true;
     try {
@@ -706,12 +720,23 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     } catch {
       toast.error(t('modals.menu.draftDiscardFailed', { defaultValue: 'The saved cart could not be discarded. It has been retained.' }));
     } finally { closingDraft.current = false; }
-  }, [isOpen, editMode, checkoutPhase, draftPersistence.status, draftPersistence.error, draftPersistence.clear, onClose, t]);
+  }, [isOpen, checkoutPhase, draftPersistence.status, draftPersistence.error, draftPersistence.clear, onClose, t]);
 
   // Hiding the menu for PaymentModal is not a request to abandon the cart.
   const handleMenuSurfaceClose = useCallback(() => {
     if (checkoutPhase === 'editing') void requestClose();
   }, [checkoutPhase, requestClose]);
+
+  // Finish a close that waited for the saved draft: once hydration is ready
+  // (or the draft is unreadable, invalidated or cannot be hydrated), run the
+  // same guarded close.
+  useEffect(() => {
+    if (!closeRequested) return;
+    if (!isOpen) { setCloseRequested(false); return; }
+    if (draftPersistence.status === 'loading' || (draftPersistence.status === 'loaded' && !draftPersistence.error)) return;
+    setCloseRequested(false);
+    void requestClose();
+  }, [closeRequested, isOpen, draftPersistence.status, draftPersistence.error, requestClose]);
 
   const customerChipName = orderType === 'pickup'
     ? pickupCustomerName.trim() : selectedCustomer?.name || '';
@@ -2666,6 +2691,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           : code.includes('EDIT_TOO_MANY_LINES') ? 'editTooManyLines'
           : code.includes('EDIT_SETTLEMENT_METHOD_UNAVAILABLE') ? 'editMethodUnavailable'
           : code.includes('ORDER_EDIT_SETTLEMENT_PENDING') ? 'editPreviousNotSaved'
+          // 1.4.125: was the generic "Failed to save changes" (08/10/2026).
+          : code.includes('EDIT_ORIGINAL_PROVIDER_REFUND_REQUIRED') ? 'editProviderRefundRequired'
           : null;
         if (specific) {
           toast.error(t(`modals.menu.${specific}`, { maxLines: MENU_EDIT_MAX_LINES }));

@@ -10,7 +10,18 @@ const point = { lat: 40.6138032, lng: 22.9601881 };
 describe('order customer edit destination ownership', () => {
   it('keeps metadata-only writes out of native destination and money fields', () => {
     const payload = customerInfoEditUpdate({ ...original, destinationChanged: false, name: 'New name', phone: '456', delivery_floor: '2', name_on_ringer: 'Bell', notes: 'Note' }, original);
-    expect(payload).toEqual({ expectedVersion: 3, customerName: 'New name', customerPhone: '456', deliveryAddress: 'Street 12', deliveryFloor: '2', nameOnRinger: 'Bell', deliveryNotes: 'Note' });
+    expect(payload).toEqual({ expectedVersion: 3, customerId, customerName: 'New name', customerPhone: '456', deliveryAddress: 'Street 12', deliveryFloor: '2', nameOnRinger: 'Bell', deliveryNotes: 'Note' });
+  });
+  // 06/10/2026 (Tomikro): a contact correction sent the linked customer's name
+  // and phone without the id; the server refused to create a second customer
+  // for that phone ("select it explicitly") and the queued edit held the Z.
+  it('keeps the order linked to its customer and never sends a local or missing id', () => {
+    expect(customerInfoEditUpdate({ ...original, destinationChanged: false, phone: '6955391363' }, original))
+      .toMatchObject({ customerId, customerPhone: '6955391363' });
+    expect(customerInfoEditUpdate({ ...original, destinationChanged: false }, { ...original, customerId: 'local-customer-1' }))
+      .not.toHaveProperty('customerId');
+    expect(customerInfoEditUpdate({ ...original, destinationChanged: false }, { ...original, customerId: null }))
+      .not.toHaveProperty('customerId');
   });
   it('keeps the renderer local version independent from the known canonical revision', () => {
     const snapshot = orderCustomerEditSnapshot({ version: 1, remote_version: 5, customer_name: 'Person', delivery_address: 'Street 12' });

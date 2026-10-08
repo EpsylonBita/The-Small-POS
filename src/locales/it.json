@@ -4247,6 +4247,7 @@
       "editTooManyLines": "Una correzione può avere al massimo {{maxLines}} righe. Rimuovi alcune righe, oppure annulla l’ordine e creane uno nuovo. Non è stato incassato denaro.",
       "editMethodUnavailable": "Questo terminale non può registrare contanti o carta per la differenza. Chiedi a un responsabile di attivare un metodo di pagamento per questo terminale. Non è stato incassato denaro.",
       "editPreviousNotSaved": "Una correzione precedente di questo ordine è stata confermata ma non salvata. Riaprila dal carrello salvato per prepararla di nuovo, oppure chiedi a un responsabile di chiuderla. Non incassare né restituire di nuovo denaro.",
+      "editProviderRefundRequired": "Questo ordine ha un pagamento con carta passato da un terminale di pagamento o da un fornitore di pagamenti, quindi non si può correggere su questa cassa. Non è stato modificato nulla.",
       "emptyEditHint": "Per rimuovere tutti gli articoli, chiudi l’editor e annulla l’ordine.",
       "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso."
     },
@@ -5301,7 +5302,7 @@
       "attemptCleared": "L'annullamento salvato è stato eliminato. Non è stato restituito denaro. Puoi annullare di nuovo l'ordine.",
       "staffCashUnavailable": "L’annullamento con consegna del contante non è al momento disponibile. Controlla la connessione e riprova dopo l’aggiornamento del server.",
       "connectionUnavailable": "Lo stato della connessione dei pagamenti non è disponibile. Aggiorna le integrazioni e riprova.",
-      "permissionRequired": "Questo account non può annullare ordini pagati.",
+      "permissionRequired": "Nessuno qui può annullare ordini pagati: né il cassiere in turno, né qualcuno con questo permesso e un PIN su questa cassa. Assegna il permesso di annullare a un ruolo nel pannello di amministrazione, poi riprova online.",
       "paymentSyncRequired": "Il pagamento originale deve essere sincronizzato prima di registrarne il rimborso. Sincronizza e riprova senza addebitare di nuovo.",
       "paymentChanged": "Il pagamento è cambiato. Chiudi la finestra e seleziona di nuovo Annulla per verificare l’importo attuale.",
       "drawerUnavailable": "È necessaria una cassa aperta per registrare un rimborso in contanti.",
@@ -5335,7 +5336,9 @@
         "bad_weather": "Maltempo",
         "duplicate_order": "Ordine duplicato",
         "test_order": "Ordine di prova"
-      }
+      },
+      "managerApprovalTitle": "Approva l'annullamento",
+      "managerApprovalSubtitle": "Annullare un ordine pagato richiede il permesso di annullare. Un responsabile che lo possiede inserisce il proprio PIN. Non viene addebitato nulla."
     },
     "addCustomer": {
       "title": "Aggiungi nuovo cliente",
@@ -8327,6 +8330,20 @@
       "enabled": "Terminale abilitato",
       "saveFailed": "Impossibile salvare il terminale"
     },
+    "admission": {
+      "cardTerminalNeedsPlugin": "Serve il suo plugin: i terminali per carte restano inattivi finché per questo negozio non è attivo e configurato un plugin di pagamento.",
+      "cashRegisterNeedsPlugin": "Serve il suo plugin: i registratori fiscali restano inattivi finché il plugin MyData del negozio non è in modalità dispositivo fiscale con la configurazione completata.",
+      "cardTerminalRefused": "Questo terminale per carte non può essere attivato: serve un plugin di pagamento attivo e configurato per questo negozio. Puoi salvarlo disattivato.",
+      "cashRegisterRefused": "Questo registratore di cassa non può essere attivato: serve il plugin MyData del negozio in modalità dispositivo fiscale con la configurazione completata. Puoi salvarlo disattivato.",
+      "deviceRefused": "Questo dispositivo non può essere attivato finché il suo plugin non è attivo, configurato e completato per questo negozio.",
+      "typeRequired": "Scegli il tipo di dispositivo: terminale di pagamento o registratore fiscale.",
+      "fiscalNotCardTerminal": "Un registratore fiscale (come RBS o ELIO) non è un terminale per carte. Configuralo in \"Registratore di cassa / Stampante fiscale\".",
+      "savedAsCardTerminal": "Sembra un registratore fiscale (RBS / ELIO), ma è salvato come terminale per carte. Disattivalo o rimuovilo qui, poi configuralo in \"Registratore di cassa / Stampante fiscale\".",
+      "disable": "Disattiva",
+      "disabledBadge": "Disattivato",
+      "disableSuccess": "Dispositivo disattivato",
+      "disableFailed": "Impossibile disattivare il dispositivo"
+    },
     "status": {
       "connected": "Connesso",
       "disconnected": "Disconnesso",
@@ -8789,6 +8806,7 @@
       "capTargetMismatch": "La destinazione del servizio CAP non è disponibile o differisce dal modulo. Apri la configurazione della connessione, imposta questo IP o questa porta COM nel servizio del produttore e aggiorna lo stato del supporto.",
       "capServiceTarget": "Destinazione del servizio del produttore",
       "configSaved": "Configurazione MyData salvata",
+      "deviceAwaitingSetup": "Il dispositivo fiscale è stato verificato, ma resta inattivo finché la configurazione MyData del negozio non risulta completata. Poi attivalo in \"Registratore di cassa / Stampante fiscale\".",
       "dashboardBanner": {
         "title": "La configurazione di myDATA avviene nella dashboard di amministrazione",
         "body": "Una volta configurato myDATA, gli scontrini vengono inviati automaticamente all'agenzia delle entrate (AADE). La configurazione stessa (credenziali, dati IVA, attivazione) si effettua nella dashboard di amministrazione: apri Plugin → MyData e segui i passaggi. Questa schermata serve solo se colleghi una stampante fiscale (ΦΗΜ) a questa cassa.",
@@ -10068,5 +10086,10 @@
     "waiterBody": "La cassa principale è chiusa. Un cassiere o responsabile deve iniziare il turno sulla cassa principale associata a questo dispositivo. Potrai poi iniziare il tuo turno e continuare.",
     "checking": "Verifica del turno di cassa…",
     "recheck": "Verifica di nuovo"
+  },
+  "zReportOffline": {
+    "refusal": "Senza connessione la giornata non si può chiudere. Continua a vendere: la giornata resta aperta e la chiudi appena torna la connessione. Per contare il cassetto adesso, usa la chiusura del cassiere, che si stampa anche senza internet, e l'anteprima in questa schermata.",
+    "status": "Nessuna connessione: la giornata si chiude appena torna",
+    "checklist": "Nessuna connessione al server. Continua a vendere e chiudi la giornata appena torna la connessione."
   }
 }

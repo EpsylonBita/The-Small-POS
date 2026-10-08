@@ -58,6 +58,10 @@ interface Props {
   onEdit: () => void
   onDelete: () => void
   onSetDefault: () => void
+  /** Plain-language states shown under the card, e.g. "needs its plugin" (founder rule 08/10/2026). */
+  notices?: string[]
+  /** When given and the device is enabled, a Disable action is shown (a non-admitted device must stay removable/disableable). */
+  onDisable?: () => void
 }
 
 // ============================================================
@@ -124,7 +128,7 @@ const getStatusInfo = (state?: DeviceState) => {
 // ============================================================
 
 export const TerminalCardCompact: React.FC<Props> = memo(
-  ({ device, status, onConnect, onDisconnect, onEdit, onDelete, onSetDefault }) => {
+  ({ device, status, onConnect, onDisconnect, onEdit, onDelete, onSetDefault, notices, onDisable }) => {
     const { t } = useTranslation()
     const ConnectionIcon = getConnectionIcon(device.connectionType)
     const statusInfo = getStatusInfo(status?.state)
@@ -156,6 +160,11 @@ export const TerminalCardCompact: React.FC<Props> = memo(
                       size={12}
                       className="text-yellow-400 fill-yellow-400 flex-shrink-0"
                     />
+                  </span>
+                )}
+                {!device.enabled && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-500/20 text-gray-500 dark:text-gray-400 flex-shrink-0">
+                    {t('ecr.admission.disabledBadge', { defaultValue: 'Disabled' })}
                   </span>
                 )}
               </div>
@@ -241,6 +250,27 @@ export const TerminalCardCompact: React.FC<Props> = memo(
           <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
             {bluetoothUnavailableMessage}
           </p>
+        )}
+        {notices?.map((notice) => (
+          <p
+            key={notice}
+            role="status"
+            className="mt-2 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300"
+          >
+            <AlertCircle size={12} className="mt-0.5 shrink-0" />
+            <span>{notice}</span>
+          </p>
+        ))}
+        {onDisable && device.enabled && (
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              onClick={onDisable}
+              className="inline-flex min-h-[36px] items-center rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 text-xs font-medium text-amber-800 dark:text-amber-200 active:bg-amber-500/20"
+            >
+              {t('ecr.admission.disable', { defaultValue: 'Disable' })}
+            </button>
+          </div>
         )}
       </div>
     )

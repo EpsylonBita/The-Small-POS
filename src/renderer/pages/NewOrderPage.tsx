@@ -582,11 +582,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       const discountPercentage = Number(orderData.discountPercentage || 0);
       const discountAmount = Number(orderData.discountAmount || 0);
       const subtotalAfterDiscount = Number(orderData.total || 0);
-      const taxDivisor = 1 + (taxRatePercentage / 100);
-      const tax =
-        taxRatePercentage > 0 && taxDivisor > 0
-          ? Math.round((subtotalAfterDiscount - (subtotalAfterDiscount / taxDivisor)) * 100) / 100
-          : 0;
+      // The order's VAT is computed natively from its lines, as the server
+      // computes it (07/10/2026); the store's checkout rate only gates readiness.
       const tipAmount = Math.max(
         0,
         Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
@@ -750,7 +747,6 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         organization_id: organizationId,
         total_amount: totalAmount,
         subtotal: subtotalAfterDiscount,
-        tax_amount: tax,
         delivery_fee: deliveryFee,
         discount_percentage: discountPercentage,
         discount_amount: discountAmount,

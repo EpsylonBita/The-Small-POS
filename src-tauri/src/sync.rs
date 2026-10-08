@@ -2432,6 +2432,31 @@ pub fn create_order(
             }
         }
     }
+    // The order's VAT is the server's own computation over the very body this
+    // till sends for the create (07/10/2026), never a renderer estimate. It is
+    // bookkeeping only: prices include VAT, so no total, subtotal, tip or
+    // payment changes, and the server recomputes it from the lines anyway.
+    let tax_amount = {
+        let vat_cents = match crate::sync_queue::order_insert_vat(&conn, &order_id, &sync_data) {
+            Ok(vat) => vat.tax_amount_cents,
+            Err(error) => {
+                warn!(order_id = %order_id, error = %error, "Order VAT not computed; stored as 0");
+                0
+            }
+        };
+        if let Err(error) =
+            crate::fiscal::greece_vat::store_local_order_vat(&conn, &order_id, vat_cents)
+        {
+            warn!(order_id = %order_id, error = %error, "Order VAT not stored");
+        }
+        let vat_amount = Cents::new(vat_cents).to_f64_dp2();
+        if let Value::Object(obj) = &mut sync_data {
+            obj.insert("taxAmount".to_string(), serde_json::json!(vat_amount));
+            obj.insert("tax_amount".to_string(), serde_json::json!(vat_amount));
+            obj.insert("tax_amount_cents".to_string(), serde_json::json!(vat_cents));
+        }
+        vat_amount
+    };
     crate::sync_queue::enqueue_payload_item(
         &conn,
         "orders",
@@ -2926,10 +2951,16 @@ pub(crate) fn get_all_orders_since_utc(
         })
         .map_err(|e| e.to_string())?;
 
+    // Screens show the slip's VAT, never the stored canonical VAT.
+    let printed_vat = crate::fiscal::receipt_vat::PrintedVatContext::load(&conn);
     let mut orders = Vec::new();
     for row in rows {
         match row {
-            Ok(order) => {
+            Ok(mut order) => {
+                crate::fiscal::receipt_vat::attach_printed_vat_to_order_json(
+                    &printed_vat,
+                    &mut order,
+                );
                 let visible = order_terminal_scope_visible(
                     &visibility_scope,
                     normalize_scope_str(order.get("owner_terminal_id").and_then(Value::as_str)),
@@ -3118,7 +3149,12 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
     );
 
     match result {
-        Ok(order) => Ok(order),
+        Ok(mut order) => {
+            // Screens show the slip's VAT, never the stored canonical VAT.
+            let printed_vat = crate::fiscal::receipt_vat::PrintedVatContext::load(&conn);
+            crate::fiscal::receipt_vat::attach_printed_vat_to_order_json(&printed_vat, &mut order);
+            Ok(order)
+        }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Value::Null),
         Err(e) => Err(format!("get order: {e}")),
     }
@@ -4266,6 +4302,10 @@ pub fn start_terminal_heartbeat_loop(
     tauri::async_runtime::spawn(async move {
         info!("Terminal heartbeat loop started (interval: {interval_secs}s)");
         let mut should_wait = false;
+        // ECR device admission (founder rule 08/10/2026) is re-read after a
+        // sent heartbeat at most every `REFRESH_INTERVAL`; offline the last
+        // known answer stays in force.
+        let mut last_admission_refresh: Option<std::time::Instant> = None;
 
         loop {
             if cancel.is_cancelled() {
@@ -4300,7 +4340,17 @@ pub fn start_terminal_heartbeat_loop(
             )
             .await
             {
-                RemoteAuthExecutionOutcome::Success(true, _) => trace!("Terminal heartbeat sent"),
+                RemoteAuthExecutionOutcome::Success(true, _) => {
+                    trace!("Terminal heartbeat sent");
+                    if last_admission_refresh
+                        .is_none_or(|at| at.elapsed() >= crate::device_admission::REFRESH_INTERVAL)
+                    {
+                        last_admission_refresh = Some(std::time::Instant::now());
+                        if let Err(error) = crate::device_admission::refresh(db.as_ref()).await {
+                            warn!(error = %error, "ECR device admission refresh failed");
+                        }
+                    }
+                }
                 RemoteAuthExecutionOutcome::Success(false, _) => {
                     trace!("Terminal heartbeat skipped")
                 }
@@ -6264,14 +6314,12 @@ fn is_failed_order_insert_parent_blocker_sql() -> &'static str {
                    0
                  )
                  - (
+                   -- Prices include VAT: the stored VAT is inside the
+                   -- subtotal, never added on top (the insert body's tip
+                   -- inference, greece_vat::vat_added_on_top_of_subtotal).
                    COALESCE(
                      repaired_order.subtotal_cents,
                      CAST(ROUND(COALESCE(repaired_order.subtotal, 0) * 100) AS INTEGER),
-                     0
-                   )
-                   + COALESCE(
-                     repaired_order.tax_amount_cents,
-                     CAST(ROUND(COALESCE(repaired_order.tax_amount, 0) * 100) AS INTEGER),
                      0
                    )
                    + COALESCE(
@@ -12179,6 +12227,61 @@ mod lan_canonical_response_tests {
         assert_eq!(amount, 10.0);
     }
     #[test]
+    fn a_canonical_lan_order_carries_the_server_vat_whatever_the_till_stored() {
+        // LAN relays (07/10/2026): the main till applies the server's own
+        // snapshot. The till's stored VAT never travels with it and never
+        // changes the money the snapshot sets.
+        let mut results = Vec::new();
+        for stored in [None, Some(252_i64)] {
+            let conn = connection();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &response()).unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+            let local = local_id(&conn);
+            match stored {
+                None => conn.execute(
+                    "UPDATE orders SET tax_amount = 0, tax_amount_cents = NULL WHERE id = ?1",
+                    params![local],
+                ),
+                Some(cents) => conn.execute(
+                    "UPDATE orders SET tax_amount = ?2, tax_amount_cents = ?3 WHERE id = ?1",
+                    params![local, cents as f64 / 100.0, cents],
+                ),
+            }
+            .unwrap();
+            let mut reply = response();
+            reply["cafe_lan_snapshot"]["orders"][0]["version"] = json!(2);
+            reply["cafe_lan_snapshot"]["orders"][0]["tax_amount"] = json!(5.81);
+            reply["cafe_lan_snapshot"]["orders"][0]["tax_amount_cents"] = json!(581);
+            reply["cafe_lan_snapshot"]["sessions"][0]["order"]["version"] = json!(2);
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            apply_lan_canonical_response(&conn, "/api/pos/table-sessions", &reply).unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+            results.push(
+                conn.query_row(
+                    "SELECT total_amount, subtotal, tax_amount, tax_amount_cents, items
+                     FROM orders WHERE id = ?1",
+                    params![local],
+                    |row| {
+                        Ok((
+                            row.get::<_, f64>(0)?,
+                            row.get::<_, f64>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(
+            (results[0].0, results[0].2, results[0].3),
+            (30.0, 5.81, 581)
+        );
+    }
+    #[test]
     fn historic_uncounted_receipts_do_not_become_new_payments() {
         let conn = connection();
         let mut reply = response();
@@ -13238,6 +13341,11 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
                     "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
                     params![remote_id, local_id],
                 );
+                // The create ACK stamps the local `updated_at` after the
+                // server's, so the order's own row usually reads as stale
+                // here. With nothing of the order queued, the server's VAT
+                // is still the order's canonical VAT (07/10/2026).
+                crate::fiscal::greece_vat::adopt_server_order_vat(conn, &local_id, &remote_order);
             }
         }
 
@@ -14415,6 +14523,9 @@ fn sync_remote_order_snapshot_into_local(
             remote_order,
             repaired_at,
         )?;
+        // Nothing of the order is queued (checked above): the server's VAT
+        // is the canonical one even when its snapshot is older, as the pull.
+        crate::fiscal::greece_vat::adopt_server_order_vat(conn, local_order_id, remote_order);
         debug!(
             order_id = %local_order_id,
             remote_updated_at = %updated_at,
@@ -17298,9 +17409,16 @@ fn build_normalized_order_operation(
         .or_else(|| num_any(&payload_data, &["deliveryFee", "delivery_fee"]))
         .unwrap_or(0.0)
         .max(0.0);
+    // Prices include VAT: the stored VAT is inside the subtotal, never on top.
     let total_amount = num_any(source, &["totalAmount", "total_amount"])
         .or_else(|| num_any(&payload_data, &["totalAmount", "total_amount"]))
-        .unwrap_or((subtotal + tax_amount + delivery_fee - discount_amount).max(0.0))
+        .unwrap_or(
+            (subtotal
+                + crate::fiscal::greece_vat::vat_added_on_top_of_subtotal(tax_amount)
+                + delivery_fee
+                - discount_amount)
+                .max(0.0),
+        )
         .max(0.0);
 
     let status = normalize_order_status_for_sync(
@@ -17550,6 +17668,7 @@ fn mark_order_synced_via_direct_fallback(
     queue_id: i64,
     entity_id: &str,
     remote_id: &str,
+    response: Option<&Value>,
 ) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -17587,6 +17706,14 @@ fn mark_order_synced_via_direct_fallback(
             params![now, remote_id, entity_id],
         )
         .map_err(|e| format!("update orders.supabase_id: {e}"))?;
+
+        // The created row's VAT is the order's canonical VAT (07/10/2026).
+        if let Some(created) = response
+            .and_then(|answer| answer.get("data"))
+            .filter(|data| data.is_object())
+        {
+            crate::fiscal::greece_vat::adopt_server_order_vat(&conn, entity_id, created);
+        }
 
         promote_payments_for_order(&conn, entity_id);
         Ok(())
@@ -17973,7 +18100,13 @@ async fn sync_order_batch_via_direct_api(
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
                     persist_room_charge_response(&conn, entity_id, &resp)?;
                 }
-                mark_order_synced_via_direct_fallback(db, *queue_id, entity_id, &remote_id)?;
+                mark_order_synced_via_direct_fallback(
+                    db,
+                    *queue_id,
+                    entity_id,
+                    &remote_id,
+                    Some(&resp),
+                )?;
                 outcome.record_synced(*queue_id);
 
                 info!(
@@ -25571,6 +25704,119 @@ mod tests {
     }
 
     #[test]
+    fn tax_inflated_repair_never_fires_for_an_order_storing_its_included_vat() {
+        // 07/10/2026: the order stores the VAT inside its 6.40 total. Only a
+        // total that carries the VAT on top is "tax inflated".
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "organization_id", "org-test").unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, supabase_id, order_number, items, total_amount, total_amount_cents,
+                 subtotal, subtotal_cents, tax_amount, tax_amount_cents, delivery_fee,
+                 delivery_fee_cents, order_type, status, sync_status, payment_status,
+                 created_at, updated_at
+             ) VALUES (
+                 'order-vat-included', 'remote-order-vat-included', 'ORD-VAT-INCLUDED',
+                 '[{\"name\":\"Chicken\",\"quantity\":1,\"unit_price\":6.4,\"total_price\":6.4}]',
+                 6.4, 640, 6.4, 640, 1.24, 124, 0, 0, 'delivery', 'pending', 'synced', 'paid',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status, sync_status,
+                 sync_state, sync_last_error, created_at, updated_at
+             ) VALUES
+                 ('payment-vat-base', 'order-vat-included', 'cash', 6.4, 640, 'EUR',
+                  'completed', 'synced', 'applied', NULL, datetime('now'), datetime('now')),
+                 ('payment-vat-extra', 'order-vat-included', 'cash', 1.24, 124, 'EUR',
+                  'completed', 'pending', 'failed', 'Payment exceeds order total',
+                  datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let repair = repair_tax_inflated_local_order_total_for_payment_conflict(
+            &conn,
+            "order-vat-included",
+            "payment-vat-extra",
+            "2026-10-07T10:00:00Z",
+        )
+        .unwrap();
+        assert!(repair.is_none());
+        let (total, tax): (i64, i64) = conn
+            .query_row(
+                "SELECT total_amount_cents, tax_amount_cents FROM orders WHERE id = 'order-vat-included'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((total, tax), (640, 124));
+    }
+
+    #[test]
+    fn a_total_mismatch_create_storing_its_vat_is_requeued_for_the_tip_inference() {
+        // The requeue recognises the create the tip inference can now fix:
+        // total = subtotal + fee - discount + the payment tips, VAT inside.
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                 tax_amount, tax_amount_cents, tip_amount, tip_amount_cents, status,
+                 order_type, payment_status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'order-vat-requeue', '[]', 12.0, 1200, 11.5, 1150, 2.23, 223, 0, 0,
+                 'pending', 'delivery', 'paid', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, amount_cents, currency, status, tip_amount,
+                 tip_amount_cents, sync_status, sync_state, created_at, updated_at
+             ) VALUES ('payment-vat-requeue', 'order-vat-requeue', 'card', 12.0, 1200, 'EUR',
+                 'completed', 0.5, 50, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "orders",
+            "order-vat-requeue",
+            "INSERT",
+            &serde_json::json!({"orderId": "order-vat-requeue"}),
+            Some(1),
+            Some("orders"),
+            Some("server-wins"),
+            Some(1),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE parity_sync_queue SET status = 'failed', attempts = 5,
+                 error_message = 'HTTP 400: Total mismatch - order totals do not match computed values'
+             WHERE record_id = 'order-vat-requeue'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            requeue_failed_order_insert_parent_blockers(&conn).unwrap(),
+            1
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE record_id = 'order-vat-requeue'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
     fn test_categorize_sync_item_routes_financial_rows_out_of_order_path() {
         assert_eq!(categorize_sync_item("order"), SyncItemCategory::Order);
         assert_eq!(categorize_sync_item("shift"), SyncItemCategory::Shift);
@@ -31185,6 +31431,214 @@ mod tests {
         }
     }
 
+    fn seed_vat_order(conn: &Connection, id: &str, remote: &str) {
+        // The create ACK stamped the local `updated_at` after the server's.
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents,
+                subtotal, tax_amount, tax_amount_cents, status, order_type, payment_status,
+                sync_status, created_at, updated_at)
+             VALUES (?1, ?2, '[]', 13.0, 1300, 13.0, 2.52, 252, 'completed', 'pickup',
+                'pending', 'synced', '2026-10-07T08:00:00Z', '2099-01-01T00:00:00Z')",
+            params![id, remote],
+        )
+        .unwrap();
+    }
+
+    fn remote_vat_row(remote: &str, total_cents: i64) -> Value {
+        serde_json::json!({
+            "id": remote, "status": "completed", "payment_status": "pending",
+            "order_type": "pickup", "total_amount": total_cents as f64 / 100.0,
+            "total_amount_cents": total_cents, "subtotal": 13.0,
+            "tax_amount": 2.51, "tax_amount_cents": 251,
+            "updated_at": "2026-10-07T08:00:01Z"
+        })
+    }
+
+    fn vat_cents(conn: &Connection, id: &str) -> i64 {
+        conn.query_row(
+            "SELECT tax_amount_cents FROM orders WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pull_adopts_the_server_vat_when_the_order_s_own_row_reads_stale() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_vat_order(&conn, "pull-vat", "remote-pull-vat");
+        assert_eq!(
+            apply_remote_orders_page(&conn, vec![remote_vat_row("remote-pull-vat", 1300)]).error,
+            None
+        );
+        assert_eq!(
+            vat_cents(&conn, "pull-vat"),
+            251,
+            "nothing queued: the server's VAT"
+        );
+        let (status, updated_at): (String, String) = conn
+            .query_row(
+                "SELECT status, updated_at FROM orders WHERE id = 'pull-vat'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), updated_at.as_str()),
+            ("completed", "2099-01-01T00:00:00Z"),
+            "only the VAT is taken from a stale row"
+        );
+
+        // Other money: the stale row answers for another version.
+        seed_vat_order(&conn, "pull-vat-other", "remote-pull-vat-other");
+        apply_remote_orders_page(&conn, vec![remote_vat_row("remote-pull-vat-other", 1400)]);
+        assert_eq!(vat_cents(&conn, "pull-vat-other"), 252);
+
+        // A queued local change: the pull leaves the order alone.
+        seed_vat_order(&conn, "pull-vat-queued", "remote-pull-vat-queued");
+        crate::sync_queue::enqueue_payload_item(
+            &conn,
+            "orders",
+            "pull-vat-queued",
+            "UPDATE",
+            &serde_json::json!({"orderId": "pull-vat-queued", "status": "completed"}),
+            Some(0),
+            Some("orders"),
+            Some("server-wins"),
+            Some(1),
+        )
+        .unwrap();
+        apply_remote_orders_page(&conn, vec![remote_vat_row("remote-pull-vat-queued", 1300)]);
+        assert_eq!(vat_cents(&conn, "pull-vat-queued"), 252);
+    }
+
+    #[test]
+    fn snapshot_older_than_the_local_row_still_brings_the_server_vat() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_vat_order(&conn, "snapshot-vat", "remote-snapshot-vat");
+        let changed = sync_remote_order_snapshot_into_local(
+            &conn,
+            "snapshot-vat",
+            &remote_vat_row("remote-snapshot-vat", 1300),
+            "2026-10-07T08:05:00Z",
+        )
+        .unwrap();
+        assert_eq!(changed, 0, "the stale snapshot is otherwise skipped");
+        assert_eq!(vat_cents(&conn, "snapshot-vat"), 251);
+        // A fresh snapshot adopts its VAT with the rest of the order.
+        conn.execute(
+            "UPDATE orders SET tax_amount = 2.52, tax_amount_cents = 252, updated_at = '2026-10-07T07:00:00Z'
+             WHERE id = 'snapshot-vat'",
+            [],
+        )
+        .unwrap();
+        sync_remote_order_snapshot_into_local(
+            &conn,
+            "snapshot-vat",
+            &remote_vat_row("remote-snapshot-vat", 1300),
+            "2026-10-07T08:05:00Z",
+        )
+        .unwrap();
+        assert_eq!(vat_cents(&conn, "snapshot-vat"), 251);
+    }
+
+    #[test]
+    fn direct_fallback_create_adopts_the_server_vat() {
+        let db = test_db();
+        let queue_id = {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, tax_amount,
+                    tax_amount_cents, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-direct-vat', '[]', 13.0, 1300, 2.52, 252, 'pending', 'pending',
+                    datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, retry_delay_ms)
+                 VALUES ('order', 'ord-direct-vat', 'insert', '{}', 'order:ord-direct-vat', 'in_progress', 1000)",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let created = serde_json::json!({"success": true, "data": {
+            "id": "remote-direct-vat", "total_amount": 13.0, "tax_amount": 2.51, "tax_amount_cents": 251
+        }});
+        mark_order_synced_via_direct_fallback(
+            &db,
+            queue_id,
+            "ord-direct-vat",
+            "remote-direct-vat",
+            Some(&created),
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(vat_cents(&conn, "ord-direct-vat"), 251);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn order_json_shows_the_printed_vat_never_the_stored_vat() {
+        crate::fiscal::active_cache::reset_for_tests();
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "branch_id", "branch-printed").unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, total_amount_cents, tip_amount,
+                    tip_amount_cents, tax_amount, tax_amount_cents, status, order_type,
+                    sync_status, branch_id, created_at, updated_at)
+                 VALUES ('printed-vat', '[]', 14.0, 1400, 1.0, 100, 2.52, 252, 'completed',
+                    'pickup', 'pending', 'branch-printed', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        let shown = |db: &DbState| {
+            let single = get_order_by_id(db, "printed-vat").unwrap()["printedVatAmount"].clone();
+            let listed = get_all_orders(db)
+                .unwrap()
+                .into_iter()
+                .find(|order| order["id"] == "printed-vat")
+                .unwrap()["printedVatAmount"]
+                .clone();
+            assert_eq!(single, listed);
+            single
+        };
+        let set_rate = |db: &DbState, rate: Option<&str>| {
+            let conn = db.conn.lock().unwrap();
+            match rate {
+                Some(rate) => db::set_setting(&conn, "tax", "default_tax_rate", rate).unwrap(),
+                None => {
+                    db::delete_setting(&conn, "tax", "default_tax_rate").unwrap();
+                }
+            }
+        };
+        // No owner rate (Le Petit Paris) and Tomikro's 0: nothing shown.
+        assert_eq!(shown(&db), Value::Null);
+        set_rate(&db, Some("0"));
+        assert_eq!(shown(&db), Value::Null);
+        // An owner rate of 24%: the VAT inside the total without its tip.
+        set_rate(&db, Some("24"));
+        assert_eq!(shown(&db), serde_json::json!(2.52));
+        // A connected fiscal plugin: the order's own computed VAT.
+        set_rate(&db, Some("13"));
+        crate::fiscal::active_cache::update_with_status(
+            "branch-printed",
+            true,
+            Some("fiscalization_gr".into()),
+            Some("active".into()),
+        );
+        assert_eq!(shown(&db), serde_json::json!(2.52));
+        crate::fiscal::active_cache::reset_for_tests();
+        // 13% of 13.00 included, the tip excluded: 1.50.
+        assert_eq!(shown(&db), serde_json::json!(1.5));
+    }
+
     #[test]
     fn test_mark_order_synced_via_direct_fallback_updates_order_and_promotes_payments() {
         let db = test_db();
@@ -31218,7 +31672,8 @@ mod tests {
         let queue_id = conn.last_insert_rowid();
         drop(conn);
 
-        mark_order_synced_via_direct_fallback(&db, queue_id, "ord-direct", "remote-123").unwrap();
+        mark_order_synced_via_direct_fallback(&db, queue_id, "ord-direct", "remote-123", None)
+            .unwrap();
 
         let conn = db.conn.lock().unwrap();
         let (queue_status, order_status, supabase_id): (String, String, String) = conn
@@ -37829,6 +38284,7 @@ mod tests {
             queue_id,
             "ord-direct-synced",
             "remote-order-123",
+            None,
         )
         .expect("mark order synced via direct fallback");
 

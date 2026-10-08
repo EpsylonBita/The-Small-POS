@@ -30,7 +30,7 @@
     }
   },
   "checkoutRecovery": {
-    "title": "Tischvorgänge warten auf Wiederherstellung",
+    "title": "Vorgänge warten auf Wiederherstellung",
     "guidance": "Ursprüngliche Anfragen bleiben gespeichert. Internet und aktuelle Berechtigungen sind erforderlich. Wiederholen Sie keine unklare Zahlung.",
     "unavailable": "Der Wiederherstellungsstatus konnte nicht gelesen werden. Ausstehende Vorgänge bleiben erhalten.",
     "pending": "Warten auf Verbindung",

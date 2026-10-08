@@ -47,6 +47,9 @@ struct CacheEntry {
     /// The plugin the server named with the answer (`fiscalization_gr`, ...),
     /// when it named one.
     plugin_id: Option<String>,
+    /// The answer's `reason` (`active`, `adapter_not_registered`, ...), when
+    /// the server gave one.
+    reason: Option<String>,
     fetched_at: Instant,
 }
 
@@ -102,14 +105,29 @@ pub fn update(branch_id: impl Into<String>, active: bool) {
 /// [`update`], keeping the plugin the server named with the answer (the
 /// fiscal currency check reads it).
 pub fn update_with_plugin(branch_id: impl Into<String>, active: bool, plugin_id: Option<String>) {
+    update_with_status(branch_id, active, plugin_id, None);
+}
+
+/// [`update_with_plugin`], keeping the answer's `reason` too (the printed-VAT
+/// rule counts only a plugin whose reason is `active`).
+pub fn update_with_status(
+    branch_id: impl Into<String>,
+    active: bool,
+    plugin_id: Option<String>,
+    reason: Option<String>,
+) {
+    let trimmed = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
     let mut s = state();
     s.by_branch.insert(
         branch_id.into(),
         CacheEntry {
             active,
-            plugin_id: plugin_id
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
+            plugin_id: trimmed(plugin_id),
+            reason: trimmed(reason),
             fetched_at: Instant::now(),
         },
     );
@@ -122,6 +140,23 @@ pub fn fresh_active_plugin_id(branch_id: &str) -> Option<String> {
     s.by_branch
         .get(branch_id)
         .filter(|entry| entry.is_fresh() && entry.active)
+        .and_then(|entry| entry.plugin_id.clone())
+}
+
+/// The plugin of a branch whose FRESH answer says a fiscal plugin is
+/// connected and dispatching: `active` true, a named plugin and the reason
+/// `active`. An active answer for another reason (`adapter_not_registered`,
+/// `certification_missing`, ...), a stale or unknown verdict give `None`.
+pub fn fresh_connected_plugin(branch_id: &str) -> Option<String> {
+    let s = state();
+    s.by_branch
+        .get(branch_id)
+        .filter(|entry| {
+            entry.is_fresh()
+                && entry.active
+                && entry.reason.as_deref()
+                    == Some(crate::fiscal::receipt_vat::FISCAL_STATUS_ACTIVE_REASON)
+        })
         .and_then(|entry| entry.plugin_id.clone())
 }
 

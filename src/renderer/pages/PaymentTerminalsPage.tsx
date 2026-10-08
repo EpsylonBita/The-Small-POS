@@ -38,6 +38,18 @@ import { TerminalCard } from '../components/ecr/TerminalCard'
 import { TerminalDiscoveryModal } from '../components/ecr/TerminalDiscoveryModal'
 import { TerminalConfigModal } from '../components/ecr/TerminalConfigModal'
 import { PaymentDialog } from '../components/ecr/PaymentDialog'
+import {
+  ecrAdmissionErrorMessage,
+  ecrDeviceSettingsSection,
+  ecrDeviceUpdatePatch,
+  ecrNotAdmittedMessage,
+  ecrSaveNeedsAdmission,
+  ecrTypeRequiredMessage,
+  isEcrTypeAdmitted,
+  loadEcrDeviceAdmission,
+  resolveEcrDeviceType,
+  storedEcrDeviceType,
+} from '../utils/ecr-device-type'
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion'
 
 // ============================================================
@@ -45,7 +57,6 @@ import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motio
 // ============================================================
 
 type ConnectionType = 'bluetooth' | 'serial_usb' | 'network'
-type DeviceType = 'payment_terminal' | 'cash_register'
 type Protocol = 'generic' | 'zvt' | 'pax'
 type DeviceState = 'disconnected' | 'connecting' | 'connected' | 'busy' | 'error'
 
@@ -129,23 +140,6 @@ const asConnectionType = (value: unknown): ConnectionType => {
   return 'serial_usb'
 }
 
-const asDeviceType = (payload: any): DeviceType => {
-  const normalized = String(payload?.deviceType ?? payload?.device_type ?? '').toLowerCase()
-  if (normalized === 'cash_register' || normalized === 'payment_terminal') {
-    return normalized
-  }
-  if (
-    payload?.print_mode ||
-    payload?.printMode ||
-    Array.isArray(payload?.tax_rates) ||
-    Array.isArray(payload?.taxRates) ||
-    typeof payload?.brand === 'string'
-  ) {
-    return 'cash_register'
-  }
-  return 'payment_terminal'
-}
-
 const asProtocol = (value: unknown): Protocol => {
   const normalized = String(value || '').toLowerCase()
   if (normalized === 'generic' || normalized === 'zvt' || normalized === 'pax') {
@@ -197,7 +191,8 @@ const normalizeTerminalDevice = (payload: any): ECRDevice => {
   return {
     id: typeof payload?.id === 'string' ? payload.id : '',
     name: typeof payload?.name === 'string' ? payload.name : '',
-    deviceType: asDeviceType(payload),
+    // Stored type ('' when none); see utils/ecr-device-type (founder rule 08/10/2026).
+    deviceType: storedEcrDeviceType(payload) ?? '',
     connectionType,
     connectionDetails: buildConnectionDetails(payload, connectionType),
     protocol: asProtocol(payload?.protocol),
@@ -241,13 +236,13 @@ const toDeviceList = (payload: any): ECRDevice[] => {
         : []
 
   return rawDevices
+    .filter((device: any) => ecrDeviceSettingsSection(device) === 'payment_terminal')
     .map((device: any) => normalizeTerminalDevice(device))
-    .filter((device: ECRDevice) => device.deviceType === 'payment_terminal')
 }
 
 const normalizeDiscoveredDevice = (payload: any): DiscoveredDevice => ({
   name: typeof payload?.name === 'string' ? payload.name : '',
-  deviceType: asDeviceType(payload),
+  deviceType: resolveEcrDeviceType(payload) ?? '',
   connectionType: asConnectionType(payload?.connectionType ?? payload?.connection_type),
   connectionDetails:
     payload?.connectionDetails && typeof payload.connectionDetails === 'object'
@@ -285,9 +280,7 @@ const toDiscoveryResponse = (payload: any): DiscoveryResponse => {
       : []
 
   return {
-    devices: rawDevices
-      .map((device: any) => normalizeDiscoveredDevice(device))
-      .filter((device: DiscoveredDevice) => device.deviceType === 'payment_terminal'),
+    devices: rawDevices.map((device: any) => normalizeDiscoveredDevice(device)),
     warnings: rawWarnings.filter(
       (warning: unknown): warning is string => typeof warning === 'string' && warning.trim().length > 0
     ),
@@ -367,7 +360,7 @@ const ecrAPI = {
   ): Promise<ECRDevice> => {
     const result: any = await getBridge().ecr.addDevice(config)
     if (result?.success === false) {
-      throw new Error(result?.error || 'Failed to add device')
+      throw Object.assign(new Error(result?.error || 'Failed to add device'), { result })
     }
     return (result?.device ?? result) as ECRDevice
   },
@@ -376,7 +369,9 @@ const ecrAPI = {
     updates: Partial<ECRDevice>
   ): Promise<ECRDevice | null> => {
     const result: any = await getBridge().ecr.updateDevice(deviceId, updates)
-    if (result?.success === false) return null
+    if (result?.success === false) {
+      throw Object.assign(new Error(result?.error || 'Failed to update device'), { result })
+    }
     return (result?.device ?? result ?? null) as ECRDevice | null
   },
   removeDevice: async (deviceId: string): Promise<boolean> => {
@@ -736,14 +731,29 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
 
   const handleSaveDevice = useCallback(
     async (config: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'>) => {
+      // Founder rule 08/10/2026: an explicit type, and adding/enabling needs its plugin.
+      const deviceType = storedEcrDeviceType(config)
+      if (!deviceType) throw new Error(ecrTypeRequiredMessage(t))
+      const previous = editingDevice
+        ? { enabled: editingDevice.enabled, deviceType: editingDevice.deviceType || null }
+        : null
+      if (
+        ecrSaveNeedsAdmission({ enabled: config.enabled, deviceType }, previous) &&
+        !isEcrTypeAdmitted(await loadEcrDeviceAdmission(getBridge().ecr), deviceType)
+      ) {
+        throw new Error(ecrNotAdmittedMessage(t, deviceType))
+      }
       try {
         if (editingDevice) {
-          // Update existing device
-          const updated = await ecrAPI.updateDevice(editingDevice.id, config)
+          // An unchanged `enabled` / type is not re-sent (native refuses them for a non-admitted type).
+          const updated = await ecrAPI.updateDevice(
+            editingDevice.id,
+            ecrDeviceUpdatePatch(config, previous!)
+          )
           if (updated) {
             const normalized = normalizeTerminalDevice(updated)
             setDevices((prev) =>
-              normalized.deviceType === 'payment_terminal'
+              ecrDeviceSettingsSection(updated) === 'payment_terminal'
                 ? prev.map((d) => (d.id === editingDevice.id ? normalized : d))
                 : prev.filter((d) => d.id !== editingDevice.id)
             )
@@ -753,7 +763,7 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
           // Add new device
           const newDevice = await ecrAPI.addDevice(config)
           const normalized = normalizeTerminalDevice(newDevice)
-          if (normalized.deviceType === 'payment_terminal') {
+          if (ecrDeviceSettingsSection(newDevice) === 'payment_terminal') {
             setDevices((prev) => [...prev, normalized])
           }
           toast.success(t('ecr.addSuccess', 'Terminal added'))
@@ -762,7 +772,9 @@ export const PaymentTerminalsPage: React.FC<PageProps> = ({ embedded = false }) 
         setEditingDevice(undefined)
         setSelectedDiscoveredDevice(undefined)
       } catch (err) {
-        throw err // Let the modal handle the error
+        // Let the modal show the error; native admission refusals get the same localized text.
+        const refusal = ecrAdmissionErrorMessage(t, (err as { result?: unknown })?.result, deviceType)
+        throw refusal ? new Error(refusal) : err
       }
     },
     [editingDevice, t]

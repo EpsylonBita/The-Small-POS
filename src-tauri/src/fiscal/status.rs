@@ -152,10 +152,11 @@ pub fn apply_fiscal_status_result(
     match result {
         Ok(body) => match parse_fiscal_status_response(&body) {
             Some(status) => {
-                active_cache::update_with_plugin(
+                active_cache::update_with_status(
                     branch_id,
                     status.active,
                     status.plugin_id.clone(),
+                    Some(status.reason.clone()),
                 );
                 if status.active {
                     FiscalStatusRefresh::Active(status)

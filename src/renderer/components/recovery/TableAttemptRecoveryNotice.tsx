@@ -12,6 +12,8 @@ export function TableAttemptRecoveryNotice() {
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [unavailable, setUnavailable] = useState(false);
   const revision = useRef(0);
+  // The last valid reading of this binding: null until one succeeds.
+  const lastValid = useRef<Attempt[] | null>(null);
   const refresh = useCallback(async () => {
     const version = ++revision.current;
     try {
@@ -19,16 +21,23 @@ export function TableAttemptRecoveryNotice() {
       if (!response?.success || !Array.isArray(response.attempts) || response.attempts.some((entry: Attempt) =>
         !entry.clientEventId || !states.has(entry.state))) throw new Error('TABLE_RECOVERY_STATUS_UNAVAILABLE');
       if (revision.current !== version) return;
-      setAttempts(response.attempts.filter((entry: Attempt) => entry.state !== 'applied'));
+      const pending = response.attempts.filter((entry: Attempt) => entry.state !== 'applied');
+      lastValid.current = pending;
+      setAttempts(pending);
       setUnavailable(false);
     } catch {
-      if (revision.current === version) setUnavailable(true);
-      // A failed read retains the last known pending work.
+      // A failed read retains the last valid reading. Pending work stays
+      // listed with the read failure; a terminal whose last reading had
+      // nothing pending stays quiet instead of announcing recovery work it
+      // does not have (06/10/2026: the notice appeared at intervals on a store
+      // without tables whenever one status read failed). Only a binding that
+      // has never been read shows the status as unavailable.
+      if (revision.current === version) setUnavailable(lastValid.current === null || lastValid.current.length > 0);
     }
   }, []);
   useEffect(() => {
     const update = () => { void refresh(); };
-    const reset = () => { ++revision.current; setAttempts([]); update(); };
+    const reset = () => { ++revision.current; lastValid.current = null; setAttempts([]); update(); };
     update();
     const timer = window.setInterval(update, 15000);
     onEvent('table_attempt_recovery', update);

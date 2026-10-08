@@ -2433,8 +2433,8 @@ export const IntegrationsPage: React.FC = () => {
         getCachedTerminalCredentials().terminalId ||
         String(getSetting('terminal', 'terminal_id') || '').trim();
       if (!isSaveCurrent()) return;
-      const result = await verifyAndSaveMyDataDevice(
-        bridge.ecr, nativeDevice, Boolean(existing), terminalId, deviceConnection,
+      const { saved: result, activated } = await verifyAndSaveMyDataDevice(
+        bridge.ecr, nativeDevice, existing ?? false, terminalId, deviceConnection,
         payload => {
           if (!isSaveCurrent()) throw new Error('Fiscal setup identity changed');
           return posApiPost<{ config?: Record<string, any> }>('/pos/mydata/config', payload);
@@ -2454,7 +2454,19 @@ export const IntegrationsPage: React.FC = () => {
           : i
         )
       );
-      toast.success(t('integrations.mydata.configSaved', 'MyData configuration saved'));
+      if (activated) {
+        toast.success(t('integrations.mydata.configSaved', 'MyData configuration saved'));
+      } else {
+        // Founder rule 08/10/2026: the verified cash register stays disabled
+        // until the server confirms MyData is in fiscal-device mode and finished.
+        toast(
+          t('integrations.mydata.deviceAwaitingSetup', {
+            defaultValue:
+              "The fiscal device was verified, but it stays inactive until the store's MyData setup is confirmed as finished. Then enable it under Cash Register / Fiscal Printer.",
+          }),
+          { icon: <AlertCircle className="w-4 h-4 text-amber-500" />, duration: 8000 },
+        );
+      }
       setMyDataModalOpen(false);
       // Re-derive the card-level reporting flag from the server after the save:
       // saving device wiring does not by itself enable fiscal transmission.

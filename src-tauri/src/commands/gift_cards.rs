@@ -917,6 +917,12 @@ fn is_cap_protocol(protocol: &str) -> bool {
 /// card is debited. Only the CAP Driver with a configured, non-cash, non-card
 /// voucher payment number qualifies; other adapters have no verified mapping.
 fn gift_fiscal_route(conn: &Connection) -> Result<GiftFiscalRoute, Refusal> {
+    // A cash register whose MyData plugin is not active, configured and
+    // finished is inert (founder rule 08/10/2026): it neither carries nor
+    // blocks a gift tender.
+    if !crate::device_admission::is_admitted(conn, crate::device_admission::CASH_REGISTER) {
+        return Ok(GiftFiscalRoute::NoRegister);
+    }
     let unavailable = |error: rusqlite::Error| {
         Refusal::new(
             "GIFT_CARD_FISCAL_STATE_UNAVAILABLE",

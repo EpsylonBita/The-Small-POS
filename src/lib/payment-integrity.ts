@@ -703,6 +703,27 @@ export function formatSetAsidePaymentMessage(
   return null;
 }
 
+/** The native Z refusal of a till that cannot reach the server (commands/analytics.rs). */
+export const Z_REPORT_OFFLINE_ERROR_CODE = "Z_REPORT_OFFLINE";
+
+/**
+ * The cashier's sentence for a Z refused because the till is offline
+ * (`Z_REPORT_OFFLINE`, offline audit 07/10/2026), in the operator's language;
+ * `null` for any other answer. It says what still works and what to do.
+ */
+export function formatZReportOfflineMessage(value: unknown, t: TFunction): string | null {
+  for (const candidate of collectCandidateRecords(value)) {
+    if (firstString(candidate, ["errorCode", "error_code"]) !== Z_REPORT_OFFLINE_ERROR_CODE) {
+      continue;
+    }
+    return t("zReportOffline.refusal", {
+      defaultValue:
+        "The day can't be closed without a connection. Keep selling: the day stays open and you close it once the connection is back. To count the drawer now, use the cashier checkout, which prints without internet, and the preview on this screen.",
+    });
+  }
+  return null;
+}
+
 /**
  * The cashier's sentence for a card charged but not saved
  * (`PAYMENT_NOT_SAVED`), or for a tender refused because one is not saved
@@ -748,6 +769,13 @@ export function formatOperatorFacingError(
   fallback: string,
   t: TFunction,
 ): string {
+  // A Z refused because the till is offline (07/10/2026): what still works
+  // and what to do, never the native "pre-Z-report sync failed" text.
+  const zReportOfflineMessage = formatZReportOfflineMessage(value, t);
+  if (zReportOfflineMessage?.trim()) {
+    return zReportOfflineMessage.trim();
+  }
+
   // A card charged but not saved (30/09/2026): never the generic failure.
   const notSavedMessage = formatPaymentNotSavedMessage(value, t);
   if (notSavedMessage?.trim()) {

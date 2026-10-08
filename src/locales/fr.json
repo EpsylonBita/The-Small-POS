@@ -4247,6 +4247,7 @@
       "editTooManyLines": "Une correction peut comporter au plus {{maxLines}} lignes. Supprimez des lignes, ou annulez la commande et créez-en une nouvelle. Aucun argent n’a été encaissé.",
       "editMethodUnavailable": "Ce terminal ne peut enregistrer ni espèces ni carte pour la différence. Demandez à un responsable d’activer un moyen de paiement pour ce terminal. Aucun argent n’a été encaissé.",
       "editPreviousNotSaved": "Une correction antérieure de cette commande a été confirmée mais pas enregistrée. Rouvrez-la depuis le panier enregistré pour la préparer à nouveau, ou demandez à un responsable de la clôturer. N’encaissez ni ne remboursez d’argent à nouveau.",
+      "editProviderRefundRequired": "Cette commande a un paiement par carte passé par un terminal de paiement ou un prestataire de paiement, elle ne peut donc pas être corrigée sur cette caisse. Rien n’a été modifié.",
       "emptyEditHint": "Pour retirer tous les articles, fermez l’éditeur et annulez la commande.",
       "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement."
     },
@@ -5301,7 +5302,7 @@
       "attemptCleared": "L'annulation enregistrée a été effacée. Aucun argent n'a été remboursé. Vous pouvez annuler la commande à nouveau.",
       "staffCashUnavailable": "L’annulation avec remise d’espèces est temporairement indisponible. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
       "connectionUnavailable": "L’état de connexion des paiements est indisponible. Actualisez les intégrations et réessayez.",
-      "permissionRequired": "Ce compte ne peut pas annuler les commandes payées.",
+      "permissionRequired": "Personne ici ne peut annuler les commandes payées : ni le caissier en service, ni une personne ayant ce droit et un code PIN sur cette caisse. Donnez le droit d'annuler à un rôle dans le tableau de bord d'administration, puis réessayez en ligne.",
       "paymentSyncRequired": "Le paiement d’origine doit être synchronisé avant d’enregistrer son remboursement. Synchronisez et réessayez, sans débiter à nouveau.",
       "paymentChanged": "Le paiement a changé. Fermez cette fenêtre et choisissez à nouveau Annuler pour vérifier le montant actuel.",
       "drawerUnavailable": "Une caisse ouverte est nécessaire pour enregistrer un remboursement en espèces.",
@@ -5335,7 +5336,9 @@
         "bad_weather": "Mauvais temps",
         "duplicate_order": "Commande en double",
         "test_order": "Commande de test"
-      }
+      },
+      "managerApprovalTitle": "Approuver l'annulation",
+      "managerApprovalSubtitle": "L'annulation d'une commande payée nécessite le droit d'annuler. Un responsable qui l'a saisit son propre code PIN. Rien n'est débité."
     },
     "addCustomer": {
       "title": "Ajouter un nouveau client",
@@ -8327,6 +8330,20 @@
       "enabled": "Terminal activé",
       "saveFailed": "Échec de l'enregistrement du terminal"
     },
+    "admission": {
+      "cardTerminalNeedsPlugin": "Plugin requis : les terminaux de carte restent inactifs tant qu’un plugin de paiement n’est pas actif et configuré pour ce magasin.",
+      "cashRegisterNeedsPlugin": "Plugin requis : les caisses fiscales restent inactives tant que le plugin MyData du magasin n’est pas en mode appareil fiscal avec sa configuration terminée.",
+      "cardTerminalRefused": "Ce terminal de carte ne peut pas être activé : il nécessite un plugin de paiement actif et configuré pour ce magasin. Vous pouvez l’enregistrer désactivé.",
+      "cashRegisterRefused": "Cette caisse ne peut pas être activée : elle nécessite le plugin MyData du magasin en mode appareil fiscal, avec sa configuration terminée. Vous pouvez l’enregistrer désactivée.",
+      "deviceRefused": "Cet appareil ne peut pas être activé tant que son plugin n’est pas actif, configuré et finalisé pour ce magasin.",
+      "typeRequired": "Choisissez le type d’appareil : terminal de paiement ou caisse fiscale.",
+      "fiscalNotCardTerminal": "Une caisse fiscale (comme RBS ou ELIO) n’est pas un terminal de carte. Configurez-la dans « Caisse enregistreuse / Imprimante fiscale ».",
+      "savedAsCardTerminal": "Cet appareil ressemble à une caisse fiscale (RBS / ELIO) mais il est enregistré comme terminal de carte. Désactivez-le ou supprimez-le ici, puis configurez-le dans « Caisse enregistreuse / Imprimante fiscale ».",
+      "disable": "Désactiver",
+      "disabledBadge": "Désactivé",
+      "disableSuccess": "Appareil désactivé",
+      "disableFailed": "Impossible de désactiver l’appareil"
+    },
     "status": {
       "connected": "Connecté",
       "disconnected": "Déconnecté",
@@ -8789,6 +8806,7 @@
       "capTargetMismatch": "La cible du service CAP est indisponible ou ne correspond pas à ce formulaire. Ouvrez la configuration de connexion, définissez cette IP ou ce port COM dans le service du fabricant, puis actualisez l'état de prise en charge.",
       "capServiceTarget": "Cible du service du fabricant",
       "configSaved": "Configuration MyData enregistrée",
+      "deviceAwaitingSetup": "L’appareil fiscal a été vérifié, mais il reste inactif tant que la configuration MyData du magasin n’est pas confirmée comme terminée. Activez-le ensuite dans « Caisse enregistreuse / Imprimante fiscale ».",
       "dashboardBanner": {
         "title": "La configuration de myDATA se fait dans le tableau de bord d'administration",
         "body": "Une fois myDATA configuré, les reçus sont envoyés automatiquement à l'administration fiscale (AADE). La configuration elle-même (identifiants, informations de TVA, activation) se fait dans votre tableau de bord d'administration : ouvrez Plugins → MyData et suivez les étapes. Cet écran n'est nécessaire que si vous connectez une imprimante fiscale (ΦΗΜ) à cette caisse.",
@@ -10068,5 +10086,10 @@
     "waiterBody": "La caisse principale est fermée. Un caissier ou responsable doit commencer son service sur la caisse principale associée à cet appareil. Vous pourrez ensuite commencer votre propre service et continuer.",
     "checking": "Vérification du service de caisse…",
     "recheck": "Vérifier à nouveau"
+  },
+  "zReportOffline": {
+    "refusal": "La journée ne peut pas être clôturée sans connexion. Continuez à vendre : la journée reste ouverte et vous la clôturez dès que la connexion revient. Pour compter la caisse maintenant, faites la clôture du caissier, qui s'imprime aussi sans internet, et consultez l'aperçu sur cet écran.",
+    "status": "Pas de connexion : la journée se clôture dès son retour",
+    "checklist": "Pas de connexion au serveur. Continuez à vendre et clôturez la journée dès que la connexion revient."
   }
 }

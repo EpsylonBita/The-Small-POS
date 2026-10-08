@@ -1,10 +1,22 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { getBridge, offEvent, onEvent } from '../../../lib'
 import { requireSettingsSuccess } from '../../utils/settings-operation'
 import { renderModalPortal } from '../../utils/render-modal-portal'
 import { myDataVoucherCodeIssue } from '../../utils/mydata-device-setup'
+import {
+  type EcrDeviceAdmission,
+  ecrAdmissionErrorMessage,
+  ecrDeviceSettingsSection,
+  ecrDeviceUpdatePatch,
+  ecrNeedsPluginMessage,
+  ecrNotAdmittedMessage,
+  ecrSaveNeedsAdmission,
+  isEcrDeviceAdmitted,
+  isEcrTypeAdmitted,
+  loadEcrDeviceAdmission,
+} from '../../utils/ecr-device-type'
 import {
   CreditCard,
   Printer,
@@ -85,9 +97,11 @@ interface ECRCashDevice {
   enabled: boolean
   status?: DeviceStatus
   error_message?: string
+  /** Native's own `admitted` flag from ecr_get_devices (founder rule 08/10/2026). */
+  native_admitted?: boolean
 }
 
-type FormData = Omit<ECRCashDevice, 'id' | 'status' | 'error_message'>
+type FormData = Omit<ECRCashDevice, 'id' | 'status' | 'error_message' | 'native_admitted'>
 
 export interface CashRegisterSetupIntent {
   mode: CashRegisterSetupMode
@@ -240,22 +254,10 @@ const asCapDriverSettings = (value: unknown): CapDriverSettings => {
   }
 }
 
-const asDeviceType = (payload: any): DeviceType => {
-  const normalized = String(payload?.device_type ?? payload?.deviceType ?? '').toLowerCase()
-  if (normalized === 'cash_register' || normalized === 'payment_terminal') {
-    return normalized
-  }
-  if (
-    payload?.print_mode ||
-    payload?.printMode ||
-    Array.isArray(payload?.tax_rates) ||
-    Array.isArray(payload?.taxRates) ||
-    typeof payload?.brand === 'string'
-  ) {
-    return 'cash_register'
-  }
-  return 'payment_terminal'
-}
+// Which section lists the device: its stored type (what native uses), else the
+// shared resolution (RBS / ELIO identity, fiscal fields). Never a silent guess
+// for saving: this section only ever saves `cash_register`.
+const asDeviceType = (payload: any): DeviceType => ecrDeviceSettingsSection(payload)
 
 const asConnectionType = (value: unknown): ConnectionType => {
   const normalized = String(value || '').toLowerCase()
@@ -356,6 +358,7 @@ const normalizeCashRegisterDevice = (payload: any): ECRCashDevice => {
     settings: asCapDriverSettings(payload?.settings),
     is_default: payload?.is_default === true || payload?.isDefault === true,
     enabled: payload?.enabled !== false,
+    native_admitted: payload?.admitted === true,
     status: asDeviceStatus(payload?.status),
     error_message:
       typeof payload?.error_message === 'string'
@@ -491,11 +494,37 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [fiscalPrintEnabled, setFiscalPrintEnabled] = useState(true)
 
+  // Founder rule 08/10/2026: a cash register is admitted only while MyData is in
+  // fiscal-device mode with its setup finished (undefined = loading, null = unreadable).
+  const [admission, setAdmission] = useState<EcrDeviceAdmission | null | undefined>(undefined)
+  const admissionRequest = useRef<Promise<EcrDeviceAdmission | null> | null>(null)
+  const refreshAdmission = useCallback(() => {
+    const request: Promise<EcrDeviceAdmission | null> = loadEcrDeviceAdmission(getBridge().ecr).then(
+      (result) => {
+        if (admissionRequest.current === request) setAdmission(result)
+        return result
+      }
+    )
+    admissionRequest.current = request
+    return request
+  }, [])
+  const cashRegisterAdmitted = admission !== undefined && isEcrTypeAdmitted(admission, 'cash_register')
+  const editingDevice = viewMode === 'edit' && editingDeviceId
+    ? devices.find((device) => device.id === editingDeviceId) ?? null
+    : null
+  // Mirrors native: adding enabled, enabling, or retyping an enabled device needs admission.
+  const formNeedsAdmission = ecrSaveNeedsAdmission(
+    { enabled: form.enabled, deviceType: form.device_type },
+    editingDevice ? { enabled: editingDevice.enabled, deviceType: editingDevice.device_type } : null
+  )
+
   // Load devices
   const loadDevices = useCallback(async (invalidatedDeviceId?: string) => {
     try {
       setLoading(true)
       setLoadError('')
+      // Plugin admission is re-read with every load (native keeps the last known answer offline).
+      void refreshAdmission()
       const [devicesResult, statusesResult] = await Promise.allSettled([
         invokeIPC('ecr_get_devices'),
         getBridge().ecr.getAllStatuses(),
@@ -525,7 +554,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [refreshAdmission])
 
   useEffect(() => {
     const updateConnection = (connected: boolean) => (event: { deviceId?: string }) => {
@@ -770,9 +799,27 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
     setIsSaving(true)
     try {
+      // Refuse before native: adding or enabling a cash register needs its plugin.
+      if (
+        formNeedsAdmission &&
+        !isEcrTypeAdmitted(await (admissionRequest.current ?? refreshAdmission()), form.device_type)
+      ) {
+        throw new Error(ecrNotAdmittedMessage(t, form.device_type))
+      }
       const nativePayload = buildCashRegisterDevicePayload(form)
+      // Native admission refusals get the same localized text as the check above.
+      const requireSaved = (result: unknown) => {
+        const refusal = ecrAdmissionErrorMessage(t, result, form.device_type)
+        if (refusal) throw new Error(refusal)
+        return requireSettingsSuccess(result)
+      }
       if (viewMode === 'edit' && editingDeviceId) {
-        requireSettingsSuccess(await invokeIPC('ecr_update_device', { device_id: editingDeviceId, ...nativePayload }))
+        // An unchanged `enabled` / type is not re-sent: native refuses them for an
+        // enabled device whose type is not admitted, and other edits must stay possible.
+        const updates = editingDevice
+          ? ecrDeviceUpdatePatch(nativePayload, { enabled: editingDevice.enabled, deviceType: editingDevice.device_type })
+          : nativePayload
+        requireSaved(await invokeIPC('ecr_update_device', { device_id: editingDeviceId, ...updates }))
         // Saved connection details do not replace an existing live transport.
         setRegisteredConnections(previous => {
           const next = new Set(previous)
@@ -786,7 +833,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
         })
         toast.success(t('settings.peripherals.cashRegister.updated', 'Device updated'))
       } else {
-        requireSettingsSuccess(await invokeIPC('ecr_add_device', nativePayload))
+        requireSaved(await invokeIPC('ecr_add_device', nativePayload))
         toast.success(t('settings.peripherals.cashRegister.added', 'Device added'))
       }
       await loadDevices(viewMode === 'edit' ? editingDeviceId ?? undefined : undefined)
@@ -797,6 +844,25 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
       toast.error(e?.message || t('settings.peripherals.cashRegister.saveFailed', 'Failed to save device'))
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  // A device that needs its plugin can always be switched off (never refused).
+  const handleDisable = async (deviceId: string) => {
+    try {
+      requireSettingsSuccess(await invokeIPC('ecr_update_device', { device_id: deviceId, enabled: false }))
+      setDevices((prev) => prev.map((d) => (d.id === deviceId ? { ...d, enabled: false } : d)))
+      if (registeredConnections.has(deviceId)) {
+        void Promise.resolve(bridge.ecr.disconnectDevice(deviceId)).catch(() => undefined)
+        setRegisteredConnections((previous) => {
+          const next = new Set(previous)
+          next.delete(deviceId)
+          return next
+        })
+      }
+      toast.success(t('ecr.admission.disableSuccess', { defaultValue: 'Device disabled' }))
+    } catch (e: any) {
+      toast.error(e?.message || t('ecr.admission.disableFailed', { defaultValue: 'Could not disable the device' }))
     }
   }
 
@@ -1010,6 +1076,27 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                       </div>
                       <StatusIndicator status={registeredConnections.has(device.id) ? 'connected' : device.status === 'connected' ? 'unknown' : device.status} error={device.error_message} />
                     </div>
+
+                    {!isEcrDeviceAdmitted(
+                      { deviceType: device.device_type, admitted: device.native_admitted },
+                      admission ?? null
+                    ) && (
+                      <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+                        <p className="flex items-start gap-1.5 text-xs text-amber-800 dark:text-amber-200">
+                          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                          <span>{ecrNeedsPluginMessage(t, device.device_type)}</span>
+                        </p>
+                        {device.enabled && (
+                          <button
+                            type="button"
+                            onClick={() => void handleDisable(device.id)}
+                            className="inline-flex min-h-[36px] items-center rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 text-xs font-medium text-amber-800 dark:text-amber-200 active:bg-amber-500/25"
+                          >
+                            {t('ecr.admission.disable', { defaultValue: 'Disable' })}
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     {/* Action buttons */}
                     <p className="text-xs liquid-glass-modal-text-muted">
@@ -1671,6 +1758,11 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
           />
         </div>
       </div>
+      {admission !== undefined && !cashRegisterAdmitted && formNeedsAdmission && (
+        <p role="status" className="text-xs font-medium text-amber-700 dark:text-amber-300">
+          {ecrNotAdmittedMessage(t, 'cash_register')}
+        </p>
+      )}
 
         </div>
 

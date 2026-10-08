@@ -633,6 +633,7 @@ pub(crate) fn check_fresh_gift_debit(
         &[json!({ "method": "gift_card", "amount": total, "status": "completed" })],
         &ready.tax_rates,
         ready.operator_id.as_deref(),
+        &crate::ecr::fiscal::FiscalLineContext::load(conn),
     )
     .map_err(|error| {
         (
@@ -767,6 +768,7 @@ fn current_receipt(
         &snapshot.completed_payments,
         tax_rates,
         operator_id,
+        &crate::ecr::fiscal::FiscalLineContext::load(conn),
     )
     .map_err(|error| ("unsupported", "GIFT_CARD_FISCAL_TENDER_UNSUPPORTED", error))?;
     let fingerprint =
@@ -1728,6 +1730,9 @@ mod tests {
             ],
         )
         .unwrap();
+        // The register acts only with its MyData plugin finished (founder
+        // rule 08/10/2026).
+        crate::device_admission::admit_for_test(conn, &[crate::device_admission::CASH_REGISTER]);
     }
 
     fn seed_order(conn: &Connection, total_cents: i64) {

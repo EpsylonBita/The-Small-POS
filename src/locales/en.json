@@ -4247,6 +4247,7 @@
       "editTooManyLines": "A correction can have at most {{maxLines}} lines. Remove lines, or cancel the order and create a new one. No money was taken.",
       "editMethodUnavailable": "This terminal may not record cash or card for the difference. Ask a manager to enable a payment method for this terminal. No money was taken.",
       "editPreviousNotSaved": "An earlier correction of this order was confirmed but not saved. Reopen it from the saved cart to prepare it again, or ask a manager to close it. Do not collect or return money again.",
+      "editProviderRefundRequired": "This order has a card payment that went through a card terminal or a payment provider, so it cannot be corrected on this till. Nothing was changed.",
       "emptyEditHint": "To remove every item, close the editor and cancel the order.",
       "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund."
     },
@@ -5301,7 +5302,7 @@
       "attemptCleared": "The saved cancellation was cleared. No money was returned. You can cancel the order again.",
       "staffCashUnavailable": "Cash handover cancellation is temporarily unavailable. Check your connection and retry after the server update.",
       "connectionUnavailable": "Payment connection status is unavailable. Refresh Integrations and try again.",
-      "permissionRequired": "This account does not have permission to cancel paid orders.",
+      "permissionRequired": "Nobody here may cancel paid orders: not the cashier on shift, and nobody with that right has a PIN on this till. Give the right to cancel orders to a role in the admin dashboard, then try again while online.",
       "paymentSyncRequired": "The original payment must finish syncing before recording its return. Sync and try again; do not charge again.",
       "paymentChanged": "The payment changed. Close this window and select Cancel again to review the current amount.",
       "drawerUnavailable": "An open cashier drawer is required to record a cash return.",
@@ -5335,7 +5336,9 @@
         "bad_weather": "Bad weather",
         "duplicate_order": "Duplicate order",
         "test_order": "Test order"
-      }
+      },
+      "managerApprovalTitle": "Approve the cancellation",
+      "managerApprovalSubtitle": "Cancelling a paid order needs the right to cancel. A manager who has it enters their own PIN. Nothing is charged."
     },
     "addCustomer": {
       "title": "Add New Customer",
@@ -8327,6 +8330,20 @@
       "enabled": "Terminal enabled",
       "saveFailed": "Failed to save terminal"
     },
+    "admission": {
+      "cardTerminalNeedsPlugin": "Needs its plugin: card terminals stay inactive until a payment plugin is active and configured for this store.",
+      "cashRegisterNeedsPlugin": "Needs its plugin: fiscal cash registers stay inactive until the store's MyData plugin is in fiscal device mode and its setup is finished.",
+      "cardTerminalRefused": "This card terminal cannot be enabled: it needs an active, configured payment plugin for this store. You can save it disabled.",
+      "cashRegisterRefused": "This cash register cannot be enabled: it needs the store's MyData plugin in fiscal device mode with its setup finished. You can save it disabled.",
+      "deviceRefused": "This device cannot be enabled until its plugin is active, configured and finished for this store.",
+      "typeRequired": "Choose the device type: payment terminal or fiscal cash register.",
+      "fiscalNotCardTerminal": "A fiscal cash register (such as RBS or ELIO) is not a card terminal. Set it up under Cash Register / Fiscal Printer.",
+      "savedAsCardTerminal": "This looks like a fiscal cash register (RBS / ELIO) but is saved as a card terminal. Disable or remove it here, then set it up under Cash Register / Fiscal Printer.",
+      "disable": "Disable",
+      "disabledBadge": "Disabled",
+      "disableSuccess": "Device disabled",
+      "disableFailed": "Could not disable the device"
+    },
     "status": {
       "connected": "Connected",
       "disconnected": "Disconnected",
@@ -8789,6 +8806,7 @@
       "capTargetMismatch": "The CAP service target is unavailable or differs from this form. Open connection setup, configure this IP or COM port in the vendor service, then refresh support status.",
       "capServiceTarget": "Vendor service target",
       "configSaved": "MyData configuration saved",
+      "deviceAwaitingSetup": "The fiscal device was verified, but it stays inactive until the store's MyData setup is confirmed as finished. Then enable it under Cash Register / Fiscal Printer.",
       "dashboardBanner": {
         "title": "myDATA setup happens in the Admin Dashboard",
         "body": "Receipts are sent to the tax office (AADE) automatically once myDATA is set up. The setup itself (credentials, VAT info, activation) is done in your Admin Dashboard: open Plugins → MyData and follow the steps. This screen is only needed if you connect a fiscal printer (ΦΗΜ) to this till.",
@@ -10068,5 +10086,10 @@
     "waiterBody": "Open the main register shift first, then start your own shift.",
     "checking": "Checking the cashier shift…",
     "recheck": "Check again"
+  },
+  "zReportOffline": {
+    "refusal": "The day can't be closed without a connection. Keep selling: the day stays open and you close it once the connection is back. To count the drawer now, use the cashier checkout, which prints without internet, and the preview on this screen.",
+    "status": "No connection: the day closes once it is back",
+    "checklist": "No connection to the server. Keep selling; close the day once the connection is back."
   }
 }

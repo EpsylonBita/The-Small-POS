@@ -5,7 +5,7 @@
  * design language of the settings modal. Replaces the embedded page approach.
  */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { getBridge, offEvent, onEvent } from '../../../lib'
@@ -27,20 +27,41 @@ import { liquidGlassModalButton } from '../../styles/designSystem'
 import { TerminalCardCompact } from './TerminalCardCompact'
 import { TerminalDiscoveryModal } from './TerminalDiscoveryModal'
 import { TerminalConfigModal } from './TerminalConfigModal'
+import {
+  type EcrDeviceAdmission,
+  type EcrDeviceType,
+  ecrAdmissionErrorMessage,
+  ecrDeviceSettingsSection,
+  ecrDeviceUpdatePatch,
+  ecrNeedsPluginMessage,
+  ecrNotAdmittedMessage,
+  ecrSaveNeedsAdmission,
+  ecrTypeRequiredMessage,
+  isEcrDeviceAdmitted,
+  isEcrTypeAdmitted,
+  loadEcrDeviceAdmission,
+  resolveEcrDeviceType,
+  storedEcrDeviceType,
+} from '../../utils/ecr-device-type'
 
 // ============================================================
 // TYPES
 // ============================================================
 
 type ConnectionType = 'bluetooth' | 'serial_usb' | 'network'
-type DeviceType = 'payment_terminal' | 'cash_register'
 type Protocol = 'generic' | 'zvt' | 'pax'
 type DeviceState = 'disconnected' | 'connecting' | 'connected' | 'busy' | 'error'
 
 interface ECRDevice {
   id: string
   name: string
+  /** The stored type ('' when native has none); native admits and uses the device by it. */
   deviceType: string
+  /** The util's resolution (RBS / ELIO identity wins); null = only the user can tell. */
+  resolvedType?: EcrDeviceType | null
+  /** Native's own `admitted` flag from ecr_get_devices. */
+  nativeAdmitted?: boolean
+  brand?: string
   connectionType: ConnectionType
   connectionDetails: Record<string, unknown>
   protocol: Protocol
@@ -108,23 +129,6 @@ const asConnectionType = (value: unknown): ConnectionType => {
   return 'serial_usb'
 }
 
-const asDeviceType = (payload: any): DeviceType => {
-  const normalized = String(payload?.deviceType ?? payload?.device_type ?? '').toLowerCase()
-  if (normalized === 'cash_register' || normalized === 'payment_terminal') {
-    return normalized
-  }
-  if (
-    payload?.print_mode ||
-    payload?.printMode ||
-    Array.isArray(payload?.tax_rates) ||
-    Array.isArray(payload?.taxRates) ||
-    typeof payload?.brand === 'string'
-  ) {
-    return 'cash_register'
-  }
-  return 'payment_terminal'
-}
-
 const asProtocol = (value: unknown): Protocol => {
   const normalized = String(value || '').toLowerCase()
   if (normalized === 'generic' || normalized === 'zvt' || normalized === 'pax') {
@@ -176,7 +180,10 @@ const normalizeTerminalDevice = (payload: any): ECRDevice => {
   return {
     id: typeof payload?.id === 'string' ? payload.id : '',
     name: typeof payload?.name === 'string' ? payload.name : '',
-    deviceType: asDeviceType(payload),
+    deviceType: storedEcrDeviceType(payload) ?? '',
+    resolvedType: resolveEcrDeviceType(payload),
+    nativeAdmitted: payload?.admitted === true,
+    brand: typeof payload?.brand === 'string' ? payload.brand : undefined,
     connectionType,
     connectionDetails: buildConnectionDetails(payload, connectionType),
     protocol: asProtocol(payload?.protocol),
@@ -219,14 +226,17 @@ const toDeviceList = (payload: any): ECRDevice[] => {
         ? payload.data.devices
         : []
 
+  // Listed by stored type (what native uses), so a fiscal register saved as a
+  // card terminal stays visible here with its state and can be disabled/removed.
   return rawDevices
+    .filter((device: any) => ecrDeviceSettingsSection(device) === 'payment_terminal')
     .map((device: any) => normalizeTerminalDevice(device))
-    .filter((device: ECRDevice) => device.deviceType === 'payment_terminal')
 }
 
 const normalizeDiscoveredDevice = (payload: any): DiscoveredDevice => ({
   name: typeof payload?.name === 'string' ? payload.name : '',
-  deviceType: asDeviceType(payload),
+  // '' = unknown: the config form then requires an explicit type choice.
+  deviceType: resolveEcrDeviceType(payload) ?? '',
   connectionType: asConnectionType(payload?.connectionType ?? payload?.connection_type),
   connectionDetails:
     payload?.connectionDetails && typeof payload.connectionDetails === 'object'
@@ -263,10 +273,9 @@ const toDiscoveryResponse = (payload: any): DiscoveryResponse => {
       ? payload.data.warnings
       : []
 
+  // Fiscal registers stay listed; the discovery modal points them to Cash Register setup.
   return {
-    devices: rawDevices
-      .map((device: any) => normalizeDiscoveredDevice(device))
-      .filter((device: DiscoveredDevice) => device.deviceType === 'payment_terminal'),
+    devices: rawDevices.map((device: any) => normalizeDiscoveredDevice(device)),
     warnings: rawWarnings.filter(
       (warning: unknown): warning is string => typeof warning === 'string' && warning.trim().length > 0
     ),
@@ -329,7 +338,7 @@ const ecrAPI = {
   ): Promise<ECRDevice> => {
     const result: any = await getBridge().ecr.addDevice(config)
     if (result?.success === false) {
-      throw new Error(result?.error || 'Failed to add device')
+      throw Object.assign(new Error(result?.error || 'Failed to add device'), { result })
     }
     return (result?.device ?? result) as ECRDevice
   },
@@ -339,7 +348,7 @@ const ecrAPI = {
   ): Promise<ECRDevice> => {
     const result: any = await getBridge().ecr.updateDevice(deviceId, updates)
     if (!result || result.success === false) {
-      throw new Error(result?.error || 'Failed to update device')
+      throw Object.assign(new Error(result?.error || 'Failed to update device'), { result })
     }
     return (result.device ?? result) as ECRDevice
   },
@@ -447,6 +456,25 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
     DiscoveredDevice | undefined
   >()
 
+  // Founder rule 08/10/2026: plugin admission of card terminals (undefined = loading,
+  // null = unreadable, which admits nothing). Refreshed whenever the section loads.
+  const [admission, setAdmission] = useState<EcrDeviceAdmission | null | undefined>(undefined)
+  const admissionRequest = useRef<Promise<EcrDeviceAdmission | null> | null>(null)
+  const refreshAdmission = useCallback(() => {
+    const request: Promise<EcrDeviceAdmission | null> = loadEcrDeviceAdmission(getBridge().ecr).then(
+      (result) => {
+        if (admissionRequest.current === request) setAdmission(result)
+        return result
+      }
+    )
+    admissionRequest.current = request
+    return request
+  }, [])
+  const currentAdmission = useCallback(
+    () => admissionRequest.current ?? refreshAdmission(),
+    [refreshAdmission]
+  )
+
   // Monitor online status
   useEffect(() => {
     const handleOnline = () => setIsOnline(true)
@@ -465,6 +493,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
   const fetchData = useCallback(async () => {
     try {
       setLoading(true)
+      void refreshAdmission()
       const [deviceList, deviceStatuses] = await Promise.all([
         ecrAPI.getDevices(),
         ecrAPI.getAllStatuses(),
@@ -479,7 +508,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
     } finally {
       setLoading(false)
     }
-  }, [t])
+  }, [refreshAdmission, t])
 
   // Initial fetch
   useEffect(() => {
@@ -547,6 +576,31 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
   }, [t])
 
   // Handlers
+  const deviceNotices = useCallback(
+    (device: ECRDevice): { notices: string[]; needsAttention: boolean } => {
+      const notices: string[] = []
+      const storedType = storedEcrDeviceType(device)
+      if (!storedType) {
+        notices.push(ecrTypeRequiredMessage(t))
+      } else if (
+        !isEcrDeviceAdmitted({ deviceType: storedType, admitted: device.nativeAdmitted }, admission ?? null)
+      ) {
+        notices.push(ecrNeedsPluginMessage(t, storedType))
+      }
+      const mismatch = Boolean(storedType && device.resolvedType && device.resolvedType !== storedType)
+      if (mismatch) {
+        notices.push(
+          t('ecr.admission.savedAsCardTerminal', {
+            defaultValue:
+              'This looks like a fiscal cash register (RBS / ELIO) but is saved as a card terminal. Disable or remove it here, then set it up under Cash Register / Fiscal Printer.',
+          })
+        )
+      }
+      return { notices, needsAttention: notices.length > 0 }
+    },
+    [admission, t]
+  )
+
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true)
     try {
@@ -670,6 +724,32 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
     [devices, t]
   )
 
+  // A device that needs its plugin can always be switched off (never refused).
+  const handleDisable = useCallback(
+    async (device: ECRDevice) => {
+      try {
+        const updated = await ecrAPI.updateDevice(device.id, { enabled: false })
+        const normalized = updated && typeof updated === 'object' ? normalizeTerminalDevice(updated) : null
+        setDevices((prev) =>
+          prev.map((d) =>
+            d.id === device.id ? (normalized?.id === device.id ? normalized : { ...d, enabled: false }) : d
+          )
+        )
+        if (statuses[device.id]?.state === 'connected') {
+          void ecrAPI.disconnectDevice(device.id).catch(() => undefined)
+        }
+        toast.success(t('ecr.admission.disableSuccess', { defaultValue: 'Device disabled' }))
+      } catch (err) {
+        toast.error(
+          err instanceof Error && err.message
+            ? err.message
+            : t('ecr.admission.disableFailed', { defaultValue: 'Could not disable the device' })
+        )
+      }
+    },
+    [statuses, t]
+  )
+
   const handleDiscoveredDeviceSelect = useCallback((device: DiscoveredDevice) => {
     setShowDiscoveryModal(false)
     setEditingDevice(undefined)
@@ -684,14 +764,31 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
 
   const handleSaveDevice = useCallback(
     async (config: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'>) => {
+      // Never saved without an explicit type; the form refuses first.
+      const deviceType = storedEcrDeviceType(config)
+      if (!deviceType) throw new Error(ecrTypeRequiredMessage(t))
+      // Refuse before native: adding or enabling a card terminal needs its plugin.
+      const previous = editingDevice
+        ? { enabled: editingDevice.enabled, deviceType: editingDevice.deviceType || null }
+        : null
+      if (
+        ecrSaveNeedsAdmission({ enabled: config.enabled, deviceType }, previous) &&
+        !isEcrTypeAdmitted(await currentAdmission(), deviceType)
+      ) {
+        throw new Error(ecrNotAdmittedMessage(t, deviceType))
+      }
       try {
         if (editingDevice) {
-          // Update existing device
-          const updated = await ecrAPI.updateDevice(editingDevice.id, config)
+          // An unchanged `enabled` / type is not re-sent: native refuses them for an
+          // enabled device whose type is not admitted, and a rename must stay possible.
+          const updated = await ecrAPI.updateDevice(
+            editingDevice.id,
+            ecrDeviceUpdatePatch(config, previous!)
+          )
           if (updated) {
             const normalized = normalizeTerminalDevice(updated)
             setDevices((prev) =>
-              normalized.deviceType === 'payment_terminal'
+              ecrDeviceSettingsSection(updated) === 'payment_terminal'
                 ? prev.map((d) => (d.id === editingDevice.id ? normalized : d))
                 : prev.filter((d) => d.id !== editingDevice.id)
             )
@@ -701,7 +798,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
           // Add new device
           const newDevice = await ecrAPI.addDevice(config)
           const normalized = normalizeTerminalDevice(newDevice)
-          if (normalized.deviceType === 'payment_terminal') {
+          if (ecrDeviceSettingsSection(newDevice) === 'payment_terminal') {
             setDevices((prev) => [...prev, normalized])
           }
           toast.success(t('ecr.addSuccess', 'Terminal added'))
@@ -710,10 +807,12 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
         setEditingDevice(undefined)
         setSelectedDiscoveredDevice(undefined)
       } catch (err) {
-        throw err // Let the modal handle the error
+        // Let the modal show the error; native admission refusals get the same localized text.
+        const refusal = ecrAdmissionErrorMessage(t, (err as { result?: unknown })?.result, deviceType)
+        throw refusal ? new Error(refusal) : err
       }
     },
-    [editingDevice, t]
+    [currentAdmission, editingDevice, t]
   )
 
   // Calculate stats
@@ -865,18 +964,23 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
               </div>
             ) : (
               <div className="space-y-2 pt-3">
-                {devices.map((device) => (
-                  <TerminalCardCompact
-                    key={device.id}
-                    device={device}
-                    status={statuses[device.id]}
-                    onConnect={() => handleConnect(device)}
-                    onDisconnect={() => handleDisconnect(device.id)}
-                    onEdit={() => handleEdit(device)}
-                    onDelete={() => handleDelete(device.id)}
-                    onSetDefault={() => handleSetDefault(device.id)}
-                  />
-                ))}
+                {devices.map((device) => {
+                  const { notices, needsAttention } = deviceNotices(device)
+                  return (
+                    <TerminalCardCompact
+                      key={device.id}
+                      device={device}
+                      status={statuses[device.id]}
+                      onConnect={() => handleConnect(device)}
+                      onDisconnect={() => handleDisconnect(device.id)}
+                      onEdit={() => handleEdit(device)}
+                      onDelete={() => handleDelete(device.id)}
+                      onSetDefault={() => handleSetDefault(device.id)}
+                      notices={notices}
+                      onDisable={needsAttention ? () => void handleDisable(device) : undefined}
+                    />
+                  )
+                })}
               </div>
             )}
           </div>
@@ -925,6 +1029,21 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
         onSave={handleSaveDevice}
         device={editingDevice}
         discoveredDevice={selectedDiscoveredDevice}
+        onOpenCashRegisterSetup={
+          onOpenCashRegisterSetup
+            ? () => {
+                setShowConfigModal(false)
+                setEditingDevice(undefined)
+                setSelectedDiscoveredDevice(undefined)
+                onOpenCashRegisterSetup()
+              }
+            : undefined
+        }
+        notAdmittedNotice={
+          admission !== undefined && !isEcrTypeAdmitted(admission, 'payment_terminal')
+            ? ecrNotAdmittedMessage(t, 'payment_terminal')
+            : undefined
+        }
       />
     </div>
   )

@@ -1411,7 +1411,7 @@ fn resolve_immediate_order_status_sync_context(
         Err(error) => {
             tracing::warn!(
                 error = %error,
-                "Skipping immediate kiosk status sync because terminal settings could not be read"
+                "Skipping immediate order status sync because terminal settings could not be read"
             );
             (None, None, None)
         }
@@ -2051,7 +2051,7 @@ fn spawn_immediate_order_status_patches(
 ) {
     let Some(context) = resolve_immediate_order_status_sync_context(db) else {
         tracing::debug!(
-            "Skipping immediate kiosk status sync because terminal credentials are unavailable"
+            "Skipping immediate order status sync because terminal credentials are unavailable"
         );
         return;
     };
@@ -2065,7 +2065,7 @@ fn spawn_immediate_order_status_patches(
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    "Immediate kiosk status sync could not build HTTP client"
+                    "Immediate order status sync could not build HTTP client"
                 );
                 return;
             }
@@ -2101,7 +2101,7 @@ fn spawn_immediate_order_status_patches(
                     tracing::info!(
                         order_id = %order_id,
                         status = %status,
-                        "Immediate kiosk status sync succeeded"
+                        "Immediate order status sync succeeded"
                     );
                     if let Some(listener) = accept_listener.as_ref() {
                         match response.json::<Value>().await {
@@ -2130,7 +2130,7 @@ fn spawn_immediate_order_status_patches(
                         status = %status,
                         http_status,
                         response = %body.chars().take(500).collect::<String>(),
-                        "Immediate kiosk status sync failed; queued retry remains pending"
+                        "Immediate order status sync failed; queued retry remains pending"
                     );
                     return;
                 }
@@ -2139,7 +2139,7 @@ fn spawn_immediate_order_status_patches(
                         order_id = %order_id,
                         status = %status,
                         error = %error,
-                        "Immediate kiosk status sync failed; queued retry remains pending"
+                        "Immediate order status sync failed; queued retry remains pending"
                     );
                     return;
                 }
@@ -2647,6 +2647,28 @@ fn edit_settlement_financial_sync_fields(
     }
 
     fields
+}
+
+/// After an edit rewrote an order's lines: the server's quoted VAT stays
+/// (it is the canonical one); otherwise the till recomputes the VAT from the
+/// new lines (07/10/2026), never keeping a renderer estimate.
+fn refresh_edited_order_vat(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    financials: Option<&EditSettlementFinancialsPayload>,
+) {
+    if financials.is_some_and(|financials| financials.quote.is_some()) {
+        return;
+    }
+    let stored = conn
+        .query_row(
+            "SELECT COALESCE(tax_amount_cents, CAST(ROUND(COALESCE(tax_amount, 0) * 100) AS INTEGER))
+             FROM orders WHERE id = ?1",
+            [order_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    refreshed_local_order_vat_cents(conn, order_id, stored);
 }
 
 fn apply_edit_settlement_financial_adjustments(
@@ -4412,6 +4434,16 @@ fn convert_pickup_order_to_delivery_inner(
         ],
     )
     .map_err(|e| format!("convert pickup order to delivery: {e}"))?;
+    // The delivery fee is a 13% line of the order's VAT (07/10/2026).
+    let stored_vat_cents = tx
+        .query_row(
+            "SELECT COALESCE(tax_amount_cents, CAST(ROUND(COALESCE(tax_amount, 0) * 100) AS INTEGER))
+             FROM orders WHERE id = ?1",
+            [&actual_order_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    refreshed_local_order_vat_cents(&tx, &actual_order_id, stored_vat_cents);
 
     let sync_payload = serde_json::json!({
         "orderId": actual_order_id.clone(),
@@ -4521,6 +4553,27 @@ fn update_customer_headers_in_connection(
     ] {
         if let Some(value) = raw.get(camel).or_else(|| raw.get(snake)) {
             headers[camel] = value.clone();
+        }
+    }
+    // The editor corrects the order's own customer; it never re-links one. A
+    // request that names no customer keeps the order's recorded link, so the
+    // server is never asked to create a customer for a phone that already
+    // belongs to this one (06/10/2026: PATCH /api/pos/orders refused it as
+    // "select it explicitly" every two minutes and the queued row held the
+    // Z). An explicit null still clears the link; a local id is never sent.
+    if headers.get("customerId").is_none() {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT customer_id FROM orders WHERE id=?1",
+                [&actual],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(id) = stored
+            .map(|id| id.trim().to_string())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        {
+            headers["customerId"] = Value::String(id);
         }
     }
     if address.as_deref().unwrap_or("").trim() != parsed.delivery_address {
@@ -4811,8 +4864,8 @@ fn is_metadata_only_item_edit(
     updates: Option<&EditSettlementOrderUpdatesPayload>,
     financials: Option<&EditSettlementFinancialsPayload>,
 ) -> Result<bool, String> {
-    let (raw,kind,total,subtotal,fee,discount,tax,tip,percentage):(String,String,f64,f64,f64,f64,f64,f64,f64)=conn.query_row(
-        "SELECT items,COALESCE(order_type,'pickup'),COALESCE(total_amount,0),COALESCE(subtotal,total_amount,0),COALESCE(delivery_fee,0),COALESCE(discount_amount,0),COALESCE(tax_amount,0),COALESCE(tip_amount,0),COALESCE(discount_percentage,0) FROM orders WHERE id=?1",[order],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).map_err(|e|e.to_string())?;
+    let (raw,kind,total,subtotal,fee,discount,tip,percentage):(String,String,f64,f64,f64,f64,f64,f64)=conn.query_row(
+        "SELECT items,COALESCE(order_type,'pickup'),COALESCE(total_amount,0),COALESCE(subtotal,total_amount,0),COALESCE(delivery_fee,0),COALESCE(discount_amount,0),COALESCE(tip_amount,0),COALESCE(discount_percentage,0) FROM orders WHERE id=?1",[order],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).map_err(|e|e.to_string())?;
     if updates.is_some_and(|u| {
         u.order_type.as_ref().is_some_and(|v| v != &kind)
             || u.driver_id.is_some()
@@ -4822,13 +4875,16 @@ fn is_metadata_only_item_edit(
     }) {
         return Ok(false);
     }
+    // The VAT is not compared: it is derived from the lines and money that
+    // are (07/10/2026, as the canonical preflight since 01401badc). The till
+    // now stores the computed VAT while the renderer still sends its own
+    // single-rate figure, which must not turn a header edit into a paid edit.
     if let Some(f) = financials {
         if [
             (f.total_amount, total),
             (f.subtotal, subtotal),
             (f.delivery_fee, fee),
             (f.discount_amount, discount),
-            (f.tax_amount, tax),
             (f.tip_amount, tip),
             (f.discount_percentage, percentage),
         ]
@@ -5197,6 +5253,7 @@ pub async fn order_update_items(
             financials.as_ref(),
             &now,
         )?;
+        refresh_edited_order_vat(&conn, &actual_order_id, financials.as_ref());
         let status: String = conn
             .query_row(
                 "SELECT status FROM orders WHERE id=?1",
@@ -6567,6 +6624,7 @@ fn apply_edit_settlement_changes(
             payload.financials.as_ref(),
             now,
         )?;
+        refresh_edited_order_vat(conn, &actual_order_id, payload.financials.as_ref());
 
         let stale_payment_ids = if should_resolve_stale_overpay_payments_before_edit_action(&action)
         {
@@ -6810,6 +6868,27 @@ pub async fn order_update_financials(
     Ok(response)
 }
 
+/// Recompute and store a local order's VAT from its own lines after a local
+/// write changed its items or money (07/10/2026), keeping `fallback_cents`
+/// (what the write stored) when the order cannot be computed (no lines).
+pub(crate) fn refreshed_local_order_vat_cents(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    fallback_cents: i64,
+) -> i64 {
+    match crate::fiscal::greece_vat::refresh_local_order_vat(conn, order_id) {
+        Ok(cents) => cents,
+        Err(error) => {
+            tracing::warn!(
+                order_id = %order_id,
+                error = %error,
+                "Order VAT not recomputed after a local edit; the stored value stays"
+            );
+            fallback_cents
+        }
+    }
+}
+
 /// The transactional body of [`order_update_financials`]. Returns the IPC
 /// response and the resolved local order id.
 fn update_order_financials_in_connection(
@@ -6819,13 +6898,19 @@ fn update_order_financials_in_connection(
 ) -> Result<(serde_json::Value, String), String> {
     let discount_amount = payload.discount_amount.unwrap_or(0.0).max(0.0);
     let discount_percentage = payload.discount_percentage.unwrap_or(0.0).max(0.0);
+    // The renderer's figure is only a fallback: the order's VAT is recomputed
+    // from its own lines below (07/10/2026).
     let tax_amount = payload.tax_amount.unwrap_or(0.0).max(0.0);
     let delivery_fee = payload.delivery_fee.unwrap_or(0.0).max(0.0);
     let tip_amount = payload.tip_amount.unwrap_or(0.0).max(0.0);
+    // Prices include VAT: the subtotal holds it, nothing sits on top.
     let subtotal = payload
         .subtotal
         .unwrap_or_else(|| {
-            (payload.total_amount + discount_amount - tax_amount - delivery_fee - tip_amount)
+            (payload.total_amount + discount_amount
+                - crate::fiscal::greece_vat::vat_added_on_top_of_subtotal(tax_amount)
+                - delivery_fee
+                - tip_amount)
                 .max(0.0)
         })
         .max(0.0);
@@ -6879,6 +6964,10 @@ fn update_order_financials_in_connection(
             ],
         )
         .map_err(|e| format!("update order financials: {e}"))?;
+        // The order's VAT follows its new discount and fees from its own
+        // lines, as the server computes it (07/10/2026). It moves no money.
+        let tax_amount_cents =
+            refreshed_local_order_vat_cents(conn, &actual_order_id, edit_tax_amount_cents);
 
         let stale_payment_ids =
             resolve_stale_unsynced_overpay_payments_for_order(conn, &actual_order_id, now)?;
@@ -6896,8 +6985,8 @@ fn update_order_financials_in_connection(
             "discountAmount": discount_amount,
             "discount_amount_cents": Cents::round_half_even(discount_amount).as_i64(),
             "discountPercentage": discount_percentage,
-            "taxAmount": tax_amount,
-            "tax_amount_cents": Cents::round_half_even(tax_amount).as_i64(),
+            "taxAmount": Cents::new(tax_amount_cents).to_f64_dp2(),
+            "tax_amount_cents": tax_amount_cents,
             "deliveryFee": delivery_fee,
             "delivery_fee_cents": Cents::round_half_even(delivery_fee).as_i64(),
             "tipAmount": tip_amount,
@@ -7242,7 +7331,9 @@ pub async fn order_save_from_remote(
     let customer_phone = value_str(&order_data, &["customer_phone", "customerPhone"]);
     let customer_email = value_str(&order_data, &["customer_email", "customerEmail"]);
     let total_amount = value_f64(&order_data, &["total_amount", "totalAmount"]).unwrap_or(0.0);
-    let tax_amount = value_f64(&order_data, &["tax_amount", "taxAmount"]).unwrap_or(0.0);
+    let remote_tax = value_f64(&order_data, &["tax_amount", "taxAmount"]);
+    let remote_tax_present = remote_tax.is_some();
+    let tax_amount = remote_tax.unwrap_or(0.0);
     let subtotal = value_f64(&order_data, &["subtotal"]).unwrap_or(0.0);
     let status = normalize_status_for_storage(
         &value_str(&order_data, &["status"]).unwrap_or_else(|| "pending".to_string()),
@@ -7461,6 +7552,11 @@ pub async fn order_save_from_remote(
             ],
         )
         .map_err(|e| format!("save remote order: {e}"))?;
+        if !remote_tax_present {
+            // The server row normally carries its canonical VAT; a remote
+            // order without one gets the same computation (07/10/2026).
+            refreshed_local_order_vat_cents(&conn, &local_id, tax_amount_cents);
+        }
         if let Some(currency) = order_data
             .get("currency")
             .and_then(Value::as_str)
@@ -9422,106 +9518,10 @@ pub async fn order_assign_driver(
     let notes = arg2;
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
-    let driver_name = resolve_driver_display_name(&conn, &driver_id);
-    ensure_box_order_mutation_allowed(&conn, &order_id, "delivered", BoxOrderMutation::Generic)?;
-    let current_status: String = conn
-        .query_row(
-            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("load order status: {e}"))?;
-
-    if matches!(current_status.as_str(), "cancelled" | "canceled") {
-        return Err("Cannot assign a driver to a cancelled order".into());
-    }
-
-    // Only create driver_earnings for delivery orders
-    let is_delivery: bool = conn
-        .query_row(
-            "SELECT COALESCE(order_type, '') = 'delivery' FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if !is_delivery {
-        return Err("Driver assignment is only supported for delivery orders".into());
-    }
-
-    let driver_shift_id = if is_delivery {
-        order_ownership::resolve_driver_shift_id(&conn, &driver_id, None)?
-    } else {
-        None
-    };
-
-    let shift_id = driver_shift_id
-        .as_deref()
-        .ok_or_else(|| "Driver must have an active shift before assignment".to_string())?;
-
-    let assignment = order_ownership::assign_order_to_driver_shift(
-        &conn,
-        &order_id,
-        &driver_id,
-        driver_name.as_deref(),
-        shift_id,
-        &now,
-    )?;
-
-    let earning_id =
-        order_ownership::upsert_driver_earning(&conn, &order_id, &driver_id, &assignment, &now)?;
+    let (order_id, driver_name, assigned_status) =
+        assign_driver_locally(&conn, &order_id_raw, &driver_id, notes.as_deref(), &now)?;
     let earning_created = true;
-
-    // A delivery tip can be collected before dispatch. Resolve every pending
-    // driver allocation to the actual driver/shift at the same point that the
-    // canonical driver earning is created, then rebuild its payment sync row
-    // so an already-offline payment cannot retain a stale pending recipient.
-    resolve_delivery_tip_recipients_for_assignment(
-        &conn,
-        &order_id,
-        &driver_id,
-        &assignment.driver_shift_id,
-        &now,
-    )?;
-
-    let assigned_status: String = conn
-        .query_row(
-            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| current_status.clone());
-
-    let _ = conn.execute(
-        "UPDATE orders
-         SET delivery_notes = COALESCE(?1, delivery_notes),
-             sync_status = 'pending',
-             updated_at = ?2
-         WHERE id = ?3",
-        rusqlite::params![notes, now, order_id],
-    );
-
-    let driver_earning_sync_payload =
-        order_ownership::build_driver_earning_sync_payload(&conn, &earning_id)?;
-    order_ownership::enqueue_or_refresh_driver_earning_sync_row(
-        &conn,
-        &earning_id,
-        &driver_earning_sync_payload,
-    )?;
-
-    let order_sync_payload = serde_json::json!({
-        "orderId": order_id,
-        "orderType": "delivery",
-        "status": assigned_status,
-        "driverId": driver_id,
-        "driverName": driver_name,
-        "deliveryNotes": notes,
-    });
-    let _ = enqueue_order_sync_payload(&conn, &order_id, &order_sync_payload);
-
     drop(conn);
-
     // Use is_print_action_enabled (not setting_bool) so the default-true behaviour
     // is preserved on fresh installs where the key is absent from local_settings.
     let driver_assigned_print_enabled =
@@ -9566,6 +9566,116 @@ pub async fn order_assign_driver(
     );
     let _ = app.emit("order_realtime_update", payload.clone());
     Ok(serde_json::json!({ "success": true, "data": payload }))
+}
+
+/// The local half of `order_assign_driver`, in one connection: the order
+/// moves to the driver's shift, the canonical driver earning is written and
+/// queued, and a pending delivery tip names the driver. Answers the local
+/// order id, the driver's display name and the status the order now has.
+pub(crate) fn assign_driver_locally(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+    driver_id: &str,
+    notes: Option<&str>,
+    now: &str,
+) -> Result<(String, Option<String>, String), String> {
+    let order_id = resolve_renderer_order_id(conn, order_id_raw)?;
+    let driver_name = resolve_driver_display_name(conn, driver_id);
+    ensure_box_order_mutation_allowed(conn, &order_id, "delivered", BoxOrderMutation::Generic)?;
+    let current_status: String = conn
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load order status: {e}"))?;
+
+    if matches!(current_status.as_str(), "cancelled" | "canceled") {
+        return Err("Cannot assign a driver to a cancelled order".into());
+    }
+
+    // Only create driver_earnings for delivery orders
+    let is_delivery: bool = conn
+        .query_row(
+            "SELECT COALESCE(order_type, '') = 'delivery' FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !is_delivery {
+        return Err("Driver assignment is only supported for delivery orders".into());
+    }
+
+    let driver_shift_id = if is_delivery {
+        order_ownership::resolve_driver_shift_id(conn, driver_id, None)?
+    } else {
+        None
+    };
+
+    let shift_id = driver_shift_id
+        .as_deref()
+        .ok_or_else(|| "Driver must have an active shift before assignment".to_string())?;
+
+    let assignment = order_ownership::assign_order_to_driver_shift(
+        conn,
+        &order_id,
+        driver_id,
+        driver_name.as_deref(),
+        shift_id,
+        now,
+    )?;
+
+    let earning_id =
+        order_ownership::upsert_driver_earning(conn, &order_id, driver_id, &assignment, now)?;
+
+    // A delivery tip can be collected before dispatch. Resolve every pending
+    // driver allocation to the actual driver/shift at the same point that the
+    // canonical driver earning is created, then rebuild its payment sync row
+    // so an already-offline payment cannot retain a stale pending recipient.
+    resolve_delivery_tip_recipients_for_assignment(
+        conn,
+        &order_id,
+        driver_id,
+        &assignment.driver_shift_id,
+        now,
+    )?;
+
+    let assigned_status: String = conn
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| current_status.clone());
+
+    let _ = conn.execute(
+        "UPDATE orders
+         SET delivery_notes = COALESCE(?1, delivery_notes),
+             sync_status = 'pending',
+             updated_at = ?2
+         WHERE id = ?3",
+        rusqlite::params![notes, now, order_id],
+    );
+
+    let driver_earning_sync_payload =
+        order_ownership::build_driver_earning_sync_payload(conn, &earning_id)?;
+    order_ownership::enqueue_or_refresh_driver_earning_sync_row(
+        conn,
+        &earning_id,
+        &driver_earning_sync_payload,
+    )?;
+
+    let order_sync_payload = serde_json::json!({
+        "orderId": order_id,
+        "orderType": "delivery",
+        "status": assigned_status,
+        "driverId": driver_id,
+        "driverName": driver_name,
+        "deliveryNotes": notes,
+    });
+    let _ = enqueue_order_sync_payload(conn, &order_id, &order_sync_payload);
+    Ok((order_id, driver_name, assigned_status))
 }
 
 fn clear_delivery_tip_recipients_for_reset(
@@ -9670,107 +9780,7 @@ pub async fn order_reset_to_active(
     let now = Utc::now().to_rfc3339();
     let (order_id, order_type, driver_was_unassigned, removed_driver_earning) = {
         let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
-        ensure_box_order_mutation_allowed(&conn, &order_id, "pending", BoxOrderMutation::Generic)?;
-        let (current_status, order_type, current_driver_id): (String, String, Option<String>) =
-            conn.query_row(
-                "SELECT
-                     COALESCE(status, 'pending'),
-                     COALESCE(order_type, 'pickup'),
-                     driver_id
-                 FROM orders
-                 WHERE id = ?1",
-                rusqlite::params![order_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|e| format!("load reset order context: {e}"))?;
-        let normalized_status = normalize_status_for_storage(&current_status);
-        if !matches!(normalized_status.as_str(), "delivered" | "completed") {
-            return Err(format!(
-                "Only delivered or completed orders can be reset (current: {normalized_status})"
-            ));
-        }
-
-        let acting_terminal_id = storage::get_credential("terminal_id")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                db::get_setting(&conn, "terminal", "terminal_id")
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            });
-
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("begin order reset transaction: {e}"))?;
-
-        // Driver assignment moves the completed payment/drawer ownership to
-        // the driver's shift. RESET must move that attribution back to the
-        // cashier before clearing the driver, while preserving delivery as
-        // the actual order type.
-        if order_type.eq_ignore_ascii_case("delivery") {
-            order_ownership::assign_order_to_cashier_pickup(
-                &tx,
-                &order_id,
-                acting_terminal_id.as_deref(),
-                &now,
-            )?;
-        }
-
-        let removed_driver_earning =
-            order_ownership::remove_driver_earning_for_order(&tx, &order_id)?;
-        if let Some(ref removed) = removed_driver_earning {
-            let _ = sync::clear_non_repair_unsynced_parity_items(
-                &tx,
-                "driver_earnings",
-                removed.id.as_str(),
-            );
-
-            if removed.supabase_id.is_some() {
-                let driver_sync_payload = serde_json::json!({
-                    "id": removed.id.clone(),
-                    "supabase_id": removed.supabase_id.clone(),
-                    "order_id": order_id.clone(),
-                    "deleted_at": now.clone(),
-                });
-                crate::sync_queue::enqueue_payload_item(
-                    &tx,
-                    "driver_earnings",
-                    &removed.id,
-                    "DELETE",
-                    &driver_sync_payload,
-                    Some(1),
-                    Some("financial"),
-                    Some("manual"),
-                    Some(1),
-                )
-                .map_err(|e| format!("enqueue reset driver earning deletion: {e}"))?;
-            }
-        }
-
-        clear_delivery_tip_recipients_for_reset(&tx, &order_id, &now)?;
-
-        reset_order_row_to_active(&tx, &order_id, &order_type, &now)?;
-
-        let sync_payload = serde_json::json!({
-            "orderId": order_id,
-            "orderType": order_type,
-            "status": "pending",
-            "driverId": serde_json::Value::Null,
-            "driverName": serde_json::Value::Null,
-            "resetToActive": true,
-        });
-        enqueue_order_sync_payload(&tx, &order_id, &sync_payload)?;
-
-        tx.commit()
-            .map_err(|e| format!("commit order reset transaction: {e}"))?;
-
-        (
-            order_id,
-            order_type,
-            current_driver_id.is_some(),
-            removed_driver_earning.is_some(),
-        )
+        reset_order_to_active_locally(&mut conn, &order_id_raw, &now)?
     };
 
     let event_payload = serde_json::json!({
@@ -9794,6 +9804,117 @@ pub async fn order_reset_to_active(
             "driverEarningRemoved": removed_driver_earning,
         }
     }))
+}
+
+/// The local half of `order_reset_to_active` (RESET of a delivered or
+/// completed order), written in one transaction. Answers the local order id,
+/// its order type, whether a driver was unassigned and whether a driver
+/// earning was removed.
+pub(crate) fn reset_order_to_active_locally(
+    conn: &mut rusqlite::Connection,
+    order_id_raw: &str,
+    now: &str,
+) -> Result<(String, String, bool, bool), String> {
+    let order_id = resolve_renderer_order_id(conn, order_id_raw)?;
+    ensure_box_order_mutation_allowed(conn, &order_id, "pending", BoxOrderMutation::Generic)?;
+    let (current_status, order_type, current_driver_id): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT
+                 COALESCE(status, 'pending'),
+                 COALESCE(order_type, 'pickup'),
+                 driver_id
+             FROM orders
+             WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("load reset order context: {e}"))?;
+    let normalized_status = normalize_status_for_storage(&current_status);
+    if !matches!(normalized_status.as_str(), "delivered" | "completed") {
+        return Err(format!(
+            "Only delivered or completed orders can be reset (current: {normalized_status})"
+        ));
+    }
+
+    let acting_terminal_id = storage::get_credential("terminal_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            db::get_setting(conn, "terminal", "terminal_id")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin order reset transaction: {e}"))?;
+
+    // Driver assignment moves the completed payment/drawer ownership to
+    // the driver's shift. RESET must move that attribution back to the
+    // cashier before clearing the driver, while preserving delivery as
+    // the actual order type.
+    if order_type.eq_ignore_ascii_case("delivery") {
+        order_ownership::assign_order_to_cashier_pickup(
+            &tx,
+            &order_id,
+            acting_terminal_id.as_deref(),
+            now,
+        )?;
+    }
+
+    let removed_driver_earning = order_ownership::remove_driver_earning_for_order(&tx, &order_id)?;
+    if let Some(ref removed) = removed_driver_earning {
+        let _ = sync::clear_non_repair_unsynced_parity_items(
+            &tx,
+            "driver_earnings",
+            removed.id.as_str(),
+        );
+
+        if removed.supabase_id.is_some() {
+            let driver_sync_payload = serde_json::json!({
+                "id": removed.id.clone(),
+                "supabase_id": removed.supabase_id.clone(),
+                "order_id": order_id.clone(),
+                "deleted_at": now,
+            });
+            crate::sync_queue::enqueue_payload_item(
+                &tx,
+                "driver_earnings",
+                &removed.id,
+                "DELETE",
+                &driver_sync_payload,
+                Some(1),
+                Some("financial"),
+                Some("manual"),
+                Some(1),
+            )
+            .map_err(|e| format!("enqueue reset driver earning deletion: {e}"))?;
+        }
+    }
+
+    clear_delivery_tip_recipients_for_reset(&tx, &order_id, now)?;
+
+    reset_order_row_to_active(&tx, &order_id, &order_type, now)?;
+
+    let sync_payload = serde_json::json!({
+        "orderId": order_id,
+        "orderType": order_type,
+        "status": "pending",
+        "driverId": serde_json::Value::Null,
+        "driverName": serde_json::Value::Null,
+        "resetToActive": true,
+    });
+    enqueue_order_sync_payload(&tx, &order_id, &sync_payload)?;
+
+    tx.commit()
+        .map_err(|e| format!("commit order reset transaction: {e}"))?;
+
+    Ok((
+        order_id,
+        order_type,
+        current_driver_id.is_some(),
+        removed_driver_earning.is_some(),
+    ))
 }
 
 /// What Ready on a platform order found before writing anything (item D8,
@@ -10656,12 +10777,12 @@ mod dto_tests {
                 "reverse_order_drawer_attribution",
             ),
             (
-                "order_assign_driver",
+                "assign_driver_locally",
                 "resolve_renderer_order_id",
                 "assign_order_to_driver_shift",
             ),
             (
-                "order_reset_to_active",
+                "reset_order_to_active_locally",
                 "resolve_renderer_order_id",
                 "remove_driver_earning_for_order",
             ),
@@ -10722,6 +10843,8 @@ mod dto_tests {
                 "order_notify_platform_ready",
                 "notify_platform_ready_locally(",
             ),
+            ("order_assign_driver", "assign_driver_locally("),
+            ("order_reset_to_active", "reset_order_to_active_locally("),
         ] {
             let start = source
                 .find(&format!("pub async fn {command}("))
@@ -14722,6 +14845,59 @@ mod transition_tests {
     }
 
     #[test]
+    fn converting_a_pickup_to_delivery_adds_the_13_percent_delivery_line_to_its_vat() {
+        let db = test_db();
+        insert_pickup_order_for_conversion(&db, "order-convert-vat");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE orders SET items = ?1, tax_amount = 2.9, tax_amount_cents = 290
+                 WHERE id = 'order-convert-vat'",
+                params![serde_json::json!([
+                    {"name": "Crepe", "quantity": 1, "unit_price": 15.0, "total_price": 15.0}
+                ])
+                .to_string()],
+            )
+            .unwrap();
+        }
+        convert_pickup_order_to_delivery_inner(
+            &db,
+            PickupToDeliveryConversionPayload {
+                order_id: "order-convert-vat".into(),
+                customer_id: None,
+                customer_name: "Alice".into(),
+                customer_phone: "123456".into(),
+                customer_email: None,
+                delivery_address: "Main St 42".into(),
+                delivery_address_id: None,
+                delivery_city: None,
+                delivery_postal_code: None,
+                delivery_floor: None,
+                delivery_notes: None,
+                name_on_ringer: None,
+                delivery_latitude: None,
+                delivery_longitude: None,
+                delivery_address_fingerprint: None,
+                delivery_zone_id: None,
+                delivery_fee: 4.0,
+                total_amount: 19.0,
+            },
+        )
+        .expect("convert pickup order to delivery");
+        let conn = db.conn.lock().unwrap();
+        let (tax, cents, total): (f64, i64, f64) = conn
+            .query_row(
+                "SELECT tax_amount, tax_amount_cents, total_amount FROM orders WHERE id = 'order-convert-vat'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        // 15.00 at 24% (2.90) and the 4.00 fee at 13% (0.46); the total is
+        // what the cashier converted to.
+        assert_eq!((tax, cents, total), (3.36, 336, 19.0));
+    }
+
+    #[test]
     fn convert_pickup_order_to_delivery_updates_order_and_enqueues_single_sync_row() {
         let db = test_db();
         insert_pickup_order_for_conversion(&db, "order-convert");
@@ -15722,6 +15898,45 @@ mod paid_edit_ledger_tests {
                 &remote
             )
             .is_err()
+        );
+    }
+
+    // 06/10/2026 (1.4.123): a delivery order made from the dashboard was kept
+    // with tax 0 while the server computed 4.37 of VAT. Converting it to
+    // pickup was refused as "changed, refresh the order" before the refund
+    // question. Tax is derived from the compared lines and totals.
+    #[test]
+    fn canonical_preflight_ignores_a_different_server_derived_tax() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        journaled_edit_fixture(&conn, false);
+        conn.execute("UPDATE orders SET supabase_id='44444444-4444-4444-8444-444444444444',tax_amount=0 WHERE id='legacy-edit'",[]).unwrap();
+        let (original, mut remote) = canonical_preflight_fixture(&conn, 3);
+        remote["order"]["tax_amount"] = serde_json::json!(4.37);
+        assert_eq!(
+            crate::edit_settlement_recovery::remember_canonical_preflight(
+                &conn,
+                "legacy-edit",
+                "fresh-event",
+                &original,
+                &remote
+            )
+            .unwrap(),
+            (3, 1)
+        );
+        // A real change of the money it is derived from is still refused.
+        remote["order"]["total_amount"] = serde_json::json!(99);
+        assert_eq!(
+            crate::edit_settlement_recovery::remember_canonical_preflight(
+                &conn,
+                "legacy-edit",
+                "fresh-event",
+                &original,
+                &remote
+            )
+            .unwrap_err(),
+            "EDIT_CANONICAL_ORIGINAL_CHANGED"
         );
     }
 
@@ -17376,6 +17591,54 @@ mod paid_edit_ledger_tests {
             );
         }
 
+        // 06/10/2026 (Tomikro): a contact correction of a linked delivery
+        // order queued the name and phone without the customer id; the server
+        // refused to create a second customer for that phone ("select it
+        // explicitly") every two minutes, and the queued row held the Z.
+        #[test]
+        fn header_correction_keeps_the_recorded_customer_link_when_the_request_names_none() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            journaled_edit_fixture(&conn, false);
+            conn.execute("UPDATE orders SET customer_id='77777777-7777-4777-8777-777777777777' WHERE id='legacy-edit'",[]).unwrap();
+            let edit = json!({"orderId":"legacy-edit","customerName":"Μαριλένα","customerPhone":"6955391363","deliveryAddress":"","deliveryFloor":"2","expectedVersion":1});
+            update_customer_headers_in_connection(&conn, edit, Some(&header_test_proof(&conn, 1)))
+                .unwrap();
+            let queue = queued_order_push(&conn, "legacy-edit");
+            assert_eq!(queue["customer_id"], "77777777-7777-4777-8777-777777777777");
+            assert_eq!(queue["customer_phone"], "6955391363");
+            let linked: Option<String> = conn
+                .query_row(
+                    "SELECT customer_id FROM orders WHERE id='legacy-edit'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                linked.as_deref(),
+                Some("77777777-7777-4777-8777-777777777777")
+            );
+        }
+
+        #[test]
+        fn header_correction_never_sends_a_local_customer_id() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            journaled_edit_fixture(&conn, false);
+            conn.execute(
+                "UPDATE orders SET customer_id='local-customer-1' WHERE id='legacy-edit'",
+                [],
+            )
+            .unwrap();
+            let edit = json!({"orderId":"legacy-edit","customerName":"Maria","customerPhone":"6900000000","deliveryAddress":"","expectedVersion":1});
+            update_customer_headers_in_connection(&conn, edit, Some(&header_test_proof(&conn, 1)))
+                .unwrap();
+            let queue = queued_order_push(&conn, "legacy-edit");
+            assert!(queue.get("customer_id").is_none(), "{queue}");
+        }
+
         #[test]
         fn settlement_original_total_is_the_verified_total_not_a_stale_cents_cache() {
             let _keyring = crate::tests::fake_keyring::install_empty();
@@ -17730,6 +17993,186 @@ mod paid_edit_ledger_tests {
             assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 1);
         }
     }
+
+    fn stored_vat(conn: &Connection, order_id: &str) -> (f64, Option<i64>) {
+        conn.query_row(
+            "SELECT tax_amount, tax_amount_cents FROM orders WHERE id = ?1",
+            [order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_financial_update_recomputes_the_vat_from_the_order_lines() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "financial-vat", 13.0, "pending", None);
+        // The split modal still sends the renderer's own figure.
+        let payload = parse_order_update_financials_payload(Some(serde_json::json!({
+            "orderId": "financial-vat", "totalAmount": 12.0, "subtotal": 13.0,
+            "discountAmount": 1.0, "discountPercentage": 0, "taxAmount": 9.99,
+            "deliveryFee": 0, "tipAmount": 0
+        })))
+        .unwrap();
+        update_order_financials_in_connection(&conn, &payload, "2026-10-07T10:00:00Z").unwrap();
+        // 12.00 at 24% included: VAT 2.32, never the renderer's 9.99.
+        assert_eq!(stored_vat(&conn, "financial-vat"), (2.32, Some(232)));
+        let push = queued_order_push(&conn, "financial-vat");
+        assert_eq!(push["tax_amount_cents"], 232);
+        assert_eq!(
+            push["totalAmount"], 12.0,
+            "the money the cashier set is unchanged"
+        );
+        assert_eq!(push["subtotal"], 13.0);
+    }
+
+    #[test]
+    fn an_edit_without_a_server_quote_recomputes_the_vat_and_a_quote_keeps_its_own() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order(&conn, "edit-vat", 7.0, "pending", None);
+        let (response, _) = apply_edit_settlement_in_connection(
+            &conn,
+            &edit_payload("edit-vat", 7.0, None),
+            EditSettlementActionPayload::None,
+            "2026-10-07T10:00:00Z",
+        )
+        .expect("apply edit");
+        assert_eq!(response["success"], true, "{response}");
+        // 7.00 at 24% included: VAT 1.35.
+        assert_eq!(stored_vat(&conn, "edit-vat"), (1.35, Some(135)));
+
+        // The server's quoted VAT is the canonical one and stays.
+        let quoted = financials_from_server_quote(&serde_json::json!({
+            "total_amount": 7.0, "subtotal": 7.0, "tax_amount": 1.34, "discount_amount": 0,
+            "delivery_fee": 0, "tip_amount": 0
+        }))
+        .unwrap();
+        apply_edit_settlement_financial_adjustments(
+            &conn,
+            "edit-vat",
+            Some(&quoted),
+            "2026-10-07T10:01:00Z",
+        )
+        .unwrap();
+        refresh_edited_order_vat(&conn, "edit-vat", Some(&quoted));
+        assert_eq!(stored_vat(&conn, "edit-vat"), (1.34, Some(134)));
+    }
+
+    #[test]
+    fn a_header_only_edit_stays_metadata_only_whatever_vat_the_order_stores() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let mut request = journaled_edit_fixture(&conn, false);
+        request["items"].as_array_mut().unwrap().pop();
+        // The renderer derives its own single-rate figure (0 here, 24% of the
+        // total at a till without a stored checkout rate).
+        request["financials"] =
+            serde_json::json!({"totalAmount": 6, "deliveryFee": 0, "taxAmount": 0});
+        for stored in [0.0, 1.16] {
+            conn.execute(
+                "UPDATE orders SET tax_amount = ?1, tax_amount_cents = ?2 WHERE id = 'legacy-edit'",
+                params![stored, Cents::round_half_even(stored).as_i64()],
+            )
+            .unwrap();
+            let payload = parse_order_update_items_payload(Some(request.clone()), None).unwrap();
+            assert!(
+                is_metadata_only_item_edit(
+                    &conn,
+                    "legacy-edit",
+                    &payload.items,
+                    payload.order_updates.as_ref(),
+                    payload.financials.as_ref()
+                )
+                .unwrap(),
+                "stored VAT {stored}"
+            );
+        }
+        // A real money change is still no header edit.
+        let mut changed = request.clone();
+        changed["financials"]["totalAmount"] = serde_json::json!(7);
+        let payload = parse_order_update_items_payload(Some(changed), None).unwrap();
+        assert!(!is_metadata_only_item_edit(
+            &conn,
+            "legacy-edit",
+            &payload.items,
+            payload.order_updates.as_ref(),
+            payload.financials.as_ref()
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn the_paid_edit_preflight_and_preview_are_unchanged_by_the_stored_vat() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let request = journaled_edit_fixture(&conn, false);
+        conn.execute(
+            "UPDATE orders SET supabase_id='44444444-4444-4444-8444-444444444444' WHERE id='legacy-edit'",
+            [],
+        )
+        .unwrap();
+        let (payload, _) =
+            parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+        let read = |conn: &Connection| {
+            let mut preflight =
+                crate::edit_settlement_recovery::capture_preflight(conn, "legacy-edit").unwrap();
+            // The stored VAT is part of the restore snapshot, never compared.
+            for key in ["tax_amount", "tax_amount_cents"] {
+                if let Some(object) = preflight.as_object_mut() {
+                    object.remove(key);
+                }
+            }
+            (
+                preview_edit_settlement_in_connection(conn, &payload).unwrap(),
+                preflight,
+            )
+        };
+        conn.execute(
+            "UPDATE orders SET tax_amount = 0, tax_amount_cents = NULL WHERE id = 'legacy-edit'",
+            [],
+        )
+        .unwrap();
+        let previous = read(&conn);
+        conn.execute(
+            "UPDATE orders SET tax_amount = 1.16, tax_amount_cents = 116 WHERE id = 'legacy-edit'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(read(&conn), previous);
+    }
+
+    #[test]
+    fn a_header_correction_ack_adopts_the_server_vat() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        journaled_edit_fixture(&conn, false);
+        conn.execute("UPDATE orders SET supabase_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',sync_status='synced',tax_amount=1.16,tax_amount_cents=116 WHERE id='legacy-edit'",[]).unwrap();
+        let first = serde_json::json!({"orderId":"legacy-edit","customerName":"First","customerPhone":"123","deliveryAddress":"","expectedVersion":1});
+        update_customer_headers_in_connection(&conn, first, Some(&header_test_proof(&conn, 1)))
+            .unwrap();
+        let mut canonical =
+            crate::edit_settlement_recovery::capture_order_headers(&conn, "legacy-edit").unwrap();
+        canonical["id"] = serde_json::json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        canonical["organization_id"] = serde_json::json!("edit-org");
+        canonical["branch_id"] = serde_json::json!("edit-branch");
+        canonical["version"] = serde_json::json!(2);
+        canonical["status"] = serde_json::json!("pending");
+        canonical["total_amount"] = serde_json::json!(6.0);
+        canonical["tax_amount"] = serde_json::json!(1.15);
+        canonical["tax_amount_cents"] = serde_json::json!(115);
+        crate::sync_queue::apply_ack_for_test(
+            &conn,
+            "orders",
+            "legacy-edit",
+            &serde_json::json!({"success": true, "data": canonical}),
+        )
+        .unwrap();
+        assert_eq!(stored_vat(&conn, "legacy-edit"), (1.15, Some(115)));
+    }
 }
 
 /// All non-financial cancellation rules also apply before preparing a manual return.
@@ -17771,4 +18214,518 @@ pub(crate) fn validate_table_manual_cancel_target(
         return Err("TABLE_CANCEL_SYNC_REQUIRED".into());
     }
     Ok(id)
+}
+
+/// Store incident 07/10/2026 (desktop 1.4.125): a paid delivery order, one
+/// manual card receipt carrying a 0.75 tip, was given to a driver, marked
+/// delivered, then reset to pending. Its paid correction then failed with
+/// "Failed to save changes" and its manual cancellation was refused. These
+/// run the whole path through the real local half of every step, with each
+/// queued write acknowledged the way the server answers it, and keep the
+/// server's copy of the order from the bodies it accepted.
+#[cfg(test)]
+pub(crate) mod driver_restore_tests {
+    use super::*;
+    use rusqlite::{params, Connection, OptionalExtension};
+    use serde_json::{json, Value};
+
+    pub(crate) const ORDER: &str = "restored-delivery";
+    pub(crate) const REMOTE_ORDER: &str = "5f0e3c1a-7a8d-4c3e-9a51-2d7c1f5e6b01";
+    pub(crate) const PAYMENT: &str = "restored-card";
+    pub(crate) const REMOTE_PAYMENT: &str = "8d1f6a3e-2b4c-4e7a-9f10-3c5d7e9a1b22";
+    const REMOTE_EARNING: &str = "0c9b8a7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d";
+    pub(crate) const ITEM: &str = "22222222-2222-4222-8222-222222222222";
+    pub(crate) const ORG: &str = "restore-org";
+    pub(crate) const BRANCH: &str = "restore-branch";
+    pub(crate) const TERMINAL: &str = "11111111-1111-4111-8111-111111111111";
+
+    pub(crate) fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        db::run_migrations_for_test(&conn);
+        conn
+    }
+
+    /// The order before dispatch: 10.00 of food plus the 0.75 tip in its
+    /// total, paid by one synced manual card receipt whose tip waits for a
+    /// driver (`tip_recipient_role='driver'`, no driver yet).
+    pub(crate) fn paid_delivery_order(conn: &Connection) {
+        for (category, key, value) in [
+            ("terminal", "organization_id", ORG),
+            ("terminal", "branch_id", BRANCH),
+            ("terminal", "terminal_id", TERMINAL),
+            ("restaurant", "store_currency_branch_id", BRANCH),
+            ("restaurant", "store_currency_available", "true"),
+            ("restaurant", "store_currency_source", "branch_country"),
+            ("restaurant", "currency", "EUR"),
+        ] {
+            db::set_setting(conn, category, key, value).unwrap();
+        }
+        let items =
+            json!([{"id":ITEM,"name":"Pizza","quantity":1,"unit_price":10,"total_price":10}]);
+        conn.execute_batch(&format!(
+            "INSERT INTO staff_shifts(id,staff_id,role_type,branch_id,terminal_id,check_in_time,status,sync_status,currency,created_at,updated_at)
+               VALUES('cashier-shift','cashier','cashier','{BRANCH}','{TERMINAL}','2026-10-07T16:00:00Z','active','synced','EUR','now','now');
+             INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opening_amount_cents,total_card_sales,total_card_sales_cents,currency,opened_at,created_at,updated_at)
+               VALUES('cashier-drawer','cashier-shift','cashier','{BRANCH}','{TERMINAL}',0,0,10.75,1075,'EUR','2026-10-07T16:00:00Z','now','now');
+             INSERT INTO staff_shifts(id,staff_id,role_type,branch_id,terminal_id,check_in_time,status,sync_status,currency,created_at,updated_at)
+               VALUES('driver-shift','driver-1','driver','{BRANCH}','{TERMINAL}','2026-10-07T16:30:00Z','active','synced','EUR','now','now');"
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders(id,supabase_id,organization_id,branch_id,terminal_id,items,order_type,status,payment_status,
+                 subtotal,subtotal_cents,tip_amount,tip_amount_cents,delivery_fee,total_amount,total_amount_cents,currency,
+                 staff_id,staff_shift_id,delivery_address,version,remote_version,sync_status,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,'delivery','pending','paid',10,1000,0.75,75,0,10.75,1075,'EUR',
+                 'cashier','cashier-shift','Odos 1',1,1,'synced','2026-10-07T18:00:00Z','2026-10-07T18:00:00Z')",
+            params![ORDER, REMOTE_ORDER, ORG, BRANCH, TERMINAL, items.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,tip_recipient_role,
+                 currency,status,staff_id,staff_shift_id,payment_origin,transaction_ref,sync_state,sync_status,remote_payment_id,created_at,updated_at)
+             VALUES(?1,?2,'card',10.75,1075,0.75,75,'driver','EUR','completed','cashier','cashier-shift','manual',
+                 'CARD-1791400000000','applied','synced',?3,'2026-10-07T18:00:00Z','2026-10-07T18:00:00Z')",
+            params![PAYMENT, ORDER, REMOTE_PAYMENT],
+        )
+        .unwrap();
+    }
+
+    /// The server's copy of the order and of its one receipt.
+    pub(crate) struct Server {
+        pub(crate) order: Value,
+        pub(crate) payment: Value,
+    }
+
+    impl Server {
+        /// The server holds what the till held when the order last synced.
+        pub(crate) fn mirror(conn: &Connection) -> Self {
+            let original = crate::edit_settlement_recovery::capture_preflight(conn, ORDER).unwrap();
+            let mut order = original.clone();
+            order["version"] = json!(1);
+            order
+                .as_object_mut()
+                .unwrap()
+                .extend(original["headers"].as_object().unwrap().clone());
+            let payment = json!({"id":REMOTE_PAYMENT,"organization_id":ORG,"branch_id":BRANCH,"order_id":REMOTE_ORDER,
+                "payment_method":"card","amount_cents":1075,"tip_amount_cents":75,"currency":"EUR","status":"completed",
+                "external_transaction_id":"CARD-1791400000000","metadata":{"payment_origin":"manual"}});
+            Self { order, payment }
+        }
+
+        /// The edit-capabilities answer for this order (`settlement_version` 1).
+        pub(crate) fn snapshot(&self) -> Value {
+            json!({"order":self.order,"payments":[self.payment],"adjustments":[],"retained_paid_cents":1075})
+        }
+
+        /// Acknowledge every queued write of the order, its receipt and its
+        /// driver earning; an order write changes the server's copy.
+        pub(crate) fn sync(&mut self, conn: &Connection) {
+            for table in ["orders", "payments", "driver_earnings"] {
+                loop {
+                    let next: Option<String> = conn
+                        .query_row(
+                            "SELECT record_id FROM parity_sync_queue WHERE table_name=?1 ORDER BY created_at,rowid LIMIT 1",
+                            [table],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .unwrap();
+                    let Some(record) = next else { break };
+                    let reply = match table {
+                        "orders" => json!({"success":true}),
+                        "payments" => json!({"success":true,"payment_id":REMOTE_PAYMENT}),
+                        _ => json!({"success":true,"results":[{"server_id":REMOTE_EARNING}]}),
+                    };
+                    let body = crate::sync_queue::apply_ack_for_test(conn, table, &record, &reply)
+                        .unwrap();
+                    if table == "orders" {
+                        for (key, value) in body.as_object().unwrap() {
+                            if key != "id" && self.order.get(key).is_some() {
+                                self.order[key] = value.clone();
+                            }
+                        }
+                        let version = self.order["version"].as_i64().unwrap();
+                        self.order["version"] = json!(version + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Driver assigned (the order is delivered with it), then marked
+    /// delivered from the dashboard; the server takes both.
+    pub(crate) fn assign_and_deliver(conn: &Connection) -> Server {
+        let mut server = Server::mirror(conn);
+        let (_, _, status) =
+            assign_driver_locally(conn, ORDER, "driver-1", None, "2026-10-07T18:10:00Z").unwrap();
+        assert_eq!(status, "delivered");
+        let earning: (String, String) = conn
+            .query_row(
+                "SELECT driver_id,staff_shift_id FROM driver_earnings WHERE order_id=?1",
+                [ORDER],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(earning, ("driver-1".into(), "driver-shift".into()));
+        let receipt: (String, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT staff_shift_id,tip_recipient_role,tip_recipient_staff_id,tip_recipient_staff_shift_id FROM order_payments WHERE id=?1",
+                [PAYMENT],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt.0, "driver-shift");
+        if receipt.1.as_deref() == Some("driver") {
+            assert_eq!(
+                (receipt.2.as_deref(), receipt.3.as_deref()),
+                (Some("driver-1"), Some("driver-shift"))
+            );
+        }
+        server.sync(conn);
+        assert_eq!(server.order["status"], "delivered", "{}", server.order);
+        assert!(matches!(
+            apply_order_status_in_connection(
+                conn,
+                ORDER,
+                "delivered",
+                None,
+                None,
+                "2026-10-07T18:40:00Z"
+            )
+            .unwrap(),
+            LocalStatusChange::Applied { .. }
+        ));
+        server.sync(conn);
+        assert_eq!(server.order["status"], "delivered");
+        server
+    }
+
+    /// RESET of the delivered order back to pending (local half only).
+    pub(crate) fn reset_to_pending(conn: &mut Connection) {
+        let (_, kind, unassigned, earning_removed) =
+            reset_order_to_active_locally(conn, ORDER, "2026-10-07T19:00:00Z").unwrap();
+        assert_eq!(
+            (kind.as_str(), unassigned, earning_removed),
+            ("delivery", true, true)
+        );
+    }
+
+    /// Driver, delivered, reset to pending; the server takes every step.
+    pub(crate) fn assign_deliver_and_restore(conn: &mut Connection) -> Server {
+        let mut server = assign_and_deliver(conn);
+        reset_to_pending(conn);
+        server.sync(conn);
+        server
+    }
+
+    /// A paid correction of the restored order: one more 2.00 line, its
+    /// difference collected in cash at the cashier drawer. `financials` is
+    /// the server's quote.
+    pub(crate) fn correction_request(event: &str) -> Value {
+        json!({"orderId":ORDER,"client_event_id":event,
+            "items":[{"id":ITEM,"name":"Pizza","quantity":1,"unit_price":10,"total_price":10},
+                     {"name":"Cola","quantity":1,"unit_price":2,"total_price":2}],
+            "financials":{"totalAmount":12.75,"subtotal":12,"tipAmount":0.75,"deliveryFee":0},
+            "action":{"type":"collect","payments":[{"method":"cash","amount":2,"paymentOrigin":"manual","collectedBy":"cashier_drawer"}]}})
+    }
+
+    /// What the menu asks before it shows the money question: the plain
+    /// preview, then the canonical preflight against the server's copy and
+    /// the scoped preview. Fills the request's expected revisions.
+    pub(crate) fn preflight_correction(
+        conn: &Connection,
+        server: &Server,
+        request: &mut Value,
+    ) -> Result<Value, String> {
+        let mut plain = request.clone();
+        for key in ["client_event_id", "action"] {
+            plain.as_object_mut().unwrap().remove(key);
+        }
+        let preview = preview_edit_settlement_in_connection(
+            conn,
+            &parse_order_edit_settlement_preview_payload(Some(plain))?,
+        )?;
+        assert_eq!(preview["requiredAction"], "collect", "{preview}");
+        assert_eq!(preview["paidTotal"], 10.75, "{preview}");
+        let original = crate::edit_settlement_recovery::capture_preflight(conn, ORDER)?;
+        let (wire, local) = crate::edit_settlement_recovery::remember_canonical_preflight(
+            conn,
+            ORDER,
+            request["client_event_id"].as_str().unwrap(),
+            &original,
+            &server.snapshot(),
+        )?;
+        request["expected_version"] = json!(wire);
+        request["expected_local_version"] = json!(local);
+        preview_edit_settlement_superseding(
+            conn,
+            &parse_order_edit_settlement_preview_payload(Some(request.clone()))?,
+            &[],
+        )
+    }
+
+    pub(crate) fn save_correction(conn: &Connection, request: &Value) -> Result<Value, String> {
+        let (payload, action) = parse_order_edit_settlement_apply_payload(Some(request.clone()))?;
+        apply_journaled_edit_settlement(
+            conn,
+            ORDER,
+            &payload,
+            action,
+            request,
+            "2026-10-07T19:10:00Z",
+        )
+    }
+
+    /// The server applies the saved correction: the order revision, then
+    /// the collected difference (`cash_remote` is its canonical id).
+    pub(crate) fn sync_correction(conn: &Connection, server: &mut Server, cash_remote: &str) {
+        let frozen: Value = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1",
+                [ORDER],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|raw| serde_json::from_str(&raw).unwrap())
+            .unwrap();
+        let mut items = frozen["items"].clone();
+        items[1]["id"] = json!("55555555-5555-4555-8555-555555555555");
+        let version = server.order["version"].as_i64().unwrap() + 1;
+        let reply = json!({"success":true,"data":{"id":REMOTE_ORDER,"organization_id":ORG,"branch_id":BRANCH,
+            "terminal_id":TERMINAL,"version":version,"status":"pending","order_type":"delivery","items":items,
+            "total_amount":12.75,"subtotal":12,"tax_amount":2.36,"discount_amount":0,"delivery_fee":0,"tip_amount":0.75}});
+        crate::sync_queue::apply_ack_for_test(conn, "orders", ORDER, &reply).unwrap();
+        let child = frozen["settlement_context"]["payments"][0]["payment_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        crate::sync_queue::apply_ack_for_test(
+            conn,
+            "payments",
+            &child,
+            &json!({"success":true,"payment_id":cash_remote}),
+        )
+        .unwrap();
+        server.order["version"] = json!(version);
+        server.order["items"] = items;
+        server.order["total_amount"] = json!(12.75);
+        server.order["subtotal"] = json!(12);
+    }
+
+    pub(crate) fn queued(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT table_name||':'||operation FROM parity_sync_queue ORDER BY rowid")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// Nothing of the driver run outlives RESET: no earning, no driver, the
+    /// order and its receipt back on the cashier's shift with the card money
+    /// in the cashier's drawer, the tip waiting for a driver again, and
+    /// nothing left to send once the server took the reset.
+    #[test]
+    fn reset_from_delivered_leaves_no_driver_custody_behind() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = test_conn();
+        paid_delivery_order(&conn);
+        let server = assign_deliver_and_restore(&mut conn);
+        let order: (String, String, Option<String>, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT status,order_type,driver_id,driver_name,staff_shift_id,sync_status FROM orders WHERE id=?1",
+                [ORDER],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            order,
+            (
+                "pending".into(),
+                "delivery".into(),
+                None,
+                None,
+                "cashier-shift".into(),
+                "synced".into()
+            )
+        );
+        let receipt: (String, Option<String>, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT staff_shift_id,tip_recipient_staff_id,tip_recipient_staff_shift_id,sync_state,sync_status FROM order_payments WHERE id=?1",
+                [PAYMENT],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            (
+                "cashier-shift".into(),
+                None,
+                None,
+                "applied".into(),
+                "synced".into()
+            )
+        );
+        let leftovers: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM driver_earnings),
+                        (SELECT COUNT(*) FROM staff_order_cash_returns),
+                        (SELECT total_card_sales_cents FROM cash_drawer_sessions WHERE id='cashier-drawer')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(leftovers, (0, 0, 1075));
+        assert!(queued(&conn).is_empty(), "{:?}", queued(&conn));
+        assert!(crate::staff_cash_returns::plan(&conn, ORDER)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            cancel_refusal_code(&conn, ORDER).unwrap(),
+            Some(ORDER_HAS_PAYMENTS)
+        );
+        assert_eq!(server.order["status"], "pending");
+        assert_eq!(server.order["driver_id"], Value::Null);
+        assert_eq!(server.order["driver_name"], Value::Null);
+    }
+
+    /// Until the server has taken RESET (the order revision and the receipt
+    /// replayed without its driver), the correction waits for that sync: the
+    /// menu shows "not synced yet", never a generic failure.
+    #[test]
+    fn a_correction_right_after_reset_waits_for_the_reset_to_sync() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = test_conn();
+        paid_delivery_order(&conn);
+        let mut server = assign_and_deliver(&conn);
+        reset_to_pending(&mut conn);
+        let waiting = queued(&conn);
+        assert!(
+            waiting.iter().any(|row| row.starts_with("payments:"))
+                && waiting.iter().any(|row| row == "orders:UPDATE"),
+            "the reset replays the receipt and the order: {waiting:?}"
+        );
+        assert_eq!(
+            crate::edit_settlement_recovery::capture_preflight(&conn, ORDER).unwrap_err(),
+            "EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED"
+        );
+        server.sync(&conn);
+        let mut request = correction_request("after-sync");
+        assert_eq!(
+            preflight_correction(&conn, &server, &mut request).unwrap()["requiredAction"],
+            "collect"
+        );
+    }
+
+    /// The incident order, after RESET synced: the paid correction reaches
+    /// its money question and is saved, collecting only the 2.00 difference.
+    /// The server derives VAT the till does not hold (tax 0 here, 2.15
+    /// there): commit 01401badc keeps that out of the comparison.
+    #[test]
+    fn a_reset_paid_delivery_order_is_corrected_and_collects_only_the_difference() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = test_conn();
+        paid_delivery_order(&conn);
+        let mut server = assign_deliver_and_restore(&mut conn);
+        server.order["tax_amount"] = json!(2.15);
+        let mut request = correction_request("restored-edit");
+        let scoped = preflight_correction(&conn, &server, &mut request).unwrap();
+        assert_eq!(scoped["requiredAction"], "collect", "{scoped}");
+        assert_eq!(scoped["deliverySettlement"]["driverEarning"], Value::Null);
+        assert_eq!(scoped["cashHandlerByRule"], "cashier_drawer");
+        assert_eq!(request["expected_version"], 4);
+        assert_eq!(request["expected_local_version"], 1);
+        crate::edit_settlement_recovery::require_canonical_preflight(
+            &conn,
+            ORDER,
+            "restored-edit",
+            4,
+            1,
+        )
+        .unwrap();
+        let saved = save_correction(&conn, &request).unwrap();
+        assert_eq!(saved["success"], true, "{saved}");
+        assert_eq!(saved["nextTotal"], 12.75);
+        assert_eq!(saved["paidTotal"], 12.75);
+        let money: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),SUM(amount_cents) FROM order_payments WHERE order_id=?1 AND status='completed'",
+                [ORDER],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(money, (2, 1275));
+        // The exact retry replays the saved answer, never a second collection.
+        assert_eq!(save_correction(&conn, &request).unwrap(), saved);
+        let push: Value = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1",
+                [ORDER],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|raw| serde_json::from_str(&raw).unwrap())
+            .unwrap();
+        assert_eq!(push["expected_version"], 4);
+    }
+
+    /// The same order without a tip: 10.00 paid by one manual card receipt.
+    pub(crate) fn without_tip(conn: &Connection) {
+        conn.execute_batch(
+            "UPDATE order_payments SET amount=10,amount_cents=1000,tip_amount=0,tip_amount_cents=0,tip_recipient_role=NULL;
+             UPDATE orders SET tip_amount=0,tip_amount_cents=0,total_amount=10,total_amount_cents=1000;
+             UPDATE cash_drawer_sessions SET total_card_sales=10,total_card_sales_cents=1000;",
+        )
+        .unwrap();
+    }
+
+    fn receipt_sync(conn: &Connection) -> (String, String) {
+        conn.query_row(
+            "SELECT sync_status,sync_state FROM order_payments WHERE id=?1",
+            [PAYMENT],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// Driver assignment and RESET move the receipt between shifts, which is
+    /// local drawer attribution the payment's wire body never carries. They
+    /// marked it `pending` without queueing anything, so a receipt without a
+    /// driver tip (the tip path happens to re-send its receipt) never synced
+    /// again and its manual cancellation was refused as unsynced forever.
+    #[test]
+    fn moving_a_receipt_to_the_driver_and_back_keeps_it_synced() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let mut conn = test_conn();
+        paid_delivery_order(&conn);
+        without_tip(&conn);
+        let mut server = Server::mirror(&conn);
+        assign_driver_locally(&conn, ORDER, "driver-1", None, "2026-10-07T18:10:00Z").unwrap();
+        assert!(
+            !queued(&conn).iter().any(|row| row.starts_with("payments:")),
+            "{:?}",
+            queued(&conn)
+        );
+        assert_eq!(receipt_sync(&conn), ("synced".into(), "applied".into()));
+        server.sync(&conn);
+        reset_to_pending(&mut conn);
+        assert!(
+            !queued(&conn).iter().any(|row| row.starts_with("payments:")),
+            "{:?}",
+            queued(&conn)
+        );
+        assert_eq!(receipt_sync(&conn), ("synced".into(), "applied".into()));
+        let shift: String = conn
+            .query_row(
+                "SELECT staff_shift_id FROM order_payments WHERE id=?1",
+                [PAYMENT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(shift, "cashier-shift");
+        server.sync(&conn);
+        assert!(queued(&conn).is_empty(), "{:?}", queued(&conn));
+    }
 }

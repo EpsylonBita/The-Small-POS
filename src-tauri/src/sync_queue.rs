@@ -2956,6 +2956,174 @@ fn is_register_order_number(value: &str) -> bool {
         && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// The money of an order exactly as `POST /api/pos/orders` receives it from
+/// this till: the normalized items, the discount fields, the delivery fee
+/// and the total. [`build_order_insert_body`] sends these values and
+/// [`order_insert_vat`] computes the order's VAT from the same ones, so the
+/// till and the server see identical inputs.
+struct OrderInsertMoney {
+    items: Vec<Value>,
+    subtotal: f64,
+    tax_amount: f64,
+    delivery_fee: f64,
+    manual_discount_mode: Option<String>,
+    manual_discount_value: Option<f64>,
+    discount_percentage: f64,
+    discount_amount: f64,
+    coupon_discount_amount: f64,
+    total_amount: f64,
+}
+
+impl OrderInsertMoney {
+    fn from_sources(sources: &[&Value]) -> Result<Self, String> {
+        let items_raw =
+            json_field_from_sources(sources, &["items"]).unwrap_or_else(|| Value::Array(vec![]));
+        let items = normalize_order_insert_items(&items_raw);
+        if items.is_empty() {
+            return Err("Order insert payload is missing items".to_string());
+        }
+
+        let items_subtotal = items
+            .iter()
+            .map(|item| {
+                item.get("total_price")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default()
+            })
+            .sum::<f64>();
+        let subtotal = number_field_from_sources(sources, &["subtotal"])
+            .unwrap_or(items_subtotal)
+            .max(0.0);
+        let tax_amount = number_field_from_sources(sources, &["tax_amount", "taxAmount"])
+            .unwrap_or_default()
+            .max(0.0);
+        let delivery_fee = number_field_from_sources(sources, &["delivery_fee", "deliveryFee"])
+            .unwrap_or_default()
+            .max(0.0);
+        let manual_discount_mode =
+            string_field_from_sources(sources, &["manual_discount_mode", "manualDiscountMode"])
+                .filter(|mode| matches!(mode.as_str(), "percentage" | "fixed"));
+        let manual_discount_value =
+            number_field_from_sources(sources, &["manual_discount_value", "manualDiscountValue"])
+                .map(|value| value.max(0.0));
+        let discount_percentage =
+            number_field_from_sources(sources, &["discount_percentage", "discountPercentage"])
+                .or_else(|| {
+                    if manual_discount_mode.as_deref() == Some("percentage") {
+                        manual_discount_value
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+                .max(0.0);
+        let discount_amount =
+            number_field_from_sources(sources, &["discount_amount", "discountAmount"])
+                .or_else(|| {
+                    if manual_discount_mode.as_deref() == Some("fixed") {
+                        manual_discount_value
+                    } else if discount_percentage > 0.0 {
+                        Some((subtotal * (discount_percentage / 100.0)).max(0.0))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+                .max(0.0);
+        let coupon_discount_amount =
+            number_field_from_sources(sources, &["coupon_discount_amount", "couponDiscountAmount"])
+                .unwrap_or_default()
+                .max(0.0);
+
+        let money = Self {
+            items,
+            subtotal,
+            tax_amount,
+            delivery_fee,
+            manual_discount_mode,
+            manual_discount_value,
+            discount_percentage,
+            discount_amount,
+            coupon_discount_amount,
+            total_amount: 0.0,
+        };
+        let total_amount =
+            number_field_from_sources(sources, &["total_amount", "totalAmount", "total"])
+                .unwrap_or_else(|| money.pre_tip_total())
+                .max(0.0);
+        Ok(Self {
+            total_amount,
+            ..money
+        })
+    }
+
+    /// The order before its tip. Prices include VAT, so the stored VAT is
+    /// already inside the subtotal and is never added to it: with the real
+    /// VAT stored on every order, adding it dropped a tip carried only in the
+    /// total and made the server's total disagree.
+    fn pre_tip_total(&self) -> f64 {
+        (self.subtotal
+            + crate::fiscal::greece_vat::vat_added_on_top_of_subtotal(self.tax_amount)
+            + self.delivery_fee
+            - self.discount_amount
+            - self.coupon_discount_amount)
+            .max(0.0)
+    }
+
+    /// The request-body fields the server's VAT reads, with the same values
+    /// and cents siblings [`build_order_insert_body`] sends.
+    fn vat_body(&self) -> Value {
+        serde_json::json!({
+            "items": self.items,
+            "delivery_fee": self.delivery_fee,
+            "delivery_fee_cents": Cents::round_half_even(self.delivery_fee).as_i64(),
+            "discount_percentage": self.discount_percentage,
+            "discount_amount": self.discount_amount,
+            "discount_amount_cents": Cents::round_half_even(self.discount_amount).as_i64(),
+            "manual_discount_mode": self.manual_discount_mode,
+            "manual_discount_value": self.manual_discount_value,
+            "coupon_discount_amount": self.coupon_discount_amount,
+            "coupon_discount_amount_cents": Cents::round_half_even(self.coupon_discount_amount).as_i64(),
+        })
+    }
+}
+
+/// The VAT the server computes for an order JSON (an order row or a checkout
+/// payload, snake_case or camelCase keys): its items, discounts and delivery
+/// fee normalized exactly as [`build_order_insert_body`] sends them.
+pub(crate) fn order_json_vat(
+    order: &Value,
+    settings: &crate::fiscal::greece_vat::GreeceVatSettings,
+) -> Result<crate::fiscal::greece_vat::GreeceOrderVatResult, String> {
+    let money = OrderInsertMoney::from_sources(&[order])?;
+    Ok(crate::fiscal::greece_vat::calculate_order_vat_from_order_body(&money.vat_body(), settings))
+}
+
+/// The VAT the server computes for this order's create request: the same
+/// normalized items, discounts and fees [`build_order_insert_body`] sends,
+/// with the branch VAT settings the till holds. Reads only; a `payload` of
+/// `Value::Null` uses the local order row alone (a local edit).
+pub(crate) fn order_insert_vat(
+    conn: &Connection,
+    record_id: &str,
+    payload: &Value,
+) -> Result<crate::fiscal::greece_vat::GreeceOrderVatResult, String> {
+    let local_order = load_local_order_insert_fallback(conn, record_id)?;
+    let payload_root = payload.get("orderData").unwrap_or(payload);
+    let mut sources = vec![payload_root, payload];
+    if let Some(local_order) = local_order.as_ref() {
+        sources.push(local_order);
+    }
+    let money = OrderInsertMoney::from_sources(&sources)?;
+    let settings = crate::fiscal::greece_vat::branch_vat_settings(conn);
+    Ok(
+        crate::fiscal::greece_vat::calculate_order_vat_from_order_body(
+            &money.vat_body(),
+            &settings,
+        ),
+    )
+}
+
 fn build_order_insert_body(
     conn: &Connection,
     record_id: &str,
@@ -2969,74 +3137,20 @@ fn build_order_insert_body(
     }
 
     let (_, runtime_branch_id, _) = resolve_runtime_context(conn, payload);
-    let items_raw =
-        json_field_from_sources(&sources, &["items"]).unwrap_or_else(|| Value::Array(vec![]));
-    let items = normalize_order_insert_items(&items_raw);
-    if items.is_empty() {
-        return Err("Order insert payload is missing items".to_string());
-    }
-
-    let items_subtotal = items
-        .iter()
-        .map(|item| {
-            item.get("total_price")
-                .and_then(Value::as_f64)
-                .unwrap_or_default()
-        })
-        .sum::<f64>();
-    let subtotal = number_field_from_sources(&sources, &["subtotal"])
-        .unwrap_or(items_subtotal)
-        .max(0.0);
-    let tax_amount = number_field_from_sources(&sources, &["tax_amount", "taxAmount"])
-        .unwrap_or_default()
-        .max(0.0);
-    let delivery_fee = number_field_from_sources(&sources, &["delivery_fee", "deliveryFee"])
-        .unwrap_or_default()
-        .max(0.0);
-    let manual_discount_mode =
-        string_field_from_sources(&sources, &["manual_discount_mode", "manualDiscountMode"])
-            .filter(|mode| matches!(mode.as_str(), "percentage" | "fixed"));
-    let manual_discount_value =
-        number_field_from_sources(&sources, &["manual_discount_value", "manualDiscountValue"])
-            .map(|value| value.max(0.0));
-    let discount_percentage =
-        number_field_from_sources(&sources, &["discount_percentage", "discountPercentage"])
-            .or_else(|| {
-                if manual_discount_mode.as_deref() == Some("percentage") {
-                    manual_discount_value
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
-            .max(0.0);
-    let discount_amount =
-        number_field_from_sources(&sources, &["discount_amount", "discountAmount"])
-            .or_else(|| {
-                if manual_discount_mode.as_deref() == Some("fixed") {
-                    manual_discount_value
-                } else if discount_percentage > 0.0 {
-                    Some((subtotal * (discount_percentage / 100.0)).max(0.0))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
-            .max(0.0);
-    let coupon_discount_amount = number_field_from_sources(
-        &sources,
-        &["coupon_discount_amount", "couponDiscountAmount"],
-    )
-    .unwrap_or_default()
-    .max(0.0);
-
-    let total_amount =
-        number_field_from_sources(&sources, &["total_amount", "totalAmount", "total"])
-            .unwrap_or_else(|| {
-                (subtotal + tax_amount + delivery_fee - discount_amount - coupon_discount_amount)
-                    .max(0.0)
-            })
-            .max(0.0);
+    let money = OrderInsertMoney::from_sources(&sources)?;
+    let expected_pre_tip_total = money.pre_tip_total();
+    let OrderInsertMoney {
+        items,
+        subtotal,
+        tax_amount,
+        delivery_fee,
+        manual_discount_mode,
+        manual_discount_value,
+        discount_percentage,
+        discount_amount,
+        coupon_discount_amount,
+        total_amount,
+    } = money;
 
     let branch_id = string_field_from_sources(&sources, &["branch_id", "branchId"])
         .or_else(|| {
@@ -3210,8 +3324,6 @@ fn build_order_insert_body(
     // included; manual_discount_mode is a string so no cents needed.
     let explicit_tip_amount =
         number_field_from_sources(&sources, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
-    let expected_pre_tip_total =
-        (subtotal + tax_amount + delivery_fee - discount_amount - coupon_discount_amount).max(0.0);
     let tip_amount = if explicit_tip_amount > 0.0 {
         explicit_tip_amount
     } else {
@@ -10391,12 +10503,67 @@ fn financial_operation(operation: &str) -> &str {
     }
 }
 
+/// A driver earning names its order by this till's local id, but the server
+/// knows a desktop order by its own id: the order went up under the
+/// renderer's request id (`client_order_id`), so the server answered
+/// "Referenced order ... was not found" for every earning and the Z waited
+/// for them (Tomikro, 07/10/2026). Send the order's server id, as a payment
+/// does (`prepare_payment_request`). A local order not on the server yet is
+/// waited for; one this till no longer holds goes as recorded, and the
+/// server resolves it through this till's payments.
+fn driver_earning_with_server_order(
+    conn: &Connection,
+    payload: &mut Value,
+) -> Result<Option<RequestPreparation>, String> {
+    let Some(local_order_id) = string_field(payload, &["order_id", "orderId"]) else {
+        return Ok(None);
+    };
+    let local_order: Option<Option<String>> = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(COALESCE(supabase_id, '')), '')
+             FROM orders
+             WHERE id = ?1 OR supabase_id = ?1
+             LIMIT 1",
+            params![local_order_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue prepare_financial_request remote order: {e}"))?;
+    match local_order {
+        None => Ok(None),
+        Some(Some(remote_order_id)) => {
+            for key in ["order_id", "orderId"] {
+                if payload.get(key).is_some() {
+                    payload[key] = Value::String(remote_order_id.clone());
+                }
+            }
+            Ok(None)
+        }
+        Some(None) => {
+            let reason = "Waiting for parent order sync".to_string();
+            if parent_order_write_in_flight(conn, local_order_id.as_str()) {
+                return Ok(Some(RequestPreparation::WaitingForParent { reason }));
+            }
+            Ok(Some(RequestPreparation::Deferred { reason }))
+        }
+    }
+}
+
 fn prepare_financial_request(
     conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
+    let mut payload = payload.clone();
+    if financial_entity_type(item.table_name.as_str()) == "driver_earning"
+        && item.operation != "DELETE"
+    {
+        if let Some(waiting) = driver_earning_with_server_order(conn, &mut payload)? {
+            return Ok(waiting);
+        }
+    }
+    let payload = &payload;
     let (_, branch_id, _) = resolve_runtime_context(conn, payload);
     // Wave 5 C17: the idempotency key is anchored on the entity row's own
     // `idempotency_key` column (populated by migration v47+ / trigger v49)
@@ -11366,6 +11533,9 @@ fn apply_header_edit_ack(
         )
         .map_err(|e| e.to_string())?;
     if projected == 1 {
+        // A header edit moves no money; the canonical snapshot's VAT is the
+        // order's canonical VAT (07/10/2026).
+        crate::fiscal::greece_vat::adopt_server_order_vat(conn, &item.record_id, canonical);
         let (notes, others): (Vec<_>, Vec<_>) = adopted
             .into_iter()
             .partition(|(column, _)| matches!(*column, "notes" | "special_instructions"));
@@ -11728,6 +11898,25 @@ fn adopt_edit_ack_headers(
     Ok(())
 }
 
+/// The request body the newest queued `table`/`record` row would send now,
+/// without claiming or acknowledging it.
+#[cfg(test)]
+pub(crate) fn request_body_for_test(
+    conn: &Connection,
+    table: &str,
+    record: &str,
+) -> Result<Value, String> {
+    let item=conn.query_row("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE table_name=?1 AND record_id=?2 ORDER BY rowid DESC LIMIT 1",
+        params![table,record],map_internal_queue_item).map_err(|error|error.to_string())?;
+    match prepare_request(conn, &item)? {
+        RequestPreparation::Ready(spec) => spec
+            .body
+            .map(|body| serde_json::from_str::<Value>(&body).map_err(|error| error.to_string()))
+            .unwrap_or(Ok(Value::Null)),
+        other => Err(format!("Unexpected test request: {other:?}")),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn apply_ack_for_test(
     conn: &Connection,
@@ -11757,6 +11946,33 @@ pub(crate) fn apply_ack_for_test(
     })?
     .ok_or("Test ACK lost its claim")?;
     Ok(body)
+}
+
+/// The create acknowledgement carries the server's row, whose VAT is the
+/// order's canonical VAT (07/10/2026). The till adopts it while no later local
+/// change of the order waits to sync: a queued edit means the row answers an
+/// older version of the order, and the edit's own acknowledgement or the next
+/// pull brings the VAT of the current one.
+fn adopt_insert_ack_vat(conn: &Connection, item: &SyncQueueItem, response: Option<&Value>) {
+    let Some(created) = response
+        .and_then(|answer| answer.get("data"))
+        .filter(|data| data.is_object())
+    else {
+        return;
+    };
+    let later_local_change: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM parity_sync_queue
+                WHERE table_name = 'orders' AND record_id = ?1 AND id <> ?2
+                  AND status IN ('pending', 'processing', 'failed', 'conflict'))",
+            params![item.record_id, item.id],
+            |row| row.get(0),
+        )
+        .unwrap_or(true);
+    if !later_local_change {
+        crate::fiscal::greece_vat::adopt_server_order_vat(conn, &item.record_id, created);
+    }
 }
 
 fn apply_success(
@@ -11864,6 +12080,7 @@ fn apply_success(
                 if let Some(response) = response {
                     sync::persist_room_charge_response(conn, &item.record_id, response)?;
                 }
+                adopt_insert_ack_vat(conn, item, response);
                 sync::promote_payments_for_order(conn, item.record_id.as_str());
             } else {
                 conn.execute(
@@ -18235,6 +18452,237 @@ mod tests {
     }
 
     #[test]
+    fn prepare_order_request_recovers_a_total_only_tip_with_the_canonical_vat_stored() {
+        // 07/10/2026: every order stores its real VAT. Prices include it, so
+        // the tip inference never adds the stored VAT on top of the subtotal;
+        // adding it made the expected tip negative and dropped the tip.
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                tax_amount, tax_amount_cents, tip_amount, tip_amount_cents, status,
+                order_type, payment_status, sync_status, branch_id, created_at, updated_at
+             ) VALUES (
+                'order-vat-tip',
+                '[{\"menu_item_id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"Crepe\",\"quantity\":1,\"unit_price\":11.5,\"total_price\":11.5}]',
+                12.0, 1200, 11.5, 1150, 2.23, 223, 0.0, 0, 'pending', 'delivery', 'paid',
+                'pending', ?1, datetime('now'), datetime('now')
+             )",
+            params![TEST_BRANCH_ID],
+        )
+        .expect("seed order storing its canonical VAT");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, amount_cents, currency, status,
+                tip_amount, tip_amount_cents, sync_status, sync_state, created_at, updated_at
+             ) VALUES ('payment-vat-tip', 'order-vat-tip', 'card', 12.0, 1200, 'EUR',
+                'completed', 0.5, 50, 'pending', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("seed tipped payment");
+        let item = queue_item(
+            "orders",
+            "INSERT",
+            "order-vat-tip",
+            json!({
+                "branchId": TEST_BRANCH_ID, "orderType": "delivery", "paymentMethod": "card",
+                "paymentStatus": "paid", "totalAmount": 12.0, "subtotal": 11.5,
+                "items": [{"menuItemId": TEST_MENU_ITEM_ID, "quantity": 1, "price": 11.5, "name": "Crepe"}]
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).unwrap();
+        let body = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap() {
+            RequestPreparation::Ready(spec) => {
+                serde_json::from_str::<Value>(spec.body.as_deref().unwrap()).unwrap()
+            }
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        assert_eq!(body["tip_amount_cents"], 50);
+        assert_eq!(body["total_amount_cents"], 1200);
+        assert_eq!(body["subtotal_cents"], 1150);
+        assert_eq!(body["tax_amount_cents"], 223);
+    }
+
+    #[test]
+    fn a_missing_total_is_never_inflated_by_the_stored_vat() {
+        let money = OrderInsertMoney::from_sources(&[&json!({
+            "items": [{"name": "Crepe", "quantity": 1, "unit_price": 10.0, "total_price": 10.0}],
+            "subtotal": 10.0,
+            "tax_amount": 1.94,
+            "delivery_fee": 2.0,
+            "discount_amount": 1.0
+        })])
+        .unwrap();
+        assert_eq!(
+            money.total_amount, 11.0,
+            "items - discount + fee; VAT included"
+        );
+    }
+
+    #[test]
+    fn order_insert_vat_is_the_server_vat_of_the_body_the_till_sends() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, subtotal, discount_amount, delivery_fee,
+                tip_amount, status, order_type, sync_status, branch_id, created_at, updated_at)
+             VALUES ('order-vat-body', ?1, 24.65, 22.6, 0.75, 1.8, 1.0, 'pending', 'delivery',
+                'pending', ?2, datetime('now'), datetime('now'))",
+            params![
+                json!([
+                    {"menu_item_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "name": "Crepe", "quantity": 1, "unit_price": 8.5},
+                    {"menu_item_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2", "name": "Waffle", "quantity": 1, "unit_price": 9.4},
+                    {"menu_item_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3", "name": "Juice", "quantity": 2, "unit_price": 2.35}
+                ])
+                .to_string(),
+                TEST_BRANCH_ID
+            ],
+        )
+        .unwrap();
+        let payload = json!({"orderType": "delivery", "tipAmount": 1.0});
+        let body = build_order_insert_body(&conn, "order-vat-body", &payload).unwrap();
+        let settings = crate::fiscal::greece_vat::branch_vat_settings(&conn);
+        let from_body =
+            crate::fiscal::greece_vat::calculate_order_vat_from_order_body(&body, &settings);
+        let till = order_insert_vat(&conn, "order-vat-body", &payload).unwrap();
+        // The body also carries the tip, a line outside VAT that shares no
+        // discount: the VAT and every VAT-bearing line are the same.
+        let vat_lines = |vat: &crate::fiscal::greece_vat::GreeceOrderVatResult| {
+            vat.breakdown
+                .lines
+                .iter()
+                .filter(|line| line.line_kind != crate::fiscal::greece_vat::FiscalLineKind::Tip)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(till.tax_amount_cents, from_body.tax_amount_cents);
+        assert_eq!(vat_lines(&till), vat_lines(&from_body));
+        // The shared vector `delivery_order_full`.
+        assert_eq!(till.tax_amount_cents, 444);
+        assert_eq!(
+            order_insert_vat(&conn, "order-vat-body", &Value::Null)
+                .unwrap()
+                .tax_amount_cents,
+            444,
+            "the local row alone gives the same VAT"
+        );
+    }
+
+    fn seed_vat_ack_order(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, total_amount_cents, subtotal,
+                tax_amount, tax_amount_cents, status, order_type, sync_status, branch_id,
+                created_at, updated_at)
+             VALUES (?1, '[]', 13.0, 1300, 13.0, 2.52, 252, 'pending', 'pickup', 'pending', ?2,
+                datetime('now'), datetime('now'))",
+            params![id, TEST_BRANCH_ID],
+        )
+        .unwrap();
+    }
+
+    fn stored_vat_cents(conn: &Connection, id: &str) -> i64 {
+        conn.query_row(
+            "SELECT tax_amount_cents FROM orders WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn insert_ack_adopts_the_server_vat_for_the_same_money_only() {
+        let conn = test_connection();
+        let answer = |total: f64| {
+            json!({"success": true, "data": {
+                "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "total_amount": total,
+                "total_amount_cents": (total * 100.0).round() as i64,
+                "tax_amount": 2.51, "tax_amount_cents": 251,
+                "tax_breakdown": [{"vatCategoryCode": "gr_standard_24"}]
+            }})
+        };
+        let insert = |id: &str| queue_item("orders", "INSERT", id, json!({"orderId": id}));
+
+        seed_vat_ack_order(&conn, "ack-vat-same");
+        apply_success(&conn, &insert("ack-vat-same"), Some(&answer(13.0))).unwrap();
+        assert_eq!(
+            stored_vat_cents(&conn, "ack-vat-same"),
+            251,
+            "the server's VAT"
+        );
+        let (tax, synced): (f64, String) = conn
+            .query_row(
+                "SELECT tax_amount, sync_status FROM orders WHERE id = 'ack-vat-same'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((tax, synced.as_str()), (2.51, "synced"));
+
+        // Another total: the answer is about other money.
+        seed_vat_ack_order(&conn, "ack-vat-other-total");
+        apply_success(&conn, &insert("ack-vat-other-total"), Some(&answer(14.0))).unwrap();
+        assert_eq!(stored_vat_cents(&conn, "ack-vat-other-total"), 252);
+
+        // A later local change waits to sync: the answer is about an older
+        // version of the order.
+        seed_vat_ack_order(&conn, "ack-vat-later-edit");
+        enqueue_payload_item(
+            &conn,
+            "orders",
+            "ack-vat-later-edit",
+            "UPDATE",
+            &json!({"orderId": "ack-vat-later-edit", "status": "pending"}),
+            Some(0),
+            Some("orders"),
+            Some("server-wins"),
+            Some(1),
+        )
+        .unwrap();
+        apply_success(&conn, &insert("ack-vat-later-edit"), Some(&answer(13.0))).unwrap();
+        assert_eq!(stored_vat_cents(&conn, "ack-vat-later-edit"), 252);
+    }
+
+    #[test]
+    fn insert_ack_vat_refused_by_the_collection_guard_still_acknowledges_the_order() {
+        let conn = test_connection();
+        seed_vat_ack_order(&conn, "ack-vat-guarded");
+        conn.execute(
+            "INSERT INTO ecr_devices (id, name, device_type, protocol, connection_type)
+             VALUES ('register', 'Register', 'cash_register', 'cap_driver', 'network')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ecr_transactions (id, device_id, order_id, transaction_type, amount, status, started_at)
+             VALUES ('collect-attempt', 'register', 'ack-vat-guarded:collect-outstanding:gen',
+                'fiscal_receipt', 1300, 'processing', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        let answer = json!({"success": true, "data": {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", "total_amount": 13.0, "tax_amount_cents": 251
+        }});
+        apply_success(
+            &conn,
+            &queue_item("orders", "INSERT", "ack-vat-guarded", json!({})),
+            Some(&answer),
+        )
+        .expect("the acknowledgement itself succeeds");
+        let (cents, sync_status, remote): (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT tax_amount_cents, sync_status, supabase_id FROM orders WHERE id = 'ack-vat-guarded'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cents, 252, "the guard keeps the till's own computation");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(
+            remote.as_deref(),
+            Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab")
+        );
+    }
+
+    #[test]
     fn prepare_order_request_preserves_string_table_numbers() {
         let conn = test_connection();
         let item = queue_item(
@@ -19259,7 +19707,10 @@ mod tests {
             body.get("discount_amount").and_then(Value::as_f64),
             Some(0.7)
         );
-        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(14.0));
+        // Prices include VAT (07/10/2026): the missing total is the items less
+        // the discount plus the fee, the total the server computes. Adding the
+        // tax on top (14.00) was refused as a total mismatch.
+        assert_eq!(body.get("total_amount").and_then(Value::as_f64), Some(12.8));
         assert_eq!(
             body.get("client_order_id").and_then(Value::as_str),
             Some("order-legacy-2")
@@ -26239,6 +26690,117 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .unwrap();
         assert_eq!(idem, "entity:order_payments:pay-w5-c17-missing");
+    }
+
+    // Tomikro, 07/10/2026: 14 driver earnings went up with the till's local
+    // order id, the server never found the order, and the 06/10 Z waited.
+    fn seed_earning_order(conn: &Connection, id: &str, supabase_id: Option<&str>) {
+        conn.execute(
+            "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+             VALUES (?1, ?2, '[]', 11.05, 1105, 'delivered', 'synced', datetime('now'), datetime('now'))",
+            params![id, supabase_id],
+        )
+        .expect("seed earning order");
+    }
+
+    fn earning_body_order(prep: RequestPreparation) -> Value {
+        let RequestPreparation::Ready(spec) = prep else {
+            panic!("expected a ready request, got {prep:?}");
+        };
+        let body: Value =
+            serde_json::from_str(spec.body.as_deref().expect("body")).expect("body is JSON");
+        body.pointer("/items/0/payload/order_id")
+            .cloned()
+            .expect("payload order_id")
+    }
+
+    #[test]
+    fn driver_earning_goes_up_with_its_orders_server_id() {
+        let conn = test_connection();
+        seed_earning_order(
+            &conn,
+            "local-order",
+            Some("01bb38f1-4d47-4f1a-bdeb-bac2db8698aa"),
+        );
+        let payload =
+            json!({"id": "earning-1", "order_id": "local-order", "driver_id": "driver-1"});
+        let item = queue_item("driver_earnings", "INSERT", "earning-1", payload.clone());
+
+        let prep = prepare_financial_request(&conn, &item, &payload, "terminal-test")
+            .expect("prepare driver earning");
+
+        assert_eq!(
+            earning_body_order(prep),
+            json!("01bb38f1-4d47-4f1a-bdeb-bac2db8698aa")
+        );
+    }
+
+    #[test]
+    fn driver_earning_waits_for_an_order_not_on_the_server_yet() {
+        let conn = test_connection();
+        seed_earning_order(&conn, "local-order", None);
+        let payload = json!({"id": "earning-1", "order_id": "local-order"});
+        let item = queue_item("driver_earnings", "INSERT", "earning-1", payload.clone());
+
+        // No write of the order is queued: a budgeted deferral.
+        let prep = prepare_financial_request(&conn, &item, &payload, "terminal-test")
+            .expect("prepare driver earning");
+        assert!(
+            matches!(prep, RequestPreparation::Deferred { .. }),
+            "{prep:?}"
+        );
+
+        // The order's own insert is still queued: waiting spends nothing.
+        conn.execute(
+            "INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id, created_at, status)
+             VALUES ('order-insert', 'orders', 'local-order', 'INSERT', '{}', 'org-1', datetime('now'), 'pending')",
+            [],
+        )
+        .expect("queue the order insert");
+        let prep = prepare_financial_request(&conn, &item, &payload, "terminal-test")
+            .expect("prepare driver earning");
+        assert!(
+            matches!(prep, RequestPreparation::WaitingForParent { .. }),
+            "{prep:?}"
+        );
+    }
+
+    #[test]
+    fn driver_earning_keeps_its_recorded_order_when_the_till_no_longer_holds_it() {
+        let conn = test_connection();
+        let payload =
+            json!({"id": "earning-1", "order_id": "87443555-be54-4b57-91fb-11f2f4a54fe8"});
+        let item = queue_item("driver_earnings", "INSERT", "earning-1", payload.clone());
+
+        let prep = prepare_financial_request(&conn, &item, &payload, "terminal-test")
+            .expect("prepare driver earning");
+
+        // The server resolves it through this till's payments.
+        assert_eq!(
+            earning_body_order(prep),
+            json!("87443555-be54-4b57-91fb-11f2f4a54fe8")
+        );
+    }
+
+    #[test]
+    fn other_financial_rows_and_earning_deletes_go_as_recorded() {
+        let conn = test_connection();
+        seed_earning_order(&conn, "local-order", Some("server-order"));
+        for (table, operation) in [
+            ("driver_earnings", "DELETE"),
+            ("shift_expenses", "INSERT"),
+            ("staff_payments", "INSERT"),
+        ] {
+            let payload = json!({"id": "row-1", "order_id": "local-order"});
+            let item = queue_item(table, operation, "row-1", payload.clone());
+            let prep = prepare_financial_request(&conn, &item, &payload, "terminal-test")
+                .expect("prepare financial row");
+            assert_eq!(
+                earning_body_order(prep),
+                json!("local-order"),
+                "{table} {operation}"
+            );
+        }
     }
 
     /// Helper for the H8 tests: insert one parity_sync_queue row with

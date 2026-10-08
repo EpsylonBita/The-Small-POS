@@ -23,6 +23,21 @@ describe('visible table recovery state', () => {
     fireEvent.click(screen.getByText('checkoutRecovery.refresh'));
     await screen.findByText('checkoutRecovery.unavailable'); expect(screen.getByText(/approval_required/)).toBeTruthy();
   });
+  // 06/10/2026: a store without tables saw the notice at intervals, each time
+  // one status read failed after readings with nothing pending.
+  it('a failed read after a valid reading with nothing pending stays quiet', async () => {
+    mocks.invoke.mockResolvedValueOnce({ success: true, attempts: [] }).mockRejectedValue(new Error('REPAIR_SCOPE_TRANSITION_PENDING'));
+    render(<TableAttemptRecoveryNotice />);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(1));
+    await act(async () => mocks.callbacks.get('table_attempt_recovery')?.());
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+  it('shows the status as unavailable while the binding has never been read', async () => {
+    mocks.invoke.mockRejectedValue(new Error('REPAIR_SCOPE_TRANSITION_PENDING'));
+    render(<TableAttemptRecoveryNotice />);
+    await screen.findByText('checkoutRecovery.unavailable');
+  });
   it('removes resolved work only after a successful authoritative status read', async () => {
     mocks.invoke.mockResolvedValueOnce({ success: true, attempts: [attempt] }).mockResolvedValue({ success: true, attempts: [] });
     render(<TableAttemptRecoveryNotice />); await screen.findByText(/approval_required/);

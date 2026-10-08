@@ -10,6 +10,12 @@ interface PrivilegedActionRequest<T> {
   action: (pin?: string) => Promise<T>
   title?: string
   subtitle?: string
+  /**
+   * Why a manager's own PIN is asked, when the caller knows better than the
+   * default "nobody is checked in" (07/10/2026: a paid cancellation asks it
+   * while a cashier without the right is on shift).
+   */
+  approvalSubtitle?: string
 }
 
 interface PendingPrivilegedAction<T> extends PrivilegedActionRequest<T> {
@@ -32,6 +38,7 @@ export function usePrivilegedActionConfirmation() {
     action,
     title,
     subtitle,
+    approvalSubtitle,
   }: PrivilegedActionRequest<T>): Promise<T> => {
     try {
       return await action()
@@ -59,6 +66,7 @@ export function usePrivilegedActionConfirmation() {
           reject,
           title,
           subtitle,
+          approvalSubtitle,
           approval: privilegedError.approval ?? null,
         })
       })
@@ -113,9 +121,11 @@ export function usePrivilegedActionConfirmation() {
   }
 
   // Nobody is on shift at this terminal: a manager approves with their own
-  // PIN (the shared terminal PIN does not), so the prompt says so.
+  // PIN (the shared terminal PIN does not), so the prompt says so, unless the
+  // caller says why it is asked.
   const subtitle = pendingAction?.approval
-    ? String(
+    ? pendingAction.approvalSubtitle ??
+      String(
         t('auth.managerApproval.subtitle', {
           defaultValue:
             'Nobody is checked in on this till. A manager with the right to approve it enters their own PIN. Nothing is charged.',
