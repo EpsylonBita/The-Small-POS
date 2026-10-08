@@ -45,6 +45,7 @@ import {
 } from '../../utils/tableOrderFlow';
 import {
   buildUnpaidAmountByItemId,
+  quoteTableItemQuantity,
   applyTableCheckOrderLevelDiscount,
   hydrateTableCheckItems,
   paymentBelongsToTableSession,
@@ -69,11 +70,12 @@ import {
   toggleBatchItemSelection,
 } from '../../../../../shared/pos/table-batch-selection';
 import {
-  enqueueTableItemTransfer,
-  enqueueTablePayment,
+  enqueueTableItemTransferBatch,
   enqueueTableSessionOpen,
   enqueueTableSessionUpdate,
   isRetryableTableServiceError,
+  isRetainedTableMutationError,
+  tableMutationOutcome,
 } from '../../utils/tableSessionOfflineQueue';
 
 type PaymentMethod = 'cash' | 'card';
@@ -87,6 +89,8 @@ interface TableSessionBalance {
   tip_total?: number;
   outstanding_balance?: number;
   payment_status?: string | null;
+  unallocated_paid_cents?: number;
+  item_settlement_requires_balance?: boolean;
 }
 
 interface TableSessionOrderItem {
@@ -129,6 +133,9 @@ interface TableSessionAllocation {
   seat_number?: number | null;
   quantity?: number | string | null;
   paid_quantity?: number | string | null;
+  item_total_cents?: number;
+  paid_amount_cents?: number;
+  outstanding_amount_cents?: number;
   status?: string | null;
   metadata?: Record<string, unknown> | null;
 }
@@ -345,18 +352,6 @@ const glassInputClass = 'liquid-glass-modal-input w-full';
 
 const isLocalSessionId = (sessionId: string | null | undefined): boolean =>
   typeof sessionId === 'string' && sessionId.startsWith(localSessionIdPrefix);
-
-function isOutstandingTableSessionBalanceError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error || '');
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes('cannot close a table session with an outstanding balance') ||
-    (
-      normalized.includes('outstanding_balance') &&
-      normalized.includes('paid_total')
-    )
-  );
-}
 
 const readOrderTotal = (order: Order): number =>
   Number((order as any).total_amount ?? (order as any).totalAmount ?? 0) || 0;
@@ -1060,6 +1055,20 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     [t],
   );
   const translatedItemFallback = tr('labels.item', 'Item');
+  const tableMutationFailureMessage = (error: unknown, fallback: string): string => {
+    const outcome = tableMutationOutcome(error);
+    if (outcome === 'BLOCKED') {
+      return tr('errors.tableMutationBlocked', 'A previous table action is awaiting confirmation. Review the saved action in Sync Health before making another change.');
+    }
+    if (outcome === 'REFUSED') {
+      const count = (error as { tableMutationQuarantinedCount?: number } | null)?.tableMutationQuarantinedCount;
+      if (typeof count === 'number' && Number.isSafeInteger(count) && count > 0) {
+        return tr('errors.tableMutationBatchRefused', 'The table change was not accepted. Selected items not sent: {{count}}. Refresh the check and review your selection before trying again.', { count });
+      }
+      return tr('errors.tableMutationRefused', 'The table change was not accepted. Refresh the check and review your selection before trying again.');
+    }
+    return error instanceof Error ? error.message : fallback;
+  };
   // Item D1 (fix review 30/09/2026): an order that owes money is cancelled
   // from its check only explicitly, with a reason and the manager's approval.
   const {
@@ -1212,10 +1221,32 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     return map;
   }, [orderItems, paidQuantityByItemId, session?.items]);
 
-  const unpaidAmountByItemId = useMemo(
-    () => buildUnpaidAmountByItemId(orderItems, paidItemRecords, paidTotal, itemLineTotal),
-    [orderItems, paidItemRecords, paidTotal],
-  );
+  const scopedPaidTotal = useMemo(() => paidItemRecords.reduce((sum, row) =>
+    sum + Math.max(0, Number(row.itemAmount ?? row.item_amount ?? 0)), 0), [paidItemRecords]);
+  const activeAllocations = (session?.items || []).filter(row => row.status !== 'voided' && row.status !== 'transferred');
+  const allocatedPaidCents = activeAllocations.length > 0 && activeAllocations.every(row => row.paid_amount_cents !== undefined)
+    ? activeAllocations.reduce((sum, row) => sum + Number(row.paid_amount_cents || 0), 0)
+    : null;
+  // A fresh server flag cannot clear an anonymous local receipt whose mirror
+  // has not reached that snapshot. Compare both scoped item proofs with money.
+  const requiresBalanceSettlement = session?.balance?.item_settlement_requires_balance === true
+    || Number(session?.balance?.unallocated_paid_cents || 0) > 0
+    || (allocatedPaidCents !== null
+      ? Math.round(paidTotal * 100) > Math.max(allocatedPaidCents, Math.round(scopedPaidTotal * 100))
+      : session?.balance?.item_settlement_requires_balance
+        ?? (Math.round(paidTotal * 100) > Math.round(scopedPaidTotal * 100)));
+  const balanceSettlementMessage = tr('errors.unallocatedPaymentBalanceOnly', 'A payment by amount is already recorded. Settle the remaining balance by amount before moving or paying individual items.');
+  const unpaidAmountByItemId = useMemo(() => {
+    // Anonymous receipts do not prove that a particular product was paid.
+    const fallback = buildUnpaidAmountByItemId(orderItems, paidItemRecords, Math.min(paidTotal, scopedPaidTotal), itemLineTotal);
+    for (const item of orderItems) {
+      const rows = (session?.items || []).filter(row => row.order_item_id === item.id && row.status !== 'voided' && row.status !== 'transferred');
+      if (rows.length && rows.every(row => row.outstanding_amount_cents !== undefined)) {
+        fallback.set(item.id, rows.reduce((sum, row) => sum + Number(row.outstanding_amount_cents || 0), 0) / 100);
+      }
+    }
+    return fallback;
+  }, [orderItems, paidItemRecords, paidTotal, scopedPaidTotal, session?.items]);
 
   const selectedTransferItem =
     (transferItemId ? orderItems.find(item => item.id === transferItemId) : null) ||
@@ -1223,10 +1254,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     orderItems[0] ||
     null;
   const selectedTransferAvailable = selectedTransferItem
-    ? availableQuantityByItemId.get(selectedTransferItem.id) || Number(selectedTransferItem.quantity || 0)
+    ? availableQuantityByItemId.get(selectedTransferItem.id) ?? Number(selectedTransferItem.quantity || 0)
     : 0;
   const selectedItemAvailable = selectedItem
-    ? availableQuantityByItemId.get(selectedItem.id) || Number(selectedItem.quantity || 0)
+    ? availableQuantityByItemId.get(selectedItem.id) ?? Number(selectedItem.quantity || 0)
     : 0;
   const selectedItemUnpaidAmount = selectedItem
     ? unpaidAmountByItemId.get(selectedItem.id) ?? Number((itemUnitPrice(selectedItem) * selectedItemAvailable).toFixed(2))
@@ -1237,7 +1268,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   const selectedItemPayAmount = selectedItem
     ? Math.min(
         selectedItemUnpaidAmount,
-        Number((itemUnitPrice(selectedItem) * Math.max(1, Number(itemPayQuantity || 1))).toFixed(2)),
+        quoteTableItemQuantity(session?.items || [], selectedItem.id, Math.max(0, Number(itemPayQuantity || 1)), selectedItemUnpaidAmount, selectedItemAvailable),
       )
     : 0;
   const isBatchMode = isBatchItemSelectionActive(batchSelectedItemIds);
@@ -1591,12 +1622,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   };
 
   const openTransferModal = (item?: TableSessionOrderItem) => {
+    if (requiresBalanceSettlement) {
+      toast.error(balanceSettlementMessage);
+      return;
+    }
     const targetItem = item || selectedTransferItem;
     if (targetItem) {
       setSelectedItem(targetItem);
       setTransferItemId(targetItem.id);
-      const available = availableQuantityByItemId.get(targetItem.id) || Number(targetItem.quantity || 1);
-      setTransferQuantity(String(Math.max(1, Math.min(1, available))));
+      const available = availableQuantityByItemId.get(targetItem.id) ?? Number(targetItem.quantity || 1);
+      setTransferQuantity(String(Math.min(1, available)));
     }
     setTargetTableId('');
     setTransferSeatNumber('');
@@ -1621,6 +1656,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   };
 
   const openBatchPayModal = () => {
+    if (requiresBalanceSettlement) {
+      toast.error(balanceSettlementMessage);
+      openPayTableModal();
+      return;
+    }
     if (batchUnpaidItemEntries.length === 0) {
       toast.error(tr('errors.noBatchPayableItems', 'Select at least one unpaid item.'));
       return;
@@ -1632,6 +1672,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   };
 
   const openBatchTransferModal = () => {
+    if (requiresBalanceSettlement) {
+      toast.error(balanceSettlementMessage);
+      return;
+    }
     if (batchUnpaidItemEntries.length === 0) {
       toast.error(tr('errors.noBatchTransferItems', 'Select at least one unpaid item to move.'));
       return;
@@ -1695,7 +1739,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     setIsSaving(true);
     const requestBody = {
       ...body,
-      client_event_id: `pos-tauri-table-${body.action}-${session.id}-${Date.now()}`,
+      client_event_id: `pos-tauri-table-${body.action}-${crypto.randomUUID()}`,
     };
     try {
       const result = await posApiPatch<{ success?: boolean; session?: TableSessionDetails; error?: string }>(
@@ -1720,22 +1764,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       await refreshAll();
     } catch (error) {
       console.error('[TableCheckManagerModal] Session update failed:', error);
-      if (isRetryableTableServiceError(error)) {
-        try {
-          await enqueueTableSessionUpdate({
-            organizationId: table?.organizationId,
-            branchId: table?.branchId,
-            sessionId: session.id,
-            payload: requestBody,
-          });
-          toast.success(tr('messages.tableActionQueued', 'Table action queued for sync'));
-          closeSecondaryModal();
-          return;
-        } catch (queueError) {
-          console.warn('[TableCheckManagerModal] Failed to queue session update:', queueError);
-        }
+      if (isRetainedTableMutationError(error)) {
+        // Native API dispatch already retained this exact original before HTTP.
+        toast.success(tr('messages.tableActionQueued', 'Table action queued for sync'));
+        closeSecondaryModal();
+        return;
       }
-      toast.error(error instanceof Error ? error.message : tr('errors.sessionUpdateFailed', 'Table session update failed'));
+      toast.error(tableMutationFailureMessage(error, tr('errors.sessionUpdateFailed', 'Table session update failed')));
     } finally {
       setIsSaving(false);
     }
@@ -1751,7 +1786,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       status: 'closed',
       release_status: 'cleaning',
       force: true,
-      client_event_id: `pos-tauri-table-close-${session.id}-${Date.now()}`,
+      client_event_id: `pos-tauri-table-close-${crypto.randomUUID()}`,
     };
 
     const emitCleaningRelease = () => {
@@ -1771,6 +1806,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           sessionId: session.id,
           payload: requestBody,
         });
+        toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
+        closeSecondaryModal();
+        return;
       } else {
         const result = await posApiPatch<{ success?: boolean; session?: TableSessionDetails; error?: string }>(
           `/api/pos/table-sessions/${encodeURIComponent(session.id)}`,
@@ -1781,26 +1819,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         }
       }
     } catch (error) {
-      if (isRetryableTableServiceError(error) || isOutstandingTableSessionBalanceError(error)) {
-        try {
-          await enqueueTableSessionUpdate({
-            organizationId: table.organizationId,
-            branchId: table.branchId,
-            sessionId: session.id,
-            payload: requestBody,
-          });
-        } catch (queueError) {
-          console.warn('[TableCheckManagerModal] Failed to queue settled table close:', queueError);
-          toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
-          closeSecondaryModal();
-          return;
-        }
-      } else {
-        console.error('[TableCheckManagerModal] Failed to close settled table:', error);
-        toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
-        closeSecondaryModal();
-        return;
-      }
+      // Native dispatch retains unknown replies. A queued close is not an ACK
+      // and must never project the physical table as released.
+      console.warn('[TableCheckManagerModal] Table close awaiting acknowledgement:', error);
+      toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
+      closeSecondaryModal();
+      return;
     }
 
     emitCleaningRelease();
@@ -1826,22 +1850,31 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       toast.error(tr('errors.noActiveOrder', 'No active order is linked to this table.'));
       return false;
     }
+    if (requiresBalanceSettlement && (options?.item || options?.items?.length)) {
+      toast.error(balanceSettlementMessage);
+      openPayTableModal();
+      return false;
+    }
 
     const itemPaymentEntries = options?.items?.length
       ? options.items
       : options?.item
         ? [{
             item: options.item,
-            itemQuantity: Math.max(1, options.itemQuantity || 1),
+            itemQuantity: Math.max(0, options.itemQuantity ?? 1),
             itemAmount: options.itemAmount,
           }]
         : [];
+    if (itemPaymentEntries.some(entry => entry.itemQuantity <= 0 || entry.itemQuantity > (availableQuantityByItemId.get(entry.item.id) ?? 0))) {
+      toast.error(tr('errors.noBatchPayableItems', 'Select at least one unpaid item.'));
+      return false;
+    }
     const principal = itemPaymentEntries.length > 0
       ? Number(itemPaymentEntries.reduce((sum, entry) => {
-          const quantity = Math.max(1, Number(entry.itemQuantity || 1));
+          const quantity = Math.max(0, Number(entry.itemQuantity ?? 1));
           const itemAmount = entry.itemAmount !== undefined
             ? Math.max(0, Number(entry.itemAmount || 0))
-            : Number((itemUnitPrice(entry.item) * quantity).toFixed(2));
+            : quoteTableItemQuantity(session.items || [], entry.item.id, quantity, unpaidAmountByItemId.get(entry.item.id) ?? 0, availableQuantityByItemId.get(entry.item.id) ?? 0);
           return sum + itemAmount;
         }, 0).toFixed(2))
       : parseMoneyInput(paymentAmount);
@@ -1856,13 +1889,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     const amount = Number((principal + tipValue).toFixed(2));
     const nextPaidAfterPayment = Number((paidTotal + principal).toFixed(2));
     const nextOutstandingAfterPayment = Number(Math.max(0, orderTotal - nextPaidAfterPayment).toFixed(2));
-    const isFullySettledAfterPayment = nextOutstandingAfterPayment <= 0.01;
+    const isFullySettledAfterPayment = Math.round(nextOutstandingAfterPayment * 100) === 0;
     const localPaymentItems: RecordPaymentParams['items'] | undefined = itemPaymentEntries.length > 0
       ? itemPaymentEntries.map(entry => {
-          const itemPaymentQuantity = Math.max(1, Number(entry.itemQuantity || 1));
+          const itemPaymentQuantity = Math.max(0, Number(entry.itemQuantity ?? 1));
           const itemAmount = entry.itemAmount !== undefined
             ? Math.max(0, Number(entry.itemAmount || 0))
-            : Number((itemUnitPrice(entry.item) * itemPaymentQuantity).toFixed(2));
+            : quoteTableItemQuantity(session.items || [], entry.item.id, itemPaymentQuantity, unpaidAmountByItemId.get(entry.item.id) ?? 0, availableQuantityByItemId.get(entry.item.id) ?? 0);
           const selectedItemIndex = Math.max(0, orderItems.findIndex(item => item.id === entry.item.id));
           return {
             order_item_id: entry.item.id,
@@ -1885,7 +1918,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       amount,
       method,
       tipAmount: tipValue,
-      seatNumber,
+      seatNumber: requiresBalanceSettlement ? '' : seatNumber,
       idempotencyKey: `pos-tauri-table-payment-${session.id}-${Date.now()}`,
       items: localPaymentItems,
     });
@@ -1903,8 +1936,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       tip_amount_cents: Math.round(tipValue * 100),
       tableSessionId: session.id,
       table_session_id: session.id,
-      seatNumber: seatNumber ? Number(seatNumber) : undefined,
-      seat_number: seatNumber ? Number(seatNumber) : undefined,
+      seatNumber: !requiresBalanceSettlement && seatNumber ? Number(seatNumber) : undefined,
+      seat_number: !requiresBalanceSettlement && seatNumber ? Number(seatNumber) : undefined,
       paymentOrigin: 'manual' as const,
       idempotencyKey: payload.idempotency_key,
       idempotency_key: payload.idempotency_key,
@@ -1928,18 +1961,18 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         const nextOutstanding = Number(Math.max(0, Number(current.balance.order_total || 0) - nextPaid).toFixed(2));
         return {
           ...current,
-          status: nextOutstanding <= 0.01 ? 'settled' : 'partially_paid',
+          status: Math.round(nextOutstanding * 100) === 0 ? 'settled' : 'partially_paid',
           balance: {
             ...current.balance,
             paid_total: nextPaid,
             tip_total: nextTip,
             outstanding_balance: nextOutstanding,
-            payment_status: nextOutstanding <= 0.01 ? 'paid' : 'partially_paid',
+            payment_status: Math.round(nextOutstanding * 100) === 0 ? 'paid' : 'partially_paid',
           },
           order: current.order
             ? {
                 ...current.order,
-                payment_status: nextOutstanding <= 0.01 ? 'paid' : 'partially_paid',
+                payment_status: Math.round(nextOutstanding * 100) === 0 ? 'paid' : 'partially_paid',
               }
             : current.order,
         };
@@ -1963,6 +1996,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       if (localPaymentItems?.length) {
         setPaidItemRecords(current => [
           ...localPaymentItems.map(item => ({
+            order_item_id: item.order_item_id,
             itemIndex: Number(item.itemIndex ?? 0),
             itemQuantity: Number(item.itemQuantity ?? item.quantity ?? 1),
             itemAmount: Number(item.itemAmount ?? item.item_amount ?? amount),
@@ -1982,21 +2016,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       return true;
     } catch (error) {
       console.error('[TableCheckManagerModal] Payment failed:', error);
-      if (isRetryableTableServiceError(error)) {
-        try {
-          await enqueueTablePayment({
-            organizationId: table?.organizationId,
-            branchId: table?.branchId,
-            payload,
-          });
-          toast.success(tr('messages.paymentQueued', 'Payment queued for sync'));
-          closeSecondaryModal();
-          await refreshAll();
-          return true;
-        } catch (queueError) {
-          console.warn('[TableCheckManagerModal] Failed to queue payment:', queueError);
-        }
-      }
+      // Native payment persistence owns receipts and moved-money recovery.
+      // A rejected collection must never become a raw server payment outbox.
       toast.error(error instanceof Error ? error.message : tr('errors.paymentFailed', 'Payment failed'));
       return false;
     } finally {
@@ -2154,6 +2175,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
   const transferItem = async () => {
     if (isSavedSession) return;
+    if (requiresBalanceSettlement) {
+      toast.error(balanceSettlementMessage);
+      return;
+    }
     if (!session || !selectedTransferItem || !targetTableId) {
       toast.error(tr('errors.selectItemAndTargetTable', 'Select an item and target table.'));
       return;
@@ -2177,7 +2202,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       source_table_id: table?.id,
       target_seat_number: transferSeatNumber ? normalizeGuestCount(transferSeatNumber) : null,
       ...buildTransferPricingPayload(selectedTransferItem, requestedQuantity),
-      client_event_id: `pos-tauri-table-item-transfer-${session.id}-${Date.now()}`,
+      client_event_id: `pos-tauri-table-item-transfer-${crypto.randomUUID()}`,
     };
     try {
       const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; target_session?: TableSessionDetails; error?: string }>(
@@ -2197,22 +2222,12 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       await refreshAll();
     } catch (error) {
       console.error('[TableCheckManagerModal] Item transfer failed:', error);
-      if (isRetryableTableServiceError(error)) {
-        try {
-          await enqueueTableItemTransfer({
-            organizationId: table?.organizationId,
-            branchId: table?.branchId,
-            sourceSessionId: session.id,
-            payload: transferPayload,
-          });
-          toast.success(tr('messages.itemTransferQueued', 'Item transfer queued for sync'));
-          closeSecondaryModal();
-          return;
-        } catch (queueError) {
-          console.warn('[TableCheckManagerModal] Failed to queue item transfer:', queueError);
-        }
+      if (isRetainedTableMutationError(error)) {
+        toast.success(tr('messages.itemTransferQueued', 'Item transfer queued for sync'));
+        closeSecondaryModal();
+        return;
       }
-      toast.error(error instanceof Error ? error.message : tr('errors.itemTransferFailed', 'Item transfer failed'));
+      toast.error(tableMutationFailureMessage(error, tr('errors.itemTransferFailed', 'Item transfer failed')));
     } finally {
       setIsSaving(false);
     }
@@ -2231,6 +2246,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
   const transferBatchItems = async () => {
     if (isSavedSession) return;
+    if (requiresBalanceSettlement) {
+      toast.error(balanceSettlementMessage);
+      return;
+    }
     if (!session || !targetTableId) {
       toast.error(tr('errors.selectItemAndTargetTable', 'Select an item and target table.'));
       return;
@@ -2245,6 +2264,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     }
 
     setIsSaving(true);
+    const batchId = crypto.randomUUID();
     const transferPayloads = batchUnpaidItemEntries.map((entry, index) => ({
       order_item_id: entry.item.id,
       quantity: entry.itemQuantity,
@@ -2252,11 +2272,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       source_table_id: table?.id,
       target_seat_number: transferSeatNumber ? normalizeGuestCount(transferSeatNumber) : null,
       ...buildTransferPricingPayload(entry.item, entry.itemQuantity),
-      client_event_id: `pos-tauri-table-batch-transfer-${session.id}-${entry.item.id}-${Date.now()}-${index}`,
+      client_event_id: `pos-tauri-table-batch-transfer-${crypto.randomUUID()}`,
+      client_batch_id: batchId,
+      client_batch_index: index,
     }));
-    let acknowledgedTransferCount = 0;
+    let batchRetained = false;
 
     try {
+      await enqueueTableItemTransferBatch({ organizationId: table?.organizationId,
+        branchId: table?.branchId, sourceSessionId: session.id, payloads: transferPayloads });
+      batchRetained = true;
       let nextSourceSession: TableSessionDetails | null = null;
       let nextTargetSession: TableSessionDetails | null = null;
       for (const payload of transferPayloads) {
@@ -2265,9 +2290,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           payload,
         );
         if (!result.success || result.data?.success === false) {
-          throw new Error(result.error || result.data?.error || tr('errors.itemTransferFailed', 'Item transfer failed'));
+          throw Object.assign(new Error(result.error || result.data?.error || tr('errors.itemTransferFailed', 'Item transfer failed')), {
+            tableMutationQuarantinedCount: result.tableMutationQuarantinedCount,
+          });
         }
-        acknowledgedTransferCount += 1;
         nextSourceSession = result.data?.source_session || nextSourceSession;
         nextTargetSession = result.data?.target_session || nextTargetSession;
       }
@@ -2289,25 +2315,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       await refreshAll();
     } catch (error) {
       console.error('[TableCheckManagerModal] Batch item transfer failed:', error);
-      if (isRetryableTableServiceError(error)) {
-        try {
-          // Keep the ambiguous request's original event ID for server dedupe,
-          // but never replay the prefix the server already acknowledged.
-          await Promise.all(transferPayloads.slice(acknowledgedTransferCount).map(payload => enqueueTableItemTransfer({
-            organizationId: table?.organizationId,
-            branchId: table?.branchId,
-            sourceSessionId: session.id,
-            payload,
-          })));
-          toast.success(tr('messages.itemTransferQueued', 'Item transfer queued for sync'));
-          clearBatchSelection();
-          closeSecondaryModal();
-          return;
-        } catch (queueError) {
-          console.warn('[TableCheckManagerModal] Failed to queue batch item transfer:', queueError);
-        }
+      if (batchRetained && isRetainedTableMutationError(error)) {
+        // The complete batch was atomically retained before its first request.
+        // Native acknowledgement removes only the durable acknowledged prefix.
+        toast.success(tr('messages.itemTransferQueued', 'Item transfer queued for sync'));
+        clearBatchSelection();
+        closeSecondaryModal();
+        await refreshAll().catch(() => undefined);
+        return;
       }
-      toast.error(error instanceof Error ? error.message : tr('errors.itemTransferFailed', 'Item transfer failed'));
+      toast.error(tableMutationFailureMessage(error, tr('errors.itemTransferFailed', 'Item transfer failed')));
     } finally {
       setIsSaving(false);
     }
@@ -3113,7 +3130,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             >
               {itemActionMode === 'menu' ? (
                 <div className="grid gap-2">
-                  <ActionButton onClick={() => setItemActionMode('pay')} tone="card">
+                  <ActionButton onClick={() => {
+                    if (requiresBalanceSettlement) { toast.error(balanceSettlementMessage); openPayTableModal(); }
+                    else setItemActionMode('pay');
+                  }} disabled={selectedItemAvailable <= 0 || selectedItemUnpaidAmount <= 0} tone="card">
                     <HandCoins className="h-4 w-4" />
                     {tr('actions.payItem', 'Pay Item')}
                   </ActionButton>
@@ -3125,7 +3145,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                     <Percent className="h-4 w-4" />
                     {tr('actions.discount', 'Discount')}
                   </ActionButton>
-                  <ActionButton onClick={() => openTransferModal(selectedItem)} tone="warn">
+                  <ActionButton onClick={() => openTransferModal(selectedItem)} disabled={selectedItemAvailable <= 0} tone="warn">
                     <MoveRight className="h-4 w-4" />
                     {tr('actions.transfer', 'Transfer')}
                   </ActionButton>

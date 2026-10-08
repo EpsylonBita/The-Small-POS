@@ -126,6 +126,10 @@
       "batchDiscountApplied": "Sconto applicato agli articoli selezionati"
     },
     "errors": {
+      "tableMutationBlocked": "Un’azione precedente sul tavolo è in attesa di conferma. Controlla l’azione salvata in «Stato sincronizzazione» prima di apportare altre modifiche.",
+      "tableMutationRefused": "La modifica del tavolo non è stata accettata. Aggiorna il conto e controlla la selezione prima di riprovare.",
+      "tableMutationBatchRefused": "La modifica del tavolo non è stata accettata. Articoli selezionati non inviati: {{count}}. Aggiorna il conto e controlla la selezione prima di riprovare.",
+      "unallocatedPaymentBalanceOnly": "È già stato registrato un pagamento per importo. Salda il residuo per importo prima di trasferire o pagare singoli articoli.",
       "loadSessionsFailed": "Impossibile caricare le sessioni tavolo",
       "reopenFailed": "Impossibile riaprire il conto tavolo",
       "noActiveSession": "Nessuna sessione tavolo attiva trovata per questo tavolo.",

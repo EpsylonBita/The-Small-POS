@@ -20,7 +20,7 @@ vi.mock('../../../config/environment', () => ({
   getApiUrl: (endpoint: string) => `https://admin.example/api/${endpoint.replace(/^\/+/, '')}`,
 }));
 
-import { posApiGet, posApiPatch } from '../api-helpers';
+import { posApiGet, posApiPatch, posApiPost } from '../api-helpers';
 
 const SAVED_AT = '2026-10-05T09:30:00.000Z';
 const list = { branch_id: 'branch-1', integrations: [{ provider: 'wolt', is_purchased: true, status: 'connected' }] };
@@ -75,6 +75,42 @@ describe('posApiFetch over the native bridge', () => {
 
     expect(result).toMatchObject({ success: false, status: 409, code: 'SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS' });
   });
+
+  it.each(['TABLE_MUTATION_BLOCKED', 'TABLE_MUTATION_RETAINED', 'TABLE_MUTATION_REFUSED'])('preserves %s before broad transport normalization', async code => {
+    const error = `${code}: network connection timeout (HTTP 500)`;
+    bridge.fetchFromAdmin.mockResolvedValue({ success: false, code, error, status: 500 });
+    expect(await posApiPost('/api/pos/table-sessions/check/items/transfer', { client_event_id: 'original' }))
+      .toMatchObject({ success: false, code, error, status: 500 });
+    expect(bridge.fetchFromAdmin).toHaveBeenCalledWith('/api/pos/table-sessions/check/items/transfer',
+      expect.objectContaining({ method: 'POST', body: '{"client_event_id":"original"}' }));
+  });
+
+  it('preserves a native string rejection carrying its retained-original outcome', async () => {
+    const error = 'TABLE_MUTATION_RETAINED: connection timed out';
+    bridge.fetchFromAdmin.mockRejectedValue(error);
+    expect(await posApiPatch('/api/pos/table-sessions/check', { action: 'move_table' }))
+      .toMatchObject({ success: false, error });
+  });
+
+  it('forwards the native transaction count for a proven refused batch', async () => {
+    bridge.fetchFromAdmin.mockResolvedValue({ success: false, code: 'TABLE_MUTATION_REFUSED',
+      error: 'TABLE_MUTATION_REFUSED: network conflict', batch: { quarantined_count: 2 } });
+    expect(await posApiPost('/api/pos/table-sessions/check/items/transfer', { client_event_id: 'original' }))
+      .toMatchObject({ success: false, error: 'TABLE_MUTATION_REFUSED: network conflict', tableMutationQuarantinedCount: 2 });
+  });
+
+  it.each([
+    ['TABLE_MUTATION_REFUSED', 'TABLE_MUTATION_REFUSED: stopped', 0],
+    ['TABLE_MUTATION_REFUSED', 'TABLE_MUTATION_REFUSED: stopped', '2'],
+    ['TABLE_MUTATION_REFUSED', 'TABLE_MUTATION_REFUSED: stopped', 1.5],
+    ['TABLE_MUTATION_RETAINED', 'TABLE_MUTATION_RETAINED: timeout', 2],
+    [undefined, 'TABLE_MUTATION_REFUSED: stopped', 2],
+    ['TABLE_MUTATION_REFUSED', 'Server text mentions TABLE_MUTATION_REFUSED', 2],
+  ])('rejects unproved suffix metadata (%s / %s / %s)', async (code, error, count) => {
+    bridge.fetchFromAdmin.mockResolvedValue({ success: false, code, error, batch: { quarantined_count: count } });
+    const result = await posApiPost('/api/pos/table-sessions/check/items/transfer', { client_event_id: 'original' });
+    expect(result.tableMutationQuarantinedCount).toBeUndefined();
+  });
 });
 
 describe('posApiFetch in a browser', () => {
@@ -92,5 +128,11 @@ describe('posApiFetch in a browser', () => {
     expect(await posApiPatch('pos/supplier-invoices/A', { amount: 30 })).toMatchObject({
       success: false, status: 409, code: 'SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS',
     });
+  });
+
+  it('does not turn server suffix metadata into native transaction proof', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ code: 'TABLE_MUTATION_REFUSED',
+      error: 'TABLE_MUTATION_REFUSED: server text', batch: { quarantined_count: 2 } }), { status: 409 })) as typeof fetch;
+    expect((await posApiPost('/api/pos/table-sessions/check/items/transfer', {})).tableMutationQuarantinedCount).toBeUndefined();
   });
 });

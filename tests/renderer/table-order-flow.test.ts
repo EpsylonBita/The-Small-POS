@@ -886,14 +886,12 @@ describe('table order flow helpers', () => {
     assert.match(source, /onClose\(\)/)
   })
 
-  it('queues close when the server still has a stale outstanding table balance', () => {
-    const source = readFileSync(tableCheckManagerSourcePath, 'utf8')
-
-    assert.match(source, /function isOutstandingTableSessionBalanceError\(error: unknown\): boolean/)
-    assert.match(source, /cannot close a table session with an outstanding balance/)
-    assert.match(source, /normalized\.includes\('outstanding_balance'\)[\s\S]*normalized\.includes\('paid_total'\)/)
-    assert.match(source, /isRetryableTableServiceError\(error\)\s*\|\|\s*isOutstandingTableSessionBalanceError\(error\)/)
-    assert.match(source, /await enqueueTableSessionUpdate\([\s\S]*release_status:\s*'cleaning'/)
+  it('retains canonical close in the native journal while a receipt mirror is behind', () => {
+    const native = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'commands', 'api_bridge.rs'), 'utf8')
+    assert.match(native, /retain_table_mutation\(/)
+    assert.match(native, /\.contains\("outstanding balance"\)/)
+    assert.match(native, /Waiting for local table payment sync/)
+    assert.match(native, /fail_table_mutation\(/)
   })
 
   it('repairs a missing table session from the matched local table order before item transfer', () => {

@@ -126,6 +126,10 @@
       "batchDiscountApplied": "Rabatt auf ausgewählte Artikel angewendet"
     },
     "errors": {
+      "tableMutationBlocked": "Eine vorherige Tischaktion wartet auf Bestätigung. Prüfen Sie die gespeicherte Aktion im Sync-Zustand, bevor Sie eine weitere Änderung vornehmen.",
+      "tableMutationRefused": "Die Tischänderung wurde nicht angenommen. Aktualisieren Sie die Rechnung und prüfen Sie Ihre Auswahl, bevor Sie es erneut versuchen.",
+      "tableMutationBatchRefused": "Die Tischänderung wurde nicht angenommen. Nicht gesendete ausgewählte Artikel: {{count}}. Aktualisieren Sie die Rechnung und prüfen Sie Ihre Auswahl, bevor Sie es erneut versuchen.",
+      "unallocatedPaymentBalanceOnly": "Eine Zahlung nach Betrag wurde bereits erfasst. Begleichen Sie den Restbetrag, bevor Sie einzelne Artikel umbuchen oder bezahlen.",
       "loadSessionsFailed": "Tischsitzungen konnten nicht geladen werden",
       "reopenFailed": "Tischrechnung konnte nicht erneut geöffnet werden",
       "noActiveSession": "Für diesen Tisch wurde keine aktive Tischsitzung gefunden.",

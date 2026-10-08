@@ -81,6 +81,12 @@ function normalizeTransportError(method: string, error?: string | null): string 
     return fallback;
   }
 
+  // Native table outcomes prove whether this exact action was retained. Keep
+  // that proof before generic network/HTML copy can obscure a blocked action.
+  if (/^TABLE_MUTATION_(BLOCKED|RETAINED|REFUSED)\b/.test(error.trim())) {
+    return error.length > 800 ? `${error.slice(0, 400).trim()}...` : error;
+  }
+
   const normalized = error.toLowerCase();
   const statusMatch = error.match(/HTTP\s+(\d{3})/i);
   const htmlResponse =
@@ -163,6 +169,8 @@ export interface PosApiResult<T = any> {
   status?: number;
   /** The office's machine code on a refusal, e.g. `SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS`. */
   code?: string;
+  /** Native transaction proof; absent for generic server/transport failures. */
+  tableMutationQuarantinedCount?: number;
   source?: 'remote' | 'cache';
   stale?: boolean;
   cachedAt?: string | null;
@@ -220,6 +228,10 @@ export async function posApiFetch<T = any>(
 
       if (!ipcResult?.success) {
         const code = readTypedCode((ipcResult as { code?: unknown } | null)?.code);
+        const quarantinedCount = (ipcResult as { batch?: { quarantined_count?: unknown } } | null)?.batch?.quarantined_count;
+        const hasRefusedBatchProof = code === 'TABLE_MUTATION_REFUSED' &&
+          /^TABLE_MUTATION_REFUSED\b/.test(String(ipcResult?.error || '').trim()) &&
+          typeof quarantinedCount === 'number' && Number.isSafeInteger(quarantinedCount) && quarantinedCount > 0;
         return {
           success: false,
           error: normalizeTransportError(
@@ -228,6 +240,7 @@ export async function posApiFetch<T = any>(
           ),
           status: ipcResult?.status,
           ...(code ? { code } : {}),
+          ...(hasRefusedBatchProof ? { tableMutationQuarantinedCount: quarantinedCount } : {}),
         };
       }
 
@@ -262,9 +275,11 @@ export async function posApiFetch<T = any>(
     return { success: true, data, status: response.status, source: 'remote', stale: false };
   } catch (error: any) {
     console.error(`[posApiFetch] ${endpoint} error:`, error);
+    const message = typeof error === 'string' && /^TABLE_MUTATION_(BLOCKED|RETAINED|REFUSED)\b/.test(error.trim())
+      ? error : error.message || 'Network error';
     return {
       success: false,
-      error: normalizeTransportError(method, error.message || 'Network error'),
+      error: normalizeTransportError(method, message),
     };
   }
 }

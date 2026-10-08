@@ -156,6 +156,15 @@ test('SyncQueueBridge processQueue and clear keep pending count synchronized', a
   ]);
 });
 
+test('SyncQueueBridge retains a table batch in one native transaction before refreshing the count', async () => {
+  const stub = createInvokeStub({ sync_queue_enqueue_table_batch: [['first', 'second']], sync_queue_length: [2] });
+  const bridge = new SyncQueueBridge(stub.invoke);
+  const items = [buildQueueItem(), { ...buildQueueItem(), recordId: 'second' }];
+  assert.deepEqual(await bridge.enqueueTableBatch(items), ['first', 'second']);
+  assert.deepEqual(stub.calls[0], { command: 'sync_queue_enqueue_table_batch', payload: { items } });
+  assert.equal(bridge.pendingCount, 2);
+});
+
 test('SyncQueueBridge list and retry helpers call parity IPC commands', async () => {
   const stub = createInvokeStub({
     sync_queue_list_items: [[

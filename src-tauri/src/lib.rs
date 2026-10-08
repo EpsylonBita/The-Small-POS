@@ -1466,6 +1466,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::sync::appointments_get_today_metrics,
             // Parity sync queue (offline queue for parity unification)
             commands::sync_queue::sync_queue_enqueue,
+            commands::sync_queue::sync_queue_enqueue_table_batch,
             commands::sync_queue::sync_queue_dequeue,
             commands::sync_queue::sync_queue_peek,
             commands::sync_queue::sync_queue_clear,

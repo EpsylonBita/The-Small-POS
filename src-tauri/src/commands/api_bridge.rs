@@ -10,6 +10,294 @@ struct AdminFetchCompatPayload {
     options: serde_json::Value,
 }
 
+fn normalize_admin_fetch_body(body: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    body.map(|value| match value {
+        serde_json::Value::String(ref serialized) => {
+            serde_json::from_str(serialized).unwrap_or(value)
+        }
+        _ => value,
+    })
+}
+
+fn table_mutation_outcome_payload(
+    code: &str,
+    reason: &str,
+    status: Option<u16>,
+) -> serde_json::Value {
+    let prefix = format!("{code}: ");
+    let reason = reason.strip_prefix(&prefix).unwrap_or(reason);
+    serde_json::json!({"success":false,"error":format!("{code}: {reason}"),"code":code,"queued":code=="TABLE_MUTATION_RETAINED","status":status})
+}
+
+fn table_mutation_failure_payload(
+    conn: &rusqlite::Connection,
+    original: &crate::sync_queue::SyncQueueItem,
+    error: &api::AdminFetchError,
+) -> Result<serde_json::Value, String> {
+    let waiting = error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("outstanding balance");
+    let refused = !waiting
+        && original.claim_generation == 1
+        && original.attempts == 0
+        && matches!(error.status(), Some(400 | 403 | 409 | 422));
+    let reason = if waiting {
+        "Waiting for local table payment sync".to_string()
+    } else if refused {
+        format!(
+            "HTTP {}: TABLE_MUTATION_FIRST_DISPATCH_REFUSED {error}",
+            error.status().unwrap()
+        )
+    } else {
+        error.to_string()
+    };
+    let quarantined=match crate::sync_queue::fail_table_mutation(conn,original,&reason,refused) {
+        Ok(count)=>count,
+        Err(_)=>return Ok(table_mutation_outcome_payload("TABLE_MUTATION_RETAINED","The original remains saved, but retry bookkeeping could not be updated. Recover the saved original in Sync Health.",error.status())),
+    };
+    if crate::sync_queue::table_mutation_was_refused(conn, original)? {
+        let mut answer = table_mutation_outcome_payload(
+            "TABLE_MUTATION_REFUSED",
+            &format!(
+                "{error}. Batch stopped; {quarantined} unattempted later items were quarantined."
+            ),
+            error.status(),
+        );
+        answer["batch"] = serde_json::json!({"quarantined_count":quarantined});
+        return Ok(answer);
+    }
+    if crate::sync_queue::table_mutation_is_unresolved(conn, original)? {
+        return Ok(table_mutation_outcome_payload(
+            "TABLE_MUTATION_RETAINED",
+            &format!("The saved original is awaiting confirmation. {error}"),
+            error.status(),
+        ));
+    }
+    Ok(table_mutation_outcome_payload("TABLE_MUTATION_BLOCKED","The saved original is no longer available for this claimant; refresh the canonical checks before another action.",error.status()))
+}
+
+#[cfg(test)]
+mod table_mutation_wire_tests {
+    use super::*;
+    use serde_json::{json, Value};
+    const SESSION: &str = "11111111-1111-4111-8111-111111111111";
+    const BRANCH: &str = "22222222-2222-4222-8222-222222222222";
+    const TERMINAL: &str = "33333333-3333-4333-8333-333333333333";
+    fn fixture() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        crate::sync_queue::create_tables(&conn).unwrap();
+        for (key, value) in [
+            ("__ignore_keyring", "1"),
+            ("organization_id", "org-1"),
+            ("branch_id", BRANCH),
+            ("terminal_id", TERMINAL),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        conn
+    }
+    fn retain(conn: &rusqlite::Connection, body: &Value) -> crate::sync_queue::SyncQueueItem {
+        crate::sync_queue::retain_table_mutation(
+            conn,
+            "PATCH",
+            &format!("/api/pos/table-sessions/{SESSION}"),
+            Some(body),
+            "org-1",
+            BRANCH,
+            TERMINAL,
+        )
+        .unwrap()
+        .unwrap()
+    }
+    #[test]
+    fn table_mutation_wire_serialized_patch_and_transfer_are_retained_before_transport() {
+        for (method, suffix, body) in [
+            (
+                "PATCH",
+                "",
+                json!({"action":"set_guest_count","guest_count":3,"client_event_id":"patch-original"}),
+            ),
+            (
+                "POST",
+                "/items/transfer",
+                json!({"order_item_id":"line","quantity":1,"target_table_id":"44444444-4444-4444-8444-444444444444","client_event_id":"transfer-original"}),
+            ),
+        ] {
+            let conn = fixture();
+            let parsed=parse_admin_fetch_payload(Some(json!({"path":format!("/api/pos/table-sessions/{SESSION}{suffix}"),"options":{"method":method,"body":body.to_string()}})),None).unwrap();
+            let normalized =
+                normalize_admin_fetch_body(parsed.options.get("body").cloned()).unwrap();
+            assert_eq!(normalized, body);
+            let original = crate::sync_queue::retain_table_mutation(
+                &conn,
+                method,
+                &parsed.path,
+                Some(&normalized),
+                "org-1",
+                BRANCH,
+                TERMINAL,
+            )
+            .unwrap()
+            .unwrap();
+            let saved: Value = serde_json::from_str(&original.data).unwrap();
+            assert_eq!(saved["client_event_id"], body["client_event_id"]);
+            assert_eq!(original.status, "processing");
+            assert_eq!(crate::sync_queue::get_length(&conn).unwrap(), 1);
+        }
+    }
+    #[test]
+    fn table_mutation_wire_5xx_timeout_and_later_auth_denial_keep_explicit_original() {
+        for error in [
+            api::AdminFetchError::transport("Connection timeout"),
+            api::AdminFetchError::from_http_response_for_test(
+                500,
+                r#"{"success":false,"error":"TABLE_MUTATION_FIRST_DISPATCH_REFUSED network timeout"}"#,
+            ),
+        ] {
+            let conn = fixture();
+            let body = json!({"action":"close","client_event_id":"original"});
+            let original = retain(&conn, &body);
+            let answer = table_mutation_failure_payload(&conn, &original, &error).unwrap();
+            assert_eq!(answer["code"], "TABLE_MUTATION_RETAINED");
+            assert_eq!(answer["queued"], true);
+            assert!(answer["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("TABLE_MUTATION_RETAINED:"));
+            assert!(!crate::sync_queue::table_mutation_was_refused(&conn, &original).unwrap());
+            let retry = retain(&conn, &body);
+            assert_eq!(retry.data, original.data);
+            let denial = table_mutation_failure_payload(
+                &conn,
+                &retry,
+                &api::AdminFetchError::from_http_response_for_test(
+                    403,
+                    r#"{"success":false,"error":"authorization revoked"}"#,
+                ),
+            )
+            .unwrap();
+            assert_eq!(denial["code"], "TABLE_MUTATION_RETAINED");
+            assert_eq!(denial["queued"], true);
+        }
+    }
+    #[test]
+    fn table_mutation_wire_first_refusal_does_not_trust_server_network_words() {
+        let conn = fixture();
+        let original = retain(
+            &conn,
+            &json!({"action":"close","client_event_id":"original"}),
+        );
+        let answer = table_mutation_failure_payload(
+            &conn,
+            &original,
+            &api::AdminFetchError::from_http_response_for_test(
+                409,
+                r#"{"success":false,"error":"network timeout conflict"}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(answer["code"], "TABLE_MUTATION_REFUSED");
+        assert_eq!(answer["queued"], false);
+        assert!(answer["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("TABLE_MUTATION_REFUSED:"));
+        assert!(crate::sync_queue::table_mutation_was_refused(&conn, &original).unwrap());
+    }
+    #[test]
+    fn table_mutation_wire_late_first_4xx_respects_newer_claim() {
+        let conn = fixture();
+        let body = json!({"action":"close","client_event_id":"original"});
+        let old = retain(&conn, &body);
+        crate::sync_queue::fail_table_mutation(&conn, &old, "unknown timeout", false).unwrap();
+        let current = retain(&conn, &body);
+        let answer = table_mutation_failure_payload(
+            &conn,
+            &old,
+            &api::AdminFetchError::from_http_response_for_test(
+                409,
+                r#"{"success":false,"error":"conflict"}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(answer["code"], "TABLE_MUTATION_RETAINED");
+        assert_eq!(answer["queued"], true);
+        let generation: i64 = conn
+            .query_row(
+                "SELECT claim_generation FROM parity_sync_queue WHERE id=?1",
+                [&current.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, current.claim_generation);
+        assert!(!crate::sync_queue::table_mutation_was_refused(&conn, &old).unwrap());
+    }
+    #[test]
+    fn table_mutation_wire_retry_bookkeeping_failure_keeps_retained_outcome() {
+        let conn = fixture();
+        let original = retain(
+            &conn,
+            &json!({"action":"close","client_event_id":"original"}),
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_bookkeeping BEFORE UPDATE ON parity_sync_queue BEGIN SELECT RAISE(ABORT,'write failed'); END;").unwrap();
+        let answer = table_mutation_failure_payload(
+            &conn,
+            &original,
+            &api::AdminFetchError::transport("timeout"),
+        )
+        .unwrap();
+        assert_eq!(answer["code"], "TABLE_MUTATION_RETAINED");
+        assert_eq!(answer["queued"], true);
+        assert!(crate::sync_queue::table_mutation_is_unresolved(&conn, &original).unwrap());
+    }
+
+    #[test]
+    fn table_mutation_wire_refused_batch_exposes_only_proven_quarantine_count() {
+        let conn = fixture();
+        let bodies:Vec<_>=(0..2).map(|index|json!({"source_session_id":SESSION,"target_table_id":"44444444-4444-4444-8444-444444444444","order_item_id":"line","quantity":1,"client_batch_id":"wire-batch","client_batch_index":index,"client_event_id":format!("wire-event-{index}")})).collect();
+        let inputs: Vec<_> = bodies
+            .iter()
+            .map(|body| crate::sync_queue::EnqueueInput {
+                table_name: "restaurant_table_session_item_transfers".into(),
+                record_id: SESSION.into(),
+                operation: "INSERT".into(),
+                data: body.to_string(),
+                organization_id: "org-1".into(),
+                module_type: Some("table_service".into()),
+                priority: Some(0),
+                conflict_strategy: Some("server-wins".into()),
+                version: Some(1),
+            })
+            .collect();
+        crate::sync_queue::enqueue_table_transfer_batch(&conn, &inputs).unwrap();
+        let original = crate::sync_queue::retain_table_mutation(
+            &conn,
+            "POST",
+            &format!("/api/pos/table-sessions/{SESSION}/items/transfer"),
+            Some(&bodies[0]),
+            "org-1",
+            BRANCH,
+            TERMINAL,
+        )
+        .unwrap()
+        .unwrap();
+        let answer = table_mutation_failure_payload(
+            &conn,
+            &original,
+            &api::AdminFetchError::from_http_response_for_test(
+                409,
+                r#"{"success":false,"error":"network conflict"}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(answer["code"], "TABLE_MUTATION_REFUSED");
+        assert_eq!(answer["queued"], false);
+        assert_eq!(answer["batch"]["quarantined_count"], 1);
+    }
+}
+
 fn merge_json_options(base: serde_json::Value, overlay: serde_json::Value) -> serde_json::Value {
     match (base, overlay) {
         (serde_json::Value::Object(mut left), serde_json::Value::Object(right)) => {
@@ -485,7 +773,9 @@ pub async fn api_fetch_from_admin(
         .unwrap_or("GET")
         .trim()
         .to_uppercase();
-    let body = opts.get("body").cloned();
+    // RequestInit producers serialize JSON. Journal and transport consume the
+    // same normalized value, before either may dispatch the request.
+    let body = normalize_admin_fetch_body(opts.get("body").cloned());
     let query = opts.get("query").or_else(|| opts.get("params"));
     let final_path = if let Some(q) = query {
         crate::build_admin_query(&path, Some(q))
@@ -517,8 +807,59 @@ pub async fn api_fetch_from_admin(
 
     let cacheable_get = is_cacheable_admin_get(&method, &final_path);
 
+    let table_original = {
+        let conn = db
+            .conn
+            .lock()
+            .map_err(|error| format!("db lock: {error}"))?;
+        let context = |key: &str| {
+            crate::db::get_setting(&conn, "terminal", key)
+                .or_else(|| crate::storage::get_credential(key))
+                .unwrap_or_default()
+        };
+        match crate::sync_queue::retain_table_mutation(
+            &conn,
+            &method,
+            &final_path,
+            body.as_ref(),
+            &context("organization_id"),
+            &context("branch_id"),
+            &crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(&conn)
+                .unwrap_or_default(),
+        ) {
+            Ok(original) => original,
+            Err(error) => {
+                let code = if error.starts_with("TABLE_MUTATION_RETAINED") {
+                    "TABLE_MUTATION_RETAINED"
+                } else {
+                    "TABLE_MUTATION_BLOCKED"
+                };
+                return Ok(table_mutation_outcome_payload(code, &error, None));
+            }
+        }
+    };
+
     match crate::admin_fetch_detailed(Some(&db), &final_path, &method, body).await {
         Ok(v) => {
+            if let Some(original) = &table_original {
+                let conn = db
+                    .conn
+                    .lock()
+                    .map_err(|error| format!("db lock: {error}"))?;
+                if let Err(error) =
+                    crate::sync_queue::acknowledge_table_mutation(&conn, original, &v)
+                {
+                    // The server may have committed. Keep the exact original for
+                    // replay/mirror recovery instead of authorizing a fresh event.
+                    let _ = crate::sync_queue::mark_failure(
+                        &conn,
+                        &original.id,
+                        "Table action is still syncing: canonical mirror unavailable",
+                        original.claim_generation,
+                    );
+                    return Ok(table_mutation_outcome_payload("TABLE_MUTATION_RETAINED",&format!("Canonical acknowledgement must be recovered for the saved original. {error}"),None));
+                }
+            }
             if cacheable_get {
                 let _ = cache_admin_get_response(&db, &final_path, &v);
             }
@@ -533,6 +874,13 @@ pub async fn api_fetch_from_admin(
             }))
         }
         Err(e) => {
+            if let Some(original) = &table_original {
+                let conn = db
+                    .conn
+                    .lock()
+                    .map_err(|error| format!("db lock: {error}"))?;
+                return table_mutation_failure_payload(&conn, original, &e);
+            }
             if let Some((cached_data, cached_at)) =
                 read_admin_get_fallback_after_error(&db, &final_path, cacheable_get, &e)
             {

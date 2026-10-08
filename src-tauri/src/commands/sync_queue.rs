@@ -20,6 +20,18 @@ pub fn sync_queue_enqueue(
     sync_queue::enqueue(&conn, &item)
 }
 
+#[tauri::command]
+pub fn sync_queue_enqueue_table_batch(
+    db: State<'_, DbState>,
+    items: Vec<sync_queue::EnqueueInput>,
+) -> Result<Vec<String>, String> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|error| format!("db lock: {error}"))?;
+    sync_queue::enqueue_table_transfer_batch(&conn, &items)
+}
+
 /// Dequeue the next item to process (highest priority, oldest first).
 ///
 /// Marks the item as `processing` so it won't be dequeued again.

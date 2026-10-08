@@ -126,6 +126,10 @@
       "batchDiscountApplied": "Ulja u aplikua tek artikujt e zgjedhur"
     },
     "errors": {
+      "tableMutationBlocked": "Një veprim i mëparshëm për tavolinën po pret konfirmim. Kontrolloni veprimin e ruajtur te gjendja e sinkronizimit përpara se të bëni një ndryshim tjetër.",
+      "tableMutationRefused": "Ndryshimi i tavolinës nuk u pranua. Rifreskoni faturën dhe kontrolloni përzgjedhjen tuaj përpara se të provoni sërish.",
+      "tableMutationBatchRefused": "Ndryshimi i tavolinës nuk u pranua. Artikuj të zgjedhur që nuk u dërguan: {{count}}. Rifreskoni faturën dhe kontrolloni përzgjedhjen tuaj përpara se të provoni sërish.",
+      "unallocatedPaymentBalanceOnly": "Është regjistruar tashmë një pagesë sipas shumës. Shlyeni shumën e mbetur para se të transferoni ose paguani artikuj veçmas.",
       "loadSessionsFailed": "Sesionet e tavolinës nuk u ngarkuan",
       "reopenFailed": "Llogaria e tavolinës nuk u rihap",
       "noActiveSession": "S'u gjet sesion aktiv për këtë tavolinë.",

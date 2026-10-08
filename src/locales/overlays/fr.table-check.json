@@ -126,6 +126,10 @@
       "batchDiscountApplied": "Remise appliquée aux articles sélectionnés"
     },
     "errors": {
+      "tableMutationBlocked": "Une action précédente sur la table attend une confirmation. Vérifiez l’action enregistrée dans l’état de synchronisation avant toute autre modification.",
+      "tableMutationRefused": "La modification de la table n’a pas été acceptée. Actualisez l’addition et vérifiez votre sélection avant de réessayer.",
+      "tableMutationBatchRefused": "La modification de la table n’a pas été acceptée. Articles sélectionnés non envoyés : {{count}}. Actualisez l’addition et vérifiez votre sélection avant de réessayer.",
+      "unallocatedPaymentBalanceOnly": "Un paiement par montant est déjà enregistré. Réglez le solde par montant avant de transférer ou payer des articles individuels.",
       "loadSessionsFailed": "Impossible de charger les sessions de table",
       "reopenFailed": "Impossible de rouvrir l'addition de table",
       "noActiveSession": "Aucune session de table active trouvée pour cette table.",

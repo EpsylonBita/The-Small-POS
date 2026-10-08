@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { buildUnpaidAmountByItemId, hydrateTableCheckItems, mergeTableCheckPayments, paymentBelongsToTableSession, sumTableCheckLineTotals } from '../tableCheckPayments';
+import { buildUnpaidAmountByItemId, hydrateTableCheckItems, mergeTableCheckPayments, paymentBelongsToTableSession, sumTableCheckLineTotals, quoteTableItemQuantity } from '../tableCheckPayments';
 
 describe('split table check ownership', () => {
   const original = [{ id: 'item-1', menu_item_id: 'menu-1', name: 'QA', quantity: 3, unit_price: 10, total_price: 30 }];
+
+  it('keeps the exact remaining cent and consumes differently priced allocation rows in canonical order', () => {
+    expect(quoteTableItemQuantity([{order_item_id:'item-1',quantity:2,paid_quantity:1,outstanding_amount_cents:334}], 'item-1', 1, 3.34, 1)).toBe(3.34);
+    const rows = [{order_item_id:'item-1',quantity:1,paid_quantity:0,outstanding_amount_cents:301},
+      {order_item_id:'item-1',quantity:1,paid_quantity:0,outstanding_amount_cents:200}];
+    expect(quoteTableItemQuantity(rows,'item-1',1,5.01,2)).toBe(3.01);
+    expect(quoteTableItemQuantity(rows,'item-1',2,5.01,2)).toBe(5.01);
+    expect(quoteTableItemQuantity([{order_item_id:'item-1',quantity:1,paid_quantity:0.5,outstanding_amount_cents:51}], 'item-1', 0.5, 0.51, 0.5)).toBe(0.51);
+  });
 
   it('keeps 2 x 10 at source and 1 x 10 at target across repeated hydration from a stale full local order', () => {
     const source = [{ order_item_id: 'item-1', quantity: 2, status: 'open' }];
@@ -17,6 +26,13 @@ describe('split table check ownership', () => {
       expect(sumTableCheckLineTotals(sourceItems)).toBe(20);
       expect(sumTableCheckLineTotals(targetItems)).toBe(10);
     }
+  });
+
+  it('rounds half a cent consistently for fractional quantities and the legacy fallback', () => {
+    const rows = [{order_item_id:'item-1',quantity:0.1,paid_quantity:0,outstanding_amount_cents:43}];
+    expect(quoteTableItemQuantity(rows,'item-1',0.05,0.43,0.1)).toBe(0.22);
+    expect(quoteTableItemQuantity([],'item-1',0.05,0.43,0.1)).toBe(0.22);
+    expect(quoteTableItemQuantity(rows,'item-1',0.1,0.43,0.1)).toBe(0.43);
   });
 
   it('does not resurrect a fully transferred source and preserves destination effective pricing', () => {

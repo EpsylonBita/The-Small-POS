@@ -97,6 +97,12 @@ export class SyncQueueBridge implements SyncQueue {
     return id;
   }
 
+  async enqueueTableBatch(items: EnqueueParams[]): Promise<string[]> {
+    const ids = await this.invokeFn<string[]>('sync_queue_enqueue_table_batch', { items });
+    await this.refreshPendingCount();
+    return ids;
+  }
+
   /**
    * Dequeue the next item (highest priority, oldest first).
    * Marks the item as 'processing'.

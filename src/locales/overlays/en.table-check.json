@@ -126,6 +126,10 @@
       "batchDiscountApplied": "Discount applied to selected items"
     },
     "errors": {
+      "tableMutationBlocked": "A previous table action is awaiting confirmation. Review the saved action in Sync Health before making another change.",
+      "tableMutationRefused": "The table change was not accepted. Refresh the check and review your selection before trying again.",
+      "tableMutationBatchRefused": "The table change was not accepted. Selected items not sent: {{count}}. Refresh the check and review your selection before trying again.",
+      "unallocatedPaymentBalanceOnly": "A payment by amount is already recorded. Settle the remaining balance by amount before moving or paying individual items.",
       "loadSessionsFailed": "Failed to load table sessions",
       "reopenFailed": "Failed to reopen table check",
       "noActiveSession": "No active table session found for this table.",

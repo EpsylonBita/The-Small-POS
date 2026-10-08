@@ -631,6 +631,34 @@ pub async fn payment_record(
         {
             return Ok(refusal);
         }
+        if !terminal_approved {
+            let already_saved: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id=?1 AND idempotency_key=?2 AND status='completed')",
+                rusqlite::params![order_id, requested_input.idempotency_key], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if !already_saved {
+                let session = match &requested_input.table_session_id {
+                    Some(session) => Some(session.clone()),
+                    None => conn
+                        .query_row(
+                            "SELECT table_session_id FROM orders WHERE id=?1",
+                            [&order_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .map_err(|error| error.to_string())?,
+                };
+                if let Some(session) = session {
+                    let organization = crate::db::get_setting(&conn, "terminal", "organization_id")
+                        .or_else(|| crate::storage::get_credential("organization_id"))
+                        .unwrap_or_default();
+                    crate::sync_queue::require_table_mutations_resolved(
+                        &conn,
+                        &organization,
+                        &session,
+                    )?;
+                }
+            }
+        }
         order_id
     };
     // Keep two renderer invocations for the same order from reaching fiscal

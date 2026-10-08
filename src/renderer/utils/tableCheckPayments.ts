@@ -37,6 +37,32 @@ export interface TableCheckAllocationLike {
   paid_quantity?: number | string | null;
   status?: string | null;
   metadata?: unknown;
+  item_total_cents?: number;
+  paid_amount_cents?: number;
+  outstanding_amount_cents?: number;
+}
+
+/** The API orders allocation rows by created_at/id. Consume their remaining
+ * quantity in that order, retaining cents at each row boundary. */
+export function quoteTableItemQuantity(
+  allocations: TableCheckAllocationLike[], itemId: string, requestedQuantity: number,
+  fallbackUnpaidAmount: number, fallbackUnpaidQuantity: number,
+): number {
+  const rows = allocations.filter(row => row.order_item_id === itemId && row.status !== 'voided' && row.status !== 'transferred');
+  let quantity = Math.max(0, Math.round(requestedQuantity * 1000));
+  if (!rows.length || rows.some(row => row.outstanding_amount_cents === undefined)) {
+    const available = Math.max(0, Math.round(fallbackUnpaidQuantity * 1000));
+    return available > 0 ? Math.round(Math.round(fallbackUnpaidAmount * 100) * Math.min(quantity, available) / available) / 100 : 0;
+  }
+  let cents = 0;
+  for (const row of rows) {
+    const unpaidQuantity = Math.max(0, Math.round((Number(row.quantity || 0) - Number(row.paid_quantity || 0)) * 1000));
+    const applied = Math.min(quantity, unpaidQuantity);
+    if (applied > 0) cents += Math.round(Math.max(0, Number(row.outstanding_amount_cents || 0)) * applied / unpaidQuantity);
+    quantity -= applied;
+    if (quantity <= 0) break;
+  }
+  return cents / 100;
 }
 
 const moneyNumber = (value: unknown): number => {

@@ -130,7 +130,18 @@
   border-radius: 9px; background: var(--table-surface); color: var(--table-text); text-align: left;
 }
 .table-workspace button.table-workspace-card:hover { border-color: var(--table-action-border); background: var(--table-soft); }
-.table-workspace .table-workspace-shape { width: 48px; height: 40px; align-self: center; margin-bottom: 12px; color: var(--table-action-border); }
+.table-workspace-card[data-status='available'] { --table-icon-rgb: 22, 163, 74; }
+.table-workspace-card[data-status='occupied'] { --table-icon-rgb: 245, 158, 11; }
+.table-workspace-card[data-status='reserved'] { --table-icon-rgb: 59, 130, 246; }
+.table-workspace-card[data-status='cleaning'] { --table-icon-rgb: 156, 163, 175; }
+.table-workspace-card[data-status='maintenance'] { --table-icon-rgb: 249, 115, 22; }
+.table-workspace-card[data-status='unavailable'] { --table-icon-rgb: 100, 116, 139; }
+.table-workspace .table-workspace-shape {
+  width: 48px; height: 40px; align-self: center; margin-bottom: 12px;
+  color: rgb(var(--table-icon-rgb, 156, 163, 175));
+  filter: drop-shadow(0 0 3px rgba(var(--table-icon-rgb, 156, 163, 175), 0.65))
+    drop-shadow(0 0 7px rgba(var(--table-icon-rgb, 156, 163, 175), 0.4));
+}
 .table-workspace-number { font-size: 16px; font-weight: 600; line-height: 1.4; }
 .table-workspace-status { margin-top: 5px; font-size: 12px; justify-content: flex-start; }
 .table-workspace-meta { margin: 8px 0 0; gap: 6px; font-size: 12px; font-weight: 400; }

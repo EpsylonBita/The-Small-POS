@@ -37,7 +37,19 @@ function withTerminalContext(
   };
 }
 
+export function tableMutationOutcome(error: unknown): 'BLOCKED' | 'RETAINED' | 'REFUSED' | undefined {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.trim().match(/^TABLE_MUTATION_(BLOCKED|RETAINED|REFUSED)\b/)?.[1] as 'BLOCKED' | 'RETAINED' | 'REFUSED' | undefined;
+}
+
+/** Only native retention proof authorizes a mutation's queued notice. */
+export function isRetainedTableMutationError(error: unknown): boolean {
+  return tableMutationOutcome(error) === 'RETAINED';
+}
+
 export function isRetryableTableServiceError(error: unknown): boolean {
+  const outcome = tableMutationOutcome(error);
+  if (outcome) return outcome === 'RETAINED';
   const message = error instanceof Error ? error.message : String(error || '');
   const normalized = message.toLowerCase();
   return (
@@ -124,6 +136,19 @@ export function enqueueTableItemTransfer(input: QueueContext & {
       client_event_id: clientEventId,
     },
   });
+}
+
+export function enqueueTableItemTransferBatch(input: QueueContext & {
+  sourceSessionId: string;
+  payloads: Record<string, unknown>[];
+}): Promise<string[]> {
+  const cached = getCachedTerminalCredentials();
+  return getSyncQueueBridge().enqueueTableBatch(input.payloads.map(payload => ({
+    tableName: 'restaurant_table_session_item_transfers', recordId: input.sourceSessionId,
+    operation: 'INSERT', organizationId: input.organizationId || cached.organizationId || 'pending-org',
+    data: JSON.stringify(withTerminalContext({ ...payload, source_session_id: input.sourceSessionId }, input)),
+    priority: 0, moduleType: 'table_service', conflictStrategy: 'server-wins', version: 1,
+  })));
 }
 
 export function enqueueTablePayment(input: QueueContext & {

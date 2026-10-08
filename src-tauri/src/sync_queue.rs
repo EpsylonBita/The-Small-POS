@@ -829,6 +829,64 @@ fn renderer_generic_owner_predicate(alias: &str) -> String {
     format!("NOT ({})", semantic_reserved_repair_owner_predicate(alias))
 }
 
+fn table_mutation_legacy_refused_predicate(alias: &str) -> String {
+    let prefixes=[400,403,409,422].map(|status|format!("COALESCE({alias}.error_message,'') LIKE 'HTTP {status}: TABLE_MUTATION_FIRST_DISPATCH_REFUSED %'")).join(" OR ");
+    format!("({alias}.status='failed' AND {alias}.claim_generation=1 AND {alias}.attempts=1 AND ({prefixes}))")
+}
+
+fn legacy_refused_table_mutation(item: &SyncQueueItem) -> bool {
+    item.status == "failed"
+        && item.claim_generation == 1
+        && item.attempts == 1
+        && item.error_message.as_deref().is_some_and(|error| {
+            [400, 403, 409, 422].iter().any(|status| {
+                error.starts_with(&format!(
+                    "HTTP {status}: TABLE_MUTATION_FIRST_DISPATCH_REFUSED "
+                ))
+            })
+        })
+}
+
+/// Terminal refusals and unattempted batch suffixes are durable audit outcomes,
+/// not generic retry candidates. The primary-key lookup survives error/budget
+/// resets without changing an original request body or identity.
+fn table_mutation_replayable_predicate(alias: &str) -> String {
+    format!("(NOT ({alias}.module_type='table_service' AND {alias}.table_name IN ('restaurant_table_sessions','restaurant_table_session_item_transfers')) OR (NOT ({legacy}) AND NOT EXISTS (SELECT 1 FROM conflict_audit_log table_outcome WHERE table_outcome.id='table-mutation-terminal:' || {alias}.id AND table_outcome.resolution IN ('TABLE_MUTATION_FIRST_DISPATCH_REFUSED','TABLE_MUTATION_BATCH_SUFFIX_QUARANTINED'))))",legacy=table_mutation_legacy_refused_predicate(alias))
+}
+
+/// Only a batch's earliest remaining original can be claimed. A predecessor
+/// waits even when it is processing, delayed, failed or conflicted. Its removal
+/// follows canonical ACK + mirrors, so queue priority/UUIDs cannot reorder a batch.
+fn table_mutation_dispatch_predicate(alias: &str) -> String {
+    let payload = format!("(CASE WHEN json_valid({alias}.data) THEN {alias}.data END)");
+    let prior = "(CASE WHEN json_valid(table_prior.data) THEN table_prior.data END)";
+    let same_scope=[("branch_id","branchId"),("terminal_id","terminalId")].iter().map(|(snake,camel)|format!("COALESCE(json_extract({prior},'$.{snake}'),json_extract({prior},'$.{camel}'),'')=COALESCE(json_extract({payload},'$.{snake}'),json_extract({payload},'$.{camel}'),'')")).collect::<Vec<_>>().join(" AND ");
+    format!("({replayable} AND (NOT ({alias}.module_type='table_service' AND {alias}.table_name='restaurant_table_session_item_transfers' AND json_type({payload},'$.client_batch_id') IS NOT NULL) OR (json_type({payload},'$.client_batch_id')='text' AND length(trim(json_extract({payload},'$.client_batch_id')))>0 AND json_type({payload},'$.client_batch_index')='integer' AND json_extract({payload},'$.client_batch_index')>=0 AND NOT EXISTS (SELECT 1 FROM parity_sync_queue table_prior WHERE table_prior.organization_id={alias}.organization_id AND table_prior.record_id={alias}.record_id AND table_prior.module_type='table_service' AND table_prior.table_name='restaurant_table_session_item_transfers' AND {same_scope} AND table_prior.id<>{alias}.id AND json_extract({prior},'$.client_batch_id')=json_extract({payload},'$.client_batch_id') AND json_extract({prior},'$.client_batch_index')<json_extract({payload},'$.client_batch_index')))))", replayable=table_mutation_replayable_predicate(alias))
+}
+
+fn table_mutation_dispatch_ready(conn: &Connection, id: &str) -> Result<bool, String> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND {})",
+            table_mutation_dispatch_predicate("parity_sync_queue")
+        ),
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn table_mutation_terminal(conn: &Connection, id: &str) -> Result<bool, String> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM conflict_audit_log WHERE id='table-mutation-terminal:' || ?1 AND resolution IN ('TABLE_MUTATION_FIRST_DISPATCH_REFUSED','TABLE_MUTATION_BATCH_SUFFIX_QUARANTINED'))",[id],|row|row.get(0)).map_err(|error|error.to_string())
+}
+
+fn refuse_terminal_table_retry(conn: &Connection, id: &str) -> Result<(), String> {
+    if table_mutation_terminal(conn, id)? {
+        return Err("TABLE_MUTATION_BLOCKED: This refused batch original cannot be replayed. Refresh the checks and review the untransferred selection.".into());
+    }
+    Ok(())
+}
+
 /// Renderer IPC scope: generic rows minus the native-only original financial
 /// openings, which only the native loop may claim, retry or clear. Native
 /// claiming and stale-lease recovery keep using the generic predicate.
@@ -911,7 +969,10 @@ fn semantic_repair_financial_queue_owner_predicate(alias: &str) -> String {
 fn semantic_generic_nonfinancial_owner_predicate(alias: &str) -> String {
     let generic = renderer_generic_owner_predicate(alias);
     let financial = semantic_repair_financial_queue_owner_predicate(alias);
-    format!("({generic} AND NOT ({financial}))")
+    format!(
+        "({generic} AND NOT ({financial}) AND {})",
+        table_mutation_replayable_predicate(alias)
+    )
 }
 
 fn semantic_repair_audit_owner_predicate(alias: &str) -> String {
@@ -1533,6 +1594,380 @@ pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String
     );
 
     Ok(id)
+}
+
+/// Retain and exclusively claim a foreground table mutation before any HTTP
+/// dispatch. Its existing parity outbox is also its restart/unknown-result journal.
+pub(crate) fn retain_table_mutation(
+    conn: &Connection,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    organization: &str,
+    branch: &str,
+    terminal: &str,
+) -> Result<Option<SyncQueueItem>, String> {
+    let parts: Vec<_> = path.split('/').collect();
+    let (table_name, operation, session_id) = match parts.as_slice() {
+        ["", "api", "pos", "table-sessions", session] if method == "PATCH" => {
+            ("restaurant_table_sessions", "UPDATE", *session)
+        }
+        ["", "api", "pos", "table-sessions", session, "items", "transfer"] if method == "POST" => (
+            "restaurant_table_session_item_transfers",
+            "INSERT",
+            *session,
+        ),
+        _ => return Ok(None),
+    };
+    if method == "PATCH"
+        && !matches!(
+            body.and_then(|body| body.get("action"))
+                .and_then(Value::as_str),
+            Some("set_guest_count" | "assign_waiter" | "move_table" | "merge_table" | "close")
+        )
+    {
+        // Approved cancellations/settlements have their own native journal.
+        // Never capture their approval material in the generic parity outbox.
+        return Ok(None);
+    }
+    if body.is_some_and(|body| {
+        body.as_object().is_some_and(|object| {
+            object.keys().any(|key| {
+                let key = key.to_ascii_lowercase();
+                key.contains("pin")
+                    || key.contains("approval")
+                    || key.contains("token")
+                    || key.contains("secret")
+            })
+        })
+    }) {
+        return Err("TABLE_MUTATION_SENSITIVE_BODY_REFUSED".into());
+    }
+    Uuid::parse_str(session_id).map_err(|_| "TABLE_MUTATION_SESSION_REQUIRED".to_string())?;
+    if organization.is_empty() || branch.is_empty() || terminal.is_empty() {
+        return Err("TABLE_MUTATION_TERMINAL_CONTEXT_REQUIRED".to_string());
+    }
+    let mut payload = body.cloned().ok_or("TABLE_MUTATION_BODY_REQUIRED")?;
+    let event = payload
+        .get("client_event_id")
+        .and_then(Value::as_str)
+        .filter(|event| !event.trim().is_empty())
+        .ok_or("TABLE_MUTATION_EVENT_REQUIRED")?
+        .to_string();
+    let object = payload
+        .as_object_mut()
+        .ok_or("TABLE_MUTATION_BODY_REQUIRED")?;
+    object.insert("organization_id".into(), Value::String(organization.into()));
+    object.insert("branch_id".into(), Value::String(branch.into()));
+    object.insert("terminal_id".into(), Value::String(terminal.into()));
+    object.insert("organizationId".into(), Value::String(organization.into()));
+    object.insert("branchId".into(), Value::String(branch.into()));
+    object.insert("terminalId".into(), Value::String(terminal.into()));
+    if operation == "INSERT" {
+        object.insert("source_session_id".into(), Value::String(session_id.into()));
+    }
+    retry_transaction(conn, |conn| {
+        quarantine_existing_refused_table_batches(conn)?;
+        let mut statement = conn.prepare("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE organization_id=?1 AND record_id=?2 AND module_type='table_service' AND table_name IN ('restaurant_table_sessions','restaurant_table_session_item_transfers')")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![organization, session_id], map_internal_queue_item)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        drop(statement);
+        let mut original = None;
+        for row in rows {
+            let saved: Value =
+                serde_json::from_str(&row.data).map_err(|error| error.to_string())?;
+            if saved.get("client_event_id").and_then(Value::as_str) == Some(event.as_str()) {
+                if saved != payload || row.table_name != table_name || row.operation != operation {
+                    return Err("TABLE_MUTATION_ORIGINAL_CONFLICT".into());
+                }
+                if row.status == "processing" {
+                    return Err(
+                        "TABLE_MUTATION_RETAINED: Table action is still syncing. Retry the saved original in Sync Health."
+                            .into(),
+                    );
+                }
+                original = Some(row);
+            } else {
+                // A definite transactional 4xx refusal is retained for Health,
+                // but does not prevent a newly corrected action. Unknown outcomes
+                // (including exhausted network retries) must retain their identity.
+                let refused =
+                    table_mutation_terminal(conn, &row.id)? || legacy_refused_table_mutation(&row);
+                let later_in_batch = saved
+                    .get("client_batch_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|batch| {
+                        Some(batch) == payload.get("client_batch_id").and_then(Value::as_str)
+                    })
+                    && saved["client_batch_index"]
+                        .as_u64()
+                        .zip(payload["client_batch_index"].as_u64())
+                        .is_some_and(|(saved, current)| saved > current)
+                    && row.status == "pending";
+                if !refused && !later_in_batch {
+                    return Err(
+                        "TABLE_MUTATION_BLOCKED: Table action is still syncing. Retry the saved original in Sync Health."
+                            .into(),
+                    );
+                }
+            }
+        }
+        let id = match original {
+            Some(row) => {
+                refuse_terminal_table_retry(conn, &row.id)?;
+                if !table_mutation_dispatch_ready(conn, &row.id)? {
+                    return Err("TABLE_MUTATION_RETAINED: An earlier saved batch item must be acknowledged before this original can be sent.".into());
+                }
+                row.id
+            }
+            None => {
+                require_table_mutation_targets_resolved(
+                    conn,
+                    organization,
+                    session_id,
+                    payload.get("target_table_id").and_then(Value::as_str),
+                )?;
+                enqueue(
+                    conn,
+                    &EnqueueInput {
+                        table_name: table_name.into(),
+                        record_id: session_id.into(),
+                        operation: operation.into(),
+                        data: payload.to_string(),
+                        organization_id: organization.into(),
+                        priority: Some(0),
+                        module_type: Some("table_service".into()),
+                        conflict_strategy: Some("server-wins".into()),
+                        version: Some(1),
+                    },
+                )?
+            }
+        };
+        conn.execute("UPDATE parity_sync_queue SET status='processing',last_attempt=?1,claim_generation=claim_generation+1 WHERE id=?2", params![Utc::now().to_rfc3339(), id])
+            .map_err(|error| error.to_string())?;
+        conn.query_row("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE id=?1", [id], map_internal_queue_item)
+            .map(Some).map_err(|error| error.to_string())
+    })
+}
+
+/// Drop the original only after its canonical answer is durably applied while
+/// this foreground claimant still owns it. Mirror failure keeps the original.
+pub(crate) fn acknowledge_table_mutation(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: &Value,
+) -> Result<(), String> {
+    with_live_generic_claim(conn, item, |conn| {
+        apply_success(conn, item, Some(response))?;
+        mark_success(conn, &item.id, item.claim_generation)
+    })?
+    .ok_or_else(|| {
+        "Table action acknowledgement is still syncing; recover the saved original.".to_string()
+    })
+}
+
+/// New collection must wait for the original transfer/lifecycle result. Already
+/// moved money is saved through its existing receipt recovery owner instead.
+pub(crate) fn require_table_mutations_resolved(
+    conn: &Connection,
+    organization: &str,
+    session: &str,
+) -> Result<(), String> {
+    require_table_mutation_targets_resolved(conn, organization, session, None)
+}
+
+fn scoped_session_tables(
+    conn: &Connection,
+    organization: &str,
+    branch: &str,
+    session: &str,
+) -> Result<Vec<String>, String> {
+    let mut tables = Vec::new();
+    let cached:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='table_session_snapshots_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    if cached {
+        let scope = crate::table_session_cache::current_scope(conn)?;
+        if scope.organization == organization && scope.branch == branch {
+            let raw:Option<String>=conn.query_row("SELECT snapshot_json FROM table_session_snapshots_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4 AND session_id=?5",params![organization,branch,scope.terminal,scope.owner,session],|row|row.get(0)).optional().map_err(|error|error.to_string())?;
+            if let Some(raw) = raw {
+                let snapshot: Value = serde_json::from_str(&raw).map_err(|_| {
+                    "TABLE_MUTATION_BLOCKED: Saved target check scope is unreadable"
+                })?;
+                if snapshot["id"].as_str() != Some(session)
+                    || snapshot["organization_id"].as_str() != Some(organization)
+                    || snapshot["branch_id"].as_str() != Some(branch)
+                {
+                    return Err("TABLE_MUTATION_BLOCKED: Saved target check scope changed".into());
+                }
+                for link in snapshot["tables"].as_array().into_iter().flatten() {
+                    if link.get("released_at").is_none_or(Value::is_null) {
+                        if let Some(table) = link["table_id"].as_str() {
+                            tables.push(table.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut statement=conn.prepare("SELECT table_id FROM orders WHERE organization_id=?1 AND branch_id=?2 AND table_session_id=?3 AND table_id IS NOT NULL").map_err(|error|error.to_string())?;
+    let local = statement
+        .query_map(params![organization, branch, session], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    tables.extend(local);
+    Ok(tables)
+}
+
+fn require_table_mutation_targets_resolved(
+    conn: &Connection,
+    organization: &str,
+    session: &str,
+    requested_target: Option<&str>,
+) -> Result<(), String> {
+    let mut statement=conn.prepare(&format!("SELECT record_id,data FROM parity_sync_queue WHERE organization_id=?1 AND module_type='table_service' AND table_name IN ('restaurant_table_sessions','restaurant_table_session_item_transfers') AND {}",table_mutation_replayable_predicate("parity_sync_queue"))).map_err(|error|error.to_string())?;
+    let rows = statement
+        .query_map([organization], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let branch = crate::db::get_setting(conn, "terminal", "branch_id")
+        .or_else(|| crate::storage::get_credential("branch_id"))
+        .unwrap_or_default();
+    let mut wanted = scoped_session_tables(conn, organization, &branch, session)?;
+    if let Some(target) = requested_target {
+        wanted.push(target.to_string());
+    }
+    for (source, raw) in rows {
+        let payload: Value = serde_json::from_str(&raw)
+            .map_err(|_| "TABLE_MUTATION_BLOCKED: Saved original scope is unreadable")?;
+        let saved_branch = payload
+            .get("branch_id")
+            .or_else(|| payload.get("branchId"))
+            .and_then(Value::as_str);
+        if saved_branch.is_some_and(|saved| !branch.is_empty() && saved != branch) {
+            continue;
+        }
+        let target = payload["target_table_id"].as_str();
+        if source == session
+            || target.is_some_and(|target| {
+                wanted.is_empty() || wanted.iter().any(|table| table == target)
+            })
+        {
+            return Err("TABLE_MUTATION_BLOCKED: Table action is still syncing. Resolve the saved source/target original in Sync Health before another table mutation or payment.".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn fail_table_mutation(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    reason: &str,
+    first_dispatch_refused: bool,
+) -> Result<usize, String> {
+    retry_transaction(conn, |conn| {
+        let failure = mark_failure_in_transaction(conn, &item.id, reason, item.claim_generation)?;
+        if !failure.applied {
+            return Ok(0);
+        }
+        if item.claim_generation == 1 && item.attempts == 0 && first_dispatch_refused {
+            conn.execute("UPDATE parity_sync_queue SET status='failed',next_retry_at=NULL WHERE id=?1 AND claim_generation=?2", params![item.id,item.claim_generation]).map_err(|error|error.to_string())?;
+            return quarantine_table_batch_after_refusal(conn, item);
+        }
+        Ok(0)
+    })
+}
+
+fn record_table_terminal_outcome(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    resolution: &str,
+) -> Result<(), String> {
+    conn.execute("INSERT OR IGNORE INTO conflict_audit_log(id,operation_type,entity_id,entity_type,local_version,server_version,timestamp,discarded_payload,resolution,is_monetary,reviewed_by_operator) VALUES(?1,?2,?3,'table_batch_original',?4,?4,?5,?6,?7,0,0)",params![format!("table-mutation-terminal:{}",item.id),item.operation,item.id,item.version,Utc::now().to_rfc3339(),item.data,resolution]).map_err(|error|error.to_string())?;
+    Ok(())
+}
+
+/// Refused head and each provably unattempted suffix stay durable for review.
+/// A suffix with any claim/attempt is ambiguous and is never discarded here.
+fn quarantine_table_batch_after_refusal(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<usize, String> {
+    record_table_terminal_outcome(conn, item, "TABLE_MUTATION_FIRST_DISPATCH_REFUSED")?;
+    let payload: Value = serde_json::from_str(&item.data).map_err(|error| error.to_string())?;
+    let (Some(batch), Some(index)) = (
+        payload["client_batch_id"].as_str(),
+        payload["client_batch_index"].as_u64(),
+    ) else {
+        return Ok(0);
+    };
+    let mut statement=conn.prepare("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE organization_id=?1 AND record_id=?2 AND module_type='table_service' AND table_name='restaurant_table_session_item_transfers' AND status='pending' AND attempts=0 AND last_attempt IS NULL AND claim_generation=0 AND json_extract(CASE WHEN json_valid(data) THEN data END,'$.client_batch_id')=?3 AND json_extract(CASE WHEN json_valid(data) THEN data END,'$.client_batch_index')>?4").map_err(|error|error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![item.organization_id, item.record_id, batch, index],
+            map_internal_queue_item,
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    let mut count = 0;
+    for suffix in rows {
+        let saved: Value = serde_json::from_str(&suffix.data).map_err(|error| error.to_string())?;
+        if saved.get("branch_id").or_else(|| saved.get("branchId"))
+            != payload.get("branch_id").or_else(|| payload.get("branchId"))
+            || saved.get("terminal_id").or_else(|| saved.get("terminalId"))
+                != payload
+                    .get("terminal_id")
+                    .or_else(|| payload.get("terminalId"))
+        {
+            continue;
+        }
+        record_table_terminal_outcome(conn, &suffix, "TABLE_MUTATION_BATCH_SUFFIX_QUARANTINED")?;
+        count+=conn.execute("UPDATE parity_sync_queue SET status='conflict',next_retry_at=NULL,error_message='TABLE_MUTATION_BATCH_SUFFIX_QUARANTINED: Earlier batch item was refused; this original was never sent.',claim_generation=claim_generation+1 WHERE id=?1 AND organization_id=?2 AND status='pending' AND attempts=0 AND last_attempt IS NULL AND claim_generation=0",params![suffix.id,suffix.organization_id]).map_err(|error|error.to_string())?;
+    }
+    Ok(count)
+}
+
+/// Upgrade old first-refusal rows before a scheduler/manual retry can see their
+/// suffixes. Bodies, ids, revisions, attempts and ambiguous originals are kept.
+fn quarantine_existing_refused_table_batches(conn: &Connection) -> Result<usize, String> {
+    let mut statement=conn.prepare(&format!("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE module_type='table_service' AND table_name IN ('restaurant_table_sessions','restaurant_table_session_item_transfers') AND {}",table_mutation_legacy_refused_predicate("parity_sync_queue"))).map_err(|error|error.to_string())?;
+    let rows = statement
+        .query_map([], map_internal_queue_item)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    rows.iter().try_fold(0, |count, item| {
+        quarantine_table_batch_after_refusal(conn, item).map(|added| count + added)
+    })
+}
+
+pub(crate) fn table_mutation_is_unresolved(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<bool, String> {
+    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE id=?1 AND organization_id=?2 AND data=?3 AND {})",table_mutation_replayable_predicate("parity_sync_queue")),params![item.id,item.organization_id,item.data],|row|row.get(0)).map_err(|error|error.to_string())
+}
+
+pub(crate) fn table_mutation_was_refused(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<bool, String> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM conflict_audit_log WHERE id='table-mutation-terminal:' || ?1 AND resolution='TABLE_MUTATION_FIRST_DISPATCH_REFUSED' AND discarded_payload=?2)",params![item.id,item.data],|row|row.get(0)).map_err(|error|error.to_string())
 }
 
 /// Native-only repair producer seam. The queue primary key is the command's
@@ -4651,7 +5086,8 @@ fn dequeue_with_quarantine_count(
     conn: &Connection,
 ) -> Result<(Option<SyncQueueItem>, i64), String> {
     retry_transaction(conn, |conn| {
-        let quarantined = quarantine_reserved_repair_lookalikes(conn)?;
+        let table_quarantined = quarantine_existing_refused_table_batches(conn)? as i64;
+        let quarantined = quarantine_reserved_repair_lookalikes(conn)? + table_quarantined;
         claim_next_internal_item(conn).map(|item| (item, quarantined))
     })
 }
@@ -4663,6 +5099,7 @@ fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, 
     let claim_canonical = canonical_repair_owner_predicate("parity_sync_queue");
     let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
     let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
+    let table_order = table_mutation_dispatch_predicate("candidate");
     let sql = format!(
         "UPDATE parity_sync_queue
             SET status = 'processing',
@@ -4672,6 +5109,7 @@ fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, 
                 SELECT candidate.id
                  FROM parity_sync_queue AS candidate
                  WHERE candidate.status = 'pending'
+                   AND {table_order}
                    AND (
                         candidate.next_retry_at IS NULL
                         OR julianday(candidate.next_retry_at) <= julianday('now')
@@ -4812,6 +5250,7 @@ pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem
     let claim_generic = renderer_visible_owner_predicate("parity_sync_queue");
     let candidate_exclusion = renderer_non_repair_owned_predicate("candidate");
     let claim_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let table_order = table_mutation_dispatch_predicate("candidate");
     let sql = format!(
         "UPDATE parity_sync_queue
          SET status = 'processing', last_attempt = ?1,
@@ -4820,6 +5259,7 @@ pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem
              SELECT candidate.id
              FROM parity_sync_queue candidate
              WHERE candidate.status = 'pending'
+                   AND {table_order}
                AND {candidate_generic}
                AND (
                     candidate.next_retry_at IS NULL
@@ -4880,6 +5320,8 @@ fn renderer_retry_and_dequeue_exact(
         return Err("PARITY_ITEM_ID_INVALID".to_string());
     }
     retry_transaction(conn, |conn| {
+        quarantine_existing_refused_table_batches(conn)?;
+        refuse_terminal_table_retry(conn, item_id)?;
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
         let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
         let ownership_sql = format!(
@@ -4899,6 +5341,9 @@ fn renderer_retry_and_dequeue_exact(
             _ => {}
         }
 
+        if !table_mutation_dispatch_ready(conn, item_id)? {
+            return Err("TABLE_MUTATION_BLOCKED: Resolve the earlier original batch item before retrying this suffix.".into());
+        }
         let now = Utc::now().to_rfc3339();
         let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
         let sql = format!(
@@ -5213,6 +5658,7 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
     let candidate_generic = semantic_generic_nonfinancial_owner_predicate("candidate");
     let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
     let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
+    let table_order = table_mutation_dispatch_predicate("candidate");
     let sql = format!(
         "SELECT candidate.id, candidate.table_name, candidate.record_id,
                 candidate.operation, candidate.data, candidate.organization_id,
@@ -5223,6 +5669,7 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
                 candidate.version, candidate.claim_generation, candidate.status
            FROM parity_sync_queue AS candidate
           WHERE candidate.status = 'pending'
+                   AND {table_order}
             AND (
                 candidate.next_retry_at IS NULL
                 OR julianday(candidate.next_retry_at) <= julianday('now')
@@ -5345,6 +5792,7 @@ pub fn peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
 pub(crate) fn renderer_peek(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
     let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let table_order = table_mutation_dispatch_predicate("parity_sync_queue");
     let sql = format!(
         "SELECT id, table_name, record_id, operation, data, organization_id,
                 created_at, attempts, last_attempt, error_message, next_retry_at,
@@ -5352,6 +5800,7 @@ pub(crate) fn renderer_peek(conn: &Connection) -> Result<Option<SyncQueueItem>, 
                 claim_generation, status
          FROM parity_sync_queue
          WHERE status = 'pending'
+           AND {table_order}
            AND {generic_owner}
            AND {ownership_exclusion}
            AND (
@@ -5996,6 +6445,8 @@ fn with_live_generic_claim<T>(
 
 pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
     retry_transaction(conn, |conn| {
+        quarantine_existing_refused_table_batches(conn)?;
+        refuse_terminal_table_retry(conn, item_id)?;
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
         let financial = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
         let ownership = conn
@@ -6038,6 +6489,8 @@ pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
 
 pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
     retry_transaction(conn, |conn| {
+        quarantine_existing_refused_table_batches(conn)?;
+        refuse_terminal_table_retry(conn, item_id)?;
         let semantic_reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
         let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
         let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
@@ -6348,14 +6801,17 @@ pub(crate) fn renderer_retry_items_by_module(
     if module_type.trim().eq_ignore_ascii_case("repairs") {
         return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
     }
+    retry_transaction(conn, quarantine_existing_refused_table_batches)?;
     let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let replayable = table_mutation_replayable_predicate("parity_sync_queue");
     let sql = format!(
         "UPDATE parity_sync_queue
          SET status = 'pending', attempts = 0, error_message = NULL,
              next_retry_at = NULL, last_attempt = NULL, retry_delay_ms = ?1
          WHERE module_type = ?2
            AND {generic_owner}
+           AND {replayable}
            AND {ownership_exclusion}
            AND status IN ('pending', 'failed', 'conflict')"
     );
@@ -6381,12 +6837,14 @@ pub(crate) fn renderer_retryable_item_ids_by_module(
     }
     let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+    let replayable = table_mutation_replayable_predicate("parity_sync_queue");
     let sql = format!(
         "SELECT id
            FROM parity_sync_queue
           WHERE module_type = ?1
             AND status IN ('pending', 'failed', 'conflict')
             AND {generic_owner}
+           AND {replayable}
             AND {ownership_exclusion}
           ORDER BY priority DESC, created_at ASC, id ASC
           LIMIT ?2"
@@ -8590,6 +9048,11 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         "restaurant_table_sessions" => {
             prepare_table_session_request(conn, item, &payload, terminal_id.as_str())
         }
+        "restaurant_tables" if item.operation == "UPDATE" => Ok(prepare_table_status_request(
+            item,
+            &payload,
+            terminal_id.as_str(),
+        )),
         // The schedule collection accepts shift_id in JSON even for DELETE.
         "salon_staff_shifts" => Ok(RequestPreparation::Ready(RequestSpec {
             endpoint: "/api/pos/staff-schedule".to_string(),
@@ -8617,6 +9080,39 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             terminal_id,
         })),
     }
+}
+
+fn prepare_table_status_request(
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> RequestPreparation {
+    let mut body = payload.clone();
+    let body = if let Some(object) = body.as_object_mut() {
+        let missing_event_id = match object.get("client_event_id") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(id)) => id.trim().is_empty(),
+            _ => false,
+        };
+        if missing_event_id {
+            // Older table-status producers omitted the workflow event ID. The
+            // persisted queue identity survives retry/restart; keep the original
+            // action and server revision intact rather than minting a new event.
+            object.insert(
+                "client_event_id".to_string(),
+                Value::String(format!("pos-tauri-table:{}", item.id)),
+            );
+        }
+        body.to_string()
+    } else {
+        item.data.clone()
+    };
+    RequestPreparation::Ready(RequestSpec {
+        endpoint: resolve_endpoint(item),
+        method: Method::PATCH,
+        body: Some(body),
+        terminal_id: terminal_id.to_string(),
+    })
 }
 
 const CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED: &str = "CUSTOMER_PHONE_COUNTRY_CONTEXT_REQUIRED";
@@ -11975,6 +12471,162 @@ fn adopt_insert_ack_vat(conn: &Connection, item: &SyncQueueItem, response: Optio
     }
 }
 
+pub(crate) fn enqueue_table_transfer_batch(
+    conn: &Connection,
+    inputs: &[EnqueueInput],
+) -> Result<Vec<String>, String> {
+    if inputs.is_empty() || inputs.len() > 128 {
+        return Err("Invalid table transfer batch".into());
+    }
+    let scope = crate::table_session_cache::current_scope(conn)?;
+    let source = &inputs[0].record_id;
+    let first: Value = serde_json::from_str(&inputs[0].data).map_err(|error| error.to_string())?;
+    let batch = first["client_batch_id"]
+        .as_str()
+        .filter(|batch| !batch.trim().is_empty())
+        .ok_or("Table batch identity required")?;
+    let mut events = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for (index, input) in inputs.iter().enumerate() {
+        if input.table_name != "restaurant_table_session_item_transfers"
+            || input.operation != "INSERT"
+            || input.module_type.as_deref() != Some("table_service")
+            || input.organization_id != scope.organization
+            || input.record_id != *source
+        {
+            return Err("Invalid table batch scope".into());
+        }
+        let mut payload: Value =
+            serde_json::from_str(&input.data).map_err(|error| error.to_string())?;
+        if payload["client_batch_id"].as_str() != Some(batch)
+            || payload["client_batch_index"].as_u64() != Some(index as u64)
+            || payload["source_session_id"].as_str() != Some(source)
+        {
+            return Err("Invalid table batch order".into());
+        }
+        let event = payload["client_event_id"]
+            .as_str()
+            .filter(|event| !event.trim().is_empty())
+            .ok_or("Table event required")?;
+        if !events.insert(event.to_string()) {
+            return Err("Duplicate table batch event".into());
+        }
+        let object = payload.as_object_mut().ok_or("Invalid table batch body")?;
+        if object.keys().any(|key| {
+            let key = key.to_ascii_lowercase();
+            key.contains("pin")
+                || key.contains("approval")
+                || key.contains("token")
+                || key.contains("secret")
+        }) {
+            return Err("TABLE_MUTATION_SENSITIVE_BODY_REFUSED".into());
+        }
+        for (key, value) in [
+            ("organization_id", &scope.organization),
+            ("organizationId", &scope.organization),
+            ("branch_id", &scope.branch),
+            ("branchId", &scope.branch),
+            ("terminal_id", &scope.terminal),
+            ("terminalId", &scope.terminal),
+        ] {
+            object.insert(key.into(), Value::String(value.clone()));
+        }
+        let mut input = input.clone();
+        input.data = payload.to_string();
+        normalized.push(input);
+    }
+    retry_transaction(conn, |conn| {
+        quarantine_existing_refused_table_batches(conn)?;
+        require_table_mutations_resolved(conn, &scope.organization, source)?;
+        for input in &normalized {
+            let payload: Value =
+                serde_json::from_str(&input.data).map_err(|error| error.to_string())?;
+            require_table_mutation_targets_resolved(
+                conn,
+                &scope.organization,
+                source,
+                payload["target_table_id"].as_str(),
+            )?;
+        }
+        normalized
+            .iter()
+            .map(|input| enqueue(conn, input))
+            .collect()
+    })
+}
+
+fn apply_table_mutation_answer(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: &Value,
+) -> Result<(), String> {
+    if response.get("success").and_then(Value::as_bool) == Some(false) {
+        return Err("Table mutation answer refused".into());
+    }
+    let answer = response.get("data").unwrap_or(response);
+    let sessions: Vec<&Value> = if item.table_name == "restaurant_table_session_item_transfers" {
+        vec![
+            answer
+                .get("source_session")
+                .ok_or("Missing source check acknowledgement")?,
+            answer
+                .get("target_session")
+                .ok_or("Missing target check acknowledgement")?,
+        ]
+    } else {
+        vec![answer
+            .get("session")
+            .ok_or("Missing check acknowledgement")?]
+    };
+    let scope = crate::table_session_cache::current_scope(conn)?;
+    if scope.organization != item.organization_id {
+        return Err("Table acknowledgement scope changed".into());
+    }
+    if is_uuid(&item.record_id) && sessions[0]["id"].as_str() != Some(item.record_id.as_str()) {
+        return Err("Table acknowledgement source changed".into());
+    }
+    let mut source_adopted = false;
+    for (index, session) in sessions.iter().enumerate() {
+        if session["organization_id"].as_str() != Some(scope.organization.as_str())
+            || session["branch_id"].as_str() != Some(scope.branch.as_str())
+            || session["snapshot_revision"]
+                .as_i64()
+                .is_none_or(|revision| revision < 0)
+        {
+            return Err("Table acknowledgement snapshot unavailable".into());
+        }
+        if session
+            .get("active_order_id")
+            .is_some_and(|order| !order.is_null())
+        {
+            let adopted = crate::table_session_cache::save(conn, session)?;
+            if index == 0 {
+                source_adopted = adopted;
+            }
+        }
+    }
+    // A target projection never replaces the complete parent or its ownership.
+    // A delayed original ACK can resolve its journal while a newer snapshot
+    // already owns the local identity. Never regress that identity on replay.
+    if source_adopted {
+        apply_table_session_snapshot(conn, sessions[0])?;
+    }
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS table_mutation_receipts_v1 (queue_id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,original_json TEXT NOT NULL,response_json TEXT NOT NULL,acknowledged_at TEXT NOT NULL);")
+        .map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO table_mutation_receipts_v1 VALUES(?1,?2,?3,?4,?5)",
+        params![
+            item.id,
+            scope.organization,
+            item.data,
+            response.to_string(),
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn apply_success(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -12231,7 +12883,11 @@ fn apply_success(
         }
         "restaurant_table_sessions" => {
             if let Some(response) = response {
-                apply_table_session_snapshot(conn, response)?;
+                if item.operation == "UPDATE" && is_uuid(&item.record_id) {
+                    apply_table_mutation_answer(conn, item, response)?;
+                } else {
+                    apply_table_session_snapshot(conn, response)?;
+                }
             }
             // Capture the remote (Supabase) session UUID minted by the open
             // INSERT and persist it onto the related local order so a later
@@ -12291,6 +12947,13 @@ fn apply_success(
                     }
                 }
             }
+        }
+        "restaurant_table_session_item_transfers" => {
+            apply_table_mutation_answer(
+                conn,
+                item,
+                response.ok_or("Missing table transfer acknowledgement")?,
+            )?;
         }
         "loyalty_transactions" => {
             // Wave 5 Session 6: mirror legacy `sync_loyalty_items`
@@ -13793,6 +14456,89 @@ where
                     }
                 }
 
+                if item.module_type == "table_service"
+                    && matches!(
+                        item.table_name.as_str(),
+                        "restaurant_table_sessions" | "restaurant_table_session_item_transfers"
+                    )
+                    && item.claim_generation == 1
+                    && item.attempts == 0
+                    && matches!(status, 400 | 403 | 409 | 422)
+                    && !is_table_session_close_waiting_payment_response(
+                        status,
+                        &response_body,
+                        &item,
+                    )
+                {
+                    let marked = {
+                        let db = conn.lock().map_err(|error| error.to_string())?;
+                        if !is_live_generic_claim(&db, &item)? {
+                            continue;
+                        }
+                        fail_table_mutation(&db,&item,&format!("HTTP {status}: TABLE_MUTATION_FIRST_DISPATCH_REFUSED {response_body}"),true)?;
+                        table_mutation_was_refused(&db, &item)?
+                    };
+                    if marked {
+                        failed += 1;
+                        telemetry.record_error(
+                            &item,
+                            "failed",
+                            "TABLE_MUTATION_REFUSED",
+                            Some(status),
+                        );
+                        errors.push(safe_sync_error(
+                            &item,
+                            "TABLE_MUTATION_REFUSED",
+                            Some(status),
+                        ));
+                    }
+                    continue;
+                }
+
+                // An ambiguous original may never be retired by generic
+                // server-wins conflict resolution. Only its canonical check
+                // ACK and both local mirrors can consume it.
+                if status == 409
+                    && item.module_type == "table_service"
+                    && matches!(
+                        item.table_name.as_str(),
+                        "restaurant_table_sessions" | "restaurant_table_session_item_transfers"
+                    )
+                    && !is_table_session_close_waiting_payment_response(
+                        status,
+                        &response_body,
+                        &item,
+                    )
+                {
+                    let marked = {
+                        let db = conn.lock().map_err(|error| error.to_string())?;
+                        if !is_live_generic_claim(&db, &item)? {
+                            continue;
+                        }
+                        fail_table_mutation(
+                            &db,
+                            &item,
+                            &format!("HTTP 409: {response_body}"),
+                            false,
+                        )?;
+                        table_mutation_is_unresolved(&db, &item)?
+                    };
+                    if marked {
+                        failed += 1;
+                        telemetry.record_error(
+                            &item,
+                            "pending",
+                            "TABLE_MUTATION_RETAINED",
+                            Some(status),
+                        );
+                        errors.push(safe_sync_error(
+                            &item,
+                            "TABLE_MUTATION_RETAINED",
+                            Some(status),
+                        ));
+                    }
+                    continue;
+                }
                 if let Some(failure) = parse_parity_terminal_auth_failure(status, &response_body) {
                     let parked = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -15058,6 +15804,732 @@ mod tests {
     const TEST_BRANCH_ID: &str = "11111111-1111-1111-1111-111111111111";
     const TEST_MENU_ITEM_ID: &str = "22222222-2222-2222-2222-222222222222";
 
+    fn review_batch(conn: &Connection, count: usize) -> (Vec<EnqueueInput>, Vec<String>) {
+        seed_foreground_table_scope(conn);
+        let source = "11111111-1111-4111-8111-111111111111";
+        let inputs:Vec<_>=(0..count).map(|index|EnqueueInput{table_name:"restaurant_table_session_item_transfers".into(),record_id:source.into(),operation:"INSERT".into(),organization_id:"org-1".into(),module_type:Some("table_service".into()),priority:Some(index as i64),conflict_strategy:Some("server-wins".into()),version:Some(1),data:json!({"source_session_id":source,"target_table_id":"44444444-4444-4444-8444-444444444444","order_item_id":format!("line-{index}"),"quantity":1,"client_batch_id":"review-batch","client_batch_index":index,"client_event_id":format!("review-event-{index}")}).to_string()}).collect();
+        let ids = enqueue_table_transfer_batch(conn, &inputs).unwrap();
+        (inputs, ids)
+    }
+    fn review_snapshot(id: &str, table: &str, revision: i64) -> Value {
+        json!({"id":id,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"active_order_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","status":"open","snapshot_revision":revision,"order":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","owner_terminal_id":"33333333-3333-4333-8333-333333333333","table_session_id":"11111111-1111-4111-8111-111111111111","order_items":[{"id":"line","quantity":1}]},"items":[{"table_session_id":id,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"quantity":1,"paid_quantity":0}],"payments":[],"balance":{"order_total":10,"paid_total":0,"tip_total":0,"outstanding_balance":10},"tables":[{"table_id":table,"released_at":null}]})
+    }
+    fn review_answer() -> Value {
+        json!({"success":true,"source_session":review_snapshot("11111111-1111-4111-8111-111111111111","55555555-5555-4555-8555-555555555555",2),"target_session":review_snapshot("22222222-2222-4222-8222-222222222222","44444444-4444-4444-8444-444444444444",2)})
+    }
+    #[test]
+    fn table_mutation_review_batch_claims_head_then_waits_for_canonical_ack() {
+        let conn = test_connection();
+        let (inputs, ids) = review_batch(&conn, 3);
+        let head = dequeue(&conn).unwrap().unwrap();
+        assert_eq!(
+            head.id, ids[0],
+            "higher suffix priority cannot reorder a batch"
+        );
+        assert!(dequeue(&conn).unwrap().is_none());
+        assert!(renderer_dequeue(&conn).unwrap().is_none());
+        assert!(peek(&conn).unwrap().is_none());
+        assert!(renderer_peek(&conn).unwrap().is_none());
+        assert!(renderer_retry_and_dequeue_exact(&conn, &ids[2])
+            .unwrap_err()
+            .starts_with("TABLE_MUTATION_BLOCKED"));
+        let body: Value = serde_json::from_str(&inputs[0].data).unwrap();
+        assert!(retain_table_mutation(
+            &conn,
+            "POST",
+            "/api/pos/table-sessions/11111111-1111-4111-8111-111111111111/items/transfer",
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333"
+        )
+        .unwrap_err()
+        .starts_with("TABLE_MUTATION_RETAINED"));
+        fail_table_mutation(&conn, &head, "unknown timeout", false).unwrap();
+        assert!(dequeue(&conn).unwrap().is_none());
+        let replay = retain_table_mutation(
+            &conn,
+            "POST",
+            "/api/pos/table-sessions/11111111-1111-4111-8111-111111111111/items/transfer",
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.data, head.data);
+        acknowledge_table_mutation(&conn, &replay, &review_answer()).unwrap();
+        assert_eq!(dequeue(&conn).unwrap().unwrap().id, ids[1]);
+    }
+
+    #[test]
+    fn table_mutation_review_foreground_and_background_race_claim_only_head() {
+        let (fixture, conn) = FileBackedTestDb::new("table-foreground-background-race");
+        let (inputs, ids) = review_batch(&conn, 3);
+        drop(conn);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let path = fixture.path.clone();
+        let start = barrier.clone();
+        let body: Value = serde_json::from_str(&inputs[0].data).unwrap();
+        let foreground = std::thread::spawn(move || {
+            let conn = Connection::open(path).unwrap();
+            conn.busy_timeout(Duration::from_secs(5)).unwrap();
+            start.wait();
+            retain_table_mutation(
+                &conn,
+                "POST",
+                "/api/pos/table-sessions/11111111-1111-4111-8111-111111111111/items/transfer",
+                Some(&body),
+                "org-1",
+                TEST_BRANCH_ID,
+                "33333333-3333-4333-8333-333333333333",
+            )
+        });
+        let path = fixture.path.clone();
+        let start = barrier.clone();
+        let background = std::thread::spawn(move || {
+            let conn = Connection::open(path).unwrap();
+            conn.busy_timeout(Duration::from_secs(5)).unwrap();
+            start.wait();
+            dequeue(&conn)
+        });
+        barrier.wait();
+        let answers = [foreground.join().unwrap(), background.join().unwrap()];
+        let claims: Vec<_> = answers
+            .iter()
+            .filter_map(|answer| answer.as_ref().ok().and_then(Option::as_ref))
+            .collect();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].id, ids[0]);
+        for error in answers.iter().filter_map(|answer| answer.as_ref().err()) {
+            assert!(error.starts_with("TABLE_MUTATION_RETAINED"));
+        }
+        let conn = Connection::open(&fixture.path).unwrap();
+        assert!(dequeue(&conn).unwrap().is_none());
+        assert!(renderer_dequeue(&conn).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn table_mutation_review_background_409_cannot_retire_unknown_original_as_server_wins() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        let (_, ids) = review_batch(&conn, 2);
+        crate::table_session_cache::save(
+            &conn,
+            &review_snapshot(
+                "22222222-2222-4222-8222-222222222222",
+                "44444444-4444-4444-8444-444444444444",
+                1,
+            ),
+        )
+        .unwrap();
+        let head = dequeue(&conn).unwrap().unwrap();
+        fail_table_mutation(&conn, &head, "unknown response", false).unwrap();
+        conn.execute(
+            "UPDATE parity_sync_queue SET next_retry_at=NULL WHERE id=?1",
+            [&head.id],
+        )
+        .unwrap();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let process_conn = shared.clone();
+        let (url, observed, release, server) =
+            spawn_blocked_first_response_server(MockResponse::json(
+                409,
+                r#"{"success":false,"error":"stale conflict","version":9}"#,
+            ))
+            .await;
+        let process =
+            tokio::spawn(async move { process_queue(&process_conn, &url, "test-api-key").await });
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .expect("table original must dispatch")
+            .unwrap();
+        release.send(()).unwrap();
+        let result = process.await.unwrap().unwrap();
+        assert_eq!(result.processed, 0);
+        assert_eq!(result.failed, 1);
+        let requests = server.await.unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "table replay cannot fetch/apply a generic server-wins record"
+        );
+        let body: Value = serde_json::from_str(&requests[0].body).unwrap();
+        let original: Value = serde_json::from_str(&head.data).unwrap();
+        assert_eq!(body["client_event_id"], original["client_event_id"]);
+        let conn = shared.lock().unwrap();
+        assert!(table_mutation_is_unresolved(&conn, &head).unwrap());
+        assert_eq!(get_length(&conn).unwrap(), ids.len() as i64);
+        assert!(require_table_mutations_resolved(
+            &conn,
+            "org-1",
+            "11111111-1111-4111-8111-111111111111"
+        )
+        .is_err());
+        assert!(require_table_mutations_resolved(
+            &conn,
+            "org-1",
+            "22222222-2222-4222-8222-222222222222"
+        )
+        .is_err());
+    }
+    #[test]
+    fn table_mutation_review_refusal_quarantines_suffix_across_restart_and_every_retry() {
+        let (fixture, conn) = FileBackedTestDb::new("table-refused-suffix");
+        let (_, ids) = review_batch(&conn, 3);
+        let bodies: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT data FROM parity_sync_queue WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            })
+            .collect();
+        let head = dequeue(&conn).unwrap().unwrap();
+        assert_eq!(
+            fail_table_mutation(
+                &conn,
+                &head,
+                "HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED conflict",
+                true
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            renderer_get_length(&conn).unwrap(),
+            3,
+            "Health still sees retained refusal/quarantine originals"
+        );
+        assert_eq!(renderer_items_by_id(&conn, &ids).unwrap().len(), 3);
+        assert_eq!(
+            renderer_list_conflict_audit_entries(&conn, 20)
+                .unwrap()
+                .len(),
+            3
+        );
+        drop(conn);
+        let conn = Connection::open(&fixture.path).unwrap();
+        for id in &ids {
+            assert!(retry_item(&conn, id)
+                .unwrap_err()
+                .starts_with("TABLE_MUTATION_BLOCKED"));
+            assert!(renderer_retry_item(&conn, id)
+                .unwrap_err()
+                .starts_with("TABLE_MUTATION_BLOCKED"));
+            assert!(renderer_retry_and_dequeue_exact(&conn, id)
+                .unwrap_err()
+                .starts_with("TABLE_MUTATION_BLOCKED"));
+        }
+        assert_eq!(
+            retry_items_by_module(&conn, "table_service")
+                .unwrap()
+                .retried,
+            0
+        );
+        assert_eq!(
+            renderer_retry_items_by_module(&conn, "table_service")
+                .unwrap()
+                .retried,
+            0
+        );
+        assert!(dequeue(&conn).unwrap().is_none());
+        assert!(renderer_dequeue(&conn).unwrap().is_none());
+        assert!(peek(&conn).unwrap().is_none());
+        assert!(renderer_peek(&conn).unwrap().is_none());
+        assert_eq!(conn.query_row("SELECT count(*) FROM conflict_audit_log WHERE resolution IN ('TABLE_MUTATION_FIRST_DISPATCH_REFUSED','TABLE_MUTATION_BATCH_SUFFIX_QUARANTINED')",[],|row|row.get::<_,i64>(0)).unwrap(),3);
+        for (index, id) in ids.iter().enumerate() {
+            let raw: String = conn
+                .query_row(
+                    "SELECT data FROM parity_sync_queue WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(raw, bodies[index]);
+        }
+        assert!(require_table_mutations_resolved(
+            &conn,
+            "org-1",
+            "11111111-1111-4111-8111-111111111111"
+        )
+        .is_ok());
+    }
+    #[test]
+    fn table_mutation_review_legacy_refusal_cannot_release_an_attempted_suffix_or_trust_5xx_text() {
+        let conn = test_connection();
+        let (_, ids) = review_batch(&conn, 3);
+        let head = dequeue(&conn).unwrap().unwrap();
+        // Simulate a pre-fix suffix race. Its attempted immutable original stays
+        // ambiguous, while only the provably untouched final suffix is parked.
+        conn.execute("UPDATE parity_sync_queue SET status='pending',claim_generation=1,last_attempt='2026-10-08T00:00:00Z',attempts=1 WHERE id=?1",[&ids[1]]).unwrap();
+        assert_eq!(
+            fail_table_mutation(
+                &conn,
+                &head,
+                "HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED conflict",
+                true
+            )
+            .unwrap(),
+            1
+        );
+        assert!(table_mutation_is_unresolved(&conn,&conn.query_row("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status FROM parity_sync_queue WHERE id=?1",[&ids[1]],map_internal_queue_item).unwrap()).unwrap());
+        let conn = test_connection();
+        let (_, ids) = review_batch(&conn, 2);
+        let head = dequeue(&conn).unwrap().unwrap();
+        fail_table_mutation(
+            &conn,
+            &head,
+            "HTTP 500: TABLE_MUTATION_FIRST_DISPATCH_REFUSED network failure",
+            false,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE parity_sync_queue SET status='failed' WHERE id=?1",
+            [&head.id],
+        )
+        .unwrap();
+        assert_eq!(
+            retry_transaction(&conn, quarantine_existing_refused_table_batches).unwrap(),
+            0
+        );
+        assert!(table_mutation_is_unresolved(&conn, &head).unwrap());
+        assert!(!table_mutation_terminal(&conn, &ids[1]).unwrap());
+    }
+    #[test]
+    fn table_mutation_review_target_fence_survives_restart_until_both_checks_ack() {
+        let (fixture, conn) = FileBackedTestDb::new("table-target-fence");
+        seed_foreground_table_scope(&conn);
+        let source = "11111111-1111-4111-8111-111111111111";
+        let target = "22222222-2222-4222-8222-222222222222";
+        let table = "44444444-4444-4444-8444-444444444444";
+        crate::table_session_cache::save(&conn, &review_snapshot(target, table, 1)).unwrap();
+        let body = json!({"quantity":1,"order_item_id":"line","target_table_id":table,"client_event_id":"target-original"});
+        let path = format!("/api/pos/table-sessions/{source}/items/transfer");
+        let original = retain_table_mutation(
+            &conn,
+            "POST",
+            &path,
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        fail_table_mutation(&conn, &original, "unknown timeout", false).unwrap();
+        drop(conn);
+        let conn = Connection::open(&fixture.path).unwrap();
+        assert!(require_table_mutations_resolved(&conn, "org-1", target)
+            .unwrap_err()
+            .starts_with("TABLE_MUTATION_BLOCKED"));
+        assert!(require_table_mutations_resolved(&conn, "different-org", target).is_ok());
+        assert!(retain_table_mutation(
+            &conn,
+            "PATCH",
+            &format!("/api/pos/table-sessions/{target}"),
+            Some(&json!({"action":"close","client_event_id":"new-target-close"})),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333"
+        )
+        .unwrap_err()
+        .starts_with("TABLE_MUTATION_BLOCKED"));
+        assert!(retain_table_mutation(&conn,"POST","/api/pos/table-sessions/66666666-6666-4666-8666-666666666666/items/transfer",Some(&json!({"quantity":1,"order_item_id":"other","target_table_id":table,"client_event_id":"other-transfer"})),"org-1",TEST_BRANCH_ID,"33333333-3333-4333-8333-333333333333").unwrap_err().starts_with("TABLE_MUTATION_BLOCKED"));
+        assert_eq!(get_length(&conn).unwrap(), 1);
+        crate::db::set_setting(
+            &conn,
+            "terminal",
+            "branch_id",
+            "77777777-7777-4777-8777-777777777777",
+        )
+        .unwrap();
+        assert!(require_table_mutations_resolved(&conn, "org-1", target).is_ok());
+        crate::db::set_setting(&conn, "terminal", "branch_id", TEST_BRANCH_ID).unwrap();
+        let replay = retain_table_mutation(
+            &conn,
+            "POST",
+            &path,
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.data, original.data);
+        acknowledge_table_mutation(&conn, &replay, &review_answer()).unwrap();
+        assert!(require_table_mutations_resolved(&conn, "org-1", target).is_ok());
+    }
+
+    #[test]
+    fn table_mutation_original_survives_restart_and_prevents_fresh_identity() {
+        let (fixture, conn) = FileBackedTestDb::new("foreground-table-original");
+        crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1").unwrap();
+        seed_terminal_context(&conn);
+        let path = "/api/pos/table-sessions/11111111-1111-4111-8111-111111111111/items/transfer";
+        let body = json!({"order_item_id":"item-1","quantity":1,"target_table_id":"table-2","client_event_id":"original-transfer","expected_updated_at":"captured-revision"});
+        let original = retain_table_mutation(
+            &conn,
+            "POST",
+            path,
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            TEST_TERMINAL_ID,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(original.status, "processing");
+        assert!(require_table_mutations_resolved(
+            &conn,
+            "org-1",
+            "11111111-1111-4111-8111-111111111111"
+        )
+        .is_err());
+        assert!(require_table_mutations_resolved(
+            &conn,
+            "different-org",
+            "11111111-1111-4111-8111-111111111111"
+        )
+        .is_ok());
+        assert_eq!(get_length(&conn).unwrap(), 1);
+        assert!(
+            dequeue(&conn).unwrap().is_none(),
+            "foreground claim fences background HTTP"
+        );
+        drop(conn); // Simulate killing the app while its HTTP answer is unknown.
+        let reopened = Connection::open(&fixture.path).unwrap();
+        reopened
+            .execute(
+                "UPDATE parity_sync_queue SET last_attempt='2000-01-01T00:00:00Z' WHERE id=?1",
+                [&original.id],
+            )
+            .unwrap();
+        recover_stale_processing_items(&reopened).unwrap();
+        let replay = peek(&reopened).unwrap().unwrap();
+        assert_eq!(replay.data, original.data);
+        assert_eq!(
+            serde_json::from_str::<Value>(&replay.data).unwrap()["client_event_id"],
+            "original-transfer"
+        );
+        let mut fresh = body.clone();
+        fresh["client_event_id"] = json!("new-transfer");
+        assert!(retain_table_mutation(
+            &reopened,
+            "POST",
+            path,
+            Some(&fresh),
+            "org-1",
+            TEST_BRANCH_ID,
+            TEST_TERMINAL_ID
+        )
+        .unwrap_err()
+        .contains("still syncing"));
+        assert_eq!(get_length(&reopened).unwrap(), 1);
+        let mut changed = body.clone();
+        changed["quantity"] = json!(2);
+        assert_eq!(
+            retain_table_mutation(
+                &reopened,
+                "POST",
+                path,
+                Some(&changed),
+                "org-1",
+                TEST_BRANCH_ID,
+                TEST_TERMINAL_ID
+            )
+            .unwrap_err(),
+            "TABLE_MUTATION_ORIGINAL_CONFLICT"
+        );
+        let retried = retain_table_mutation(
+            &reopened,
+            "POST",
+            path,
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            TEST_TERMINAL_ID,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retried.id, original.id);
+        assert_eq!(retried.data, original.data);
+    }
+
+    #[test]
+    fn table_mutation_original_refuses_dispatch_without_persistence_or_safe_context() {
+        let conn = test_connection();
+        let path = "/api/pos/table-sessions/11111111-1111-4111-8111-111111111111";
+        let body = json!({"action":"move_table","target_table_id":"table-2","client_event_id":"original-move"});
+        assert!(
+            retain_table_mutation(&conn, "PATCH", path, Some(&body), "", "branch", "terminal")
+                .is_err()
+        );
+        assert!(retain_table_mutation(
+            &conn,
+            "PATCH",
+            path,
+            Some(&json!({"action":"close"})),
+            "org",
+            "branch",
+            "terminal"
+        )
+        .is_err());
+        assert!(retain_table_mutation(
+            &conn,
+            "PATCH",
+            path,
+            Some(&json!({"action":"close","client_event_id":"close","manager_pin":"1234"})),
+            "org",
+            "branch",
+            "terminal"
+        )
+        .is_err());
+        assert!(retain_table_mutation(&conn, "PATCH", path, Some(&json!({"action":"whole_order_cancel","client_event_id":"cancel","manager_pin":"1234"})), "org", "branch", "terminal").unwrap().is_none());
+        assert_eq!(get_length(&conn).unwrap(), 0);
+        conn.execute_batch("CREATE TRIGGER fail_table_original BEFORE INSERT ON parity_sync_queue BEGIN SELECT RAISE(ABORT, 'disk write failed'); END;").unwrap();
+        assert!(retain_table_mutation(
+            &conn,
+            "PATCH",
+            path,
+            Some(&body),
+            "org",
+            "branch",
+            "terminal"
+        )
+        .unwrap_err()
+        .contains("disk write failed"));
+        assert_eq!(get_length(&conn).unwrap(), 0);
+    }
+
+    fn seed_foreground_table_scope(conn: &Connection) {
+        for (key, value) in [
+            ("__ignore_keyring", "1"),
+            ("organization_id", "org-1"),
+            ("branch_id", TEST_BRANCH_ID),
+            ("terminal_id", "33333333-3333-4333-8333-333333333333"),
+        ] {
+            crate::db::set_setting(conn, "terminal", key, value).unwrap();
+        }
+    }
+
+    #[test]
+    fn table_mutation_original_auth_denial_after_unknown_still_blocks_new_money_and_identity() {
+        let conn = test_connection();
+        seed_foreground_table_scope(&conn);
+        let path = "/api/pos/table-sessions/11111111-1111-4111-8111-111111111111/items/transfer";
+        let body = json!({"order_item_id":"line","quantity":1,"client_event_id":"original"});
+        let item = retain_table_mutation(
+            &conn,
+            "POST",
+            path,
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        mark_failure(
+            &conn,
+            &item.id,
+            "Network response lost",
+            item.claim_generation,
+        )
+        .unwrap();
+        let replay = retain_table_mutation(
+            &conn,
+            "POST",
+            path,
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        mark_failure(
+            &conn,
+            &replay.id,
+            "HTTP 403: authorization revoked",
+            replay.claim_generation,
+        )
+        .unwrap();
+        let mut fresh = body.clone();
+        fresh["client_event_id"] = json!("fresh");
+        assert!(retain_table_mutation(
+            &conn,
+            "POST",
+            path,
+            Some(&fresh),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333"
+        )
+        .is_err());
+        assert!(require_table_mutations_resolved(
+            &conn,
+            "org-1",
+            "11111111-1111-4111-8111-111111111111"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn table_mutation_original_batch_is_atomic_and_survives_restart_before_dispatch() {
+        let (fixture, conn) = FileBackedTestDb::new("table-complete-batch");
+        seed_foreground_table_scope(&conn);
+        let source = "11111111-1111-4111-8111-111111111111";
+        let inputs:Vec<_>=(0..2).map(|index|EnqueueInput {table_name:"restaurant_table_session_item_transfers".into(),
+            record_id:source.into(),operation:"INSERT".into(),organization_id:"org-1".into(),module_type:Some("table_service".into()),
+            priority:Some(0),conflict_strategy:Some("server-wins".into()),version:Some(1),data:json!({"source_session_id":source,
+                "client_event_id":format!("batch-event-{index}"),"client_batch_id":"whole-batch","client_batch_index":index,
+                "order_item_id":format!("line-{index}"),"quantity":1}).to_string()}).collect();
+        conn.execute_batch("CREATE TRIGGER fail_second BEFORE INSERT ON parity_sync_queue WHEN json_extract(NEW.data,'$.client_batch_index')=1 BEGIN SELECT RAISE(ABORT,'second write failed'); END;").unwrap();
+        assert!(enqueue_table_transfer_batch(&conn, &inputs).is_err());
+        assert_eq!(get_length(&conn).unwrap(), 0);
+        conn.execute_batch("DROP TRIGGER fail_second").unwrap();
+        let ids = enqueue_table_transfer_batch(&conn, &inputs).unwrap();
+        assert_eq!(ids.len(), 2);
+        drop(conn);
+        let reopened = Connection::open(&fixture.path).unwrap();
+        assert_eq!(get_length(&reopened).unwrap(), 2);
+        let body: Value = serde_json::from_str(&inputs[0].data).unwrap();
+        let first = retain_table_mutation(
+            &reopened,
+            "POST",
+            &format!("/api/pos/table-sessions/{source}/items/transfer"),
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.id, ids[0]);
+        assert_eq!(get_length(&reopened).unwrap(), 2);
+    }
+
+    #[test]
+    fn table_mutation_original_ack_mirrors_both_checks_atomically_before_deleting_original() {
+        let conn = test_connection();
+        seed_foreground_table_scope(&conn);
+        let source = "11111111-1111-4111-8111-111111111111";
+        let target = "22222222-2222-4222-8222-222222222222";
+        let body = json!({"client_event_id":"original","quantity":1,"order_item_id":"line"});
+        let item = retain_table_mutation(
+            &conn,
+            "POST",
+            &format!("/api/pos/table-sessions/{source}/items/transfer"),
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        let snapshot = |id: &str, revision: i64| {
+            json!({"id":id,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,
+            "active_order_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","status":"open","snapshot_revision":revision,
+            "order":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","owner_terminal_id":"33333333-3333-4333-8333-333333333333", "table_session_id":source,"order_items":[{"id":"line","quantity":1}]},
+            "items":[{"table_session_id":id,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"quantity":1,"paid_quantity":0}],
+            "payments":[],"balance":{"order_total":10,"paid_total":0,"tip_total":0,"outstanding_balance":10},"tables":[]})
+        };
+        crate::table_session_cache::save(&conn, &snapshot(source, 1)).unwrap();
+        let mut answer = json!({"success":true,"source_session":snapshot(source,2),"target_session":snapshot(target,2)});
+        answer["target_session"]["order"]["owner_terminal_id"] = json!("wrong-owner");
+        assert!(acknowledge_table_mutation(&conn, &item, &answer).is_err());
+        assert_eq!(get_length(&conn).unwrap(), 1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT snapshot_revision FROM table_session_snapshots_v1 WHERE session_id=?1",
+                [source],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        answer["target_session"] = snapshot(target, 2);
+        acknowledge_table_mutation(&conn, &item, &answer).unwrap();
+        assert_eq!(get_length(&conn).unwrap(), 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM table_session_snapshots_v1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        let receipt: String = conn
+            .query_row(
+                "SELECT original_json FROM table_mutation_receipts_v1 WHERE queue_id=?1",
+                [&item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt, item.data);
+    }
+
+    #[test]
+    fn table_mutation_original_late_ack_does_not_regress_newer_order_identity() {
+        let conn = test_connection();
+        seed_foreground_table_scope(&conn);
+        let source = "11111111-1111-4111-8111-111111111111";
+        let order = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        conn.execute("INSERT INTO orders(id,items,total_amount,status,sync_status,table_session_id,table_id,guest_count,created_at,updated_at) VALUES (?1,'[]',10,'pending','synced',?2,'new-table',4,datetime('now'),datetime('now'))", params![order,source]).unwrap();
+        let snapshot = |revision: i64, table: &str, guests: i64| {
+            json!({
+                "id":source,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,
+                "active_order_id":order,"status":"open","snapshot_revision":revision,
+                "order":{"id":order,"owner_terminal_id":"33333333-3333-4333-8333-333333333333","table_session_id":source,"table_id":table,"guest_count":guests,"order_items":[]},
+                "items":[],"payments":[],"balance":{"order_total":10,"paid_total":0,"tip_total":0,"outstanding_balance":10},"tables":[]
+            })
+        };
+        crate::table_session_cache::save(&conn, &snapshot(2, "new-table", 4)).unwrap();
+        let body = json!({"action":"move_table","client_event_id":"old-original","target_table_id":"old-table"});
+        let item = retain_table_mutation(
+            &conn,
+            "PATCH",
+            &format!("/api/pos/table-sessions/{source}"),
+            Some(&body),
+            "org-1",
+            TEST_BRANCH_ID,
+            "33333333-3333-4333-8333-333333333333",
+        )
+        .unwrap()
+        .unwrap();
+        acknowledge_table_mutation(
+            &conn,
+            &item,
+            &json!({"success":true,"session":snapshot(1,"old-table",1)}),
+        )
+        .unwrap();
+        let identity: (String, i64) = conn
+            .query_row(
+                "SELECT table_id,guest_count FROM orders WHERE id=?1",
+                [order],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(identity, ("new-table".into(), 4));
+        let revision: i64 = conn
+            .query_row(
+                "SELECT snapshot_revision FROM table_session_snapshots_v1 WHERE session_id=?1",
+                [source],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 2);
+        assert_eq!(get_length(&conn).unwrap(), 0);
+    }
+
     #[test]
     fn insert_normalizer_keeps_gift_card_tender() {
         // Module audit 2026-09-16: offline gift-card orders replayed as "other".
@@ -15965,6 +17437,129 @@ mod tests {
             resolve_endpoint(&update_address),
             "/api/pos/customers/cust-1/addresses/addr-1"
         );
+    }
+
+    #[test]
+    fn table_status_request_adds_a_durable_event_id_without_changing_the_queued_action() {
+        let (fixture, conn) = FileBackedTestDb::new("table-status-event");
+        crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1")
+            .expect("disable keyring reads");
+        seed_terminal_context(&conn);
+        let original = json!({
+            "status": "available",
+            "expected_updated_at": "2026-10-08T09:05:43.025944+00:00",
+            "updated_at": "2026-10-08T09:06:15.276150100+00:00"
+        });
+        let id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "restaurant_tables".to_string(),
+                record_id: "table-1".to_string(),
+                operation: "UPDATE".to_string(),
+                data: original.to_string(),
+                organization_id: "org-1".to_string(),
+                priority: Some(0),
+                module_type: Some("operations".to_string()),
+                conflict_strategy: Some("server-wins".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("enqueue legacy table status action");
+        let before = full_queue_row_fingerprint(&conn, &id);
+        let item = peek(&conn)
+            .expect("peek queued action")
+            .expect("queued action");
+        let RequestPreparation::Ready(first) =
+            prepare_request(&conn, &item).expect("prepare table status")
+        else {
+            panic!("table status request must be ready");
+        };
+        let mut body: Value =
+            serde_json::from_str(first.body.as_deref().expect("body")).expect("parse body");
+        assert_eq!(first.endpoint, "/api/pos/tables/table-1");
+        assert_eq!(first.method, Method::PATCH);
+        assert_eq!(body["client_event_id"], format!("pos-tauri-table:{id}"));
+        body.as_object_mut()
+            .expect("object")
+            .remove("client_event_id");
+        assert_eq!(
+            body, original,
+            "business fields and captured revision must stay unchanged"
+        );
+        assert_eq!(full_queue_row_fingerprint(&conn, &id), before);
+        drop(conn);
+
+        let reopened = Connection::open(&fixture.path).expect("reopen queue after restart");
+        let item = peek(&reopened)
+            .expect("peek after restart")
+            .expect("original action retained");
+        let RequestPreparation::Ready(replay) =
+            prepare_request(&reopened, &item).expect("prepare replay")
+        else {
+            panic!("table status replay must be ready");
+        };
+        assert_eq!(
+            replay.body, first.body,
+            "restart must preserve exact replay identity and payload"
+        );
+        assert_eq!(full_queue_row_fingerprint(&reopened, &id), before);
+    }
+
+    #[test]
+    fn table_status_request_preserves_captured_event_ids_and_fills_only_blank_ids() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        for captured in [
+            json!(null),
+            json!(""),
+            json!("   "),
+            json!("captured-event-1"),
+        ] {
+            let original = json!({
+                "status": "cleaning",
+                "expected_updated_at": "2026-10-08T09:05:43.025944+00:00",
+                "client_event_id": captured
+            });
+            let item = queue_item("restaurant_tables", "UPDATE", "table-1", original.clone());
+            let RequestPreparation::Ready(spec) =
+                prepare_request(&conn, &item).expect("prepare status")
+            else {
+                panic!("table status request must be ready");
+            };
+            let body: Value =
+                serde_json::from_str(spec.body.as_deref().expect("body")).expect("parse body");
+            let expected = if captured.as_str().is_some_and(|id| !id.trim().is_empty()) {
+                captured.clone()
+            } else {
+                json!("pos-tauri-table:queue-1")
+            };
+            assert_eq!(body["client_event_id"], expected);
+            assert_eq!(body["expected_updated_at"], original["expected_updated_at"]);
+            assert_eq!(item.data, original.to_string());
+        }
+    }
+
+    #[test]
+    fn table_status_request_keeps_other_entity_and_delete_contracts_unchanged() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let original = json!({"status": "available"});
+        let item = queue_item("reservations", "UPDATE", "reservation-1", original);
+        let RequestPreparation::Ready(spec) =
+            prepare_request(&conn, &item).expect("prepare reservation")
+        else {
+            panic!("reservation must be ready");
+        };
+        assert_eq!(spec.body.as_deref(), Some(item.data.as_str()));
+
+        let item = queue_item("restaurant_tables", "DELETE", "table-1", json!({}));
+        let RequestPreparation::Ready(spec) =
+            prepare_request(&conn, &item).expect("prepare deletion")
+        else {
+            panic!("deletion must be ready");
+        };
+        assert_eq!(spec.method, Method::DELETE);
+        assert!(spec.body.is_none());
     }
 
     #[test]
@@ -18019,7 +19614,9 @@ mod tests {
         let disk = disk.restart();
         {
             let conn = disk.state.conn.lock().unwrap();
+            let before_resume = Utc::now();
             resume_exhausted_transport_items(&conn).unwrap();
+            let after_resume = Utc::now();
             let row: (String, i64, String, String) = conn
                 .query_row(
                     "SELECT status,attempts,data,next_retry_at FROM parity_sync_queue WHERE id=?1",
@@ -18031,12 +19628,14 @@ mod tests {
                 (row.0.as_str(), row.1, row.2.as_str()),
                 ("pending", 10, original.as_str())
             );
-            assert!(
-                chrono::DateTime::parse_from_rfc3339(&row.3)
-                    .unwrap()
-                    .timestamp()
-                    > Utc::now().timestamp() + 59
-            );
+            let scheduled = chrono::DateTime::parse_from_rfc3339(&row.3)
+                .unwrap()
+                .with_timezone(&Utc);
+            // The owner doubles its minimum 30s delay, then adds <1s jitter.
+            // Compare against the scheduling window, preserving the complete
+            // 60s cooldown even when reading/asserting the row takes longer.
+            assert!(scheduled >= before_resume + ChronoDuration::seconds(60));
+            assert!(scheduled <= after_resume + ChronoDuration::milliseconds(60_999));
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM parity_sync_queue WHERE status='failed'",

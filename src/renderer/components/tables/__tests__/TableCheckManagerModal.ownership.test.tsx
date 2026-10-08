@@ -1,13 +1,14 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import greekTableCheck from '../../../../locales/overlays/el.table-check.json';
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(), patch: vi.fn(), invoke: vi.fn(), emit: vi.fn(), orders: vi.fn(), payments: vi.fn(),
-  updateItems: vi.fn(), toastError: vi.fn(),
-  post: vi.fn(), enqueueTransfer: vi.fn(), retryable: vi.fn(),
-  recordPayment: vi.fn(), enqueueUpdate: vi.fn(),
-  t: (_key: string, options: any) => String(options?.defaultValue || _key).replace(/\{\{(\w+)\}\}/g, (_match, name) => String(options[name] ?? '')),
+  updateItems: vi.fn(), toastError: vi.fn(), toastSuccess: vi.fn(), nativeFetch: vi.fn(), retained: vi.fn(), outcome: vi.fn(),
+  post: vi.fn(), enqueueTransfer: vi.fn(), enqueueBatch: vi.fn(), retryable: vi.fn(),
+  recordPayment: vi.fn(), enqueueUpdate: vi.fn(), enqueuePayment: vi.fn(),
+  t: vi.fn((_key: string, options: any) => String(options?.defaultValue || _key).replace(/\{\{(\w+)\}\}/g, (_match, name) => String(options[name] ?? ''))),
   directory: vi.fn().mockResolvedValue({ staff: [] }),
 }));
 vi.mock('../../../contexts/i18n-context', () => ({ useI18n: () => ({ t: mocks.t }) }));
@@ -16,14 +17,19 @@ vi.mock('../../../../lib', () => ({ getBridge: () => ({
   invoke: mocks.invoke, orders: { getAll: mocks.orders, updateItems: mocks.updateItems },
   payments: { getOrderPayments: mocks.payments, getPaidItems: async () => [], recordPayment: mocks.recordPayment },
   staffAuth: { refreshDirectory: mocks.directory },
+  adminApi: { fetchFromAdmin: mocks.nativeFetch },
 }), emitCompatEvent: mocks.emit }));
 vi.mock('../../../utils/tableSessionOfflineQueue', () => ({
   isRetryableTableServiceError: mocks.retryable,
+  isRetainedTableMutationError: mocks.retained,
+  tableMutationOutcome: mocks.outcome,
   enqueueTableItemTransfer: mocks.enqueueTransfer,
+  enqueueTableItemTransferBatch: mocks.enqueueBatch,
   enqueueTableSessionUpdate: mocks.enqueueUpdate,
+  enqueueTablePayment: mocks.enqueuePayment,
 }));
 vi.mock('../../../utils/format', () => ({ formatCurrency: (amount: number) => `EUR ${amount.toFixed(2)}` }));
-vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: mocks.toastError } }));
+vi.mock('react-hot-toast', () => ({ default: { success: mocks.toastSuccess, error: mocks.toastError } }));
 vi.mock('framer-motion', () => ({
   AnimatePresence: ({ children }: any) => children,
   motion: {
@@ -51,16 +57,168 @@ const props = { isOpen: true, tables: [t1, t2], table: t1, localOrders: [order] 
   onClose: vi.fn(), onAddItems: vi.fn(), onRefreshOrders: refresh, onRefreshTables: refresh };
 
 describe('table check workflow ownership', () => {
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); delete (window as any).__TAURI_INTERNALS__; });
   beforeEach(() => {
+    mocks.t.mockImplementation((_key: string, options: any) => String(options?.defaultValue || _key).replace(/\{\{(\w+)\}\}/g, (_match, name) => String(options[name] ?? '')));
     mocks.invoke.mockReset().mockResolvedValue({ success: true });
     mocks.orders.mockResolvedValue([order]);
     mocks.payments.mockResolvedValue([{ id: 'local-payment', table_session_id: sourceId, status: 'completed', amount: 15 }]);
     mocks.updateItems.mockResolvedValue({ success: true });
     mocks.retryable.mockReturnValue(false);
+    mocks.retained.mockReturnValue(false);
+    mocks.outcome.mockReturnValue(undefined);
+    mocks.nativeFetch.mockReset();
     mocks.enqueueTransfer.mockResolvedValue('queued');
+    mocks.enqueueBatch.mockResolvedValue(['first','second']);
     mocks.recordPayment.mockResolvedValue({ success: true, paymentId: 'recorded-payment' });
     mocks.enqueueUpdate.mockResolvedValue('queued-close');
+  });
+
+  const useNativeTableTransport = async () => {
+    (window as any).__TAURI_INTERNALS__ = {};
+    const api = await vi.importActual<typeof import('../../../utils/api-helpers')>('../../../utils/api-helpers');
+    const queue = await vi.importActual<typeof import('../../../utils/tableSessionOfflineQueue')>('../../../utils/tableSessionOfflineQueue');
+    mocks.patch.mockImplementation(api.posApiPatch);
+    mocks.post.mockImplementation(api.posApiPost);
+    mocks.retained.mockImplementation(queue.isRetainedTableMutationError);
+    mocks.outcome.mockImplementation(queue.tableMutationOutcome);
+    mocks.payments.mockResolvedValue([]);
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: makeSession(sourceId, 'T01', 3) } });
+  };
+
+  it.each(['BLOCKED', 'REFUSED', 'RETAINED', 'UNTYPED'])('preserves a move dialog only when its native outcome is %s, through actual posApi', async outcome => {
+    await useNativeTableTransport();
+    const status = outcome === 'REFUSED' ? 409 : 500;
+    const error = outcome === 'UNTYPED' ? 'HTTP 500: service temporarily unavailable' : `TABLE_MUTATION_${outcome}: network timeout (HTTP ${status})`;
+    mocks.nativeFetch.mockResolvedValue({ success: false, code: outcome === 'UNTYPED' ? undefined : `TABLE_MUTATION_${outcome}`, error, queued: outcome === 'RETAINED', status });
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    fireEvent.click(within(sheet).getByRole('option', { name: /T02/ }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Move Check' }));
+    await waitFor(() => expect(mocks.nativeFetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mocks.nativeFetch.mock.calls[0][1].body)).toMatchObject({ action: 'move_table', target_table_id: 'T02', client_event_id: expect.any(String) });
+    if (outcome === 'RETAINED') {
+      await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('Table action queued for sync'));
+      expect(screen.queryByRole('button', { name: 'Move Check' })).not.toBeInTheDocument();
+    } else {
+      const friendly = outcome === 'BLOCKED' ? 'A previous table action is awaiting confirmation. Review the saved action in Sync Health before making another change.'
+        : outcome === 'REFUSED' ? 'The table change was not accepted. Refresh the check and review your selection before trying again.' : error;
+      await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(friendly));
+      expect(screen.getByRole('button', { name: 'Move Check' })).toBeEnabled();
+      expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    }
+    expect(mocks.enqueueUpdate).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(mocks.emit.mock.calls.filter(([event]) => event === 'table-session-settled')).toHaveLength(0);
+  });
+
+  it.each(['BLOCKED', 'REFUSED'])('shows Greek operator guidance without native codes for %s', async outcome => {
+    await useNativeTableTransport();
+    mocks.t.mockImplementation((key: string, options: any) => {
+      const errorKey = key.replace('tableCheckManager.errors.', '');
+      return String((greekTableCheck.tableCheckManager.errors as Record<string, string>)[errorKey] || options?.defaultValue || key)
+        .replace(/\{\{(\w+)\}\}/g, (_match, name) => String(options[name] ?? ''));
+    });
+    mocks.nativeFetch.mockResolvedValue({ success: false, code: `TABLE_MUTATION_${outcome}`, error: `TABLE_MUTATION_${outcome}: network timeout`, queued: false });
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    fireEvent.click(within(sheet).getByRole('option', { name: /T02/ }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Move Check' }));
+    const expected = outcome === 'BLOCKED' ? greekTableCheck.tableCheckManager.errors.tableMutationBlocked : greekTableCheck.tableCheckManager.errors.tableMutationRefused;
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(expected));
+    expect(expected).not.toContain('TABLE_MUTATION_');
+    expect(screen.getByRole('button', { name: 'Move Check' })).toBeEnabled();
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it.each(['BLOCKED', 'RETAINED'])('preserves single-transfer quantity/seat intent for %s through actual posApi', async outcome => {
+    await useNativeTableTransport();
+    const error = `TABLE_MUTATION_${outcome}: HTTP 500: connection timed out`;
+    // Rust Result errors may reject as strings across Tauri; exercise that path too.
+    mocks.nativeFetch.mockRejectedValue(error);
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.keyDown(screen.getByText('Coffee').closest('button')!, { key: 'Enter' });
+    fireEvent.click(within(screen.getAllByRole('dialog').at(-1)!).getByRole('button', { name: 'Transfer' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    fireEvent.click(within(sheet).getByRole('option', { name: /T02/ }));
+    const inputs = within(sheet).getAllByRole('textbox');
+    fireEvent.change(inputs[0], { target: { value: '2' } });
+    fireEvent.change(inputs[1], { target: { value: '3' } });
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Move Quantity' }));
+    await waitFor(() => expect(mocks.nativeFetch).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mocks.nativeFetch.mock.calls[0][1].body)).toMatchObject({ quantity: 2, target_seat_number: 3, target_table_id: 'T02' });
+    if (outcome === 'RETAINED') {
+      await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('Item transfer queued for sync'));
+      expect(screen.queryByRole('button', { name: 'Move Quantity' })).not.toBeInTheDocument();
+    } else {
+      await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('A previous table action is awaiting confirmation. Review the saved action in Sync Health before making another change.'));
+      const retainedSheet = screen.getAllByRole('dialog').at(-1)!;
+      expect(within(retainedSheet).getByRole('button', { name: 'Move Quantity' })).toBeEnabled();
+      expect(within(retainedSheet).getAllByRole('textbox')[0]).toHaveValue('2');
+      expect(within(retainedSheet).getAllByRole('textbox')[1]).toHaveValue('3');
+      expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    }
+    expect(mocks.enqueueTransfer).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['BLOCKED', undefined], ['REFUSED', 1], ['REFUSED', 2], ['REFUSED', 0], ['REFUSED', undefined], ['RETAINED', 1],
+  ])('does not claim a partially attempted batch is queued for native %s (quarantined %s)', async (outcome, quarantinedCount) => {
+    await useNativeTableTransport();
+    if (quarantinedCount === 2) {
+      mocks.t.mockImplementation((key: string, options: any) => String((greekTableCheck.tableCheckManager.errors as Record<string, string>)[key.replace('tableCheckManager.errors.', '')] || options?.defaultValue || key)
+        .replace(/\{\{(\w+)\}\}/g, (_match, name) => String(options[name] ?? '')));
+    }
+    const lines = [original, { ...original, id: 'line-2', name: 'Tea' }, { ...original, id: 'line-3', name: 'Wine' }];
+    if (quarantinedCount === 2) lines.push({ ...original, id: 'line-4', name: 'Soda' });
+    const completeOrder = { ...order, total_amount: lines.length * 30, items: lines };
+    const session = makeSession(sourceId, 'T01', 3);
+    session.order.order_items = lines;
+    session.items = lines.map(line => ({ order_item_id: line.id, quantity: 3, status: 'open' }));
+    session.balance = { order_total: lines.length * 30, paid_total: 0, outstanding_balance: lines.length * 30 };
+    mocks.orders.mockResolvedValue([completeOrder]);
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session } });
+    const error = outcome === 'REFUSED'
+      ? 'TABLE_MUTATION_REFUSED: HTTP 409: network conflict; 1 later transfer quarantined'
+      : `TABLE_MUTATION_${outcome}: HTTP 500: connection timed out`;
+    mocks.nativeFetch.mockResolvedValueOnce({ success: true, data: { success: true, source_session: session } })
+      .mockResolvedValue({ success: false, code: `TABLE_MUTATION_${outcome}`, error, queued: outcome === 'RETAINED', batch: { quarantined_count: quarantinedCount } });
+    render(<TableCheckManagerModal {...props} localOrders={[completeOrder] as any} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    const coffee = screen.getByText('Coffee').closest('button')!;
+    fireEvent(coffee, new MouseEvent('pointerdown', { button: 0, bubbles: true }));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 460)); });
+    fireEvent.pointerUp(coffee);
+    for (const line of lines.slice(1)) fireEvent.pointerUp(screen.getByText(line.name).closest('button')!);
+    fireEvent.click(screen.getByRole('button', { name: 'Transfer' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    fireEvent.click(within(sheet).getByRole('option', { name: /T02/ }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Move Selected Quantities' }));
+    await waitFor(() => expect(mocks.nativeFetch).toHaveBeenCalledTimes(2));
+    expect(mocks.enqueueBatch).toHaveBeenCalledTimes(1);
+    const originals = mocks.enqueueBatch.mock.calls[0][0].payloads;
+    expect(originals).toHaveLength(lines.length);
+    expect(JSON.parse(mocks.nativeFetch.mock.calls[0][1].body)).toEqual(originals[0]);
+    expect(JSON.parse(mocks.nativeFetch.mock.calls[1][1].body)).toEqual(originals[1]);
+    if (outcome === 'RETAINED') {
+      await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('Item transfer queued for sync'));
+      expect(screen.queryByRole('button', { name: 'Move Selected Quantities' })).not.toBeInTheDocument();
+    } else {
+      const friendly = outcome === 'BLOCKED' ? 'A previous table action is awaiting confirmation. Review the saved action in Sync Health before making another change.'
+        : quarantinedCount === 2 ? greekTableCheck.tableCheckManager.errors.tableMutationBatchRefused.replace('{{count}}', '2')
+        : quarantinedCount === 1 ? 'The table change was not accepted. Selected items not sent: 1. Refresh the check and review your selection before trying again.'
+        : 'The table change was not accepted. Refresh the check and review your selection before trying again.';
+      await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(friendly));
+      expect(screen.getByRole('button', { name: 'Move Selected Quantities' })).toBeEnabled();
+      expect(mocks.toastSuccess).not.toHaveBeenCalled();
+      expect(screen.getAllByText(`${lines.length} selected`).length).toBeGreaterThan(0);
+    }
+    expect(mocks.enqueueTransfer).not.toHaveBeenCalled();
   });
 
   it('opens a durable saved split scope offline, retains paid claims, and disables collection and edits', async () => {
@@ -399,7 +557,7 @@ describe('table check workflow ownership', () => {
     expect(screen.getByRole('button', { name: /^Pay$/ })).toBeDisabled();
   });
 
-  it('queues only the unacknowledged suffix after a batch transfer partially succeeds', async () => {
+  it('does not duplicate the native journal for the unknown second request after a batch transfer partially succeeds', async () => {
     const second = { ...original, id: 'line-2', name: 'Tea', menu_item_id: 'menu-2' };
     const completeOrder = { ...order, total_amount: 60, items: [original, second] };
     const session = makeSession(sourceId, 'T01', 3);
@@ -426,8 +584,90 @@ describe('table check workflow ownership', () => {
     const sheet = screen.getAllByRole('dialog').at(-1)!;
     fireEvent.click(within(sheet).getByRole('option', { name: /T02/ }));
     fireEvent.click(within(sheet).getByRole('button', { name: 'Move Selected Quantities' }));
-    await waitFor(() => expect(mocks.enqueueTransfer).toHaveBeenCalled());
-    expect(mocks.enqueueTransfer).toHaveBeenCalledTimes(1);
-    expect(mocks.enqueueTransfer.mock.calls[0][0].payload.order_item_id).toBe('line-2');
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    expect(mocks.post.mock.calls[1][1].order_item_id).toBe('line-2');
+    expect(mocks.enqueueTransfer).not.toHaveBeenCalled();
+    expect(mocks.enqueueBatch).toHaveBeenCalledTimes(1);
+    expect(mocks.enqueueBatch.mock.calls[0][0].payloads).toHaveLength(2);
+    expect(mocks.enqueueBatch.mock.invocationCallOrder[0]).toBeLessThan(mocks.post.mock.invocationCallOrder[0]);
+  });
+
+  it('retains a paid check while its canonical close answer is unknown', async () => {
+    mocks.payments.mockResolvedValue([]);
+    mocks.get.mockResolvedValue({ success:true, data:{success:true,session:makeSession(sourceId,'T01',3)} });
+    mocks.patch.mockResolvedValue({ success:false,error:'Offline' });
+    mocks.retryable.mockReturnValue(true);
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button',{name:/^Pay$/}));
+    fireEvent.click(screen.getByRole('button',{name:/^Cash$/}));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalled());
+    expect(mocks.recordPayment).toHaveBeenCalledTimes(1);
+    expect(mocks.emit.mock.calls.filter(([event]) => event === 'table-session-settled')).toHaveLength(0);
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(mocks.enqueueUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole('button',{name:/^Pay$/})).toBeDisabled();
+  });
+
+  it('does not turn a refused collection during an unknown transfer into a raw payment queue', async () => {
+    mocks.payments.mockResolvedValue([]);
+    mocks.get.mockResolvedValue({success:true,data:{success:true,session:makeSession(sourceId,'T01',3)}});
+    mocks.recordPayment.mockRejectedValue(new Error('Table action is still syncing. Retry the saved original in Sync Health before collecting another payment.'));
+    mocks.retryable.mockReturnValue(true);
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button',{name:/^Pay$/}));
+    fireEvent.click(screen.getByRole('button',{name:/^Cash$/}));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalled());
+    expect(mocks.enqueuePayment).not.toHaveBeenCalled();
+    expect(mocks.patch).not.toHaveBeenCalled();
+    expect(screen.getByRole('button',{name:/^Pay$/})).not.toBeDisabled();
+  });
+
+  it.each(['canonical receipt', 'local receipt ahead of the canonical mirror'])('settles an amount-only partial from %s without fabricated item quantities', async (scenario) => {
+    const coffee = {...original,unit_price:8,total_price:24};
+    const canonical = {...order,total_amount:24,items:[coffee]};
+    const session:any = {...makeSession(sourceId,'T01',3),status:'partially_paid',
+      order:{...makeSession(sourceId,'T01',3).order,total_amount:24,order_items:[coffee]},
+      balance:{order_total:24,paid_total:8,outstanding_balance:16,item_settlement_requires_balance:true}};
+    if (scenario === 'local receipt ahead of the canonical mirror') {
+      session.balance = {order_total:24,paid_total:0,outstanding_balance:24,item_settlement_requires_balance:false};
+      session.items = [{order_item_id:'line-1',quantity:3,paid_quantity:0,status:'open',item_total_cents:2400,paid_amount_cents:0,outstanding_amount_cents:2400}];
+    }
+    mocks.orders.mockResolvedValue([canonical]);
+    mocks.payments.mockResolvedValue([{id:'partial',table_session_id:sourceId,status:'completed',amount:8}]);
+    mocks.get.mockResolvedValue({success:true,data:{success:true,session}});
+    mocks.patch.mockResolvedValue({success:false,error:'Offline'});
+    render(<TableCheckManagerModal {...props} localOrders={[canonical] as any} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    const line = screen.getByText('Coffee').closest('button')!;
+    fireEvent(line,new MouseEvent('pointerdown',{button:0,bubbles:true}));
+    await act(async () => {await new Promise(resolve => setTimeout(resolve,460));});
+    fireEvent.pointerUp(line);
+    fireEvent.click(screen.getByRole('button',{name:'Pay Selected'}));
+    fireEvent.click(within(screen.getAllByRole('dialog').at(-1)!).getByRole('button',{name:'Cash'}));
+    await waitFor(() => expect(mocks.recordPayment).toHaveBeenCalledTimes(1));
+    expect(mocks.recordPayment.mock.calls[0][0]).toMatchObject({amount:16});
+    expect(mocks.recordPayment.mock.calls[0][0].items).toBeUndefined();
+    expect(mocks.recordPayment.mock.calls[0][0].seat_number).toBeUndefined();
+  });
+
+  it('does not revive a fully paid product for transfer when another product is unpaid', async () => {
+    const coffee = {...original,quantity:1,total_price:10};
+    const tea = {...coffee,id:'line-2',name:'Tea'};
+    const canonical = {...order,total_amount:20,items:[coffee,tea]};
+    const session:any = {...makeSession(sourceId,'T01',1),status:'partially_paid',
+      order:{...makeSession(sourceId,'T01',1).order,total_amount:20,order_items:[coffee,tea]},
+      items:[{order_item_id:'line-1',quantity:1,paid_quantity:1,status:'paid',outstanding_amount_cents:0},
+        {order_item_id:'line-2',quantity:1,paid_quantity:0,status:'open',outstanding_amount_cents:1000}],
+      balance:{order_total:20,paid_total:10,outstanding_balance:10,item_settlement_requires_balance:false}};
+    mocks.orders.mockResolvedValue([canonical]);
+    mocks.payments.mockResolvedValue([{id:'receipt',table_session_id:sourceId,status:'completed',amount:10}]);
+    mocks.get.mockResolvedValue({success:true,data:{success:true,session}});
+    render(<TableCheckManagerModal {...props} localOrders={[canonical] as any} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.pointerUp(screen.getByText('Coffee').closest('button')!);
+    expect(screen.getByRole('button',{name:'Transfer'})).toBeDisabled();
+    expect(mocks.post).not.toHaveBeenCalled();
   });
 });
