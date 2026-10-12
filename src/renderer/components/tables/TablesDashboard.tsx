@@ -10,6 +10,8 @@ import { TableFloorPlanModal } from './TableFloorPlanModal';
 import { FloatingActionButton } from '../ui/FloatingActionButton';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
+import { sumTableCheckDue } from '../../utils/table-check-total';
+import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import {
   AlertTriangle,
   ArrowRightLeft,
@@ -293,6 +295,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
         {activeTab === 'tables' && (
           <TablesTabContent 
             tables={tables}
+            orders={tableOrders}
             isDark={isDark}
             branchId={branchId}
             organizationId={organizationId}
@@ -399,7 +402,7 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
   return (
     <div className="h-full overflow-y-auto pr-2 space-y-3 scrollbar-hide">
       {activeOrders.map((order, index) => {
-        const orderNumber = order.orderNumber || order.order_number || `#${index + 1}`;
+        const orderNumber = formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order), order.created_at || order.createdAt) || `#${index + 1}`;
         const tableNumber = order.tableNumber || order.table_number || '-';
         const totalAmount = order.totalAmount || order.total_amount || 0;
         const createdAt = order.createdAt || order.created_at || '';
@@ -544,7 +547,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
   return (
     <div className="h-full overflow-y-auto pr-2 space-y-3 scrollbar-hide">
       {deliveredOrders.map((order, index) => {
-        const orderNumber = order.orderNumber || order.order_number || `#${index + 1}`;
+        const orderNumber = formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order), order.created_at || order.createdAt) || `#${index + 1}`;
         const tableNumber = order.tableNumber || order.table_number || '-';
         const totalAmount = order.totalAmount || order.total_amount || 0;
         const createdAt = order.createdAt || order.created_at || '';
@@ -695,7 +698,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
   return (
     <div className="h-full overflow-y-auto pr-2 space-y-3 scrollbar-hide">
       {canceledOrders.map((order, index) => {
-        const orderNumber = order.orderNumber || order.order_number || `#${index + 1}`;
+        const orderNumber = formatCompactOrderNumberForDisplay(getVisibleOrderNumber(order), order.created_at || order.createdAt) || `#${index + 1}`;
         const tableNumber = order.tableNumber || order.table_number || '-';
         const totalAmount = order.totalAmount || order.total_amount || 0;
         const createdAt = order.createdAt || order.created_at || '';
@@ -790,6 +793,7 @@ CanceledTabContent.displayName = 'CanceledTabContent';
 // Requirements: 1.5 - Display the table grid with status indicators (available, occupied, reserved, cleaning)
 interface TablesTabContentProps {
   tables: RestaurantTable[];
+  orders: Order[];
   isDark: boolean;
   branchId: string;
   organizationId: string;
@@ -799,6 +803,7 @@ interface TablesTabContentProps {
 
 const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   tables,
+  orders,
   isDark,
   branchId,
   organizationId,
@@ -869,11 +874,11 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     const occupied = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'occupied').length;
     const reserved = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'reserved').length;
     const cleaning = floorScopedTables.filter(table => resolveTableDisplayStatus(table) === 'cleaning').length;
-    const due = floorScopedTables.reduce((sum, table) => {
+    const due = sumTableCheckDue(floorScopedTables, table => {
       const balance = table.balance || {};
       const outstanding = Number(table.unpaidBalance ?? balance.outstanding_balance ?? 0);
-      return sum + (Number.isFinite(outstanding) ? outstanding : 0);
-    }, 0);
+      return Number.isFinite(outstanding) ? outstanding : 0;
+    });
     const occupancyRate = total > 0 ? Math.round((occupied / total) * 100) : 0;
 
     return { total, available, occupied, reserved, cleaning, due, occupancyRate };
@@ -1230,6 +1235,11 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
               const guestCount = table.guestCount || table.capacity || 0;
               const isSelected = selectedTable?.id === table.id;
               const hasOpenCheck = tableHasOpenCheckReference(table);
+              const checkOrder = table.currentOrderId ? orders.find(order =>
+                order.id === table.currentOrderId || order.supabase_id === table.currentOrderId || order.supabaseId === table.currentOrderId) : undefined;
+              const checkOrderNumber = checkOrder
+                ? formatCompactOrderNumberForDisplay(getVisibleOrderNumber(checkOrder), checkOrder.created_at || checkOrder.createdAt)
+                : '';
               const occupiedInfo = hasOpenCheck ? formatOccupiedDuration(table.occupiedSince) : null;
               // Cleaning/maintenance/unavailable tables are not ready for guests and must not
               // offer guest order actions, even when no open check remains after payment.
@@ -1334,10 +1344,10 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                         {occupiedInfo.since} · {occupiedInfo.duration}
                       </span>
                     ) : null}
-                    {table.currentOrderId ? (
+                    {checkOrderNumber ? (
                       <span className="inline-flex max-w-full items-center gap-1 rounded-xl border border-slate-400/20 px-2 py-1">
                         <ReceiptText className="h-3.5 w-3.5" />
-                        <span className="truncate">{String(table.currentOrderId).slice(0, 10)}</span>
+                        <span className="truncate">{checkOrderNumber}</span>
                       </span>
                     ) : null}
                   </div>

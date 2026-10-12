@@ -171,6 +171,214 @@ fn close_expected(td: &TestDb) -> Value {
     closed["expected"].clone()
 }
 
+#[test]
+fn driver_health_reports_zero_cash_without_mutating_receipts_or_closed_history() {
+    let td = TestDb::open();
+    let conn = td.state.conn.lock().unwrap();
+    seed_shifts(&conn);
+    for order in [
+        "health-cash",
+        "health-card",
+        "health-unpaid",
+        "health-other-branch",
+    ] {
+        seed_delivery(&conn, order);
+        assign(&conn, order);
+    }
+    add_payment(
+        &conn,
+        "health-pay",
+        "health-cash",
+        "cash",
+        1520,
+        DRIVER_SHIFT,
+    );
+    add_payment(
+        &conn,
+        "health-card-pay",
+        "health-card",
+        "card",
+        1165,
+        DRIVER_SHIFT,
+    );
+    add_payment(
+        &conn,
+        "health-other-pay",
+        "health-other-branch",
+        "cash",
+        200,
+        DRIVER_SHIFT,
+    );
+    conn.execute(
+        "UPDATE orders SET branch_id='other' WHERE id='health-other-branch'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE staff_shifts SET status='closed',check_out_time=datetime('now') WHERE id=?1",
+        [DRIVER_SHIFT],
+    )
+    .unwrap();
+    conn.execute("UPDATE driver_earnings SET created_at=datetime('now')", [])
+        .unwrap();
+    let changes = conn.total_changes();
+    let result = crate::courier_integrity::collect(&conn).unwrap();
+    assert_eq!(result["issues"].as_array().unwrap().len(), 1);
+    assert_eq!(result["issues"][0]["orderId"], "health-cash");
+    assert_eq!(result["issues"][0]["differenceCents"], 1520);
+    assert_eq!(result["issues"][0]["shiftStatus"], "closed");
+    assert_eq!(
+        result,
+        crate::courier_integrity::collect(&conn)
+            .map(|mut v| {
+                v["checkedAt"] = result["checkedAt"].clone();
+                v
+            })
+            .unwrap()
+    );
+    assert_eq!(conn.total_changes(), changes);
+    assert_eq!(earning(&conn, "health-cash"), (0, 0, 0));
+    drop(conn);
+    let health = crate::commands::sync::collect_financial_integrity(&td.state).unwrap();
+    assert_eq!(health["valid"], false);
+    assert_eq!(health["courierCash"]["issues"][0]["differenceCents"], 1520);
+    let conn = td.state.conn.lock().unwrap();
+    conn.execute("UPDATE order_payments SET staff_id='cashier-courier',staff_shift_id=?1 WHERE id='health-pay'", [CASHIER_SHIFT]).unwrap();
+    assert!(crate::courier_integrity::collect(&conn).unwrap()["issues"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    conn.execute(
+        "UPDATE order_payments SET status='voided' WHERE id='health-pay'",
+        [],
+    )
+    .unwrap();
+    assert!(crate::courier_integrity::collect(&conn).unwrap()["issues"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn driver_preview_recounts_late_receipts_without_closing_the_shift() {
+    let _keyring = fake_keyring::install_seeded([("terminal_id", TERMINAL), ("branch_id", BRANCH)]);
+    let td = TestDb::open();
+    {
+        let conn = td.state.conn.lock().unwrap();
+        seed_shifts(&conn);
+        conn.execute("UPDATE staff_shifts SET opening_cash_amount=0, opening_cash_amount_cents=0 WHERE id=?1", [DRIVER_SHIFT]).unwrap();
+        for order in ["preview-49", "preview-53", "preview-56"] {
+            seed_delivery(&conn, order);
+            conn.execute("UPDATE orders SET tip_amount=0,tip_amount_cents=0,delivery_fee=0,delivery_fee_cents=0 WHERE id=?1", [order]).unwrap();
+        }
+        // The earning was mirrored before its real payment. The order itself
+        // predates check-in, but its explicit assignment belongs to this shift.
+        assign(&conn, "preview-49");
+        add_payment(
+            &conn,
+            "receipt-49",
+            "preview-49",
+            "cash",
+            1520,
+            DRIVER_SHIFT,
+        );
+        conn.execute(
+            "UPDATE orders SET created_at='2026-09-30T08:25:00Z' WHERE id='preview-49'",
+            [],
+        )
+        .unwrap();
+        add_payment(
+            &conn,
+            "receipt-53",
+            "preview-53",
+            "cash",
+            1660,
+            DRIVER_SHIFT,
+        );
+        assign(&conn, "preview-53");
+        add_payment(
+            &conn,
+            "receipt-56",
+            "preview-56",
+            "card",
+            1165,
+            DRIVER_SHIFT,
+        );
+        assign(&conn, "preview-56");
+        assert_eq!(earning(&conn, "preview-49"), (0, 0, 0));
+    }
+    let summary = crate::shifts::get_shift_summary(&td.state, DRIVER_SHIFT).unwrap();
+    assert_eq!(summary["amountToReturn"], json!(31.8));
+    let deliveries = summary["driverDeliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 3);
+    assert_eq!(
+        deliveries
+            .iter()
+            .map(|row| row["card_amount"].as_f64().unwrap())
+            .sum::<f64>(),
+        11.65
+    );
+    {
+        let conn = td.state.conn.lock().unwrap();
+        let state: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status,check_out_time FROM staff_shifts WHERE id=?1",
+                [DRIVER_SHIFT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("active".into(), None));
+        assert_eq!(
+            earning(&conn, "preview-49"),
+            (0, 0, 0),
+            "preview does not settle or rewrite the saved earning"
+        );
+    }
+    assert_eq!(close_expected(&td), json!(31.8));
+    {
+        let conn = td.state.conn.lock().unwrap();
+        assert_eq!(earning(&conn, "preview-49"), (1520, 0, 1520));
+        // A later mirror must not change the statement of a closed shift.
+        conn.execute(
+            "UPDATE order_payments SET amount=99,amount_cents=9900 WHERE id='receipt-49'",
+            [],
+        )
+        .unwrap();
+    }
+    let closed_summary = crate::shifts::get_shift_summary(&td.state, DRIVER_SHIFT).unwrap();
+    let closed_cash: f64 = closed_summary["driverDeliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["cash_collected"].as_f64().unwrap())
+        .sum();
+    assert_eq!(closed_cash, 31.8);
+}
+
+#[test]
+fn driver_preview_reads_receipts_after_assignment_changes_local_attribution() {
+    let _keyring = fake_keyring::install_seeded([("terminal_id", TERMINAL), ("branch_id", BRANCH)]);
+    let td = TestDb::open();
+    {
+        let conn = td.state.conn.lock().unwrap();
+        seed_shifts(&conn);
+        seed_delivery(&conn, "assigned-after-payment");
+        add_payment(
+            &conn,
+            "before-assignment",
+            "assigned-after-payment",
+            "cash",
+            1300,
+            CASHIER_SHIFT,
+        );
+        // Assignment returns the pre-assignment tender snapshot, then moves
+        // the receipt columns. No explicit cashier collection metadata exists.
+        assign(&conn, "assigned-after-payment");
+        assert_eq!(earning(&conn, "assigned-after-payment"), (0, 0, 0));
+    }
+    assert_eq!(amount_to_return(&td), OPENING + 13.0 - 1.0);
+}
+
 /// No payment row: the courier owes nothing for the order and keeps no tip
 /// out of the drawer. It used to be the whole 13.00 in cash, less the tip.
 #[test]
@@ -546,13 +754,9 @@ fn a_refund_that_names_no_handler_on_a_couriers_order_is_the_couriers_only() {
                 (1000, 0, 1000),
                 "{order_id}: the courier handed the 3.00 back"
             );
-            // The drawer never counts it too, even where the order and its
-            // payment are attributed to the cashier's shift.
-            conn.execute(
-                "UPDATE order_payments SET staff_shift_id = ?1 WHERE order_id = ?2",
-                params![CASHIER_SHIFT, order_id],
-            )
-            .unwrap();
+            // Moving the order to the cashier does not move the original
+            // receipt or make its courier refund a drawer movement. Keep
+            // the payment's staff and shift consistent with its collector.
             conn.execute(
                 "UPDATE orders SET staff_shift_id = ?1 WHERE id = ?2",
                 params![CASHIER_SHIFT, order_id],

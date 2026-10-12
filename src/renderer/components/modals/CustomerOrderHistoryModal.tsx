@@ -12,6 +12,7 @@ interface CustomerOrder {
     status: string;
     order_type: string;
     total_amount: number;
+    currency?: string | null;
     payment_method?: string;
     created_at: string;
     items_count?: number;
@@ -98,7 +99,12 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
     };
 
     // Calculate totals
-    const totalSpent = orders.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+    const totalsByCurrency = orders.reduce((totals, order) => {
+        const currency = order.currency?.trim().toUpperCase() || null;
+        totals.set(currency, (totals.get(currency) ?? 0) + (order.total_amount ?? 0));
+        return totals;
+    }, new Map<string | null, number>());
+    const totalSpent = Array.from(totalsByCurrency, ([currency, amount]) => formatCurrency(amount, currency)).join(' · ') || '—';
     const totalOrders = orders.length;
 
     return (
@@ -152,7 +158,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                 <div className="text-xs liquid-glass-modal-text-muted uppercase">
                                     {t('modals.customerHistory.totalSpent') || 'Total Spent'}
                                 </div>
-                                <div className="text-lg font-bold text-green-400">{formatCurrency(totalSpent)}</div>
+                                <div className="text-lg font-bold text-green-400">{totalSpent}</div>
                             </div>
                         </div>
                         <button
@@ -214,7 +220,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                                         <div className="flex items-center gap-3">
                                             <div className="text-right">
                                                 <div className="font-bold liquid-glass-modal-text">
-                                                    {formatCurrency(order.total_amount)}
+                                                    {formatCurrency(order.total_amount, order.currency ?? null)}
                                                 </div>
                                                 {order.items_count && (
                                                     <div className="text-xs liquid-glass-modal-text-muted">

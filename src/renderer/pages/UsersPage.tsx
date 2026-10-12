@@ -1286,10 +1286,10 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
             role="dialog"
             aria-modal="true"
             aria-labelledby={detailsTitleId}
-            className={`max-w-2xl w-full rounded-3xl overflow-hidden border shadow-2xl backdrop-blur-2xl ${
-            resolvedTheme === 'dark' ? 'bg-gray-900/70 border-white/10' : 'bg-white/75 border-white/50'
+            className={`max-w-2xl w-full max-h-[calc(100dvh-2rem)] flex flex-col rounded-2xl overflow-hidden border shadow-xl ${
+            resolvedTheme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
           }`}>
-            <div className={`px-6 py-4 border-b ${
+            <div className={`shrink-0 px-6 py-4 border-b ${
               resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
             }`}>
               <h3 id={detailsTitleId} className={`text-xl font-semibold ${
@@ -1299,7 +1299,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
               </h3>
             </div>
 
-            <div className="p-6 space-y-6">
+            <div className="min-h-0 overflow-y-auto p-6 space-y-6">
               {/* Basic Info */}
               <div>
                 <h4 className={`text-sm font-medium mb-3 ${
@@ -1578,9 +1578,9 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
               )}
             </div>
 
-            <div className={`px-6 py-4 border-t ${
+            <div className={`shrink-0 px-6 py-4 border-t ${
               resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-            } flex justify-between items-center`}>
+            } flex flex-wrap gap-3 justify-between items-center`}>
               {selectedUser.type !== 'app_user' && (
                 <button
                   onClick={() => {
@@ -1611,7 +1611,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
               )}
               <button
                 onClick={closeDetailsModal}
-                className={`px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
+                className={`min-h-11 px-4 py-2 rounded-xl transition-all active:scale-[0.98] ${
                   resolvedTheme === 'dark'
                     ? 'bg-white/10 active:bg-white/15 text-white'
                     : 'bg-black/5 active:bg-black/10 text-gray-900'

@@ -97,6 +97,7 @@ function makeBridge() {
     staffAuth: { refreshDirectory: vi.fn(async () => ({ success: true, currentTerminalId: fixture.scope.terminalId, staff: [] })), verifyCheckInPin: vi.fn(async () => ({ success: true })) },
     staffSchedule: { list: vi.fn(async () => ({ success: true, data: { staff: members } })) },
     shifts: {
+      pendingCashReturns: vi.fn(async () => ({ success: true, requires_receipt_check: false, active_waiter_count: 0, returns: [] })),
       getActive: vi.fn(async () => null), getActiveForBranch: vi.fn(async () => []), getCheckInEligibility: vi.fn(async () => ({ requiresCashierFirst: false })),
       getActiveCashierByTerminal: vi.fn(async () => ({ id: 'ordinary-cashier' })), open: vi.fn(), getById: vi.fn(async () => null),
       getSummary: vi.fn(async () => ({ success: true, data: summary(123.45) })), getExpenses: vi.fn(async () => []),

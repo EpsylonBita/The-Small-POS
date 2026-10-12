@@ -86,6 +86,7 @@ import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveOrderCompletionOutcome } from '../utils/orderCompletionOutcome';
 import { getCheckoutDraftStore } from '../services/CheckoutDraftStore';
+import { shouldAutomaticallyRestoreCheckoutDraft } from '../utils/checkoutDraftRestoration';
 import { buildOrderServiceTableMetadata, tableHasOpenCheckReference } from '../utils/tableOrderFlow';
 import { useCheckoutRequestId } from '../hooks/useCheckoutRequestId';
 import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from '../utils/checkoutOutcome';
@@ -483,7 +484,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     if (!restoreDraftOnMount || isRetailVertical || !organizationId || !effectiveBranchId || !resolvedIdentityTerminalId) return;
     let disposed = false;
     void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
-      if (!disposed && saved && (saved.cartItems.length || saved.phase === 'checkout_pending')) {
+      if (!disposed && saved && shouldAutomaticallyRestoreCheckoutDraft(saved)) {
         restoreDraftContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
       }
     }).catch(() => { /* The modal's durable read gate surfaces failure without replacing the cart. */ });

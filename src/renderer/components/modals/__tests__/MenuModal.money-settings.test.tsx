@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   editOrder: null as any,
   inspect: null as any,
   applyEditSettlement: vi.fn(),
+  recoverySnapshot: vi.fn(),
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -155,6 +156,7 @@ vi.mock('../../../../lib', async (importOriginal) => {
         ...(draftStorage.invalidated ? { invalidation: { reason: 'edit_target_cancelled', orderId: 'cancelled-order' } } : {}) };
     }),
     settings: { get: vi.fn(async () => null) },
+    recovery: { createPreActionSnapshot: mocks.recoverySnapshot },
     orders: { getById: vi.fn(async () => mocks.editOrder), applyEditSettlement: (...args: any[]) => mocks.applyEditSettlement(...args) },
     loyalty: {
       getSettings: vi.fn(async () => null),
@@ -222,6 +224,7 @@ beforeEach(() => {
   mocks.draftFreezeError = false;
   mocks.inspect = null;
   mocks.applyEditSettlement.mockReset();
+  mocks.recoverySnapshot.mockReset().mockResolvedValue({ id: 'pre-action-snapshot' });
 });
 
 afterEach(() => {
@@ -722,6 +725,23 @@ describe('MenuModal paid edit corrections (06/10/2026)', () => {
     expect(mocks.applyEditSettlement).toHaveBeenCalledWith(expect.objectContaining({ orderId: 'paid-order', client_event_id: 'refused-event',
       reconcile: expect.objectContaining({ decision: 'close_without_money' }) }));
     expect(draftStorage.draft).toBeNull();
+  });
+
+  it('keeps the original correction protected when its recovery snapshot cannot be confirmed', async () => {
+    editOrder([{ id: 'original-line', menu_item_id: 'espresso', name: 'Espresso', quantity: 1, unit_price: 6, total_price: 6 }]);
+    refusedDraft();
+    mocks.recoverySnapshot.mockResolvedValue(null);
+    const complete = vi.fn();
+    const close = vi.fn();
+    render(<MenuModal isOpen onClose={close} orderType="pickup" editMode editOrderId="paid-order"
+      onEditPreflight={vi.fn(async () => ({ kind: 'ordinary' as const }))} onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The original checkout could not be verified. Its saved cart remains protected.'));
+    expect(complete).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(mocks.applyEditSettlement).not.toHaveBeenCalled();
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    expect(draftStorage.draft.checkoutRequestId).toBe('refused-event');
   });
 
   it('a refused correction that is not proven never applied keeps the original held', async () => {

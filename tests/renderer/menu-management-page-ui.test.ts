@@ -46,7 +46,7 @@ test('MenuManagementPage labels the menu-items tab via i18n, not "Subcategories"
   assert.match(source, /bridge\.menu\.getSubcategories\(\)/);
 });
 
-test('MenuManagementPage uses neutral grey controls, white search outline, and yellow grid cards', () => {
+test('MenuManagementPage uses neutral controls and theme-aware grid cards', () => {
   const source = menuManagementPageSource();
 
   // Round 165: inactive tabs use active: (touch) instead of hover:.
@@ -58,14 +58,13 @@ test('MenuManagementPage uses neutral grey controls, white search outline, and y
   assert.match(source, /bg-gray-100 border-white text-gray-900 placeholder-gray-500/);
   assert.match(source, /focus:outline-none focus:ring-2 focus:ring-white\/70/);
   assert.match(source, /const gridCardClass = `p-4 rounded-xl border/);
-  assert.match(source, /bg-yellow-500\/10 border-yellow-500\/45/);
-  assert.match(source, /bg-yellow-50 border-yellow-200/);
+  assert.match(source, /bg-zinc-900 border-zinc-700/);
+  assert.match(source, /bg-white border-gray-200/);
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!category\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!item\.is_available \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!ingredient\.is_available \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.match(source, /className=\{`\$\{gridCardClass\} \$\{!offer\.is_active \? 'opacity-60 grayscale' : ''\}`\}/);
   assert.doesNotMatch(source, /bg-gray-800\/50 border-gray-700/);
-  assert.doesNotMatch(source, /bg-white border-gray-200/);
   assert.doesNotMatch(source, /bg-slate-800\/70/);
   assert.doesNotMatch(source, /bg-slate-100/);
   assert.doesNotMatch(source, /focus:ring-blue-500/);
@@ -105,10 +104,7 @@ test('MenuManagementPage places refresh as an icon-only header action like Order
   assert.doesNotMatch(source, /text-blue-500/);
 });
 
-// Round 234 (live QA): the per-card availability toggles (categories / menu items / ingredients /
-// offers) were borderless p-2 eye glyphs that read like decoration on a touchscreen. They are now
-// explicit ~44x44 glass touch targets with semantic green (enabled) / red (disabled) tints.
-test('MenuManagementPage renders availability toggles as 44px semantic glass touch targets', () => {
+test('MenuManagementPage keeps 44px availability targets with standalone icons', () => {
   const source = menuManagementPageSource();
 
   // Single shared helper drives all four call-sites (DRY + stable test anchor).
@@ -118,13 +114,15 @@ test('MenuManagementPage renders availability toggles as 44px semantic glass tou
   assert.match(source, /className=\{getAvailabilityToggleClass\(ingredient\.is_available\)\}/);
   assert.match(source, /className=\{getAvailabilityToggleClass\(offer\.is_active\)\}/);
 
-  // 44px, inline-flex centered, rounded glass surface with active press feedback + disabled state.
-  assert.match(source, /inline-flex h-11 w-11 items-center justify-center rounded-2xl border backdrop-blur-md/);
+  // The decorative fill is gone; target size, focus and press feedback stay usable.
+  assert.match(source, /inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl/);
   assert.match(source, /disabled:opacity-50 disabled:cursor-not-allowed active:scale-95/);
 
-  // Semantic colors preserved: green = enabled, red = disabled (translucent tinted glass, not text-only).
-  assert.match(source, /border-green-500\/40 bg-green-500\/15 text-green-500 active:bg-green-500\/25/);
-  assert.match(source, /border-red-500\/40 bg-red-500\/15 text-red-500 active:bg-red-500\/25/);
+  assert.match(source, /focus-visible:outline-2/);
+  assert.match(source, /text-green-400 active:bg-zinc-800/);
+  assert.match(source, /text-green-700 active:bg-gray-100/);
+  assert.match(source, /text-zinc-400 active:bg-zinc-800/);
+  assert.match(source, /text-gray-600 active:bg-gray-100/);
 
   // The old tiny borderless p-2 button styling is gone.
   assert.doesNotMatch(source, /p-2 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed/);

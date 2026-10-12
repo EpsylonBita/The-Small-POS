@@ -9,6 +9,7 @@ import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
+import { isKioskOriginOrder } from '../../../../../shared/order-approval';
 import { getPluginColor, getPluginName, isExternalPlugin } from '../../utils/plugin-icons';
 import {
   BOX_CLOSURE_CANCELLATION_REASONS,
@@ -92,15 +93,6 @@ function resolveOrderTotalAmount(order: unknown, fallback: number): number {
     readFiniteNumber(record.totalAmount) ??
     fallback
   );
-}
-
-function resolveDisplayOrderNumber(orderNumber: string, createdAt?: string | null): string {
-  const trimmedOrderNumber = orderNumber.trim();
-  if (isKioskOrderNumber(trimmedOrderNumber)) {
-    return formatCompactOrderNumberForDisplay(trimmedOrderNumber, createdAt);
-  }
-
-  return trimmedOrderNumber;
 }
 
 function isKioskOrderNumber(orderNumber: string): boolean {
@@ -457,8 +449,10 @@ export function OrderApprovalPanel({
   });
   const customerPhone = order.customer_phone || order.customerPhone || '';
   const createdAtRaw = order.created_at || order.createdAt;
-  const orderNumber = resolveDisplayOrderNumber(rawOrderNumber, createdAtRaw);
-  const isKioskOrder = isKioskOrderNumber(rawOrderNumber.trim());
+  const orderNumber = formatCompactOrderNumberForDisplay(
+    order.display_order_number || order.displayOrderNumber || rawOrderNumber, createdAtRaw,
+  );
+  const isKioskOrder = isKioskOriginOrder(order) || isKioskOrderNumber(rawOrderNumber.trim());
   const createdAt = createdAtRaw ? new Date(createdAtRaw) : null;
   // Platform identity: bridge payloads are camelCase, admin API is snake_case.
   const orderAsRecord = order as unknown as Record<string, unknown>;

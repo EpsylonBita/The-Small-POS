@@ -74,22 +74,29 @@ interface CardProps {
   shape?: string | null; floor: string; covers: string; waiter: string;
   hasOpenCheck: boolean; needsAttention: boolean; attentionLabel: string;
   balance: { due: number; total: number; paid: number }; paidPercent: number;
-  occupiedSince: string | null; orderId?: string; formatCurrency: (value: number) => string;
+  occupiedSince: string | null; orderNumber?: string; formatCurrency: (value: number) => string;
   onPrimary: () => void;
 }
 
-export const TableShapeIcon = ({ shape }: { shape?: string | null }) => (
-  <svg viewBox="0 0 48 40" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" className="table-workspace-shape">
-    {shape === 'circle' || shape === 'round' || shape === 'oval'
-      ? <><ellipse cx="24" cy="20" rx={shape === 'oval' ? 15 : 13} ry="13" /><path d="M17 3h14M17 37h14M6 13v14M42 13v14" /></>
-      : <><rect x="12" y="8" width="24" height="24" rx="3" /><path d="M17 3h14M17 37h14M6 13v14M42 13v14" /></>}
-  </svg>
-);
+export const TableShapeIcon = ({ shape }: { shape?: string | null }) => {
+  const round = shape === 'circle' || shape === 'round' || shape === 'oval';
+  const radius = shape === 'oval' ? 15 : 13;
+  const outline = `${round
+    ? `M${24 + radius} 20a${radius} 13 0 1 1-${radius * 2} 0a${radius} 13 0 1 1 ${radius * 2} 0`
+    : 'M15 8h18a3 3 0 0 1 3 3v18a3 3 0 0 1-3 3H15a3 3 0 0 1-3-3V11a3 3 0 0 1 3-3z'} M17 3h14 M17 37h14 M6 13v14 M42 13v14`;
+  return <svg viewBox="-4 -4 56 48" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="table-workspace-shape">
+    <path d={outline} strokeWidth="9" className="table-shape-halo-outer" />
+    <path d={outline} strokeWidth="6" className="table-shape-halo-middle" />
+    <path d={outline} strokeWidth="3.5" className="table-shape-halo-inner" />
+    <path d={outline} strokeWidth="1.8" />
+    <path d={outline} stroke="#ffffff" strokeWidth="0.5" className="table-shape-core" />
+  </svg>;
+};
 
 /** The compact tile opens the parent's context-aware table/check workflow. */
 export const TableWorkspaceCard = memo(({
   id, number, status, statusLabel, shape, floor, covers, waiter, hasOpenCheck,
-  needsAttention, attentionLabel, balance, paidPercent, occupiedSince, orderId, formatCurrency, onPrimary,
+  needsAttention, attentionLabel, balance, paidPercent, occupiedSince, orderNumber, formatCurrency, onPrimary,
 }: CardProps) => {
   const { t } = useI18n();
   return <button type="button" className="table-workspace-card" data-status={status} data-table-id={id}
@@ -108,7 +115,7 @@ export const TableWorkspaceCard = memo(({
       <span className="table-workspace-check-meta">
         <span><UserCheck aria-hidden="true" />{waiter}</span>
         {occupiedSince && <span><Clock3 aria-hidden="true" />{occupiedSince}</span>}
-        {orderId && <span><ReceiptText aria-hidden="true" />{orderId.slice(0, 10)}</span>}
+        {orderNumber && <span><ReceiptText aria-hidden="true" />{orderNumber}</span>}
       </span>
     </span>}
     {needsAttention && <span className="table-workspace-attention">{attentionLabel}</span>}

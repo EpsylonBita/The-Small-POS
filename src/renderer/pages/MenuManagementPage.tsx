@@ -342,24 +342,22 @@ export const MenuManagementPage: React.FC = () => {
 
   const gridCardClass = `p-4 rounded-xl border ${
     resolvedTheme === 'dark'
-      ? 'bg-yellow-500/10 border-yellow-500/45'
-      : 'bg-yellow-50 border-yellow-200'
+      ? 'bg-zinc-900 border-zinc-700'
+      : 'bg-white border-gray-200'
   }`;
-  // Round 234: availability toggles are real 44x44 glass touch targets (was a borderless p-2 eye
-  // glyph that read like decoration on a touchscreen). Semantic green = enabled, red = disabled,
-  // with a translucent tinted glass surface + active press feedback; no hover, no native title.
+  // Keep the full touch target while letting the availability icon stand alone.
   const getAvailabilityToggleClass = (active: boolean) =>
-    `inline-flex h-11 w-11 items-center justify-center rounded-2xl border backdrop-blur-md transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${
+    `inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-500 ${
       active
-        ? 'border-green-500/40 bg-green-500/15 text-green-500 active:bg-green-500/25'
-        : 'border-red-500/40 bg-red-500/15 text-red-500 active:bg-red-500/25'
+        ? resolvedTheme === 'dark' ? 'text-green-400 active:bg-zinc-800' : 'text-green-700 active:bg-gray-100'
+        : resolvedTheme === 'dark' ? 'text-zinc-400 active:bg-zinc-800' : 'text-gray-600 active:bg-gray-100'
     }`;
   const refreshLabel = loading
     ? t('menu.refreshingMenu', 'Refreshing menu')
     : t('menu.refreshMenu', 'Refresh menu');
 
   const renderTabs = () => (
-    <motion.div variants={pageMotionItem} className="flex gap-2 mb-6">
+    <motion.div variants={pageMotionItem} className="flex flex-wrap gap-2 mb-6">
       <button
         onClick={() => setActiveTab('categories')}
         className={getTabClass('categories')}

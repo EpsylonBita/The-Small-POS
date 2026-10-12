@@ -7,6 +7,7 @@
 import React from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { internalOrderReference } from '../../../../../../shared/utils/internal-order-reference'
 
 // One stable translator: the panel re-loads its items whenever `t` changes.
 const i18n = vi.hoisted(() => {
@@ -95,5 +96,20 @@ describe('OrderApprovalPanel incoming-order marker', () => {
     )
 
     expect(markers()).toHaveLength(0)
+  })
+
+  it.each([undefined, 'ORD-20261011-0042'])('shows a staff-facing QR title with display number %s', (displayNumber) => {
+    const raw = 'ORD-20261011-42d0bf26b7204caa94949da625b03234'
+    const created = '2026-10-11T11:44:49Z'
+    render(<OrderApprovalPanel
+      order={{ ...order, plugin: 'web', external_plugin_order_id: null, order_number: raw,
+        display_order_number: displayNumber, created_at: created,
+        ghost_metadata: { kiosk: { entryMode: 'table' } } } as any}
+      onApprove={vi.fn()} onDecline={vi.fn()} onClose={vi.fn()} viewOnly />)
+    const heading = screen.getByRole('heading', { level: 2 })
+    // Without a display number the title falls back to the stable identity
+    // reference (never the creation time, which repeats within a minute).
+    expect(heading).toHaveTextContent(displayNumber ? 'ORD #0042' : internalOrderReference(raw))
+    expect(heading).not.toHaveTextContent(raw)
   })
 })

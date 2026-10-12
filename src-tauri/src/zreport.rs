@@ -5400,24 +5400,12 @@ fn load_unclassified_platform_sources(
     Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
-/// The part of `orderTurnover - paymentCoverage` that has a LEGITIMATE
-/// explanation, so a healthy day does not read as a financial gap.
-///
-/// Review item C (16/09/2026): the two sides count different populations by
-/// design. Turnover excludes only `cancelled`/`canceled`; the payment query
-/// also excludes `refunded`, because a refunded order's money went back to the
-/// customer and must not be reported as takings. The order itself still
-/// belongs to the day's gross (the refunds line subtracts it separately), so a
-/// fully-refunded order leaves a non-zero difference with no finding behind it
-/// — and the panel painted that red.
-///
-/// A partial refund recorded as a `payment_adjustments` row moves NEITHER side
-/// (coverage is gross completed payments), so the founder's «order paid then
-/// €0,70 refunded» day nets to zero difference on its own. It is the
-/// order-level `refunded` STATUS that opens the gap, and this is what accounts
-/// for it.
-///
-/// Anything this does NOT explain is a real break and stays visible.
+/// Explain only money deliberately excluded from the completed-payment side.
+/// Order-level refunds remain a legacy explanation. A completed order may also
+/// retain its gross value after an individual receipt is fully refunded. That
+/// receipt leaves payment coverage, but its linked refund adjustments still
+/// prove the returned money. Partial refunds on completed receipts do not leave
+/// gross coverage, so they must not be explained again here.
 fn load_reconciliation_explanations(
     conn: &Connection,
     branch_id: &str,
@@ -5429,21 +5417,40 @@ fn load_reconciliation_explanations(
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
     let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
-    // Same population as the turnover aggregate, narrowed to the orders the
-    // payment side deliberately drops.
+    // Aggregate per receipt before per order: multiple refund adjustments must
+    // not multiply the receipt, and a returned split portion cannot explain a
+    // missing payment for the rest of the check. Never count both refund shapes.
     let sql = format!(
-        "SELECT COUNT(*),
-                COALESCE(SUM(COALESCE(o.total_amount_cents,
-                                      CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
-         FROM orders o
-         WHERE {financial_predicate}
-           AND (?2 IS NULL OR {financial_expr} <= ?2)
-           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
-           AND COALESCE(o.is_ghost, 0) = 0
-           AND COALESCE(o.is_test, 0) = 0
-           AND COALESCE(o.order_context, '') <> 'repair_settlement'
-           AND LOWER(TRIM(COALESCE(o.status, ''))) = 'refunded'
-           AND {reportable_order}"
+        "WITH explanations AS (
+           SELECT CASE WHEN LOWER(TRIM(COALESCE(o.status, ''))) = 'refunded'
+             THEN COALESCE(o.total_amount_cents,
+                           CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)
+             ELSE COALESCE((
+               SELECT SUM(MAX(0, MIN(
+                 COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0),
+                 COALESCE((SELECT SUM(COALESCE(pa.amount_cents,
+                                  CAST(ROUND(pa.amount * 100) AS INTEGER), 0))
+                           FROM payment_adjustments pa
+                           WHERE pa.payment_id = op.id AND pa.order_id = o.id
+                             AND pa.adjustment_type = 'refund'), 0))))
+               FROM order_payments op
+               WHERE op.order_id = o.id AND op.status = 'refunded'
+                 AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed'
+                          AND TRIM(COALESCE(op.remote_payment_id, '')) = '')
+                 AND (op.method <> 'twint' OR op.currency = 'CHF')
+             ), 0) END AS amount_cents
+           FROM orders o
+           WHERE {financial_predicate}
+             AND (?2 IS NULL OR {financial_expr} <= ?2)
+             AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+             AND COALESCE(o.is_ghost, 0) = 0
+             AND COALESCE(o.is_test, 0) = 0
+             AND COALESCE(o.order_context, '') <> 'repair_settlement'
+             AND o.status NOT IN ('cancelled', 'canceled')
+             AND {reportable_order}
+         )
+         SELECT COUNT(*), COALESCE(SUM(amount_cents), 0)
+         FROM explanations WHERE amount_cents > 0"
     );
     conn.query_row(
         &sql,
@@ -5536,8 +5543,8 @@ fn build_z_integrity_block(
         "paymentCoverage_cents": coverage_cents,
         "difference": Cents::new(difference_cents).to_f64_dp2(),
         "difference_cents": difference_cents,
-        // Difference with a known, legitimate cause — today: orders whose
-        // `refunded` status keeps them in turnover but out of coverage.
+        // Known returned money retained in gross turnover but excluded from
+        // completed-payment coverage, counted once per original receipt.
         "explainedDifference": Cents::new(explained_cents).to_f64_dp2(),
         "explainedDifference_cents": explained_cents,
         "refundedOrders": {
@@ -13718,6 +13725,218 @@ mod tests {
             zreport_src.contains("AND op.status = 'completed'"),
             "the payment aggregate must count only completed rows"
         );
+    }
+
+    fn seed_restaurant_refund_reconciliation() -> DbState {
+        let db = test_db();
+        let shift = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "DELETE FROM payment_adjustments; DELETE FROM order_payments;
+                DELETE FROM orders; DELETE FROM shift_expenses;
+                UPDATE staff_shifts SET currency='CHF';
+                UPDATE cash_drawer_sessions SET opening_amount=100, opening_amount_cents=10000,
+                total_cash_sales=206, total_cash_sales_cents=20600,
+                total_card_sales=0, total_card_sales_cents=0,
+                total_refunds=87, total_refunds_cents=8700,
+                total_expenses=0, total_expenses_cents=0,
+                driver_cash_returned=52.5, driver_cash_returned_cents=5250,
+                closing_amount=271.5, closing_amount_cents=27150,
+                expected_amount=271.5, expected_amount_cents=27150;",
+            )
+            .unwrap();
+            // Same ledger shape and amounts as the two-waiter restaurant run.
+            // Five returned checks, six retained checks, thirteen receipts.
+            for (index, amounts) in [
+                vec![1050],
+                vec![4500],
+                vec![1050],
+                vec![1050],
+                vec![1050],
+                vec![600, 2550],
+                vec![1050],
+                vec![1050, 5600],
+                vec![4200],
+                vec![1050],
+                vec![1050],
+            ]
+            .iter()
+            .enumerate()
+            {
+                let order = format!("restaurant-{index}");
+                let total: i64 = amounts.iter().sum();
+                conn.execute("INSERT INTO orders(id,order_number,items,total_amount,total_amount_cents,
+                    status,order_type,payment_status,staff_shift_id,branch_id,currency,sync_status,created_at,updated_at)
+                    VALUES(?1,?1,'[]',?2,?3,'completed','dine-in',?4,?5,'branch-1','CHF','synced',
+                    '2026-02-16T12:00:00Z','2026-02-16T12:00:00Z')",
+                    params![order,total as f64/100.0,total,if index<5 {"pending"}else{"paid"},shift]).unwrap();
+                for (part, cents) in amounts.iter().enumerate() {
+                    let payment = format!("receipt-{index}-{part}");
+                    conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,
+                        staff_shift_id,currency,created_at,updated_at) VALUES(?1,?2,'cash',?3,?4,?5,?6,'CHF',
+                        '2026-02-16T12:05:00Z','2026-02-16T12:05:00Z')",
+                        params![payment,order,*cents as f64/100.0,cents,if index<5 {"refunded"}else{"completed"},shift]).unwrap();
+                    if index < 5 {
+                        let returns = if index == 0 {
+                            vec![400, 650]
+                        } else {
+                            vec![*cents]
+                        };
+                        for (refund_part, returned) in returns.iter().enumerate() {
+                            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,
+                                amount,amount_cents,reason,sync_state,created_at,updated_at)
+                                VALUES(?1,?2,?3,'refund',?4,?5,'restaurant regression','applied','2026-02-16T13:00:00Z','2026-02-16T13:00:00Z')",
+                                params![format!("refund-{index}-{refund_part}"),payment,order,*returned as f64/100.0,returned]).unwrap();
+                        }
+                    }
+                }
+            }
+            // These are settled table checks, like the captured restaurant run.
+            conn.execute(
+                "UPDATE orders SET table_number=id WHERE id LIKE 'restaurant-%'",
+                [],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn restaurant_refund_explanation(db: &DbState) -> (i64, i64) {
+        load_reconciliation_explanations(
+            &db.conn.lock().unwrap(),
+            "branch-1",
+            "2026-02-16T00:00:00Z",
+            Some("2026-02-16T23:59:59Z"),
+            LowerBoundMode::Inclusive,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_restaurant_refunded_receipts_explain_87_without_changing_money() {
+        let db = seed_restaurant_refund_reconciliation();
+        let result = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({"branchId":"branch-1","date":"2026-02-16"}),
+        )
+        .unwrap();
+        let report = &result["report"]["reportJson"];
+        assert_eq!(report["sales"]["totalSales_cents"], 25850);
+        assert_eq!(report["daySummary"]["total_cents"], 17150);
+        assert_eq!(result["report"]["refundsTotal"], 87.0);
+        assert_eq!(report["cashDrawer"]["expected_cents"], 27150);
+        assert_eq!(report["integrity"]["refundedOrders"]["orders"], 5);
+        assert_eq!(report["integrity"]["explainedDifference_cents"], 8700);
+        assert_eq!(report["integrity"]["unexplainedDifference_cents"], 0);
+        assert_eq!(
+            report["integrity"]["reconciled"], true,
+            "{}",
+            report["integrity"]
+        );
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*),SUM(amount_cents) FROM order_payments",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (13, 25850)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*),SUM(amount_cents) FROM payment_adjustments",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (6, 8700)
+        );
+    }
+
+    #[test]
+    fn test_restaurant_refunded_receipt_explanation_keeps_missing_money_visible() {
+        let db = seed_restaurant_refund_reconciliation();
+        // A missing CHF 6 split portion must not disappear behind other refunds.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM order_payments WHERE id='receipt-5-0'", [])
+            .unwrap();
+        let result = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({"branchId":"branch-1","date":"2026-02-16"}),
+        )
+        .unwrap();
+        let integrity = &result["report"]["reportJson"]["integrity"];
+        assert_eq!(integrity["explainedDifference_cents"], 8700);
+        assert_eq!(integrity["unexplainedDifference_cents"], 600);
+        assert_eq!(integrity["reconciled"], false);
+        assert!(integrity["blockingFindings"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_restaurant_refunded_receipt_explanation_requires_linked_money_proof() {
+        let db = seed_restaurant_refund_reconciliation();
+        // A status alone cannot explain a receipt's missing portion.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM payment_adjustments WHERE id='refund-0-1'", [])
+            .unwrap();
+        assert_eq!(restaurant_refund_explanation(&db), (5, 8050));
+        // Nor can a local fabricated reconstructed receipt act as canonical proof.
+        db.conn.lock().unwrap().execute("UPDATE order_payments SET payment_origin='sync_reconstructed',remote_payment_id=NULL WHERE id='receipt-1-0'",[]).unwrap();
+        assert_eq!(restaurant_refund_explanation(&db), (4, 3550));
+    }
+
+    #[test]
+    fn test_restaurant_refunded_receipt_explanation_does_not_double_count() {
+        let db = seed_restaurant_refund_reconciliation();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET status='refunded' WHERE id='restaurant-0'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(restaurant_refund_explanation(&db), (5, 8700));
+        // Partial adjustment on a still-completed receipt is still in gross coverage.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE order_payments SET status='completed' WHERE id='receipt-1-0'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(restaurant_refund_explanation(&db), (4, 4200));
+    }
+
+    #[test]
+    fn test_restaurant_refunded_receipt_explanation_uses_report_scope() {
+        for mutation in [
+            "branch_id='foreign'",
+            "is_ghost=1",
+            "is_test=1",
+            "order_context='repair_settlement'",
+            "status='cancelled'",
+            "created_at='2026-02-17T12:00:00Z',updated_at='2026-02-17T12:00:00Z'",
+        ] {
+            let db = seed_restaurant_refund_reconciliation();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE orders SET {mutation} WHERE id='restaurant-1'"),
+                    [],
+                )
+                .unwrap();
+            assert_eq!(restaurant_refund_explanation(&db), (4, 4200), "{mutation}");
+        }
     }
 
     #[test]

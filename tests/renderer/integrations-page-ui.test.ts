@@ -48,7 +48,7 @@ test('Round 286: IntegrationsPage touch controls use aria-label, not native DOM 
   const titleAttrs = source.match(/\btitle=/g) ?? [];
   assert.equal(titleAttrs.length, 2, 'only the two LiquidGlassModal title props may remain');
   assert.match(source, /<LiquidGlassModal[\s\S]*?title=\{t\('integrations\.mydata\.title'/);
-  assert.match(source, /title=\{activePlugin \? `\$\{activePlugin\.name\}/);
+  assert.match(source, /title=\{activePlugin \? t\('integrations\.configuration', \{ name: activePlugin\.name \}\)/);
 
   // The logo stays named (aria-label + img alt); configure + toggle expose aria-labels; the toggle folds
   // its disabled reason into the accessible name without enabling it.

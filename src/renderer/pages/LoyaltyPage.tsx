@@ -117,10 +117,10 @@ const LoyaltyPage: React.FC = () => {
       return isDark ? 'text-zinc-400 border-zinc-700' : 'text-gray-500 border-gray-300';
     }
     switch (normalized) {
-      case 'platinum': return 'text-amber-300 border-amber-400/50';
-      case 'gold': return 'text-yellow-400 border-yellow-500/40';
-      case 'silver': return 'text-zinc-300 border-zinc-400/40';
-      default: return 'text-amber-500 border-amber-500/40';
+      case 'platinum': return isDark ? 'text-amber-300 border-amber-400/50' : 'text-amber-800 border-amber-400/50';
+      case 'gold': return isDark ? 'text-yellow-400 border-yellow-500/40' : 'text-yellow-800 border-yellow-500/40';
+      case 'silver': return isDark ? 'text-zinc-300 border-zinc-400/40' : 'text-zinc-600 border-zinc-400/40';
+      default: return isDark ? 'text-amber-500 border-amber-500/40' : 'text-amber-800 border-amber-500/40';
     }
   };
 
@@ -291,7 +291,7 @@ const LoyaltyPage: React.FC = () => {
             className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className="shrink-0">
                 <Users className="w-5 h-5 text-green-500" />
               </div>
               <div>
@@ -307,7 +307,7 @@ const LoyaltyPage: React.FC = () => {
             className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className="shrink-0">
                 <Award className="w-5 h-5 text-yellow-500" />
               </div>
               <div>
@@ -323,7 +323,7 @@ const LoyaltyPage: React.FC = () => {
             className={`p-4 rounded-xl border ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-2xl ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <div className="shrink-0">
                 <TrendingUp className="w-5 h-5 text-amber-500" />
               </div>
               <div>
@@ -361,6 +361,15 @@ const LoyaltyPage: React.FC = () => {
           {filteredCustomers.map((customer, idx) => (
             <motion.div
               key={customer.id}
+              role="button"
+              tabIndex={0}
+              aria-expanded={selectedCustomer?.id === customer.id}
+              onKeyDown={(event) => {
+                if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                  event.preventDefault();
+                  setSelectedCustomer(selectedCustomer?.id === customer.id ? null : customer);
+                }
+              }}
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: idx * 0.05 }}
@@ -387,23 +396,23 @@ const LoyaltyPage: React.FC = () => {
 
               <div className="grid grid-cols-3 gap-2 text-center">
                 <div>
-                  <p className="text-lg font-bold text-yellow-400">{customer.points_balance}</p>
-                  <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{t('loyalty.balance', 'Balance')}</p>
+                  <p className={`text-lg font-bold ${isDark ? 'text-yellow-400' : 'text-yellow-800'}`}>{customer.points_balance}</p>
+                  <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('loyalty.balance', 'Balance')}</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-green-400">{customer.total_earned}</p>
-                  <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{t('loyalty.earned', 'Earned')}</p>
+                  <p className={`text-lg font-bold ${isDark ? 'text-green-400' : 'text-green-700'}`}>{customer.total_earned}</p>
+                  <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('loyalty.earned', 'Earned')}</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-orange-400">{customer.total_redeemed}</p>
-                  <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{t('loyalty.redeemed', 'Redeemed')}</p>
+                  <p className={`text-lg font-bold ${isDark ? 'text-orange-400' : 'text-orange-800'}`}>{customer.total_redeemed}</p>
+                  <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('loyalty.redeemed', 'Redeemed')}</p>
                 </div>
               </div>
 
               {customer.points_balance >= (settings?.min_redemption_points || 100) && (
                 <div className={`mt-3 pt-3 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="flex items-center gap-1 text-green-400">
+                    <span className={`flex items-center gap-1 ${isDark ? 'text-green-400' : 'text-green-700'}`}>
                       <Gift className="w-4 h-4" />
                       {t('loyalty.canRedeem', 'Can redeem')}
                     </span>

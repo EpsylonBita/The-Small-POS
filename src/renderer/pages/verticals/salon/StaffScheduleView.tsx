@@ -168,7 +168,8 @@ const toIsoFromDateAndTimeParts = (dateValue: string, hourValue: string, minuteV
     return null;
   }
   const iso = new Date(`${dateValue}T${hourValue}:${minuteValue}:00`);
-  if (Number.isNaN(iso.getTime())) {
+  if (Number.isNaN(iso.getTime()) || localDateKey(iso) !== dateValue ||
+    pad(iso.getHours()) !== hourValue || pad(iso.getMinutes()) !== minuteValue) {
     return null;
   }
   return iso.toISOString();

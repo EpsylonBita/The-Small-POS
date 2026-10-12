@@ -2,6 +2,7 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import greekTableCheck from '../../../../locales/overlays/el.table-check.json';
+import { internalOrderReference } from '../../../../../../shared/utils/internal-order-reference';
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(), patch: vi.fn(), invoke: vi.fn(), emit: vi.fn(), orders: vi.fn(), payments: vi.fn(),
@@ -74,6 +75,67 @@ describe('table check workflow ownership', () => {
     mocks.enqueueUpdate.mockResolvedValue('queued-close');
   });
 
+  it('uses a staff-facing number instead of the internal hash in the table title', async () => {
+    const raw='ORD-20261010-1ea711cbfd03e5efc93e924138a8c836';
+    mocks.get.mockResolvedValue({ success:true, data:{success:true, session: { ...makeSession(sourceId,'T01',3), opened_at:'2026-10-10T16:29:45Z',
+      order: { ...makeSession(sourceId,'T01',3).order, order_number:raw } } } });
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    expect(screen.queryByText(new RegExp(raw))).toBeNull();
+    expect(screen.getByText(new RegExp(`Order ${internalOrderReference(raw)}`))).toBeInTheDocument();
+  });
+
+  it.each(['closed', 'cancelled'])('closes an active check after canonical remote %s without repeating a business action', async status => {
+    const originalSession = { ...makeSession(sourceId, 'T01', 3), organization_id: 'org', branch_id: 'branch', snapshot_revision: 1 };
+    const onClose = vi.fn();
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: originalSession } });
+    const { rerender } = render(<TableCheckManagerModal {...props} onClose={onClose} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: { ...originalSession, status, snapshot_revision: 0 } } });
+    rerender(<TableCheckManagerModal {...props} onClose={onClose} localOrders={[{ ...order, status: 'cancelled', version: 1 }] as any} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+    expect(onClose).not.toHaveBeenCalled();
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: { ...originalSession, status, snapshot_revision: 2 } } });
+    rerender(<TableCheckManagerModal {...props} onClose={onClose} localOrders={[{ ...order, status: 'cancelled' }] as any} />);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(mocks.patch).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+    expect(mocks.recordPayment).not.toHaveBeenCalled();
+    expect(mocks.enqueueUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('closes the old physical-table view after an accepted background move (released link present: %s)', async releasedLinkPresent => {
+    const originalSession = { ...makeSession(sourceId, 'T01', 3), organization_id: 'org', branch_id: 'branch', snapshot_revision: 1 };
+    const moved = { ...originalSession, primary_table_id: 'T02', snapshot_revision: 2,
+      tables: [{ table_id: 'T02', released_at: null }, ...(releasedLinkPresent ? [{ table_id: 'T01', released_at: '2026-10-11T02:57:00Z' }] : [])] };
+    const onClose = vi.fn();
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: originalSession } });
+    const { rerender } = render(<TableCheckManagerModal {...props} onClose={onClose} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: moved } });
+    rerender(<TableCheckManagerModal {...props} onClose={onClose} localOrders={[{ ...order, table_id: 'T02', table_number: 'T02' }] as any} />);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(mocks.patch).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+    expect(mocks.recordPayment).not.toHaveBeenCalled();
+    expect(mocks.enqueueUpdate).not.toHaveBeenCalled();
+    expect(mocks.emit.mock.calls.filter(([event]) => event === 'table-session-settled')).toHaveLength(0);
+  });
+
+  it('keeps a linked physical-table view when a different table becomes primary', async () => {
+    const originalSession = { ...makeSession(sourceId, 'T01', 3), snapshot_revision: 1 };
+    const onClose = vi.fn();
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: originalSession } });
+    const { rerender } = render(<TableCheckManagerModal {...props} onClose={onClose} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: { ...originalSession, snapshot_revision: 2, primary_table_id: 'T02',
+      tables: [{ table_id: 'T02', released_at: null }, { table_id: 'T01', released_at: null }] } } });
+    rerender(<TableCheckManagerModal {...props} onClose={onClose} localOrders={[{ ...order }] as any} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText('Table #T01 Check')).toBeInTheDocument();
+  });
+
   const useNativeTableTransport = async () => {
     (window as any).__TAURI_INTERNALS__ = {};
     const api = await vi.importActual<typeof import('../../../utils/api-helpers')>('../../../utils/api-helpers');
@@ -85,6 +147,29 @@ describe('table check workflow ownership', () => {
     mocks.payments.mockResolvedValue([]);
     mocks.get.mockResolvedValue({ success: true, data: { success: true, session: makeSession(sourceId, 'T01', 3) } });
   };
+
+  it.each(['single', 'selected'])('offers an independent occupied check for %s item transfer but excludes source links', async mode => {
+    await useNativeTableTransport();
+    const occupied = { ...t2, id: 'T03', tableNumber: 'T03', status: 'occupied', tableSessionId: targetId, currentOrderId: 'independent-order' };
+    const linked = { ...t1, id: 'T04', tableNumber: 'T04' };
+    render(<TableCheckManagerModal {...props} tables={[t1, t2, occupied, linked]} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    const coffee = screen.getByText('Coffee').closest('button')!;
+    if (mode === 'single') fireEvent.keyDown(coffee, { key: 'Enter' });
+    else {
+      fireEvent(coffee, new MouseEvent('pointerdown', { button: 0, bubbles: true }));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 460)); });
+      fireEvent.pointerUp(coffee);
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Transfer' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    expect(within(sheet).getByRole('option', { name: /T03/ })).toBeEnabled();
+    expect(within(sheet).queryByRole('option', { name: /T04/ })).toBeNull();
+    expect(within(sheet).queryByRole('option', { name: /T01/ })).toBeNull();
+    fireEvent.click(within(sheet).getByRole('option', { name: /T03/ }));
+    expect(within(sheet).getByRole('button', { name: mode === 'single' ? 'Move Quantity' : 'Move Selected Quantities' })).toBeEnabled();
+    expect(mocks.nativeFetch).not.toHaveBeenCalled();
+  });
 
   it.each(['BLOCKED', 'REFUSED', 'RETAINED', 'UNTYPED'])('preserves a move dialog only when its native outcome is %s, through actual posApi', async outcome => {
     await useNativeTableTransport();
@@ -650,6 +735,25 @@ describe('table check workflow ownership', () => {
     expect(mocks.recordPayment.mock.calls[0][0]).toMatchObject({amount:16});
     expect(mocks.recordPayment.mock.calls[0][0].items).toBeUndefined();
     expect(mocks.recordPayment.mock.calls[0][0].seat_number).toBeUndefined();
+  });
+
+  it('shows a durably retained close as waiting for its recorded payment without force or another collection', async () => {
+    mocks.payments.mockResolvedValue([]);
+    mocks.get.mockResolvedValue({success:true,data:{success:true,session:makeSession(sourceId,'T01',3)}});
+    mocks.patch.mockResolvedValue({success:false,error:'TABLE_MUTATION_RETAINED: Waiting for local table payment sync'});
+    mocks.retained.mockImplementation(error => String(error?.message || error).startsWith('TABLE_MUTATION_RETAINED:'));
+    render(<TableCheckManagerModal {...props} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button',{name:/^Pay$/}));
+    fireEvent.click(screen.getByRole('button',{name:/^Cash$/}));
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('Table action queued for sync'));
+    expect(mocks.toastError).not.toHaveBeenCalled();
+    expect(mocks.recordPayment).toHaveBeenCalledTimes(1);
+    expect(mocks.patch).toHaveBeenCalledTimes(1);
+    expect(mocks.patch.mock.calls[0][1].force).not.toBe(true);
+    expect(mocks.emit.mock.calls.filter(([event])=>event==='table-session-settled')).toHaveLength(0);
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button',{name:/^Pay$/})).toBeDisabled();
   });
 
   it('does not revive a fully paid product for transfer when another product is unpaid', async () => {

@@ -1055,14 +1055,20 @@ pub async fn shift_print_checkout(
         }
     };
 
+    let (expected_amount, variance_amount) = current_checkout_print_amounts(
+        &summary,
+        payload.expected_amount,
+        payload.closing_amount,
+        payload.variance_amount,
+    );
     let print_payload = serde_json::json!({
         "shiftId": shift_id,
         "roleType": role_type_for_job,
         "terminalName": terminal_name_for_job,
         "snapshotCheckOutTime": caller_snapshot(serde_json::json!(payload.snapshot_check_out_time)),
-        "expectedAmount": caller_snapshot(serde_json::json!(payload.expected_amount)),
+        "expectedAmount": caller_snapshot(serde_json::json!(expected_amount)),
         "closingAmount": caller_snapshot(serde_json::json!(payload.closing_amount)),
-        "varianceAmount": caller_snapshot(serde_json::json!(payload.variance_amount)),
+        "varianceAmount": caller_snapshot(serde_json::json!(variance_amount)),
     });
 
     match print::enqueue_print_job_with_payload(
@@ -1090,6 +1096,39 @@ pub async fn shift_print_checkout(
             "terminalName": terminal_name,
         })),
     }
+}
+
+fn current_checkout_print_amounts(
+    summary: &serde_json::Value,
+    expected: Option<f64>,
+    closing: Option<f64>,
+    variance: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    if summary
+        .pointer("/shift/role_type")
+        .and_then(serde_json::Value::as_str)
+        == Some("driver")
+        && summary
+            .pointer("/shift/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("active")
+        && summary
+            .pointer("/shift/check_out_time")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        // The screen can predate a receipt sync. Printing reads a fresh native
+        // summary and must not replace its money with that older UI snapshot.
+        let current = summary
+            .get("amountToReturn")
+            .and_then(serde_json::Value::as_f64);
+        return (
+            current,
+            closing
+                .zip(current)
+                .map(|(actual, expected)| actual - expected),
+        );
+    }
+    (expected, variance)
 }
 
 #[tauri::command]
@@ -1486,6 +1525,27 @@ pub async fn shift_get_today_scheduled_shifts(
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+
+    #[test]
+    fn driver_preview_print_uses_fresh_receipts_and_preserves_closed_snapshots() {
+        let mut summary = serde_json::json!({
+            "shift": {"role_type": "driver", "status": "active", "check_out_time": null},
+            "amountToReturn": 31.8,
+        });
+        assert_eq!(
+            current_checkout_print_amounts(&summary, Some(16.6), None, None),
+            (Some(31.8), None)
+        );
+        assert_eq!(
+            current_checkout_print_amounts(&summary, Some(16.6), Some(31.8), Some(15.2)),
+            (Some(31.8), Some(0.0))
+        );
+        summary["shift"]["status"] = serde_json::json!("closed");
+        assert_eq!(
+            current_checkout_print_amounts(&summary, Some(16.6), Some(16.6), Some(0.0)),
+            (Some(16.6), Some(0.0))
+        );
+    }
 
     #[test]
     fn parse_shift_branch_terminal_supports_legacy_strings() {

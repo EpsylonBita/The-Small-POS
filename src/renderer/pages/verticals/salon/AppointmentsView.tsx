@@ -426,7 +426,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         return;
       }
 
-      await createAppointment({
+      const created = await createAppointment({
         customerId: formData.customerId || undefined,
         customerName: formData.customerName || undefined,
         customerPhone: formData.customerPhone || undefined,
@@ -436,6 +436,8 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         endTime: endDate.toISOString(),
         notes: formData.notes || undefined,
       });
+
+      if (!created) return;
 
       // Reset form and close modal
       setFormData({

@@ -169,7 +169,7 @@ test('assign-waiter role labels render Greek role names, not raw slugs like "cas
 test('TableCheckManager loadSession clears the spinner on local lookup failure / fallback paths', () => {
   const start = modalSource.indexOf('const loadSession = useCallback');
   assert.ok(start > -1, 'loadSession not found');
-  const end = modalSource.indexOf('}, [isOpen, localOrders', start);
+  const end = modalSource.indexOf('}, [isOpen, loadScope, localOrders', start);
   assert.ok(end > start, 'loadSession dependency array not found');
   const slice = modalSource.slice(start, end);
 
@@ -188,6 +188,7 @@ test('TableCheckManager loadSession clears the spinner on local lookup failure /
   assert.ok(snapshotIdx > tryIdx, 'fetchLocalPaymentSnapshot must run inside the guarded try');
   // Loading is always cleared in the finally on every success/fallback/error path.
   assert.ok(finallyIdx > -1 && loadingFalseIdx > finallyIdx, 'setIsLoading(false) must be in the finally block');
+  assert.match(slice, /finally \{\s*if \(canApply\(\)\) setIsLoading\(false\)/);
 
   // Each local lookup is TIME-BOUNDED (resolveWithTimeout), so a hung promise that
   // never settles — not only a throw/reject — still falls back and lets the load

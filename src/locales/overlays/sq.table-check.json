@@ -126,6 +126,7 @@
       "batchDiscountApplied": "Ulja u aplikua tek artikujt e zgjedhur"
     },
     "errors": {
+      "checkChanged": "Fatura ka ndryshuar. Kontrolloni artikujt dhe shumën e përditësuar përpara se të vazhdoni.",
       "tableMutationBlocked": "Një veprim i mëparshëm për tavolinën po pret konfirmim. Kontrolloni veprimin e ruajtur te gjendja e sinkronizimit përpara se të bëni një ndryshim tjetër.",
       "tableMutationRefused": "Ndryshimi i tavolinës nuk u pranua. Rifreskoni faturën dhe kontrolloni përzgjedhjen tuaj përpara se të provoni sërish.",
       "tableMutationBatchRefused": "Ndryshimi i tavolinës nuk u pranua. Artikuj të zgjedhur që nuk u dërguan: {{count}}. Rifreskoni faturën dhe kontrolloni përzgjedhjen tuaj përpara se të provoni sërish.",
@@ -195,5 +196,58 @@
       "minutes": "{{minutes}} min"
     },
     "floorPlanAriaLabel": "Plani i tavolinave"
+  },
+  "waiterService": {
+    "unreadRejections": "Refuzime për shqyrtim: {{count}}",
+    "rejectionSummary": "Refuzuar nga {{waiter}} · Tavolina {{table}}",
+    "acknowledgeRejection": "Shëno si të parë",
+    "rejectedChangeHelp": "Ndryshimi i propozuar nuk u zbatua. Fatura dhe caktimi mbetën të pandryshuara.",
+    "rejectedQrHelp": "Kërkesa e klientit mbetet në terminalin kryesor për ricaktim.",
+    "noticeSaveFailed": "Konfirmimi nuk u ruajt. Shtyp sërish “Shëno si të parë”.",
+    "qrRequest": "Kërkesë nga QR i tavolinës",
+    "awaitingAssignment": "Zgjidhni një kamerier. Fatura ndryshon pasi ai ta pranojë.",
+    "chooseWaiter": "Zgjidhni kamerierin",
+    "assign": "Dërgo te kamerieri",
+    "noActiveWaiters": "Nuk ka kamerierë me turn aktiv të disponueshëm.",
+    "requests": "Kërkesa shërbimi",
+    "incoming": "Kërkesë për tavolinën tuaj",
+    "accept": "Prano",
+    "reject": "Refuzo",
+    "table": "Tavolina {{table}}",
+    "destination": "Destinacioni: tavolina {{table}}",
+    "sent": "U dërgua për pranim. Fatura mbetet e pandryshuar deri në pranim.",
+    "awaitingDelivery": "Vendimi juaj u ruajt dhe pret dërgimin.",
+    "stale": "Statusi i kërkesave të shërbimit nuk u konfirmua. Kontrolloni lidhjen dhe provoni përsëri.",
+    "empty": "Nuk ka kërkesa shërbimi.",
+    "status": {
+      "pending": "Në pritje të pranimit",
+      "accepted": "U pranua",
+      "rejected": "U refuzua",
+      "superseded": "Ka ndryshuar — kontrolloni përsëri"
+    },
+    "kind": {
+      "assign_waiter": "Kalimi te kamarieri",
+      "append_items": "Artikuj shtesë",
+      "transfer_item": "Transferim artikujsh",
+      "move_table": "Zhvendos tavolinën",
+      "merge_table": "Bashko tavolinat"
+    },
+    "signIn": "Konfirmoni me PIN-in tuaj",
+    "pin": "PIN i personelit",
+    "signInFailed": "Hyrja nuk u konfirmua. Provoni përsëri.",
+    "mainResolutionTitle": "Vendimi i terminalit kryesor",
+    "mainResolutionHelp": "Cakto një kamerier tjetër, merre përsipër në terminalin kryesor ose refuzo përfundimisht kërkesën.",
+    "reassign": "Cakto për pranim të ri",
+    "takeItems": "Merr përsipër vetëm artikujt e rinj",
+    "rejectionReason": "Arsyeja e refuzimit përfundimtar",
+    "finalReject": "Refuzo përfundimisht",
+    "finalRejectHelp": "Refuzohet vetëm kjo kërkesë. Artikujt dhe pagesat ekzistuese ruhen.",
+    "resolutionRefused": "Veprimi nuk u zbatua sepse gjendja ndryshoi. Kontrollo kërkesën dhe zgjidh përsëri.",
+    "resolutionStatus": {
+      "reject_final": "Refuzuar përfundimisht nga terminali kryesor",
+      "reassign": "Ricaktuar për pranim të ri",
+      "main_items": "Artikujt e rinj u morën përsipër nga terminali kryesor"
+    },
+    "itemResponsibility": "Përgjegjësia e artikujve · {{name}}"
   }
 }

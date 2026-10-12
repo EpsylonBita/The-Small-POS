@@ -50,7 +50,7 @@ export function CashierOperationalBoundary({ children }: { children: React.React
           <p>{t('cashierGate.checking')}</p>
         </div> : <div className="p-6 sm:p-8">
           <div className="text-center">
-            <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-300"><Store size={26} strokeWidth={1.6} aria-hidden="true" /></div>
+            <Store className="mx-auto mb-5 text-amber-700 dark:text-amber-300" size={28} strokeWidth={1.8} aria-hidden="true" />
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{t(actions.resolving ? 'cashierGate.checking' : 'cashierGate.title')}</h1>
             <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-gray-600 dark:text-gray-400">{t(actions.waiter ? 'cashierGate.waiterBody' : 'cashierGate.body')}</p>
           </div>

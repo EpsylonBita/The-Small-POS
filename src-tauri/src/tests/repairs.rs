@@ -938,42 +938,47 @@ fn repair_keyring_entries_are_managed_by_factory_reset() {
 #[test]
 fn startup_repair_staging_janitor_runs_after_identity_reconcile_before_sync_loop() {
     let source = include_str!("../lib.rs");
-    let identity = source
-        .find("commands::settings::reconcile_startup_terminal_binding(&db_state)")
-        .expect("startup must use checked canonical terminal binding reconciliation");
-    let janitor = source
-        .find("repairs::run_startup_staging_janitor")
-        .expect("startup must invoke the native repair staging janitor");
-    let identity_failure_log = source
-        .find("Terminal identity reconciliation failed; repair access remains blocked")
-        .expect("identity reconciliation failure must be observable");
-    let sync = source
+    let (helper, startup) = source
+        .split_once("pub fn run() {")
+        .expect("native application entry point must exist");
+    let helper = helper
+        .split_once("pub(crate) async fn reconcile_native_startup(")
+        .expect("startup must use the checked asynchronous reconciliation helper")
+        .1;
+    let identity = helper
+        .find("commands::settings::reconcile_startup_terminal_binding_with_access(db).await?;")
+        .expect("startup must await authoritative identity/access recovery and propagate failure");
+    let checked_lock = helper
+        .find(".map_err(|_| \"REPAIR_NATIVE_STATE_UNAVAILABLE\")?;")
+        .expect("startup DB lock failure must propagate to the startup failure latch");
+    let janitor = helper
+        .find("repairs::run_startup_staging_janitor(&connection)?")
+        .expect("startup must run checked native maintenance after identity recovery");
+    let transport = helper
+        .find("restore_transport();")
+        .expect("transport must restore only after successful reconciliation and maintenance");
+    assert!(identity < checked_lock && checked_lock < janitor && janitor < transport);
+
+    let reconcile = startup
+        .find("tauri::async_runtime::block_on(reconcile_native_startup(&db_state, || {")
+        .expect("the app must wait for the checked helper before starting queue replay");
+    let sync = startup
         .find("sync::start_sync_loop(")
         .expect("startup must launch the background sync loop");
-    let identity_failure_latch = identity
-        + source[identity..janitor]
-            .find("repairs::latch_startup_maintenance_failure();")
-            .expect("identity reconciliation failure must latch repair replay closed");
-    let janitor_lock_failure_latch = janitor
-        + source[janitor..sync]
-            .find("repairs::latch_startup_maintenance_failure();")
-            .expect("startup DB lock failure must latch repair replay closed");
-    let janitor_lock_failure_log = source
-        .find("Repair staging startup janitor could not lock SQLite")
-        .expect("startup DB lock failure must be observable");
-    let latch_count = source
-        .match_indices("repairs::latch_startup_maintenance_failure();")
-        .count();
-
+    assert!(reconcile < sync);
+    let completion = &startup[reconcile..sync];
+    let failure = completion
+        .find("Err(error) => {")
+        .expect("the app must handle a failed reconciliation");
+    let failure_log = completion[failure..]
+        .find("Terminal identity or staging reconciliation failed; startup remains blocked")
+        .expect("identity and maintenance failures must both be observable");
+    let failure_latch = completion[failure..]
+        .find("repairs::latch_startup_maintenance_failure();")
+        .expect("identity and maintenance failures must latch repair replay closed");
     assert!(
-        latch_count >= 2
-            && identity < identity_failure_log
-            && identity_failure_log < identity_failure_latch
-            && identity_failure_latch < janitor
-            && janitor < janitor_lock_failure_latch
-            && janitor_lock_failure_latch < janitor_lock_failure_log
-            && janitor_lock_failure_log < sync,
-        "repair staging cleanup must run after identity reconciliation and before queue replay"
+        failure_log < failure_latch,
+        "the unified failure path must log and latch before queue replay starts"
     );
 }
 

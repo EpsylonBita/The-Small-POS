@@ -1018,6 +1018,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           status: payload.response?.status ?? payload.status,
           deduped: payload.response?.deduped ?? payload.deduped,
           alertSent: payload.response?.alertSent ?? payload.alertSent,
+          alertStatus: payload.response?.alertStatus ?? payload.alertStatus,
+          bundleStored: payload.response?.bundleStored ?? payload.bundleStored,
           lastSentAt: payload.lastSentAt ?? payload.lastAttemptAt,
           error: payload.error,
         });
@@ -1403,9 +1405,15 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const handleSendDiagnosticsToSupport = async () => {
     setSendingSupport(true);
     try {
-      const result = await bridge.diagnostics.sendRemoteIncident();
+      const result = await bridge.diagnostics.sendRemoteIncident({ healthView: buildExportHealthView() });
+      if (!result.success || !result.bundleStored) throw new Error('diagnostics_zip_not_confirmed');
       setIncidentReport(result);
-      toast.success(t('sync.healthModal.support.sentToast'));
+      if (result.path) setExportPath(result.path);
+      if (result.alertSent || result.alertStatus === 'throttled') {
+        toast.success(t('sync.healthModal.support.sentToast'));
+      } else {
+        toast.error(t('sync.healthModal.support.notificationFailed'));
+      }
     } catch (err) {
       setIncidentReport({
         success: false,
@@ -1653,8 +1661,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       closeout: closeoutSummary,
       terminalAuthInvalid,
       printQueue: printQueueSignal,
+      courierCashIssues: recoveryIntegrity.issues.filter(issue => issue.reasonCode.startsWith('courier_cash_')).length,
     }),
-    [closeoutSummary, healthAvailability, printQueueSignal, stuckSignal, terminalAuthInvalid],
+    [closeoutSummary, healthAvailability, printQueueSignal, stuckSignal, terminalAuthInvalid, recoveryIntegrity],
   );
 
   const simpleHealthSummary = useMemo(() => {
@@ -3217,7 +3226,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </button>
                   </div>
                   <p className="text-sm opacity-75">{t('sync.healthModal.support.safeLocal')}</p>
-                  {incidentReport?.success && <p role="status">{t('sync.healthModal.support.received')}</p>}
+                  {incidentReport?.success && <p role="status">{t(!incidentReport.bundleStored ? 'sync.healthModal.support.reportReceived' : incidentReport.alertSent || incidentReport.alertStatus === 'throttled' ? 'sync.healthModal.support.received' : 'sync.healthModal.support.notificationFailed')}</p>}
                   {incidentReport?.error && <p role="alert">{t('sync.healthModal.support.sendFailed')}</p>}
                   {exportPath && <button onClick={handleOpenExportDir} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
                   <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>

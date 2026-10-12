@@ -352,6 +352,14 @@ export function useTables({
       scheduleRefresh(150);
     };
 
+    const handleLanCanonicalApplied = (payload: { id?: string; source?: string; request_id?: string }) => {
+      // This hint follows the committed order/session/table snapshot. Re-read
+      // through the existing scoped table bridge rather than projecting it.
+      if (!payload?.id && payload?.source === 'lan' && typeof payload.request_id === 'string' && payload.request_id.trim()) {
+        scheduleRefresh(150);
+      }
+    };
+
     const handleTableSessionSettled = (payload: {
       tableId?: string | null;
       releaseStatus?: string | null;
@@ -447,6 +455,7 @@ export function useTables({
 
     onEvent('sync:status', handleSyncStatus);
     onEvent('sync:complete', handleOrderMutation);
+    onEvent('order-realtime-update', handleLanCanonicalApplied);
     onEvent('order-created', handleOrderMutation);
     onEvent('order-status-updated', handleOrderMutation);
     onEvent('order-deleted', handleOrderMutation);
@@ -458,6 +467,7 @@ export function useTables({
       if (pendingTimer) clearTimeout(pendingTimer);
       offEvent('sync:status', handleSyncStatus);
       offEvent('sync:complete', handleOrderMutation);
+      offEvent('order-realtime-update', handleLanCanonicalApplied);
       offEvent('order-created', handleOrderMutation);
       offEvent('order-status-updated', handleOrderMutation);
       offEvent('order-deleted', handleOrderMutation);

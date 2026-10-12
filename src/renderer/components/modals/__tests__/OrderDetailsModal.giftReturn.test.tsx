@@ -340,10 +340,10 @@ const scriptBegin = (answer: (payload: any) => unknown) =>
 
 // -- Operator steps -------------------------------------------------------------
 
-const renderDetails = () => {
+const renderDetails = (order?: ReturnType<typeof orderRow>) => {
   const onClose = vi.fn();
   const ui = (isOpen: boolean) => (
-    <OrderDetailsModal isOpen={isOpen} orderId={ORDER_ID} onClose={onClose} />
+    <OrderDetailsModal isOpen={isOpen} orderId={ORDER_ID} order={order} onClose={onClose} />
   );
   const utils = render(ui(true));
   return {
@@ -401,6 +401,20 @@ const lastByClass = (className: string) => {
 };
 
 describe('OrderDetailsModal with RefundVoidModal: original-card gift returns', () => {
+  it('shows a completed fully refunded table check as refunded and preserves history without offering recollection', async () => {
+    const closed = { ...orderRow('pending'), payment_method: 'pending', order_type: 'dine-in', table_session_id: 'closed-table-check', currency: 'EUR' };
+    mocks.bridge.orders.getById.mockResolvedValue(closed);
+    mocks.bridge.payments.getOrderPayments.mockResolvedValue([{ id: 'original-cash', order_id: ORDER_ID, method: 'cash', amount: 15, currency: 'EUR', status: 'refunded' }]);
+    renderDetails(closed);
+    await waitFor(() => expect(mocks.bridge.payments.getOrderPayments).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole('button', { name: tr('payment.split.title') })).toBeNull());
+    expect(screen.getByText(/Payment status: Refunded/i)).toBeInTheDocument();
+    const paymentHeader = screen.getByText('Payment Method').parentElement!;
+    expect(paymentHeader).toHaveTextContent('Cash');
+    expect(paymentHeader).not.toHaveTextContent('Pending');
+    expect(screen.getByTestId('order-details-void-refund')).toBeEnabled();
+    expect(mocks.bridge.refunds.refundPayment).not.toHaveBeenCalled();
+  });
   it('returns exactly 4.00 of a cash 5 + gift 10 order to the card and shows net 11 without any payout', async () => {
     scriptBegin(() => completed(commitReturn('rk-1', 400, 'Damaged')));
     renderDetails();
@@ -673,6 +687,27 @@ describe('OrderDetailsModal with RefundVoidModal: original-card gift returns', (
       expect(call).not.toHaveBeenCalled();
     }
     expect(screen.queryByTestId('gift-return-panel')).toBeNull();
+  });
+
+  it('rereads the order payment status after a cash return when opened with a stale dashboard prop', async () => {
+    mocks.bridge.refunds.refundPayment.mockImplementation(async () => {
+      world.paymentStatus = 'partially_paid';
+      return { success: true };
+    });
+    renderDetails(orderRow('paid'));
+    await expectCoverage(15, 0);
+    const readsBeforeReturn = mocks.bridge.orders.getById.mock.calls.length;
+    fireEvent.click(await screen.findByTestId('order-details-void-refund'));
+    const cashRow = await screen.findByTestId('refund-payment-pay-cash');
+    fireEvent.click(within(cashRow).getByRole('button', { name: tr('modals.refund.refundButton') }));
+    fireEvent.change(await screen.findByRole('spinbutton'), { target: { value: '5' } });
+    const reasons = document.querySelectorAll('textarea');
+    fireEvent.change(reasons[reasons.length - 1], { target: { value: 'Cold food' } });
+    fireEvent.click(screen.getByRole('button', { name: tr('modals.refund.confirmRefund') }));
+    await waitFor(() => expect(mocks.bridge.refunds.refundPayment).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText(/Payment status: Partially Paid/i)).toBeInTheDocument());
+    expect(mocks.bridge.orders.getById.mock.calls.length).toBeGreaterThan(readsBeforeReturn);
+    expect(mocks.bridge.giftReturns.begin).not.toHaveBeenCalled();
   });
 
   it('drops a held authorization when the terminal configuration changes', async () => {

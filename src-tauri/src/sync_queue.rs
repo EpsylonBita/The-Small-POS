@@ -10522,6 +10522,49 @@ fn prepare_order_request(
     }))
 }
 
+/// Forward receipt-owned provenance; replay never chooses a new collector.
+fn merge_recorded_payment_metadata(payload: &Value, trace: Value) -> Value {
+    let original = payload.get("metadata").cloned().unwrap_or(Value::Null);
+    let original = match original {
+        Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null),
+        value => value,
+    };
+    let mut metadata = original.as_object().cloned().unwrap_or_default();
+    if let Some(trace) = trace.as_object() {
+        for (key, value) in trace {
+            if value.is_null() {
+                metadata.entry(key.clone()).or_insert(Value::Null);
+            } else {
+                metadata.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for (field, aliases) in [
+        ("staff_id", ["staff_id", "staffId"]),
+        ("staff_shift_id", ["staff_shift_id", "staffShiftId"]),
+        ("collected_by", ["collected_by", "collectedBy"]),
+    ] {
+        if aliases.iter().any(|alias| {
+            metadata
+                .get(*alias)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            continue;
+        }
+        if let Some(value) = aliases.iter().find_map(|alias| {
+            payload
+                .get(*alias)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }) {
+            metadata.insert(field.into(), Value::String(value.into()));
+        }
+    }
+    Value::Object(metadata)
+}
+
 fn prepare_payment_request(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -10655,13 +10698,13 @@ fn prepare_payment_request(
         "amount_cents": Cents::round_half_even(amount).as_i64(),
         "payment_method": payment_method,
         "idempotency_key": canonical_idempotency_key.clone(),
-        "metadata": {
+        "metadata": merge_recorded_payment_metadata(payload, serde_json::json!({
             "terminal_id": terminal_id,
             "local_order_id": local_order_id,
             "local_payment_id": item.record_id,
             "canonical_idempotency_key": canonical_idempotency_key.clone(),
             "payment_origin": string_field(payload, &["paymentOrigin", "payment_origin"]),
-        }
+        }))
     });
     if let Some(value) = string_field(
         payload,
@@ -13288,7 +13331,143 @@ fn is_parent_order_wait_response(status: u16, response_body: &str) -> bool {
         || lower.contains("parent_order_sync")
 }
 
-fn is_table_session_close_waiting_payment_response(
+const TABLE_OPEN_PARENT_WAIT: &str = "Waiting for parent order sync before opening table session";
+
+fn is_table_open_parent_wait(status: u16, response_body: &str, item: &SyncQueueItem) -> bool {
+    if status != 409
+        || item.module_type != "table_service"
+        || item.table_name != "restaurant_table_sessions"
+        || item.operation != "INSERT"
+    {
+        return false;
+    }
+    let Ok(response) = serde_json::from_str::<Value>(response_body) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&item.data) else {
+        return false;
+    };
+    response["success"] == false
+        && response["error"].as_str() == Some(TABLE_OPEN_PARENT_WAIT)
+        && payload.as_object().is_some()
+        && (payload.get("action").is_none()
+            || matches!(
+                payload.get("action").and_then(Value::as_str),
+                Some("open" | "reopen")
+            ))
+        && string_field(
+            &payload,
+            &[
+                "active_order_id",
+                "active_order_client_id",
+                "client_order_id",
+            ],
+        )
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
+/// Version 1, once per proven first-dispatch misclassification. Only scheduling
+/// and its audit classification change; the original body/event and money stay
+/// intact. The ordinary dispatcher must still obtain and apply a canonical ACK.
+fn resume_table_opens_waiting_for_parent(conn: &Connection) -> Result<usize, String> {
+    let Ok(scope) = crate::table_session_cache::current_scope(conn) else {
+        return Ok(0);
+    };
+    retry_transaction(conn, |conn| {
+        let mut statement = conn.prepare("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status
+            FROM parity_sync_queue WHERE organization_id=?1 AND module_type='table_service'
+            AND table_name='restaurant_table_sessions' AND operation='INSERT' AND status='failed'
+            AND attempts=1 AND claim_generation=1
+            AND error_message LIKE 'HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED %'
+            ORDER BY created_at,id").map_err(|e|e.to_string())?;
+        let rows = statement
+            .query_map([&scope.organization], map_internal_queue_item)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(statement);
+        let mut resumed = 0;
+        for item in rows {
+            // Bound remedies, not candidates: unrelated old refusals must not
+            // permanently starve a later eligible original.
+            if resumed == 3 {
+                break;
+            }
+            let Some(body) = item
+                .error_message
+                .as_deref()
+                .and_then(|e| e.strip_prefix("HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED "))
+            else {
+                continue;
+            };
+            if !is_table_open_parent_wait(409, body, &item) {
+                continue;
+            }
+            let payload: Value = serde_json::from_str(&item.data).map_err(|e| e.to_string())?;
+            if payload.get("client_batch_id").is_some()
+                || [
+                    ("organization_id", &scope.organization),
+                    ("organizationId", &scope.organization),
+                    ("branch_id", &scope.branch),
+                    ("branchId", &scope.branch),
+                    ("terminal_id", &scope.terminal),
+                    ("terminalId", &scope.terminal),
+                ]
+                .iter()
+                .any(|(k, v)| payload[*k].as_str() != Some(v.as_str()))
+                || string_field(&payload, &["client_event_id"])
+                    .is_none_or(|id| id.trim().is_empty())
+            {
+                continue;
+            }
+            // A durably acknowledged, still-open parent on this same table is
+            // required before reviving a legacy failure. Never guess an alias.
+            let Some(parent) = payload["active_order_id"].as_str() else {
+                continue;
+            };
+            let Some(table) = payload["table_id"].as_str() else {
+                continue;
+            };
+            let remote: Option<String> = conn
+                .query_row(
+                    "SELECT supabase_id FROM orders
+                WHERE id=?1 AND organization_id=?2 AND branch_id=?3 AND table_id=?4
+                AND sync_status='synced' AND status NOT IN ('cancelled','completed','delivered')
+                AND payment_status IN ('pending','unpaid')",
+                    params![parent, scope.organization, scope.branch, table],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .flatten();
+            if remote
+                .as_deref()
+                .is_none_or(|id| Uuid::parse_str(id).is_err())
+            {
+                continue;
+            }
+            let eligible: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM conflict_audit_log
+                WHERE id=?1 AND entity_id=?2 AND entity_type='table_batch_original' AND operation_type='INSERT'
+                AND discarded_payload=?3 AND local_version=?4 AND server_version=?4
+                AND resolution='TABLE_MUTATION_FIRST_DISPATCH_REFUSED' AND reviewed_by_operator=0 AND is_monetary=0)",
+                params![format!("table-mutation-terminal:{}",item.id),item.id,item.data,item.version], |r|r.get(0)).map_err(|e|e.to_string())?;
+            if !eligible {
+                continue;
+            }
+            audit_transient_schedule(conn, &item.id, "table_open_parent_wait_reclassified_v1")?;
+            conn.execute("UPDATE conflict_audit_log SET resolution='TABLE_OPEN_PARENT_WAIT_RECLASSIFIED_V1'
+                WHERE id=?1 AND resolution='TABLE_MUTATION_FIRST_DISPATCH_REFUSED' AND discarded_payload=?2",
+                params![format!("table-mutation-terminal:{}",item.id),item.data]).map_err(|e|e.to_string())?;
+            resumed += conn.execute("UPDATE parity_sync_queue SET status='pending',error_message='Waiting for parent order sync',
+                next_retry_at=?1,claim_generation=claim_generation+1
+                WHERE id=?2 AND organization_id=?3 AND data=?4 AND status='failed' AND attempts=1 AND claim_generation=1",
+                params![(Utc::now()+ChronoDuration::seconds(5)).to_rfc3339(),item.id,item.organization_id,item.data]).map_err(|e|e.to_string())?;
+        }
+        Ok(resumed)
+    })
+}
+
+pub(crate) fn is_table_session_close_waiting_payment_response(
     status: u16,
     response_body: &str,
     item: &SyncQueueItem,
@@ -13306,6 +13485,7 @@ fn is_table_session_close_waiting_payment_response(
 
     let lower = response_body.to_ascii_lowercase();
     lower.contains("cannot close a table session with an outstanding balance")
+        || lower.contains("cannot close a table session with outstanding money")
         || (lower.contains("outstanding_balance") && lower.contains("paid_total"))
 }
 
@@ -13976,6 +14156,7 @@ where
             }
             reconcile_payment_queue_mirrors(&db, None)?;
             resume_exhausted_transport_items(&db)?;
+            resume_table_opens_waiting_for_parent(&db)?;
             let _ = cleanup_superseded_synced_order_status_updates(&db)?;
             if visibility == QueueProcessVisibility::InternalAll {
                 // Fix 1 (06/10/2026): identity-less 1.4.122 paid edits go back
@@ -14464,6 +14645,7 @@ where
                     && item.claim_generation == 1
                     && item.attempts == 0
                     && matches!(status, 400 | 403 | 409 | 422)
+                    && !is_table_open_parent_wait(status, &response_body, &item)
                     && !is_table_session_close_waiting_payment_response(
                         status,
                         &response_body,
@@ -14500,6 +14682,7 @@ where
                 // ACK and both local mirrors can consume it.
                 if status == 409
                     && item.module_type == "table_service"
+                    && !is_table_open_parent_wait(status, &response_body, &item)
                     && matches!(
                         item.table_name.as_str(),
                         "restaurant_table_sessions" | "restaurant_table_session_item_transfers"
@@ -24381,6 +24564,224 @@ mod tests {
         );
     }
 
+    mod payment_collector_parity {
+        use super::*;
+
+        const SESSION: &str = "33333333-3333-4333-9333-333333333333";
+
+        fn fixture() -> Connection {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            crate::db::set_setting(&conn, "terminal", "organization_id", "org-1").unwrap();
+            conn.execute("INSERT INTO orders (id,supabase_id,organization_id,branch_id,terminal_id,
+                staff_id,staff_shift_id,items,total_amount,total_amount_cents,status,payment_status,
+                sync_status,created_at,updated_at) VALUES ('collector-order','remote-collector-order',
+                'org-1',?1,?2,'original-waiter','original-waiter-shift','[]',21,2100,'pending','pending',
+                'synced',datetime('now'),datetime('now'))", params![TEST_BRANCH_ID, TEST_TERMINAL_ID]).unwrap();
+            conn.execute("INSERT INTO order_payments (id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,currency,
+                status,payment_origin,staff_id,staff_shift_id,table_session_id,sync_status,sync_state,
+                created_at,updated_at) VALUES ('collector-payment','collector-order','cash',6,600,0.5,50,'CHF',
+                'completed','manual','recorded-cashier','recorded-cashier-shift',?1,'pending','pending',
+                datetime('now'),datetime('now'))", [SESSION]).unwrap();
+            conn
+        }
+
+        fn payload() -> Value {
+            json!({"paymentId":"collector-payment","orderId":"collector-order","method":"cash",
+                "amount":6,"amount_cents":600,"currency":"CHF","tipAmount":0.5,
+                "tableSessionId":SESSION,"seatNumber":2,"paymentOrigin":"manual",
+                "staffId":"recorded-cashier","staffShiftId":"recorded-cashier-shift",
+                "collectedBy":"cashier_drawer","metadata":{"receipt_note":"original-receipt"}})
+        }
+
+        fn prepared(conn: &Connection, payload: &Value) -> Value {
+            let item = queue_item("payments", "INSERT", "collector-payment", payload.clone());
+            let RequestPreparation::Ready(request) =
+                prepare_payment_request(conn, &item, payload, TEST_TERMINAL_ID).unwrap()
+            else {
+                panic!("recorded receipt was not ready")
+            };
+            assert_eq!(request.endpoint, "/api/pos/payments");
+            serde_json::from_str(request.body.as_deref().unwrap()).unwrap()
+        }
+
+        #[test]
+        fn recorded_collector_reaches_actual_request_without_changing_money_or_identity() {
+            let body = prepared(&fixture(), &payload());
+            assert_eq!(body["metadata"]["staff_id"], "recorded-cashier");
+            assert_eq!(body["metadata"]["staff_shift_id"], "recorded-cashier-shift");
+            assert_eq!(body["metadata"]["collected_by"], "cashier_drawer");
+            assert_eq!(body["metadata"]["receipt_note"], "original-receipt");
+            assert_eq!(body["order_id"], "remote-collector-order");
+            assert_eq!(body["payment_id"], "collector-payment");
+            assert_eq!(body["idempotency_key"], "payment:collector-payment");
+            assert_eq!(
+                body["metadata"]["canonical_idempotency_key"],
+                "payment:collector-payment"
+            );
+            assert_eq!(body["table_session_id"], SESSION);
+            assert_eq!(body["seat_number"], 2);
+            assert_eq!(body["amount"].as_f64(), Some(6.0));
+            assert_eq!(body["amount_cents"], 600);
+            assert_eq!(body["tip_amount"], 0.5);
+            assert_eq!(body["tip_amount_cents"], 50);
+            assert_eq!(body["currency"], "CHF");
+        }
+
+        #[test]
+        fn original_metadata_aliases_win_on_retained_replay_including_json_text() {
+            let conn = fixture();
+            for original in [
+                json!({"staffId":"original-cashier","staffShiftId":"original-shift",
+                "collectedBy":"cashier_drawer","provider":"original-provider"}),
+                json!({"staff_id":"original-cashier","staff_shift_id":"original-shift",
+                    "collected_by":"cashier_drawer","provider":"original-provider"}),
+            ] {
+                for metadata in [original.clone(), Value::String(original.to_string())] {
+                    let mut data = payload();
+                    data["metadata"] = metadata;
+                    let first = prepared(&conn, &data);
+                    crate::db::set_setting(&conn, "terminal", "active_staff_id", "later-cashier")
+                        .unwrap();
+                    let replay = prepared(&conn, &data);
+                    assert_eq!(replay, first, "same retained event preserves its request");
+                    for (key, value) in original.as_object().unwrap() {
+                        assert_eq!(&replay["metadata"][key], value);
+                    }
+                    for (snake, camel) in [
+                        ("staff_id", "staffId"),
+                        ("staff_shift_id", "staffShiftId"),
+                        ("collected_by", "collectedBy"),
+                    ] {
+                        if original.get(camel).is_some() {
+                            assert!(replay["metadata"].get(snake).is_none());
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn snake_case_recorded_collector_fills_missing_metadata() {
+            let mut data = payload();
+            for (camel, snake) in [
+                ("staffId", "staff_id"),
+                ("staffShiftId", "staff_shift_id"),
+                ("collectedBy", "collected_by"),
+            ] {
+                let value = data.as_object_mut().unwrap().remove(camel).unwrap();
+                data[snake] = value;
+            }
+            let body = prepared(&fixture(), &data);
+            assert_eq!(body["metadata"]["staff_id"], "recorded-cashier");
+            assert_eq!(body["metadata"]["staff_shift_id"], "recorded-cashier-shift");
+            assert_eq!(body["metadata"]["collected_by"], "cashier_drawer");
+        }
+
+        #[test]
+        fn missing_historical_collector_is_not_guessed_from_receipt_or_waiter_or_current_staff() {
+            let conn = fixture();
+            crate::db::set_setting(&conn, "terminal", "active_staff_id", "current-cashier")
+                .unwrap();
+            let mut data = payload();
+            for key in ["staffId", "staffShiftId", "collectedBy"] {
+                data.as_object_mut().unwrap().remove(key);
+            }
+            data["order_staff_id"] = json!("original-waiter");
+            data["order_staff_shift_id"] = json!("original-waiter-shift");
+            let body = prepared(&conn, &data);
+            for key in [
+                "staff_id",
+                "staffId",
+                "staff_shift_id",
+                "staffShiftId",
+                "collected_by",
+                "collectedBy",
+            ] {
+                assert!(
+                    body["metadata"].get(key).is_none(),
+                    "unknown collector stays unknown: {key}"
+                );
+            }
+            assert_eq!(body["metadata"]["receipt_note"], "original-receipt");
+        }
+
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn canonical_dispatch_sends_recorded_collector_and_keeps_parent_waiter() {
+            let conn = fixture();
+            let original = payload().to_string();
+            crate::sync::upsert_payment_sync_queue_row(
+                &conn,
+                "collector-payment",
+                &original,
+                "pending",
+                0,
+                None,
+                None,
+                None,
+                &Utc::now().to_rfc3339(),
+            )
+            .unwrap();
+            let db = std::sync::Mutex::new(conn);
+            let (base_url, mut requests, server) =
+                spawn_mock_http_server(vec![MockResponse::json(
+                    200,
+                    r#"{"success":true,"payment_id":"canonical-collector-payment"}"#,
+                )])
+                .await;
+            let outcome = process_queue(&db, &base_url, "test-api-key").await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect("bounded fixture server")
+                .unwrap();
+            assert_eq!(outcome.processed, 1);
+            let sent = requests.recv().await.unwrap();
+            assert_eq!(sent.request_line, "POST /api/pos/payments HTTP/1.1");
+            assert_eq!(
+                sent.headers.get("x-terminal-id").map(String::as_str),
+                Some(TEST_TERMINAL_ID)
+            );
+            let body: Value = serde_json::from_str(&sent.body).unwrap();
+            assert_eq!(body["metadata"]["staff_id"], "recorded-cashier");
+            assert_eq!(body["metadata"]["staff_shift_id"], "recorded-cashier-shift");
+            assert_eq!(body["metadata"]["collected_by"], "cashier_drawer");
+            assert_eq!(body["metadata"]["receipt_note"], "original-receipt");
+            assert_eq!(body["idempotency_key"], "payment:collector-payment");
+            assert_eq!(body["amount_cents"], 600);
+            assert_eq!(body["tip_amount_cents"], 50);
+            assert_eq!(body["table_session_id"], SESSION);
+            assert_eq!(body["seat_number"], 2);
+            let conn = db.lock().unwrap();
+            let receipt: (String, String, String) = conn.query_row(
+                "SELECT remote_payment_id,staff_id,staff_shift_id FROM order_payments WHERE id='collector-payment'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+            assert_eq!(
+                receipt,
+                (
+                    "canonical-collector-payment".into(),
+                    "recorded-cashier".into(),
+                    "recorded-cashier-shift".into()
+                )
+            );
+            let money: (i64, i64, String) = conn.query_row(
+                "SELECT amount_cents,tip_amount_cents,currency FROM order_payments WHERE id='collector-payment'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+            assert_eq!(money, (600, 50, "CHF".into()));
+            let waiter: (String, String) = conn
+                .query_row(
+                    "SELECT staff_id,staff_shift_id FROM orders WHERE id='collector-order'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                waiter,
+                ("original-waiter".into(), "original-waiter-shift".into())
+            );
+        }
+    }
+
     #[test]
     fn prepare_payment_request_keeps_local_table_session_in_metadata() {
         let conn = test_connection();
@@ -24801,6 +25202,43 @@ mod tests {
 
     const OUTSTANDING_CLOSE_REFUSAL: &str =
         r#"{"success":false,"error":"Cannot close a table session with an outstanding balance"}"#;
+
+    #[test]
+    fn outstanding_money_response_only_defers_the_original_close() {
+        let conn = test_connection();
+        seed_owing_table_close(&conn, "pending");
+        let mut item = list_actionable_items(
+            &conn,
+            &QueueListQuery {
+                limit: Some(1),
+                module_type: None,
+            },
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let body = "Cannot close a table session with outstanding money";
+        assert!(is_table_session_close_waiting_payment_response(
+            409, body, &item
+        ));
+        assert!(!is_table_session_close_waiting_payment_response(
+            400, body, &item
+        ));
+        assert!(!is_table_session_close_waiting_payment_response(
+            409,
+            "Other conflict",
+            &item
+        ));
+        item.operation = "DELETE".into();
+        assert!(!is_table_session_close_waiting_payment_response(
+            409, body, &item
+        ));
+        item.operation = "UPDATE".into();
+        item.data = json!({"action":"whole_order_cancel"}).to_string();
+        assert!(!is_table_session_close_waiting_payment_response(
+            409, body, &item
+        ));
+    }
 
     #[tokio::test]
     #[serial_test::serial]
@@ -27689,6 +28127,13 @@ mod tests {
             }),
         );
 
+        // Use the production owner: the generic customer fixture bypasses the
+        // table first-dispatch refusal branch that caused the live backlog.
+        conn.execute(
+            "UPDATE parity_sync_queue SET module_type='table_service' WHERE id=?1",
+            [&queue_id],
+        )
+        .unwrap();
         let conn = std::sync::Mutex::new(conn);
         let (base_url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
             409,
@@ -27731,6 +28176,161 @@ mod tests {
 
         clear_terminal_identity();
         server.await.expect("mock server task");
+    }
+
+    fn table_open_parent_wait_fixture() -> (Connection, SyncQueueItem) {
+        let conn = test_connection();
+        seed_foreground_table_scope(&conn);
+        let payload = json!({"action":"open","active_order_id":"local-parent","table_id":"table-1",
+            "client_event_id":"original-open","organization_id":"org-1","organizationId":"org-1",
+            "branch_id":TEST_BRANCH_ID,"branchId":TEST_BRANCH_ID,
+            "terminal_id":"33333333-3333-4333-8333-333333333333","terminalId":"33333333-3333-4333-8333-333333333333"});
+        let id = enqueue_test_item(
+            &conn,
+            "restaurant_table_sessions",
+            "INSERT",
+            "local-open",
+            payload,
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue SET module_type='table_service' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+        let item = dequeue(&conn).unwrap().unwrap();
+        let error = format!(
+            "HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED {}",
+            json!({"success":false,"error":TABLE_OPEN_PARENT_WAIT})
+        );
+        fail_table_mutation(&conn, &item, &error, true).unwrap();
+        conn.execute("INSERT INTO orders(id,supabase_id,organization_id,branch_id,table_id,items,total_amount,status,payment_status,sync_status,created_at,updated_at)
+            VALUES('local-parent','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','org-1',?1,'table-1','[]',7,'pending','pending','synced',datetime('now'),datetime('now'))",[TEST_BRANCH_ID]).unwrap();
+        (conn, item)
+    }
+
+    #[test]
+    fn table_open_parent_wait_recovery_preserves_original_and_reschedules_once() {
+        let (conn, item) = table_open_parent_wait_fixture();
+        assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(), 1);
+        assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(), 0);
+        let row:(String,String,i64,i64,Option<String>)=conn.query_row("SELECT data,status,attempts,claim_generation,next_retry_at FROM parity_sync_queue WHERE id=?1",[&item.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(row.0, item.data);
+        assert_eq!(row.1, "pending");
+        assert_eq!(row.2, 1);
+        assert_eq!(row.3, 2);
+        assert!(chrono::DateTime::parse_from_rfc3339(&row.4.unwrap()).unwrap() > Utc::now());
+        assert!(!table_mutation_was_refused(&conn, &item).unwrap());
+        assert!(table_mutation_is_unresolved(&conn, &item).unwrap());
+        let count:i64=conn.query_row("SELECT count(*) FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 AND outcome='table_open_parent_wait_reclassified_v1'",[&item.id],|r|r.get(0)).unwrap();
+        assert_eq!(count, 1);
+        let audit: (String, String) = conn
+            .query_row(
+                "SELECT discarded_payload,resolution FROM conflict_audit_log WHERE entity_id=?1",
+                [&item.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(audit.0, item.data);
+        assert_eq!(audit.1, "TABLE_OPEN_PARENT_WAIT_RECLASSIFIED_V1");
+        assert!(
+            dequeue(&conn).unwrap().is_none(),
+            "persisted cooldown is respected"
+        );
+    }
+
+    #[test]
+    fn table_open_parent_wait_recovery_refuses_changed_scope_intent_parent_or_claim() {
+        for change in [
+            "UPDATE parity_sync_queue SET organization_id='other'",
+            "UPDATE parity_sync_queue SET data=json_set(data,'$.branch_id','other')",
+            "UPDATE parity_sync_queue SET data=json_set(data,'$.terminalId','other')",
+            "UPDATE parity_sync_queue SET data=json_set(data,'$.action','close')",
+            "UPDATE parity_sync_queue SET data=json_set(data,'$.client_event_id','changed')",
+            "UPDATE parity_sync_queue SET data=json_set(data,'$.client_batch_id','batch')",
+            "UPDATE parity_sync_queue SET error_message='HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED {\"success\":false,\"error\":\"version conflict\"}'",
+            "UPDATE parity_sync_queue SET claim_generation=2",
+            "UPDATE parity_sync_queue SET status='processing'",
+            "UPDATE orders SET sync_status='pending'",
+            "UPDATE orders SET status='cancelled'",
+            "UPDATE orders SET payment_status='paid'",
+            "UPDATE orders SET branch_id='other'",
+            "UPDATE orders SET table_id='other'",
+            "UPDATE conflict_audit_log SET discarded_payload='{}'",
+            "UPDATE conflict_audit_log SET reviewed_by_operator=1",
+        ] {
+            let (conn,_) = table_open_parent_wait_fixture();conn.execute_batch(change).unwrap();
+            assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(),0,"{change}");
+        }
+    }
+
+    #[test]
+    fn table_open_parent_wait_recovery_rolls_back_schedule_and_guard_together() {
+        let (conn, item) = table_open_parent_wait_fixture();
+        conn.execute_batch("CREATE TRIGGER fail_wait_requeue BEFORE UPDATE OF status ON parity_sync_queue BEGIN SELECT RAISE(ABORT,'disk failure'); END").unwrap();
+        assert!(resume_table_opens_waiting_for_parent(&conn).is_err());
+        assert!(table_mutation_was_refused(&conn, &item).unwrap());
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM parity_sync_queue WHERE id=?1",
+                [&item.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        conn.execute_batch("DROP TRIGGER fail_wait_requeue")
+            .unwrap();
+        assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn table_open_parent_wait_recovery_is_not_starved_by_older_unrelated_refusals() {
+        let (conn, item) = table_open_parent_wait_fixture();
+        for n in 0..3 {
+            conn.execute("INSERT INTO parity_sync_queue
+                (id,table_name,record_id,operation,data,organization_id,created_at,attempts,error_message,module_type,status,claim_generation)
+                SELECT ?1,table_name,record_id,operation,data,organization_id,'2000-01-01',attempts,
+                'HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED {\"success\":false,\"error\":\"version conflict\"}',
+                module_type,status,claim_generation FROM parity_sync_queue WHERE id=?2",
+                params![format!("older-refusal-{n}"),item.id]).unwrap();
+        }
+        assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(), 1);
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM parity_sync_queue WHERE status='failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 3, "unrelated refusals remain untouched");
+    }
+
+    #[test]
+    fn table_open_parent_wait_classifier_does_not_weaken_other_refusals() {
+        let (_, item) = table_open_parent_wait_fixture();
+        let body = json!({"success":false,"error":TABLE_OPEN_PARENT_WAIT}).to_string();
+        assert!(is_table_open_parent_wait(409, &body, &item));
+        for status in [400, 401, 403, 422, 500] {
+            assert!(!is_table_open_parent_wait(status, &body, &item));
+        }
+        assert!(!is_table_open_parent_wait(
+            409,
+            "parent_order_sync version conflict",
+            &item
+        ));
+        assert!(!is_table_open_parent_wait(
+            409,
+            &json!({"success":false,"error":"version conflict","details":TABLE_OPEN_PARENT_WAIT})
+                .to_string(),
+            &item
+        ));
+        let mut other = item.clone();
+        other.table_name = "restaurant_table_session_item_transfers".into();
+        assert!(!is_table_open_parent_wait(409, &body, &other));
+        let mut invalid_action = item.clone();
+        let mut payload: Value = serde_json::from_str(&invalid_action.data).unwrap();
+        payload["action"] = json!(42);
+        invalid_action.data = payload.to_string();
+        assert!(!is_table_open_parent_wait(409, &body, &invalid_action));
     }
 
     #[tokio::test]

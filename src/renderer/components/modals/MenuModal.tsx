@@ -2500,6 +2500,38 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         proof = await draftPersistence.inspect();
       }
       if (proof.outcome !== 'saved' && original && ['edit', 'edit_settlement'].includes(original.action) && onEditComplete) {
+        const nativeItemState = (proof as { recovery?: { recoveryState?: string } }).recovery?.recoveryState;
+        if (original.action === 'edit' && nativeItemState === 'processing') throw new Error('RECOVERY_ORIGINAL_PROCESSING');
+        const recoverySnapshot = await bridge.recovery.createPreActionSnapshot();
+        if (!recoverySnapshot?.id) throw new Error('Recovery snapshot was not confirmed');
+        if (original.action === 'edit' && typeof nativeItemState === 'string') {
+          if (!original.client_event_id || original.client_event_id !== draftPersistence.restored?.checkoutRequestId ||
+            !Number.isInteger(original.expected_version) || original.expected_version < 1) {
+            throw new Error('RECOVERY_ORIGINAL_REQUEST_REQUIRED');
+          }
+          // The native journal owns this frozen body and its captured version.
+          // A fresh edit preflight would reject an already-applied original.
+          const context = draftPersistence.restored?.context as Record<string, any> | undefined;
+          const capturedOrder = context?.editOriginalOrder;
+          const result = await bridge.orders.updateItems(original.orderId, original.items, {
+            clientEventId: original.client_event_id, expectedVersion: original.expected_version,
+            expectedLocalVersion: original.renderer_local_version,
+            tableSessionId: capturedOrder?.table_session_id || capturedOrder?.tableSessionId,
+            orderUpdates: original.orderUpdates, financials: original.financials, orderNotes: original.notes,
+          });
+          if (result?.success !== true || (await draftPersistence.inspect()).outcome !== 'saved') {
+            throw new Error('CHECKOUT_DRAFT_EDIT_NOT_APPLIED');
+          }
+          if (onRecoveredOrder) {
+            const reply: any = await bridge.orders.getById(original.orderId);
+            const order = reply?.data || reply;
+            if (order?.id !== original.orderId || !Array.isArray(order.items)) throw new Error('CHECKOUT_DRAFT_ORDER_INCOMPLETE');
+            await onRecoveredOrder(order);
+          }
+          await draftPersistence.clear(true);
+          onClose();
+          return;
+        }
         // A renewed permission or an ambiguous response can retry this original
         // mutation. Settlement replay retains the exact confirmed action and
         // amount; it never opens another picker or starts a provider charge.
@@ -3019,7 +3051,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           ? t('orders.type.dineIn', { defaultValue: 'Dine In' })
           : t('modals.menu.pickup');
     if (editMode && editOrderNumber) {
-      return `${t('modals.menu.editOrder') || 'Edit Order'} ${formatCompactOrderNumberForDisplay(editOrderNumber)} - ${typeLabel}`;
+      const original = editOriginalOrderRef.current;
+      return `${t('modals.menu.editOrder') || 'Edit Order'} ${formatCompactOrderNumberForDisplay(editOrderNumber, original?.created_at || original?.createdAt)} - ${typeLabel}`;
     }
     return `${typeLabel} ${t('modals.menu.order')}`;
   };
@@ -3152,10 +3185,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         {(draftPersistence.error || draftPersistence.status !== 'ready' || draftPersistence.isPending()) && (
           <div role="status" className="px-4 py-3 border-b border-amber-500 text-amber-700 dark:text-amber-200">
             {(draftPersistence.error ? t(`modals.menu.${draftPersistence.error}`) : null) || (draftPersistence.isPending()
-              ? t('modals.menu.draftPending', { defaultValue: 'The original checkout is retained. Confirm its result before starting another payment.' })
+              ? (editMode
+                ? t('modals.menu.editDraftPending', { defaultValue: 'Your original change is saved for recovery. Check its result before making another change.' })
+                : t('modals.menu.draftPending', { defaultValue: 'The original checkout is retained. Confirm its result before starting another payment.' }))
               : t('modals.menu.draftLoading', { defaultValue: 'Loading the saved cart…' }))}
-            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy} onClick={recoverSavedCheckout} className="ml-3 underline">
+            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit} onClick={recoverSavedCheckout} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
               {t('modals.menu.draftRecover', { defaultValue: 'Check original checkout' })}
+            </button>}
+            {draftPersistence.isPending() && <button
+              type="button"
+              disabled={draftRecoveryBusy || isSavingEdit || checkoutPhase !== 'editing' || draftPersistence.error === 'draftSaveFailed'}
+              onClick={() => void requestClose()}
+              className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50"
+            >
+              {t('modals.menu.draftReturnToOrders', { defaultValue: 'Return to orders' })}
             </button>}
           </div>
         )}
@@ -3226,7 +3269,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                     }
               }
               editMode={editMode}
-              isSaving={isSavingEdit || draftPersistence.status !== 'ready' || draftPersistence.isPending()}
+              isSaving={isSavingEdit}
+              submissionBlocked={draftPersistence.status !== 'ready' || draftPersistence.isPending()}
               orderType={orderType}
               minimumOrderAmount={effectiveMinimumOrderAmount}
               deliveryFee={resolvedDeliveryFee}

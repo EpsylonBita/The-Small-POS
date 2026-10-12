@@ -3725,7 +3725,8 @@
         "printingStalled": {
           "one": "Receipts are waiting and not printing: 1 print job has been waiting for {{duration}}.",
           "other": "Receipts are waiting and not printing: {{count}} print jobs are waiting, the oldest for {{duration}}."
-        }
+        },
+        "courierCashReview": "Courier cash needs review"
       },
       "recommendations": {
         "doNotClearData": "Do not clear any data.",
@@ -3783,9 +3784,11 @@
         "viaMainTerminal": "Via main terminal"
       },
       "support": {
-        "sentToast": "Diagnostic report sent to support.",
+        "sentToast": "Super Admin received the ZIP. Telegram notification confirmed or already sent recently.",
         "sendFailedToast": "Could not send diagnostics to support. Try again later.",
-        "received": "Support received the diagnostic report.",
+        "received": "Super Admin received the ZIP. Telegram notification confirmed or already sent recently.",
+        "notificationFailed": "The ZIP is available in Super Admin, but the Telegram notification was not confirmed.",
+        "reportReceived": "Super Admin received the diagnostic report.",
         "incidentId": "Incident ID: {{id}}",
         "sendFailed": "Diagnostics could not be sent right now. The POS will keep working, and you can try again later.",
         "safeLocal": "The POS can continue working locally. Do not reset it or clear data unless support asks you to."
@@ -4809,6 +4812,11 @@
       "satelliteTerminalChip": "on {{terminal}}",
       "satelliteTotalsChip": "{{orders}} orders · {{sales}}",
       "satelliteCheckout": {
+        "awaitingReceipt": "Cash awaiting receipt",
+        "receive": "Receive cash",
+        "received": "Received {{counted}}. Expected {{expected}}.",
+        "receiveBeforeClose": "Receive the cash from closed shifts in staff selection before closing Main.",
+        "pendingReadFailed": "Pending cash returns could not be checked. Check the connection and press Refresh.",
         "back": "Back",
         "title": "Cash handover — {{name}}",
         "loading": "Loading shift figures from the server…",
@@ -5105,6 +5113,7 @@
       "submitFailed": "Failed: {{error}}",
       "resolveBlockerCash": "Record Cash Payment",
       "resolveBlockerCard": "Record Card Payment",
+      "recordPaymentOriginalCurrencyMissing": "This order has no recorded original currency. Changing the store country will not repair it. Support must check the original receipt before a payment can be recorded.",
       "recordConfirmTitle": "Record this payment?",
       "recordConfirmMessage": "Record {{amount}} ({{method}}) for order {{order}} only if the customer already paid it. Nothing is charged, and the record keeps your name.",
       "recordConfirmAction": "Record it",
@@ -6410,7 +6419,8 @@
       "newReservation": "Reserve",
       "markMaintenance": "Set Maintenance",
       "markCleaned": "Cleaned",
-      "markBackInService": "Back in service"
+      "markBackInService": "Back in service",
+      "history": "History"
     },
     "filters": {
       "search": "Search tables...",
@@ -6462,7 +6472,11 @@
       "switchToGrid": "Switch to grid view"
     },
     "noTables": "No tables configured",
-    "configureInAdmin": "Configure tables in the Admin Dashboard"
+    "configureInAdmin": "Configure tables in the Admin Dashboard",
+    "historyLoadFailed": "Could not load table history. Reconnect and retry.",
+    "historyLoadMore": "Load more",
+    "historyTitle": "Table {{table}} History",
+    "noHistory": "No order history for this table"
   },
   "reservations": {
     "title": "Reservations",
@@ -8548,7 +8562,7 @@
     "togglePlugin": "Toggle plugin",
     "lastSync": "Synced",
     "configure": "Configure",
-    "configuration": "Configuration",
+    "configuration": "{{name}} settings",
     "pluginConfiguration": "Plugin configuration",
     "credentialsHelp": "Enter the credentials provided by the platform. Leave fields blank to keep existing values.",
     "partnerRequired": "Partner Required",
@@ -8602,7 +8616,9 @@
       "openAdmin": "Open Admin Dashboard",
       "adminUrlMissing": "Admin Dashboard URL is not configured on this terminal.",
       "adminLinkCopied": "Admin Dashboard link copied.",
-      "adminOpenFailed": "Could not open the Admin Dashboard."
+      "adminOpenFailed": "Could not open the Admin Dashboard.",
+      "sandbox": "Test environment",
+      "production": "Live environment"
     },
     "callerId": {
       "setupInAdmin": "Set up Caller ID in Admin Dashboard",
@@ -8827,7 +8843,9 @@
     "routingEmpty": "No terminals found for this branch.",
     "wolt": {
       "adminManagedSetup": "Wolt is connected in the Admin Dashboard with your Wolt account; there's no API key to enter on the POS. This screen only shows its status."
-    }
+    },
+    "invalidCommission": "Enter a commission from 0 to 100.",
+    "missingFields": "Complete the required fields: {{fields}}"
   },
   "errorBoundary": {
     "whatCanYouDo": "What can you do?",
@@ -9408,6 +9426,16 @@
         "title": "Receipts not printing: {{count}}",
         "summary": "The oldest has been waiting for {{duration}}. Orders are still saved.",
         "guidance": "Check that the printer is on, has paper and is connected, then print a test receipt from the printer settings. If the receipts still don't print, contact support. Don't clear any data."
+      },
+      "courierCashMissing": {
+        "title": "Cash missing from the saved courier record",
+        "summary": "Order #{{orderNumber}} has {{amount}} {{currency}} in cash receipts, but the saved courier cash is zero.",
+        "guidance": "Review the payment and shift before settlement and send diagnostics to support. The difference does not prove cash was not returned."
+      },
+      "courierCashIncomplete": {
+        "title": "Courier cash check incomplete",
+        "summary": "Not all relevant records could be checked.",
+        "guidance": "Refresh the status and send diagnostics to support if this persists."
       }
     }
   },

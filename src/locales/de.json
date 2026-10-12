@@ -3681,7 +3681,8 @@
         "printingStalled": {
           "one": "Belege warten und werden nicht gedruckt: 1 Druckauftrag wartet seit {{duration}}.",
           "other": "Belege warten und werden nicht gedruckt: {{count}} Druckaufträge warten, der älteste seit {{duration}}."
-        }
+        },
+        "courierCashReview": "Bargeld der Lieferfahrer prüfen"
       },
       "recommendations": {
         "doNotClearData": "Löschen Sie keine Daten.",
@@ -3739,9 +3740,11 @@
         "viaMainTerminal": "Über Hauptterminal"
       },
       "support": {
-        "sentToast": "Diagnosebericht an den Support gesendet.",
+        "sentToast": "Der Super Admin hat die ZIP erhalten. Die Telegram-Benachrichtigung wurde bestätigt oder kürzlich bereits gesendet.",
         "sendFailedToast": "Die Diagnose konnte nicht an den Support gesendet werden. Versuchen Sie es später erneut.",
-        "received": "Der Support hat den Diagnosebericht erhalten.",
+        "received": "Der Super Admin hat die ZIP erhalten. Die Telegram-Benachrichtigung wurde bestätigt oder kürzlich bereits gesendet.",
+        "notificationFailed": "Die ZIP ist im Super Admin verfügbar, aber die Telegram-Benachrichtigung wurde nicht bestätigt.",
+        "reportReceived": "Der Super Admin hat den Diagnosebericht erhalten.",
         "incidentId": "Vorfall-ID: {{id}}",
         "sendFailed": "Die Diagnose konnte gerade nicht gesendet werden. Das POS arbeitet weiter, und Sie können es später erneut versuchen.",
         "safeLocal": "Das POS kann lokal weiterarbeiten. Setzen Sie es nicht zurück und löschen Sie keine Daten, außer der Support bittet Sie darum."
@@ -4809,6 +4812,11 @@
       "satelliteTerminalChip": "auf {{terminal}}",
       "satelliteTotalsChip": "{{orders}} Bestellungen · {{sales}}",
       "satelliteCheckout": {
+        "awaitingReceipt": "Bargeld zur Annahme bereit",
+        "receive": "Bargeld annehmen",
+        "received": "{{counted}} erhalten. Erwartet: {{expected}}.",
+        "receiveBeforeClose": "Nehmen Sie zuerst das Bargeld abgeschlossener Schichten in der Personalauswahl an.",
+        "pendingReadFailed": "Ausstehende Bargeldübergaben konnten nicht geprüft werden. Prüfen Sie die Verbindung und wählen Sie Aktualisieren.",
         "back": "Zurück",
         "title": "Kassenübergabe — {{name}}",
         "loading": "Schichtdaten werden vom Server geladen…",
@@ -5101,6 +5109,7 @@
       "submitFailed": "Fehlgeschlagen: {{error}}",
       "resolveBlockerCash": "Fehlende Barzahlung Erfassen",
       "resolveBlockerCard": "Fehlende Kartenzahlung Erfassen",
+      "recordPaymentOriginalCurrencyMissing": "Für diese Bestellung wurde keine ursprüngliche Währung gespeichert. Eine Änderung des Geschäftslands behebt dies nicht. Der Support muss den ursprünglichen Beleg prüfen, bevor eine Zahlung erfasst werden kann.",
       "recordConfirmTitle": "Diese Zahlung erfassen?",
       "recordConfirmMessage": "Erfassen Sie {{amount}} ({{method}}) für Bestellung {{order}} nur, wenn der Kunde bereits bezahlt hat. Es wird nichts belastet, und die Erfassung trägt Ihren Namen.",
       "recordConfirmAction": "Erfassen",
@@ -6410,7 +6419,8 @@
       "newReservation": "Reservieren",
       "markMaintenance": "Als Wartung markieren",
       "markCleaned": "Gereinigt",
-      "markBackInService": "Wieder in Betrieb"
+      "markBackInService": "Wieder in Betrieb",
+      "history": "Verlauf"
     },
     "filters": {
       "search": "Tische suchen...",
@@ -6462,7 +6472,11 @@
       "switchToGrid": "Zur Rasteransicht wechseln"
     },
     "noTables": "Keine Tische eingerichtet",
-    "configureInAdmin": "Richten Sie Tische im Admin-Dashboard ein"
+    "configureInAdmin": "Richten Sie Tische im Admin-Dashboard ein",
+    "historyLoadFailed": "Der Tischverlauf konnte nicht geladen werden. Verbindung prüfen und erneut versuchen.",
+    "historyLoadMore": "Mehr laden",
+    "historyTitle": "Verlauf Tisch {{table}}",
+    "noHistory": "Kein Bestellverlauf für diesen Tisch"
   },
   "reservations": {
     "title": "Reservierungen",
@@ -8548,7 +8562,7 @@
     "togglePlugin": "Plugin umschalten",
     "lastSync": "Synchronisiert",
     "configure": "Konfigurieren",
-    "configuration": "Konfiguration",
+    "configuration": "Einstellungen für {{name}}",
     "pluginConfiguration": "Plugin-Konfiguration",
     "credentialsHelp": "Geben Sie die von der Plattform bereitgestellten Zugangsdaten ein. Lassen Sie Felder leer, um vorhandene Werte beizubehalten.",
     "partnerRequired": "Partner erforderlich",
@@ -8602,7 +8616,9 @@
       "openAdmin": "Admin Dashboard öffnen",
       "adminUrlMissing": "Die Admin-Dashboard-URL ist auf diesem Terminal nicht konfiguriert.",
       "adminLinkCopied": "Admin-Dashboard-Link kopiert.",
-      "adminOpenFailed": "Das Admin Dashboard konnte nicht geöffnet werden."
+      "adminOpenFailed": "Das Admin Dashboard konnte nicht geöffnet werden.",
+      "sandbox": "Testumgebung",
+      "production": "Produktivumgebung"
     },
     "callerId": {
       "setupInAdmin": "Anruferkennung im Admin Dashboard einrichten",
@@ -8827,7 +8843,9 @@
     "routingEmpty": "Keine Terminals für diese Filiale gefunden.",
     "wolt": {
       "adminManagedSetup": "Wolt wird im Admin-Dashboard mit Ihrem Wolt-Konto verbunden; am POS wird kein API-Schlüssel eingegeben. Dieser Bildschirm zeigt nur den Status."
-    }
+    },
+    "invalidCommission": "Geben Sie eine Provision von 0 bis 100 ein.",
+    "missingFields": "Füllen Sie die Pflichtfelder aus: {{fields}}"
   },
   "errorBoundary": {
     "whatCanYouDo": "Was können Sie tun?",
@@ -9408,6 +9426,16 @@
         "title": "Belege werden nicht gedruckt: {{count}}",
         "summary": "Der älteste wartet seit {{duration}}. Bestellungen bleiben gespeichert.",
         "guidance": "Prüfen Sie, ob der Drucker eingeschaltet ist, Papier hat und verbunden ist, und drucken Sie dann in den Druckereinstellungen einen Testbeleg. Wenn die Belege weiterhin nicht gedruckt werden, wenden Sie sich an den Support. Löschen Sie keine Daten."
+      },
+      "courierCashMissing": {
+        "title": "Bargeld fehlt im gespeicherten Fahrerbeleg",
+        "summary": "Bestellung #{{orderNumber}} hat {{amount}} {{currency}} an Bareinnahmen, aber beim Fahrer sind null gespeichert.",
+        "guidance": "Zahlung und Schicht vor der Abrechnung prüfen und Diagnosedaten an den Support senden. Die Differenz beweist keine fehlende Bargeldrückgabe."
+      },
+      "courierCashIncomplete": {
+        "title": "Bargeldprüfung der Fahrer unvollständig",
+        "summary": "Nicht alle relevanten Einträge konnten geprüft werden.",
+        "guidance": "Status aktualisieren und bei anhaltendem Problem Diagnosedaten an den Support senden."
       }
     }
   },

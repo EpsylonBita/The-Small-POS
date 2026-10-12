@@ -89,6 +89,7 @@ interface PaymentRecord {
   amount: number;
   status: string;
   created_at: string;
+  createdAt?: string;
   transaction_ref?: string;
   /**
    * The delivery platform's settlement row (shared rule R1): never voided or
@@ -120,6 +121,11 @@ const readRouteOrNull = (value: unknown): RefundTender | null | undefined =>
     : value === null
       ? null
       : undefined;
+
+const receiptTimestamp = (value: string): string => {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : '—';
+};
 
 const readHandlerByRule = (
   value: unknown,
@@ -1384,7 +1390,12 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
           await bridge.payments.getOrderPayments(requestedOrderId);
         if (!isCurrent()) return false;
         const rowsRead = Array.isArray(orderPayments);
-        const paymentList: PaymentRecord[] = rowsRead ? orderPayments : [];
+        const paymentList: PaymentRecord[] = rowsRead
+          ? orderPayments.map((payment: PaymentRecord) => ({
+              ...payment,
+              created_at: payment.created_at ?? payment.createdAt ?? '',
+            }))
+          : [];
         setPayments(paymentList);
         try {
           const order = await bridge.orders.getById(requestedOrderId);
@@ -1876,7 +1887,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               {getMethodLabel(payment.method)}
                             </div>
                             <div className="text-xs liquid-glass-modal-text-muted">
-                              {new Date(payment.created_at).toLocaleString()}
+                              {receiptTimestamp(payment.created_at)}
                             </div>
                           </div>
                         </div>
@@ -1886,7 +1897,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           </div>
                           {balance && balance.totalRefunds > 0 && (
                             <div className="text-xs text-yellow-400">
-                              {t("modals.refund.refunded", {
+                              {t("modals.refund.statusRefunded", {
                                 defaultValue: "Refunded",
                               })}
                               : {formatCurrency(balance.totalRefunds)} &middot;{" "}
@@ -2061,9 +2072,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             {balance && (
                               <p className="text-xs liquid-glass-modal-text-muted mt-1">
                                 {t("modals.refund.maxRefund", {
-                                  defaultValue: "Max refundable",
+                                  defaultValue: "Maximum refundable: {{amount}}",
+                                  amount: formatCurrency(balance.remaining),
                                 })}
-                                : {formatCurrency(balance.remaining)}
                               </p>
                             )}
                           </div>
@@ -2164,7 +2175,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               : payment.method || "Unknown"}
                           </div>
                           <div className="text-xs liquid-glass-modal-text-muted">
-                            {new Date(payment.created_at).toLocaleString()}
+                            {receiptTimestamp(payment.created_at)}
                           </div>
                         </div>
                       </div>
@@ -2276,7 +2287,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           )
                         )}
                         <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-60">
-                          {new Date(adj.created_at).toLocaleString()}
+                          {receiptTimestamp(adj.created_at)}
                         </div>
                       </div>
                     ))}

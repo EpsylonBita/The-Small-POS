@@ -265,6 +265,26 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     expect(screen.queryByTestId('health-primary-action')).not.toBeInTheDocument()
   })
 
+  it('shows ZIP delivery separately from a failed Telegram notification', async () => {
+    bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true, bundleStored: true, alertSent: false, alertStatus: 'failed', path: 'C:/diagnostics/sent.zip' })
+    renderHealthModal()
+    await screen.findByText('Everything is working')
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.sendSupport') }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(i18n.t('sync.healthModal.support.notificationFailed')))
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(await screen.findByText(i18n.t('sync.healthModal.support.notificationFailed'))).toBeInTheDocument()
+    expect(bridge.diagnostics.sendRemoteIncident).toHaveBeenCalledWith(expect.objectContaining({ healthView: expect.any(Object) }))
+  })
+
+  it('does not show success when a legacy backend accepted only the summary', async () => {
+    bridge.diagnostics.sendRemoteIncident.mockResolvedValue({ success: true, alertSent: true })
+    renderHealthModal()
+    await screen.findByText('Everything is working')
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('sync.healthModal.actions.sendSupport') }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(i18n.t('sync.healthModal.support.sendFailedToast')))
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
   it('reports the day close as blocked by a completed order that was not paid', async () => {
     bridge.diagnostics.getSystemHealth.mockResolvedValue({
       ...HEALTHY_SYSTEM_HEALTH,

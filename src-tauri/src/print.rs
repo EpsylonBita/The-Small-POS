@@ -17446,6 +17446,21 @@ mod tests {
     }
 
     #[test]
+    fn test_efood_receipt_preserves_explicit_catalog_removal() {
+        let item = serde_json::json!({
+            "name": "Club sandwich λαχανικών",
+            "customizations": {
+                "platform_source": "efood", "external_sku": "1440683288",
+                "modifiers": [{ "name": "Ντομάτα", "price": 0, "without": true }]
+            }
+        });
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "Ντομάτα");
+        assert!(parsed[0].is_without);
+    }
+
+    #[test]
     fn test_parse_item_customizations_ignores_metadata_only_wrapper() {
         // A platform item WITHOUT materials still carries the bookkeeping
         // wrapper (live efood order 31/08, Κρέπα Snickers) — its values must

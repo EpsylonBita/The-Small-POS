@@ -204,7 +204,7 @@ test('menu modal keeps search below the wrapping title and cards expose hold pre
 test('menu modal edit mode formats order numbers and flattens kiosk customizations', () => {
   const modalSource = readFileSync(menuModalPath, 'utf8');
 
-  assert.match(modalSource, /formatCompactOrderNumberForDisplay\(editOrderNumber\)/);
+  assert.match(modalSource, /formatCompactOrderNumberForDisplay\(editOrderNumber, original\?\.created_at \|\| original\?\.createdAt\)/);
   assert.doesNotMatch(modalSource, /#\$\{editOrderNumber\}/);
   assert.match(modalSource, /parsed\.added/);
   assert.match(modalSource, /parsed\.groups/);

@@ -97,7 +97,11 @@ function extractErrorMessage(
   fallback: string,
   t: ReturnType<typeof useTranslation>['t'],
 ): string {
-  return formatOperatorFacingError(error, fallback, t);
+  const message = formatOperatorFacingError(error, fallback, t);
+  if (['ORDER_CURRENCY_UNAVAILABLE', 'PAYMENT_CURRENCY_UNAVAILABLE', 'ORIGINAL_CURRENCY_UNAVAILABLE'].includes(message.trim())) {
+    return t('modals.zReport.recordPaymentOriginalCurrencyMissing');
+  }
+  return message;
 }
 
 // Normalize a raw backend slug to a canonical lookup key: lowercase, trim, and collapse
@@ -496,7 +500,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           setSubmitResult(
             t('modals.zReport.resolveBlockerFailed', {
               orderNumber: blocker.orderNumber,
-              error: formatPaymentIntegrityError(
+              error: extractErrorMessage(
                 outcome.result,
                 t('modals.zReport.submissionFailed'),
                 t,
@@ -1508,17 +1512,27 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const staffPaymentsTotal = summaryExpenses.staffPaymentsTotal ?? 0;
   const driverCashGiven = summaryCashDrawer.driverCashGiven ?? 0;
   const driverCashReturned = summaryCashDrawer.driverCashReturned ?? 0;
-  // With a gift card close, expected cash is native's canonical drawer figure (ordinary expected +
-  // ordinary adjustment + gift card cash, each exactly once). Ordinary reports keep the flow sum.
+  // Branch revenue already includes waiter receipts. Adding their handover to
+  // that revenue counts the same cash twice. Native owns the drawer expectation;
+  // retain the flow fallback only for older reports without a drawer snapshot.
+  const recordedDrawerExpected = typeof summaryCashDrawer.expected_cents === 'number'
+    && Number.isSafeInteger(summaryCashDrawer.expected_cents)
+    ? summaryCashDrawer.expected_cents / 100
+    : typeof summaryCashDrawer.expected === 'number' && Number.isFinite(summaryCashDrawer.expected)
+      ? summaryCashDrawer.expected : null;
+  const drawerCashNet = typeof summaryCashDrawer.cashSales === 'number'
+    && Number.isFinite(summaryCashDrawer.cashSales)
+    && typeof summaryCashDrawer.totalRefunds === 'number' && Number.isFinite(summaryCashDrawer.totalRefunds)
+    ? summaryCashDrawer.cashSales - summaryCashDrawer.totalRefunds : cashCollected;
   const expectedCash = giftCloseDrawer
     ? giftCloseDrawer.expectedCents / 100
-    : drawerOpening +
-      cashCollected -
+    : recordedDrawerExpected ?? (drawerOpening +
+      drawerCashNet -
       expensesTotal -
       staffPaymentsTotal -
       drawerDrops -
       driverCashGiven +
-      driverCashReturned;
+      driverCashReturned);
   const otherCollected = otherTenderCollected;
   // Cash + Card + Platforms (+ Other tender) = the headline, by construction.
   const revenueSplitTiles = [
@@ -1581,7 +1595,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   ];
   const moneyFlowRows = [
     { key: 'start', label: t('modals.zReport.opening'), value: formatMoney(drawerOpening), tone: strongTextClass },
-    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(cashCollected)}`, tone: 'text-emerald-600 dark:text-emerald-300' },
+    { key: 'cash', label: t('modals.zReport.cashSales'), value: `+${formatMoney(drawerCashNet)}`, tone: 'text-emerald-600 dark:text-emerald-300' },
     { key: 'card', label: t('modals.zReport.cardSales'), value: formatMoney(cardCollected), tone: strongTextClass },
     ...(reportSections.twint ? [{ key: 'twint', label: 'TWINT', value: formatMoney(twintCollected), tone: strongTextClass }] : []),
     ...(platformOnlineCollected > 0

@@ -749,6 +749,8 @@ async fn http(
     staff: Option<&str>,
     capabilities: Option<&str>,
 ) -> Result<(u16, Value), String> {
+    #[cfg(debug_assertions)]
+    let started = Instant::now();
     let method =
         reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "LAN_INVALID_METHOD")?;
     let mut builder = client
@@ -787,6 +789,23 @@ async fn http(
     if !value.is_object() {
         return Err("LAN_CLOUD_INVALID_RESPONSE".into());
     }
+    #[cfg(debug_assertions)]
+    tracing::info!(
+        stage = if path.starts_with("pos/table-sessions") {
+            "session"
+        } else if path.starts_with("pos/orders") {
+            "order"
+        } else if path.starts_with("pos/payments") {
+            "ledger"
+        } else if path.starts_with("pos/tables") {
+            "floor"
+        } else {
+            "authority"
+        },
+        duration_ms = started.elapsed().as_millis() as u64,
+        status,
+        "Cafe LAN HTTPS read timing"
+    );
     Ok((status, value))
 }
 async fn main_authority(app: &tauri::AppHandle) -> Result<(String, String, String, Value), String> {
@@ -1017,6 +1036,33 @@ async fn hydrate(
     request: &Request,
     response: &mut Value,
 ) -> Result<(), String> {
+    hydrate_with_get(request, response, |path| async move {
+        http(
+            client,
+            origin,
+            &path,
+            "GET",
+            &request.api_key,
+            terminal,
+            None,
+            None,
+            request.staff_session_id.as_deref(),
+            request.payment_capabilities.as_deref(),
+        )
+        .await
+    })
+    .await
+}
+
+async fn hydrate_with_get<F, Fut>(
+    request: &Request,
+    response: &mut Value,
+    get: F,
+) -> Result<(), String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(u16, Value), String>>,
+{
     let mut order_ids = BTreeSet::new();
     let mut session_ids = BTreeSet::new();
     collect_hydration_ids(response, &mut order_ids, &mut session_ids);
@@ -1062,19 +1108,29 @@ async fn hydrate(
                 continue;
             }
             uuid::Uuid::parse_str(&id).map_err(|_| "LAN_CANONICAL_SESSION_INVALID")?;
-            let (status, body) = http(
-                client,
-                origin,
-                &format!("pos/table-sessions/{id}"),
-                "GET",
-                &request.api_key,
-                terminal,
-                None,
-                None,
-                request.staff_session_id.as_deref(),
-                request.payment_capabilities.as_deref(),
-            )
-            .await?;
+            // Reuse only the complete canonical response of this exact GET.
+            // Full parent/ledger hydration and the final revision fence remain
+            // mandatory. Mutation replies must always refresh their snapshot.
+            let initial_session = response.get("session");
+            let selected_read = request.method == "GET"
+                && request.body.is_none()
+                && request.path == format!("pos/table-sessions/{id}")
+                && initial_session.is_some_and(|session| {
+                    session.get("id").and_then(Value::as_str) == Some(id.as_str())
+                        && session.get("items").is_some_and(Value::is_array)
+                        && session
+                            .get("snapshot_revision")
+                            .and_then(Value::as_i64)
+                            .is_some_and(|revision| revision >= 0)
+                });
+            let (status, body) = if selected_read {
+                (
+                    200,
+                    json!({"session":initial_session.expect("validated selected session")}),
+                )
+            } else {
+                get(format!("pos/table-sessions/{id}")).await?
+            };
             if status != 200 {
                 return Err("LAN_CANONICAL_REFRESH_REQUIRED".into());
             }
@@ -1099,19 +1155,7 @@ async fn hydrate(
                 continue;
             }
             uuid::Uuid::parse_str(&id).map_err(|_| "LAN_CANONICAL_ORDER_INVALID")?;
-            let (status, body) = http(
-                client,
-                origin,
-                &format!("pos/orders/sync?order_id={id}&limit=1"),
-                "GET",
-                &request.api_key,
-                terminal,
-                None,
-                None,
-                request.staff_session_id.as_deref(),
-                request.payment_capabilities.as_deref(),
-            )
-            .await?;
+            let (status, body) = get(format!("pos/orders/sync?order_id={id}&limit=1")).await?;
             if status != 200 {
                 return Err("LAN_CANONICAL_REFRESH_REQUIRED".into());
             }
@@ -1127,19 +1171,19 @@ async fn hydrate(
             // binding discovers the check even when no workflow envelope exists.
             collect_hydration_ids(order, &mut order_ids, &mut session_ids);
             orders.push(order.clone());
-            let (status, ledger) = http(
-                client,
-                origin,
-                &format!("pos/payments?order_id={id}&limit=500"),
-                "GET",
-                &request.api_key,
-                terminal,
-                None,
-                None,
-                request.staff_session_id.as_deref(),
-                request.payment_capabilities.as_deref(),
-            )
-            .await?;
+        }
+        order_ids.retain(|id| !seen_orders.contains(id));
+        session_ids.retain(|id| !seen_sessions.contains(id));
+    }
+    // Ledger follows the parent snapshot; floor reads are independent. Keep
+    // bounded concurrency and do not apply anything until both revision fences.
+    let ledger_read = async {
+        for order in &orders {
+            let id = order
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("LAN_CANONICAL_ORDER_INVALID")?;
+            let (status, ledger) = get(format!("pos/payments?order_id={id}&limit=500")).await?;
             if status != 200 || ledger.get("has_more").and_then(Value::as_bool) != Some(false) {
                 return Err("LAN_CANONICAL_LEDGER_REFRESH_REQUIRED".into());
             }
@@ -1149,7 +1193,7 @@ async fn hydrate(
                 .ok_or("LAN_CANONICAL_LEDGER_REFRESH_REQUIRED")?;
             if rows
                 .iter()
-                .any(|row| row.get("order_id").and_then(Value::as_str) != Some(id.as_str()))
+                .any(|row| row.get("order_id").and_then(Value::as_str) != Some(id))
             {
                 return Err("LAN_CANONICAL_LEDGER_SCOPE_MISMATCH".into());
             }
@@ -1163,100 +1207,76 @@ async fn hydrate(
                 payments.push(payment);
             }
         }
-        order_ids.retain(|id| !seen_orders.contains(id));
-        session_ids.retain(|id| !seen_sessions.contains(id));
-    }
-    let mut tables = Vec::new();
-    if request.path.starts_with("pos/tables")
-        || request.path.starts_with("pos/table-sessions")
-        || !sessions.is_empty()
-    {
-        let (status, body) = http(
-            client,
-            origin,
-            "pos/tables",
-            "GET",
-            &request.api_key,
-            terminal,
-            None,
-            None,
-            request.staff_session_id.as_deref(),
-            request.payment_capabilities.as_deref(),
-        )
-        .await?;
-        if status != 200 {
-            return Err("LAN_CANONICAL_REFRESH_REQUIRED".into());
+        Ok::<(), String>(())
+    };
+    let table_read = async {
+        let mut tables = Vec::new();
+        if request.path.starts_with("pos/tables")
+            || request.path.starts_with("pos/table-sessions")
+            || !sessions.is_empty()
+        {
+            let (status, body) = get("pos/tables".into()).await?;
+            if status != 200 {
+                return Err("LAN_CANONICAL_REFRESH_REQUIRED".into());
+            }
+            tables = body
+                .get("tables")
+                .and_then(Value::as_array)
+                .ok_or("LAN_CANONICAL_REFRESH_REQUIRED")?
+                .clone();
         }
-        tables = body
-            .get("tables")
-            .and_then(Value::as_array)
-            .ok_or("LAN_CANONICAL_REFRESH_REQUIRED")?
-            .clone();
-    }
+
+        Ok::<Vec<Value>, String>(tables)
+    };
+    let (_, tables) = tokio::try_join!(ledger_read, table_read)?;
     // Payments may advance a check revision without changing order.version.
     // Recheck all scopes after collecting ledger and table projections, before
     // any hydrated response is cached or applied as a successful receipt.
-    for session in &sessions {
-        let id = session
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("LAN_CANONICAL_SESSION_INVALID")?;
-        let (status, body) = http(
-            client,
-            origin,
-            &format!("pos/table-sessions/{id}"),
-            "GET",
-            &request.api_key,
-            terminal,
-            None,
-            None,
-            request.staff_session_id.as_deref(),
-            request.payment_capabilities.as_deref(),
-        )
-        .await?;
-        if status != 200 {
-            return Err("LAN_CANONICAL_REFRESH_REQUIRED".into());
+    let session_fence = async {
+        for session in &sessions {
+            let id = session
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("LAN_CANONICAL_SESSION_INVALID")?;
+            let (status, body) = get(format!("pos/table-sessions/{id}")).await?;
+            if status != 200 {
+                return Err("LAN_CANONICAL_REFRESH_REQUIRED".into());
+            }
+            require_same_revision(
+                session,
+                body.get("session")
+                    .ok_or("LAN_CANONICAL_REFRESH_REQUIRED")?,
+            )?;
         }
-        require_same_revision(
-            session,
-            body.get("session")
-                .ok_or("LAN_CANONICAL_REFRESH_REQUIRED")?,
-        )?;
-    }
-    for order in &orders {
-        let id = order
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("LAN_CANONICAL_ORDER_INVALID")?;
-        let (status, body) = http(
-            client,
-            origin,
-            &format!("pos/orders/sync?order_id={id}&limit=1"),
-            "GET",
-            &request.api_key,
-            terminal,
-            None,
-            None,
-            request.staff_session_id.as_deref(),
-            request.payment_capabilities.as_deref(),
-        )
-        .await?;
-        let current = body
-            .get("orders")
-            .and_then(Value::as_array)
-            .and_then(|rows| {
-                rows.iter()
-                    .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
-            });
-        if status != 200
-            || current.map_or(true, |current| {
-                current.get("version") != order.get("version")
-                    || current.get("updated_at") != order.get("updated_at")
-            })
-        {
-            return Err("LAN_CANONICAL_SNAPSHOT_CHANGED".into());
+        Ok::<(), String>(())
+    };
+    let order_fence = async {
+        for order in &orders {
+            let id = order
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("LAN_CANONICAL_ORDER_INVALID")?;
+            let (status, body) = get(format!("pos/orders/sync?order_id={id}&limit=1")).await?;
+            let current = body
+                .get("orders")
+                .and_then(Value::as_array)
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+                });
+            if status != 200
+                || current.map_or(true, |current| {
+                    current.get("version") != order.get("version")
+                        || current.get("updated_at") != order.get("updated_at")
+                })
+            {
+                return Err("LAN_CANONICAL_SNAPSHOT_CHANGED".into());
+            }
         }
-    }
+
+        Ok::<(), String>(())
+    };
+    tokio::try_join!(session_fence, order_fence)?;
 
     for key in ["session", "source_session", "target_session"] {
         if let Some(id) = response
@@ -2267,6 +2287,180 @@ mod tests {
         let mut changed = current.clone();
         changed["snapshot_revision"] = json!(3);
         assert!(require_same_revision(&current, &changed).is_err());
+    }
+
+    #[tokio::test]
+    async fn selected_get_snapshot_reuse_preserves_fences_and_mutation_refresh() {
+        for mode in ["selected", "mutation", "partial", "subresource"] {
+            for changed in ["none", "session", "order"] {
+                let order_id = "00000000-0000-4000-8000-000000000001";
+                let check_id = "00000000-0000-4000-8000-000000000002";
+                let order = json!({"id":order_id,"version":4,"updated_at":"before","items":[]});
+                let session = json!({"id":check_id,"active_order_id":order_id,"order":order,"items":[],"snapshot_revision":7});
+                let path = format!(
+                    "pos/table-sessions/{check_id}{}",
+                    if mode == "subresource" {
+                        "/history"
+                    } else {
+                        ""
+                    }
+                );
+                let req = request(
+                    &path,
+                    if mode == "mutation" { "PATCH" } else { "GET" },
+                    None,
+                );
+                let mut original = session.clone();
+                if mode == "partial" {
+                    original
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("snapshot_revision");
+                }
+                let mut response = json!({"session":original});
+                let reads = Mutex::new(HashMap::<String, usize>::new());
+                let ledger_done = std::sync::atomic::AtomicBool::new(false);
+                let result = hydrate_with_get(&req, &mut response, |path| {
+                    let (reads, ledger_done, order, session) =
+                        (&reads, &ledger_done, &order, &session);
+                    async move {
+                        use std::sync::atomic::Ordering::SeqCst;
+                        let count = {
+                            let mut reads = reads.lock().unwrap();
+                            let count = reads.entry(path.clone()).or_default();
+                            *count += 1;
+                            *count
+                        };
+                        if path == "pos/tables" {
+                            return Ok((200, json!({"tables":[]})));
+                        }
+                        if path.starts_with("pos/payments?") {
+                            ledger_done.store(true, SeqCst);
+                            return Ok((200, json!({"payments":[],"has_more":false})));
+                        }
+                        if path.starts_with("pos/orders/sync?") {
+                            let mut value = order.clone();
+                            if count == 2 {
+                                assert!(ledger_done.load(SeqCst));
+                                if changed == "order" {
+                                    value["updated_at"] = json!("after");
+                                }
+                            }
+                            return Ok((200, json!({"orders":[value]})));
+                        }
+                        let fence = mode == "selected" || count == 2;
+                        if fence {
+                            assert!(ledger_done.load(SeqCst));
+                        }
+                        let mut value = session.clone();
+                        if fence && changed == "session" {
+                            value["snapshot_revision"] = json!(8);
+                        }
+                        Ok((200, json!({"session":value})))
+                    }
+                })
+                .await;
+                if changed == "none" {
+                    result.unwrap();
+                    assert_eq!(
+                        reads.lock().unwrap()[&format!("pos/table-sessions/{check_id}")],
+                        if mode == "selected" { 1 } else { 2 }
+                    );
+                    assert_eq!(response["cafe_lan_snapshot"]["sessions"], json!([session]));
+                    assert_eq!(response["cafe_lan_snapshot"]["orders"], json!([order]));
+                } else {
+                    assert!(result.is_err(), "{mode}/{changed}");
+                    assert!(response.get("cafe_lan_snapshot").is_none());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_parent_hydration_fences_both_parallel_read_phases() {
+        for changed in ["none", "session", "order"] {
+            let ids = [
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+            ];
+            let check_ids = [
+                "00000000-0000-4000-8000-000000000003",
+                "00000000-0000-4000-8000-000000000004",
+            ];
+            let orders: Vec<_> = ids
+                .iter()
+                .map(|id| json!({"id":id,"version":4,"updated_at":"before","items":[]}))
+                .collect();
+            let sessions: Vec<_> = (0..2).map(|i| json!({"id":check_ids[i],"active_order_id":ids[i],"order":orders[i],"items":[],"snapshot_revision":7})).collect();
+            let reads = Mutex::new(HashMap::<String, usize>::new());
+            let floor = tokio::sync::Notify::new();
+            let floor_done = std::sync::atomic::AtomicBool::new(false);
+            let ledgers = std::sync::atomic::AtomicUsize::new(0);
+            let req = request(&format!("pos/table-sessions/{}", check_ids[0]), "GET", None);
+            let mut response = json!({"source_session":sessions[0],"target_session":sessions[1]});
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                hydrate_with_get(&req, &mut response, |path| {
+                    let (orders, sessions, reads, floor, floor_done, ledgers) =
+                        (&orders, &sessions, &reads, &floor, &floor_done, &ledgers);
+                    async move {
+                        use std::sync::atomic::Ordering::SeqCst;
+                        let count = {
+                            let mut calls = reads.lock().unwrap();
+                            let count = calls.entry(path.clone()).or_default();
+                            *count += 1;
+                            *count
+                        };
+                        if path == "pos/tables" {
+                            floor_done.store(true, SeqCst);
+                            floor.notify_one();
+                            return Ok((200, json!({"tables":[]})));
+                        }
+                        if path.starts_with("pos/payments?") {
+                            if !floor_done.load(SeqCst) {
+                                floor.notified().await;
+                            }
+                            ledgers.fetch_add(1, SeqCst);
+                            return Ok((200, json!({"payments":[],"has_more":false})));
+                        }
+                        if count == 2 {
+                            assert!(floor_done.load(SeqCst));
+                            assert_eq!(ledgers.load(SeqCst), 2);
+                        }
+                        if path.starts_with("pos/orders/sync?") {
+                            let mut order = orders
+                                .iter()
+                                .find(|o| path.contains(o["id"].as_str().unwrap()))
+                                .unwrap()
+                                .clone();
+                            if count == 2 && changed == "order" {
+                                order["updated_at"] = json!("after");
+                            }
+                            return Ok((200, json!({"orders":[order]})));
+                        }
+                        let mut session = sessions
+                            .iter()
+                            .find(|s| path.ends_with(s["id"].as_str().unwrap()))
+                            .unwrap()
+                            .clone();
+                        if count == 2 && changed == "session" {
+                            session["snapshot_revision"] = json!(8);
+                        }
+                        Ok((200, json!({"session":session})))
+                    }
+                }),
+            )
+            .await
+            .expect("floor and ledger must run concurrently");
+            if changed == "none" {
+                result.unwrap();
+                assert_eq!(response["cafe_lan_snapshot"]["orders"], json!(orders));
+                assert_eq!(response["cafe_lan_snapshot"]["sessions"], json!(sessions));
+            } else {
+                assert!(result.is_err());
+                assert!(response.get("cafe_lan_snapshot").is_none());
+            }
+        }
     }
 
     #[tokio::test]

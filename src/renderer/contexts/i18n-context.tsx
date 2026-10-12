@@ -1,20 +1,12 @@
 'use client'
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import React, { useState, useEffect, ReactNode } from 'react'
 import { I18nextProvider, useTranslation } from 'react-i18next'
-import { TFunction } from 'i18next'
 import i18n from '../../lib/i18n'
 import { getBridge } from '../../lib'
 
-type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it' | 'sq'
-
-interface I18nContextType {
-  language: string
-  setLanguage: (lang: SupportedLanguage) => Promise<void>
-  t: TFunction
-}
-
-const I18nContext = createContext<I18nContextType | undefined>(undefined)
+import { I18nContext, type I18nContextType, type SupportedLanguage } from './i18n-state'
+export { useI18n } from './i18n-state'
 
 const assertLanguageSaved = (result: { success?: boolean; error?: unknown } | null | undefined) => {
   if (result?.success === false) {
@@ -133,12 +125,4 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
       {children}
     </I18nContext.Provider>
   )
-}
-
-export const useI18n = (): I18nContextType => {
-  const context = useContext(I18nContext)
-  if (context === undefined) {
-    throw new Error('useI18n must be used within an I18nProvider')
-  }
-  return context
 }

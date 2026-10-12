@@ -73,6 +73,20 @@ pub(crate) struct RepairAccessDecision {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RepairPendingPurpose {
+    AccessReconciliation {
+        binding_digest: Option<String>,
+        verified: bool,
+        #[serde(default)]
+        retry_not_before: Option<i64>,
+    },
+    IdentityTransition,
+    OperationalClear,
+    Reset,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepairScopeState {
     version: u8,
@@ -83,6 +97,8 @@ struct RepairScopeState {
     scope_epoch: u64,
     transition_pending: bool,
     reset_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_purpose: Option<RepairPendingPurpose>,
     offline_terminal_token: Option<String>,
     offline_sequence_lease_start: Option<u64>,
     offline_sequence_lease_end: Option<u64>,
@@ -199,6 +215,24 @@ fn validate_scope(scope: &RepairScopeState) -> Result<(), String> {
         || scope.scope_epoch > MAX_SAFE_INTEGER
     {
         return Err("REPAIR_SCOPE_CORRUPT".to_string());
+    }
+    if scope.pending_purpose.is_some() && !scope.transition_pending {
+        return Err("REPAIR_SCOPE_CORRUPT".to_string());
+    }
+    if let Some(RepairPendingPurpose::AccessReconciliation {
+        binding_digest,
+        verified,
+        ..
+    }) = &scope.pending_purpose
+    {
+        if scope.reset_pending
+            || (*verified && binding_digest.is_none())
+            || binding_digest.as_ref().is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err("REPAIR_SCOPE_CORRUPT".to_string());
+        }
     }
     match (
         scope.offline_terminal_token.as_deref(),
@@ -560,6 +594,7 @@ where
     if let Some((_raw, old)) = scope_snapshot {
         let mut pending = old.clone();
         pending.transition_pending = true;
+        pending.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
         pending.scope_epoch = old
             .scope_epoch
             .checked_add(1)
@@ -640,7 +675,12 @@ pub(crate) fn prepare_terminal_identity_rollback(
 fn exact_pending_shape(current: &RepairScopeState, old: &RepairScopeState) -> bool {
     let mut expected = old.clone();
     expected.transition_pending = true;
+    expected.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
     expected.scope_epoch = old.scope_epoch.saturating_add(1);
+    if serde_json::to_vec(current).ok() == serde_json::to_vec(&expected).ok() {
+        return true;
+    }
+    expected.pending_purpose = None;
     serde_json::to_vec(current).ok() == serde_json::to_vec(&expected).ok()
 }
 
@@ -693,6 +733,7 @@ pub(crate) fn arm_terminal_identity_transition(
     if !exact_pending_shape(&current, &old) {
         let mut pending = old.clone();
         pending.transition_pending = true;
+        pending.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
         pending.scope_epoch = old
             .scope_epoch
             .checked_add(1)
@@ -1271,6 +1312,7 @@ fn mark_identity_transition_pending(key: &str, new_value: Option<&str>) -> Resul
         .ok_or_else(|| "REPAIR_SCOPE_EPOCH_EXHAUSTED".to_string())?;
     state.blocked = true;
     scope.transition_pending = true;
+    scope.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
     scope.scope_epoch = next_epoch;
     persist_scope(&scope)?;
     state.epoch = scope.scope_epoch;
@@ -1366,6 +1408,7 @@ fn new_scope(
         scope_epoch: epoch.max(1),
         transition_pending: false,
         reset_pending: false,
+        pending_purpose: None,
         offline_terminal_token: None,
         offline_sequence_lease_start: None,
         offline_sequence_lease_end: None,
@@ -1477,6 +1520,21 @@ pub(crate) fn latch_authoritative_access_pending(
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
     require_current_access_decision(&state, decision)?;
     state.blocked = true;
+    // A later authoritative refusal must survive process restart. Only the
+    // new access purpose is invalidated; legacy/identity/reset/clear scopes
+    // retain their original guarded lifecycle and crypto shape.
+    if let Some(mut scope) = load_scope_raw()? {
+        if let Some(RepairPendingPurpose::AccessReconciliation {
+            verified,
+            retry_not_before,
+            ..
+        }) = &mut scope.pending_purpose
+        {
+            *verified = false;
+            *retry_not_before = None;
+            persist_scope(&scope)?;
+        }
+    }
     condition.notify_all();
     Ok(())
 }
@@ -1497,6 +1555,11 @@ fn block_access_reconciliation(
     state.epoch = state.epoch.saturating_add(1);
     if let Some(scope) = scope {
         scope.transition_pending = true;
+        scope.pending_purpose = Some(RepairPendingPurpose::AccessReconciliation {
+            binding_digest: crate::commands::settings::current_access_binding_digest()?,
+            verified: false,
+            retry_not_before: None,
+        });
         persist_scope(scope)?;
     }
     while state.active_readers > 0 {
@@ -2792,6 +2855,72 @@ pub(crate) fn begin_authoritative_access_reconciliation(
     enabled: bool,
     decision: RepairAccessDecision,
 ) -> Result<RepairAccessReconciliation, String> {
+    begin_authoritative_access_reconciliation_inner(
+        db,
+        organization_id,
+        branch_id,
+        terminal_id,
+        enabled,
+        decision,
+        None,
+        None,
+    )
+}
+
+/// Carry the authenticated fetch's pre-await binding through the locked
+/// publication boundary, including the distinction between absent/complete.
+pub(crate) fn begin_bound_authoritative_access_reconciliation(
+    db: &crate::db::DbState,
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    enabled: bool,
+    decision: RepairAccessDecision,
+    expected_binding_digest: Option<&str>,
+) -> Result<RepairAccessReconciliation, String> {
+    begin_authoritative_access_reconciliation_inner(
+        db,
+        organization_id,
+        branch_id,
+        terminal_id,
+        enabled,
+        decision,
+        None,
+        Some(expected_binding_digest),
+    )
+}
+
+pub(crate) fn resume_authoritative_access_reconciliation(
+    db: &crate::db::DbState,
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    enabled: bool,
+    decision: RepairAccessDecision,
+    snapshot: &RepairAccessRecoverySnapshot,
+) -> Result<RepairAccessReconciliation, String> {
+    begin_authoritative_access_reconciliation_inner(
+        db,
+        organization_id,
+        branch_id,
+        terminal_id,
+        enabled,
+        decision,
+        Some(snapshot),
+        None,
+    )
+}
+
+fn begin_authoritative_access_reconciliation_inner(
+    db: &crate::db::DbState,
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    enabled: bool,
+    decision: RepairAccessDecision,
+    recovery: Option<&RepairAccessRecoverySnapshot>,
+    expected_binding_digest: Option<Option<&str>>,
+) -> Result<RepairAccessReconciliation, String> {
     if canonical_uuid(organization_id).as_deref() != Some(organization_id)
         || canonical_uuid(branch_id).as_deref() != Some(branch_id)
         || !validate_terminal_id(terminal_id)
@@ -2802,11 +2931,33 @@ pub(crate) fn begin_authoritative_access_reconciliation(
     let _transition = transition_mutex()
         .lock()
         .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE".to_string())?;
+    if let Some(snapshot) = recovery {
+        validate_access_recovery_snapshot(snapshot, decision)?;
+    }
+    let original_binding_digest = crate::commands::settings::current_access_binding_digest()?;
+    if expected_binding_digest
+        .is_some_and(|expected| original_binding_digest.as_deref() != expected)
+    {
+        return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+    }
     if crate::storage::read_repair_transition_journal()?.is_some() {
         latch_startup_maintenance_failure();
         return Err("REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
     }
     let mut prior = load_scope_raw()?;
+    if prior.as_ref().is_some_and(|scope| {
+        scope.transition_pending
+            && matches!(
+                scope.pending_purpose,
+                Some(
+                    RepairPendingPurpose::IdentityTransition
+                        | RepairPendingPurpose::OperationalClear
+                        | RepairPendingPurpose::Reset
+                )
+            )
+    }) {
+        return Err("REPAIR_ACCESS_RECOVERY_PURPOSE_MISMATCH".to_string());
+    }
     let identity_changed = prior.as_ref().map_or(true, |scope| {
         !scope_matches_identity(scope, organization_id, branch_id, terminal_id)
     });
@@ -3005,6 +3156,21 @@ pub(crate) fn begin_authoritative_access_reconciliation(
     candidate.offline_sequence_lease_end = None;
     candidate.transition_pending = enabled;
     candidate.reset_pending = false;
+    let binding_digest = crate::commands::settings::current_access_binding_digest()?;
+    let same_binding = !identity_changed
+        && binding_digest.is_some()
+        && binding_digest == original_binding_digest
+        && runtime_scope_identity_from_keyring()?
+            == (
+                organization_id.to_string(),
+                branch_id.to_string(),
+                terminal_id.to_string(),
+            );
+    candidate.pending_purpose = enabled.then_some(RepairPendingPurpose::AccessReconciliation {
+        binding_digest,
+        verified: same_binding,
+        retry_not_before: None,
+    });
     persist_scope(&candidate)?;
 
     if let Some(journal) = transition_journal.as_mut() {
@@ -3038,6 +3204,11 @@ pub(crate) fn begin_authoritative_access_reconciliation(
     };
     if enabled {
         persist_entitlement_for_scope(&candidate, true)?;
+        // The verified unchanged terminal can run ordinary POS operations.
+        // Repairs still rejects transition_pending until its staff bootstrap.
+        if same_binding {
+            unblock_at_epoch_for_decision(candidate.scope_epoch, decision)?;
+        }
     } else {
         clear_maintenance_failure_after_destructive_recovery()?;
         unblock_at_epoch_for_decision(candidate.scope_epoch, decision)?;
@@ -3065,7 +3236,7 @@ pub(crate) fn finalize_authoritative_offline_access(
             .lock()
             .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
         require_current_access_decision(&state, decision)?;
-        if !state.blocked {
+        if !state.blocked && !verified_access_pending()? {
             return Err("REPAIR_SCOPE_TRANSITION_NOT_ARMED".to_string());
         }
     }
@@ -3107,6 +3278,7 @@ pub(crate) fn finalize_authoritative_offline_access(
         scope.offline_sequence_lease_end = None;
     }
     scope.transition_pending = false;
+    scope.pending_purpose = None;
     validate_scope(&scope).map_err(|_| "REPAIR_OFFLINE_BOOTSTRAP_INVALID".to_string())?;
     persist_scope(&scope)?;
     unblock_at_epoch_for_decision(scope.scope_epoch, decision)
@@ -3136,6 +3308,25 @@ pub(crate) fn retain_verified_access_after_network_failure(
     // Drain active native operations before SQLite is acquired. This keeps
     // the same global lock order as authoritative enable/revoke processing.
     block_access_decision_in_memory(decision)?;
+    if let Some(scope) = load_scope_raw()? {
+        if scope_has_verified_access_purpose(&scope)? {
+            let Some(RepairPendingPurpose::AccessReconciliation {
+                binding_digest: Some(digest),
+                ..
+            }) = &scope.pending_purpose
+            else {
+                return Err("REPAIR_OFFLINE_ACCESS_UNAVAILABLE".to_string());
+            };
+            if crate::storage::read_repair_transition_journal()?.is_some() {
+                return Err("REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
+            }
+            crate::commands::settings::verify_current_access_binding(db, digest)?;
+            unblock_at_epoch_for_decision(scope.scope_epoch, decision)?;
+            // Generic POS admission is retained, but a cached modules reply
+            // must not advertise pending Repairs as usable offline access.
+            return Err("REPAIR_OFFLINE_ACCESS_UNAVAILABLE".to_string());
+        }
+    }
     let scope = active_scope()?;
     let runtime = {
         let connection = db
@@ -3240,7 +3431,18 @@ fn block_and_wait(mut scope: Option<&mut RepairScopeState>, reset: bool) -> Resu
     state.blocked = true;
     state.reset_latched |= reset;
     if let Some(scope) = scope.as_mut() {
-        if !scope.transition_pending || (reset && !scope.reset_pending) {
+        let needs_epoch = !scope.transition_pending || (reset && !scope.reset_pending);
+        // An already armed authenticated identity rollback owns its exact
+        // epoch/shape. Joining its drain must not advance or relabel it.
+        let purpose_changed = reset
+            && !matches!(scope.pending_purpose, Some(RepairPendingPurpose::Reset))
+            || !reset
+                && (needs_epoch
+                    || matches!(
+                        scope.pending_purpose,
+                        Some(RepairPendingPurpose::AccessReconciliation { .. })
+                    ));
+        if needs_epoch {
             scope.transition_pending = true;
             scope.reset_pending |= reset;
             scope.scope_epoch = scope
@@ -3248,6 +3450,15 @@ fn block_and_wait(mut scope: Option<&mut RepairScopeState>, reset: bool) -> Resu
                 .checked_add(1)
                 .filter(|epoch| *epoch <= MAX_SAFE_INTEGER)
                 .ok_or_else(|| "REPAIR_SCOPE_EPOCH_EXHAUSTED".to_string())?;
+        }
+        if purpose_changed {
+            scope.pending_purpose = Some(if reset {
+                RepairPendingPurpose::Reset
+            } else {
+                RepairPendingPurpose::OperationalClear
+            });
+        }
+        if needs_epoch || purpose_changed {
             persist_scope(scope)?;
         }
         // Startup lifecycle memory begins at epoch zero. Rehydrate it from
@@ -3528,6 +3739,7 @@ pub(crate) fn prepare_operational_clear_publication(
         .unwrap_or(1);
     let mut replacement = new_scope(organization_id, branch_id, terminal_id, epoch);
     replacement.transition_pending = true;
+    replacement.pending_purpose = Some(RepairPendingPurpose::OperationalClear);
     persist_scope(&replacement)?;
     Ok(OperationalClearPublication {
         replacement: Some(replacement),
@@ -3542,6 +3754,7 @@ pub(crate) fn activate_operational_clear_publication(
         return Ok(());
     };
     replacement.transition_pending = false;
+    replacement.pending_purpose = None;
     persist_scope(replacement)
 }
 
@@ -3552,6 +3765,7 @@ pub(crate) fn reblock_operational_clear_publication(
         return Ok(());
     };
     replacement.transition_pending = true;
+    replacement.pending_purpose = Some(RepairPendingPurpose::OperationalClear);
     persist_scope(replacement)
 }
 
@@ -3567,7 +3781,178 @@ pub(crate) fn finish_operational_clear_publication(
 }
 
 pub(crate) fn operational_clear_transition_pending() -> Result<bool, String> {
-    Ok(load_scope_raw()?.is_some_and(|scope| scope.transition_pending))
+    let Some(scope) = load_scope_raw()? else {
+        return Ok(false);
+    };
+    Ok(scope.transition_pending && !scope_has_verified_access_purpose(&scope)?)
+}
+
+fn scope_has_verified_access_purpose(scope: &RepairScopeState) -> Result<bool, String> {
+    let Some(RepairPendingPurpose::AccessReconciliation {
+        binding_digest: Some(digest),
+        verified: true,
+        ..
+    }) = &scope.pending_purpose
+    else {
+        return Ok(false);
+    };
+    if scope.reset_pending || !scope.transition_pending {
+        return Ok(false);
+    }
+    Ok(
+        crate::commands::settings::current_access_binding_digest()?.as_ref() == Some(digest)
+            && runtime_scope_identity_from_keyring()?
+                == (
+                    scope.organization_id.clone(),
+                    scope.branch_id.clone(),
+                    scope.terminal_id.clone(),
+                ),
+    )
+}
+
+pub(crate) fn verified_access_pending() -> Result<bool, String> {
+    load_scope_raw()?.map_or(Ok(false), |scope| scope_has_verified_access_purpose(&scope))
+}
+
+/// Rehydrate only prior fully verified generic terminal admission. Entitlement,
+/// staff actor and offline numbering remain pending and unavailable to Repairs.
+pub(crate) fn restore_verified_access_pending(
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    digest: &str,
+    decision: RepairAccessDecision,
+) -> Result<(), String> {
+    let _transition = transition_mutex()
+        .lock()
+        .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE")?;
+    require_access_recovery_lifecycle(decision)?;
+    if crate::storage::read_repair_transition_journal()?.is_some() {
+        return Err("REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
+    }
+    let scope = load_scope_raw()?.ok_or("REPAIR_SCOPE_REQUIRED")?;
+    if !scope_matches_identity(&scope, organization_id, branch_id, terminal_id)
+        || !scope_has_verified_access_purpose(&scope)?
+        || crate::commands::settings::current_access_binding_digest()?.as_deref() != Some(digest)
+    {
+        return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+    }
+    unblock_at_epoch_for_decision(scope.scope_epoch, decision)
+}
+
+pub(crate) fn access_reconciliation_pending() -> Result<bool, String> {
+    Ok(load_scope_raw()?.is_some_and(|scope| {
+        scope.transition_pending
+            && matches!(
+                scope.pending_purpose,
+                Some(RepairPendingPurpose::AccessReconciliation { .. })
+            )
+    }))
+}
+
+/// Opaque comparison proof held across the two authenticated reads. No
+/// credential, crypto token or scope serialization is exposed to the renderer.
+pub(crate) struct RepairAccessRecoverySnapshot {
+    scope: Zeroizing<String>,
+    binding_digest: String,
+}
+
+fn require_access_recovery_lifecycle(decision: RepairAccessDecision) -> Result<(), String> {
+    let state = lifecycle()
+        .0
+        .lock()
+        .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE")?;
+    require_current_access_decision(&state, decision)?;
+    if state.reset_latched || state.terminal_identity_rollback_publication_pending {
+        return Err("REPAIR_RESET_PENDING".to_string());
+    }
+    if state.maintenance_failed {
+        return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn capture_access_recovery(
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    digest: &str,
+    decision: RepairAccessDecision,
+) -> Result<RepairAccessRecoverySnapshot, String> {
+    let _transition = transition_mutex()
+        .lock()
+        .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE")?;
+    require_access_recovery_lifecycle(decision)?;
+    if crate::storage::read_repair_transition_journal()?.is_some() {
+        return Err("REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
+    }
+    let mut scope = load_scope_raw()?.ok_or("REPAIR_SCOPE_REQUIRED")?;
+    if !scope.transition_pending
+        || scope.reset_pending
+        || !scope_matches_identity(&scope, organization_id, branch_id, terminal_id)
+        || crate::commands::settings::current_access_binding_digest()?.as_deref() != Some(digest)
+    {
+        return Err("REPAIR_ACCESS_RECOVERY_SCOPE_MISMATCH".to_string());
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    match &scope.pending_purpose {
+        None => {} // Legacy: exact strict authority and fresh full responses are required.
+        Some(RepairPendingPurpose::AccessReconciliation {
+            binding_digest,
+            retry_not_before,
+            ..
+        }) => {
+            if binding_digest.as_deref() != Some(digest) {
+                return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+            }
+            if retry_not_before.is_some_and(|instant| instant > now) {
+                return Err("REPAIR_ACCESS_RECOVERY_COOLDOWN".to_string());
+            }
+        }
+        _ => return Err("REPAIR_ACCESS_RECOVERY_PURPOSE_MISMATCH".to_string()),
+    }
+    // Persist a bounded retry gate before any await. Eligibility never clears
+    // pending or grants entitlement; failure leaves the protected scope closed.
+    scope.pending_purpose = Some(RepairPendingPurpose::AccessReconciliation {
+        binding_digest: Some(digest.to_string()),
+        verified: false,
+        retry_not_before: Some(now.saturating_add(30_000)),
+    });
+    persist_scope(&scope)?;
+    let raw = crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_SCOPE_V1)?
+        .ok_or("REPAIR_SCOPE_REQUIRED")?;
+    Ok(RepairAccessRecoverySnapshot {
+        scope: raw,
+        binding_digest: digest.to_string(),
+    })
+}
+
+fn validate_access_recovery_snapshot(
+    snapshot: &RepairAccessRecoverySnapshot,
+    decision: RepairAccessDecision,
+) -> Result<(), String> {
+    require_access_recovery_lifecycle(decision)?;
+    if crate::storage::read_repair_transition_journal()?.is_some()
+        || crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_SCOPE_V1)?
+            .as_ref()
+            .map(|value| value.as_str())
+            != Some(snapshot.scope.as_str())
+        || crate::commands::settings::current_access_binding_digest()?.as_deref()
+            != Some(snapshot.binding_digest.as_str())
+    {
+        return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn check_access_recovery_snapshot(
+    snapshot: &RepairAccessRecoverySnapshot,
+    decision: RepairAccessDecision,
+) -> Result<(), String> {
+    let _transition = transition_mutex()
+        .lock()
+        .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE")?;
+    validate_access_recovery_snapshot(snapshot, decision)
 }
 
 /// Factory/emergency-reset preflight. On success the barrier deliberately
@@ -8544,6 +8929,19 @@ fn acquire_startup_maintenance_lease(
         return Ok(None);
     };
     if candidate.transition_pending || candidate.reset_pending {
+        // A fully authenticated same-binding module decision may be waiting
+        // only for staff bootstrap. Do not perform staging IO or latch a fatal
+        // filesystem failure for that supported deferred access state.
+        if scope_has_verified_access_purpose(&candidate)? {
+            let state = lifecycle()
+                .0
+                .lock()
+                .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE")?;
+            if state.reset_latched || state.maintenance_failed || state.blocked {
+                return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
+            }
+            return Ok(None);
+        }
         return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
     }
     let first_identity = runtime_scope_identity_from_keyring()?;
@@ -9043,11 +9441,32 @@ mod tests {
             scope_epoch: 7,
             transition_pending: false,
             reset_pending: false,
+            pending_purpose: None,
             offline_terminal_token: Some("A19F".to_string()),
             offline_sequence_lease_start: Some(1),
             offline_sequence_lease_end: Some(100),
             settings_cache: None,
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn main_startup_access_clear_drain_preserves_authenticated_rollback_shape() {
+        let _lifecycle = isolate_lifecycle_for_test();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let mut pending = original.clone();
+        pending.transition_pending = true;
+        pending.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
+        pending.scope_epoch += 1;
+        persist_scope(&pending).unwrap();
+        assert!(exact_pending_shape(&pending, &original));
+        block_and_wait(Some(&mut pending), false).unwrap();
+        assert!(exact_pending_shape(
+            &load_scope_raw().unwrap().unwrap(),
+            &original
+        ));
+        assert_eq!(pending.scope_epoch, original.scope_epoch + 1);
     }
 
     fn install_native_state(scope: &RepairScopeState) -> crate::tests::fake_keyring::Guard {

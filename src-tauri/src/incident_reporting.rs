@@ -337,9 +337,20 @@ pub async fn send_candidate_report(
     candidate: &PosIncidentCandidate,
     health: &Value,
 ) -> Result<Value, String> {
+    send_candidate_report_with_bundle(db, candidate, health, None).await
+}
+
+pub async fn send_candidate_report_with_bundle(
+    db: &db::DbState,
+    candidate: &PosIncidentCandidate,
+    health: &Value,
+    bundle_path: Option<&str>,
+) -> Result<Value, String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
     let about = diagnostics::get_about_info();
     let redacted_health = diagnostics::redact_remote_diagnostics_value(health.clone());
-    let body = json!({
+    let mut body = json!({
         "severity": candidate.severity.as_str(),
         "issueCode": candidate.issue_code,
         "fingerprint": candidate.fingerprint,
@@ -352,8 +363,40 @@ pub async fn send_candidate_report(
         "occurredAt": Utc::now().to_rfc3339(),
     });
 
+    let mut bundle_hash = None;
+    if let Some(path) = bundle_path {
+        // Same 2 MiB limit as shared/pos/health/incident-transfer.ts.
+        if std::fs::metadata(path)
+            .map_err(|_| "Diagnostics ZIP unavailable")?
+            .len()
+            > 2 * 1024 * 1024
+        {
+            return Err("Diagnostics ZIP exceeds the 2 MiB upload limit".into());
+        }
+        let bytes = std::fs::read(path).map_err(|_| "Diagnostics ZIP could not be read")?;
+        bundle_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
+        body["diagnosticBundle"] = json!({
+            "fileName": std::path::Path::new(path).file_name().and_then(|name| name.to_str()),
+            "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "redacted": true,
+        });
+    }
+
     match crate::admin_fetch(Some(db), "/api/pos/incidents/report", "POST", Some(body)).await {
         Ok(response) => {
+            if let Some(hash) = bundle_hash {
+                if response.get("bundleStored").and_then(Value::as_bool) != Some(true)
+                    || response.get("bundleSha256").and_then(Value::as_str) != Some(hash.as_str())
+                    || response.get("incidentId").and_then(Value::as_str).is_none()
+                {
+                    record_send_failure(
+                        db,
+                        &candidate.fingerprint,
+                        "diagnostics_zip_not_confirmed",
+                    );
+                    return Err("Diagnostics ZIP delivery was not confirmed".into());
+                }
+            }
             record_send_success(db, &candidate.fingerprint, &response);
             Ok(response)
         }

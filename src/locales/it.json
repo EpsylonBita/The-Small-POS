@@ -3681,7 +3681,8 @@
         "printingStalled": {
           "one": "Gli scontrini sono in attesa e non vengono stampati: 1 stampa è in attesa da {{duration}}.",
           "other": "Gli scontrini sono in attesa e non vengono stampati: {{count}} stampe in attesa, la più vecchia da {{duration}}."
-        }
+        },
+        "courierCashReview": "Controllare i contanti dei fattorini"
       },
       "recommendations": {
         "doNotClearData": "Non cancellare alcun dato.",
@@ -3739,9 +3740,11 @@
         "viaMainTerminal": "Tramite terminale principale"
       },
       "support": {
-        "sentToast": "Rapporto diagnostico inviato all’assistenza.",
+        "sentToast": "Il Super Admin ha ricevuto lo ZIP. La notifica Telegram è confermata o è già stata inviata di recente.",
         "sendFailedToast": "Non è stato possibile inviare la diagnostica all’assistenza. Riprova più tardi.",
-        "received": "L’assistenza ha ricevuto il rapporto diagnostico.",
+        "received": "Il Super Admin ha ricevuto lo ZIP. La notifica Telegram è confermata o è già stata inviata di recente.",
+        "notificationFailed": "Lo ZIP è disponibile nel Super Admin, ma la notifica Telegram non è stata confermata.",
+        "reportReceived": "Il Super Admin ha ricevuto il rapporto diagnostico.",
         "incidentId": "ID dell’incidente: {{id}}",
         "sendFailed": "Al momento non è possibile inviare la diagnostica. Il POS continuerà a funzionare e potrai riprovare più tardi.",
         "safeLocal": "Il POS può continuare a funzionare in locale. Non ripristinarlo e non cancellare dati, a meno che non lo chieda l’assistenza."
@@ -4809,6 +4812,11 @@
       "satelliteTerminalChip": "su {{terminal}}",
       "satelliteTotalsChip": "{{orders}} ordini · {{sales}}",
       "satelliteCheckout": {
+        "awaitingReceipt": "Contanti in attesa di ricezione",
+        "receive": "Ricevi contanti",
+        "received": "Ricevuti {{counted}}. Previsti {{expected}}.",
+        "receiveBeforeClose": "Ricevi prima i contanti dei turni chiusi dalla selezione del personale.",
+        "pendingReadFailed": "Impossibile verificare le consegne in attesa. Controlla la connessione e premi Aggiorna.",
         "back": "Indietro",
         "title": "Consegna cassa — {{name}}",
         "loading": "Caricamento dei dati del turno…",
@@ -5101,6 +5109,7 @@
       "submitFailed": "Non riuscito: {{error}}",
       "resolveBlockerCash": "Registra Pagamento Contanti",
       "resolveBlockerCard": "Registra Pagamento Carta",
+      "recordPaymentOriginalCurrencyMissing": "La valuta originale di questo ordine non è stata salvata. Cambiare il paese del negozio non risolve il problema. L’assistenza deve verificare la ricevuta originale prima di registrare un pagamento.",
       "recordConfirmTitle": "Registrare questo pagamento?",
       "recordConfirmMessage": "Registra {{amount}} ({{method}}) per l'ordine {{order}} solo se il cliente l'ha già pagato. Non viene addebitato nulla e la registrazione conserva il tuo nome.",
       "recordConfirmAction": "Registra",
@@ -6410,7 +6419,8 @@
       "newReservation": "Prenota",
       "markMaintenance": "Segna manutenzione",
       "markCleaned": "Pulito",
-      "markBackInService": "Di nuovo in servizio"
+      "markBackInService": "Di nuovo in servizio",
+      "history": "Storico"
     },
     "filters": {
       "search": "Cerca tavoli...",
@@ -6462,7 +6472,11 @@
       "switchToGrid": "Passa alla vista griglia"
     },
     "noTables": "Nessun tavolo configurato",
-    "configureInAdmin": "Configura i tavoli nella dashboard di amministrazione"
+    "configureInAdmin": "Configura i tavoli nella dashboard di amministrazione",
+    "historyLoadFailed": "Impossibile caricare lo storico. Riconnettiti e riprova.",
+    "historyLoadMore": "Carica altro",
+    "historyTitle": "Storico tavolo {{table}}",
+    "noHistory": "Nessuno storico ordini per questo tavolo"
   },
   "reservations": {
     "title": "Prenotazioni",
@@ -8548,7 +8562,7 @@
     "togglePlugin": "Attiva/disattiva plugin",
     "lastSync": "Sincronizzato",
     "configure": "Configura",
-    "configuration": "Configurazione",
+    "configuration": "Impostazioni {{name}}",
     "pluginConfiguration": "Configurazione plugin",
     "credentialsHelp": "Inserisci le credenziali fornite dalla piattaforma. Lascia i campi vuoti per mantenere i valori esistenti.",
     "partnerRequired": "Partner richiesto",
@@ -8602,7 +8616,9 @@
       "openAdmin": "Apri il pannello di amministrazione",
       "adminUrlMissing": "L'URL del pannello di amministrazione non è configurato su questo terminale.",
       "adminLinkCopied": "Link del pannello di amministrazione copiato.",
-      "adminOpenFailed": "Impossibile aprire il pannello di amministrazione."
+      "adminOpenFailed": "Impossibile aprire il pannello di amministrazione.",
+      "sandbox": "Ambiente di prova",
+      "production": "Ambiente operativo"
     },
     "callerId": {
       "setupInAdmin": "Configura l'ID chiamante nel pannello di amministrazione",
@@ -8827,7 +8843,9 @@
     "routingEmpty": "Nessun terminale trovato per questa filiale.",
     "wolt": {
       "adminManagedSetup": "Wolt si collega nel pannello di amministrazione con il tuo account Wolt; sul POS non si inserisce nessuna chiave API. Questa schermata ne mostra solo lo stato."
-    }
+    },
+    "invalidCommission": "Inserisci una commissione da 0 a 100.",
+    "missingFields": "Compila i campi obbligatori: {{fields}}"
   },
   "errorBoundary": {
     "whatCanYouDo": "Cosa puoi fare?",
@@ -9408,6 +9426,16 @@
         "title": "Scontrini non stampati: {{count}}",
         "summary": "La stampa più vecchia è in attesa da {{duration}}. Gli ordini restano salvati.",
         "guidance": "Controlla che la stampante sia accesa, abbia carta e sia collegata, poi stampa uno scontrino di prova dalle impostazioni della stampante. Se gli scontrini continuano a non essere stampati, contatta l’assistenza. Non cancellare nessun dato."
+      },
+      "courierCashMissing": {
+        "title": "Contanti assenti dalla registrazione del fattorino",
+        "summary": "L’ordine #{{orderNumber}} ha {{amount}} {{currency}} di incassi in contanti, ma il valore registrato per il fattorino è zero.",
+        "guidance": "Verificare il pagamento e il turno prima del conteggio e inviare la diagnostica all’assistenza. La differenza non dimostra che il contante non sia stato restituito."
+      },
+      "courierCashIncomplete": {
+        "title": "Controllo dei contanti dei fattorini incompleto",
+        "summary": "Non è stato possibile verificare tutte le registrazioni pertinenti.",
+        "guidance": "Aggiornare lo stato e inviare la diagnostica all’assistenza se il problema persiste."
       }
     }
   },

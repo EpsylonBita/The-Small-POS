@@ -67,6 +67,15 @@ afterEach(() => {
 });
 
 describe('OrderCard payment state', () => {
+  it('shows the original full table return instead of asking for payment', () => {
+    const order = makeOrder({ status: 'completed', table_session_id: 'session-returned', total_amount: 9,
+      payment_status: 'pending', payment_receipts: [{ id: 'receipt-returned', order_id: 'ord-pay-1', amount: 9, currency: 'CHF', status: 'refunded' }] });
+    renderCard(order);
+    expect(screen.queryByTestId('order-card-payment-pending')).toBeNull();
+    expect(screen.getByTestId('order-card-payment-refunded').textContent).toBe('Refunded');
+    expect(order.payment_status).toBe('pending');
+  });
+
   it('shows PAY PENDING first, never the cash icon, for a pending cash order', () => {
     renderCard(makeOrder({ payment_status: 'pending' }));
 

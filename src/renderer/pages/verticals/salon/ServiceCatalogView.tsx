@@ -42,7 +42,7 @@ function draftFromService(service: Service): ServiceDraft {
     name: service.name,
     description: service.description || '',
     categoryId: service.categoryId || '',
-    price: service.price > 0 ? service.price.toFixed(2) : '',
+    price: Number.isFinite(service.price) && service.price >= 0 ? service.price.toFixed(2) : '',
     durationMinutes: String(service.durationMinutes || 30),
     isActive: service.isActive,
   };
@@ -157,6 +157,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
   const serviceDuration = Number.parseInt(serviceDraft.durationMinutes, 10);
   const canSubmitService =
     serviceDraft.name.trim().length > 0 &&
+    serviceDraft.price.trim().length > 0 &&
     Number.isFinite(servicePrice) &&
     servicePrice >= 0 &&
     Number.isFinite(serviceDuration) &&
@@ -240,7 +241,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
       toast.error(t('serviceCatalog.validation.nameRequired', { defaultValue: 'Service name is required' }));
       return;
     }
-    if (!Number.isFinite(servicePrice) || servicePrice < 0) {
+    if (!serviceDraft.price.trim() || !Number.isFinite(servicePrice) || servicePrice < 0) {
       toast.error(t('serviceCatalog.validation.priceInvalid', { defaultValue: 'Enter a valid price' }));
       return;
     }

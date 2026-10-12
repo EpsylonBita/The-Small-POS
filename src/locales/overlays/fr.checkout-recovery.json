@@ -1,6 +1,9 @@
 {
   "modals": {
     "menu": {
+      "draftAwaitingReview": "En attente de vérification",
+      "draftReturnToOrders": "Retour aux commandes",
+      "editDraftPending": "Votre modification initiale est conservée pour la récupération. Vérifiez son résultat avant de faire une autre modification.",
       "draftTargetCancelled": "Cette commande a été annulée. Son ancienne modification a été archivée et ne peut pas être enregistrée.",
       "draftReadFailed": "Le panier enregistré ne peut pas être lu. La validation est suspendue et le panier précédent est conservé.",
       "draftSaveFailed": "Le panier ne peut pas être enregistré. La validation attend un enregistrement durable réussi.",
@@ -37,8 +40,10 @@
     "processing": "Récupération de l’opération initiale",
     "approval_required": "L’annulation nécessite une nouvelle autorisation du personnel ou du responsable. Rouvrez l’addition initiale.",
     "auth_required": "Connectez-vous avec une session autorisée pour continuer.",
-    "conflict": "Un autre terminal a modifié cette addition. Vérifiez son état actuel avant de continuer.",
-    "refresh": "Actualiser le statut"
+    "conflict": "La demande initiale doit être vérifiée avant de continuer.",
+    "refresh": "Actualiser le statut",
+    "confirmOriginalResult": "Vérifier l’annulation initiale",
+    "originalResultUnconfirmed": "L’annulation initiale n’a pas pu être confirmée et reste enregistrée. Reconnectez-vous et vérifiez l’addition avant de continuer."
   },
   "paymentIntegrity": {
     "reasonCodes": {

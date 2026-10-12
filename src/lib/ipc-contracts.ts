@@ -237,6 +237,14 @@ export interface SyncFinancialQueueItemsResponse {
 }
 
 export interface SyncFinancialIntegrityIssue {
+  driverId?: string;
+  shiftId?: string;
+  shiftStatus?: string;
+  checkOutTime?: string | null;
+  currency?: string | null;
+  recordedCashCents?: number;
+  receiptCashCents?: number;
+  differenceCents?: number;
   entityType: string;
   entityId: string;
   orderId?: string | null;
@@ -1518,6 +1526,9 @@ export interface RemoteIncidentReportResponse {
   status?: 'open' | 'resolved' | string;
   deduped?: boolean;
   alertSent?: boolean;
+  alertStatus?: 'sent' | 'failed' | 'disabled' | 'throttled' | 'not_required';
+  bundleStored?: boolean;
+  path?: string;
   lastSentAt?: string;
   candidate?: PosIncidentCandidate;
   error?: string;

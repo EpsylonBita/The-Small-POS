@@ -9,6 +9,7 @@ import React, {
   useRef,
 } from "react";
 import { commitMenuOrderEdit, menuEditRefundAction, previewMenuOrderEdit, type MenuOrderEditData, type MenuOrderEditLifecycle, type MenuEditHeaders } from '../services/MenuOrderEdit';
+import { hasPendingServiceRequest } from '../../../../shared/pos/tables/WaiterServiceInbox';
 import {
   adoptGiftCardPaymentIds,
   claimOrdinaryCollectionOwner,
@@ -91,6 +92,7 @@ import {
   deriveRoomFloors,
 } from "./modals/RoomStayWorkflowModals";
 import { TableSelector, TableActionModal, TableCheckManagerModal, ReservationForm, TableFloorPlanView, TableFloorPlanModal } from "./tables";
+import { emitTableSessionBalanceUpdate } from './tables/TableCheckManagerModal';
 import type { CreateReservationDto } from "./tables";
 import {
   AlertTriangle,
@@ -169,6 +171,7 @@ import {
 import { repairStore, useRepairStore } from "../features/repairs/store";
 import { getSecureSessionSync } from "../lib/secure-session-cache";
 import { formatTableDisplayNumber } from "../utils/table-display";
+import { sumTableCheckDue } from "../utils/table-check-total";
 import {
   buildSingleDeliveryRouteStop,
   createTerminalSettingGetter,
@@ -225,6 +228,7 @@ import {
 } from "../utils/platformReadyAction";
 import { useCheckoutRequestId } from "../hooks/useCheckoutRequestId";
 import { getCheckoutDraftStore } from "../services/CheckoutDraftStore";
+import { selectRetainedCheckoutEdit, shouldAutomaticallyRestoreCheckoutDraft } from "../utils/checkoutDraftRestoration";
 import { TableAttemptRecoveryNotice } from "./recovery/TableAttemptRecoveryNotice";
 import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from "../utils/checkoutOutcome";
 import {
@@ -952,10 +956,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       const cleaning = floorScopedTables.filter(
         (table) => resolveTableDisplayStatus(table) === "cleaning",
       ).length;
-      const due = floorScopedTables.reduce(
-        (sum, table) => sum + readTableBalance(table).due,
-        0,
-      );
+      const due = sumTableCheckDue(floorScopedTables, table => readTableBalance(table).due);
       return {
         total,
         occupied,
@@ -3709,12 +3710,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       if (!organizationId || !effectiveBranchId || !resolvedTerminalId) return;
       let mounted = true;
       void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
-        if (mounted && saved && (saved.cartItems.length || saved.phase === "checkout_pending")) {
+        if (mounted && saved && shouldAutomaticallyRestoreCheckoutDraft(saved)) {
           restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
         }
       }).catch(() => { /* Menu admission retains and displays a failed native read. */ });
       return () => { mounted = false; };
     }, [organizationId, effectiveBranchId, resolvedTerminalId, restoreCheckoutContext]);
+    const reviewRetainedEdit = useCallback(async (clientEventId: string): Promise<boolean> => {
+      const owner = await getCheckoutDraftStore();
+      const saved = selectRetainedCheckoutEdit(await owner.load(), clientEventId);
+      if (!saved) return false;
+      restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
+      return true;
+    }, [restoreCheckoutContext]);
     const acceptRecoveredCheckout = async () => {
       resetCheckoutRequestId();
       setRestoredCheckoutContext(null);
@@ -7406,11 +7414,35 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       resetEditOrderState();
     };
 
-    const handleEditMenuPreflight = async (data: MenuOrderEditData) =>
-      (await previewMenuOrderEdit(bridge.orders, data, bridge.sync)).preflight;
+    const tableEditScope = (data: MenuOrderEditData) => currentEditOrderId === data.orderId && selectedTable?.tableSessionId
+      ? { tableId: selectedTable.id, tableSessionId: selectedTable.tableSessionId } : null;
+    const handleEditMenuPreflight = async (data: MenuOrderEditData) => {
+      // A table's new round remains on its open check; it never collects an
+      // ordinary-order edit difference. Native and server enforce append scope.
+      if (tableEditScope(data)) return { kind: 'ordinary' as const, financials: data.financials };
+      return (await previewMenuOrderEdit(bridge.orders, data, bridge.sync)).preflight;
+    };
 
     // Keep the cart editable through the picker; freeze the exact final action before IPC.
     const handleEditMenuComplete = async (data: MenuOrderEditData, lifecycle?: MenuOrderEditLifecycle) => {
+      const tableScope = tableEditScope(data);
+      if (tableScope && data.action !== 'edit_settlement') {
+        const result: any = await bridge.orders.updateItems(data.orderId, data.items, {
+          ...tableScope, clientEventId: data.client_event_id, expectedVersion: data.expected_version,
+          expectedLocalVersion: data.renderer_local_version, orderUpdates: data.orderUpdates,
+          financials: data.financials, orderNotes: data.notes,
+        });
+        if (result?.success === false) throw new Error('CHECKOUT_DRAFT_EDIT_NOT_APPLIED');
+        if (hasPendingServiceRequest(result)) toast.success(String(t('waiterService.sent')));
+        else if (result?.session?.id === tableScope.tableSessionId
+          && result.session.organization_id === organizationId
+          && result.session.branch_id === effectiveBranchId) {
+          emitTableSessionBalanceUpdate(tableScope.tableId, result.session);
+        }
+        void silentRefresh().catch(() => undefined);
+        void refetchTables();
+        return;
+      }
       if (data.action === 'edit_settlement') {
         if (!data.settlementAction) throw new Error('RECOVERY_ORIGINAL_REQUEST_REQUIRED');
         await commitMenuOrderEdit(bridge.orders, data, data.settlementAction);
@@ -7551,7 +7583,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
 
     return (
       <div className={`relative flex h-full min-h-0 flex-col gap-4 overflow-hidden ${className}`}>
-        <TableAttemptRecoveryNotice />
+        <TableAttemptRecoveryNotice onReviewEdit={reviewRetainedEdit} />
         {/* Order Conflict Banner */}
         {/* Conflict banner intentionally disabled: remote always wins */}
 
@@ -7718,6 +7750,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                         t("tablesDashboard.unassigned", "Unassigned");
                       const guestCount =
                         table.guestCount || table.capacity || 0;
+                      const checkOrder = table.currentOrderId ? orders.find(order =>
+                        order.id === table.currentOrderId ||
+                        order.supabase_id === table.currentOrderId ||
+                        order.supabaseId === table.currentOrderId) : undefined;
+                      const checkOrderNumber = checkOrder
+                        ? formatCompactOrderNumberForDisplay(getVisibleOrderNumber(checkOrder), checkOrder.created_at || checkOrder.createdAt)
+                        : '';
 
                       return (
                         <TableWorkspaceCard
@@ -7736,7 +7775,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                           balance={balance}
                           paidPercent={paidPercent}
                           occupiedSince={occupiedSinceLabel}
-                          orderId={table.currentOrderId}
+                          orderNumber={checkOrderNumber}
                           formatCurrency={formatCurrency}
                           onPrimary={() => handleTableSelect(table)}
                         />

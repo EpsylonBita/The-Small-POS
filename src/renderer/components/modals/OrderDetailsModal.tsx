@@ -36,6 +36,7 @@ import {
   readBoxDisplayItems,
 } from '../order/box-order-decision';
 import { isExternalDeliveryPlatform } from '../../../../../shared/platforms/order-platforms';
+import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -688,6 +689,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         return t('modals.orderDetails.completed', { defaultValue: 'Completed' });
       case 'partially_paid':
         return t('payment.split.partiallyPaid', { defaultValue: 'Partially Paid' });
+      case 'refunded':
+        return t('payment.status.refunded', { defaultValue: 'Refunded' });
       case 'cancelled':
       case 'canceled':
         return t('modals.orderDetails.cancelled', { defaultValue: 'Cancelled' });
@@ -888,7 +891,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     isBox && normalizedOrderStatus === 'pending' && isBoxDecisionClosed(displayOrder);
   const isBoxManualCheck = isBoxDecisionClosedPending && isBoxManualCheckRequired(displayOrder);
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
-  const paymentStatus = String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
+  const fullyReturnedTable = isFullyRefundedCompletedTable(displayOrder, orderPayments);
+  const paymentStatus = fullyReturnedTable ? 'refunded' : String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
   const cancelledAt =
     displayOrder.cancelled_at || displayOrder.cancelledAt || displayOrder.updated_at || displayOrder.updatedAt || '';
   const completedPayments = useMemo(
@@ -985,7 +989,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const paymentMethodPresentation = (() => {
     const normalizedMethod = String(paymentMethod || '').toLowerCase();
     const completedPaymentMethods = new Set(
-      completedPayments
+      (fullyReturnedTable
+        ? orderPayments.filter((payment: any) => String(payment?.status || '').toLowerCase() === 'refunded')
+        : completedPayments)
         .map((payment: any) => String(payment?.method || payment?.payment_method || '').toLowerCase().trim())
         .filter(Boolean),
     );
@@ -1247,7 +1253,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     return deduped.join(' | ');
   };
 
-  const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
+  const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed' || fullyReturnedTable;
   // Gift card rows go back only to their original card. A partial return moves the
   // header to partially_paid, so the entry stays while a completed gift row remains;
   // ordinary refunds keep the paid/completed rule.
@@ -2317,8 +2323,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
             return refreshAfterGiftReturn(detail.giftReturn.orderId);
           }
           // Reload order data to reflect updated payment status
-          if (orderId && !order) {
-            loadOrderData();
+          if (orderId) {
+            void loadOrderData(orderId);
           }
           void loadPaymentState();
           return undefined;

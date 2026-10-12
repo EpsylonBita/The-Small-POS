@@ -15,6 +15,18 @@ import {
 } from '../orderNumberUtils';
 
 describe('satellite display codes', () => {
+  it('keeps legacy kitchen tickets distinguishable without exposing raw identifiers', () => {
+    const a = 'ORD-20260827-dbec94b835c8f04f93f56601b7c98728';
+    const b = 'ORD-20260827-dbec94b835c8f04f93f56602b7c98728';
+    const label = formatCompactOrderNumberForDisplay(a);
+    expect(label).toMatch(/^ORD #[0-9A-Z]{11}$/);
+    expect(label).not.toBe(formatCompactOrderNumberForDisplay(b));
+    expect(label).not.toContain('DBEC94');
+    expect(label).not.toContain('C98728');
+    expect(formatCompactOrderNumberForDisplay(a, 'invalid')).toBe(label);
+    expect(formatCompactOrderNumberForDisplay(a, '2026-08-27T17:24:01.000Z')).toBe(label);
+    expect(formatCompactOrderNumberForDisplay(b, '2026-08-27T17:24:01.000Z')).not.toBe(label);
+  });
   it('passes M1-0042 through the compact formatter untouched', () => {
     expect(formatCompactOrderNumberForDisplay('M1-0042')).toBe('M1-0042');
     expect(formatCompactOrderNumberForDisplay('#M1-0042')).toBe('#M1-0042');

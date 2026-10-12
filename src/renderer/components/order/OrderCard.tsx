@@ -3,6 +3,7 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShieldCheck, Split } from 'lucide-react';
 import { resolvePlatformPaymentPresentation } from '../../../../../shared/platforms/payment-presentation';
+import { isFullyRefundedCompletedTable } from '../../../../../shared/pos/orders/returned-table-check';
 import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
 import TableOrderIcon from '../icons/TableOrderIcon';
@@ -363,6 +364,8 @@ export const OrderCard = memo<OrderCardProps>(({
   const orderStatusForPayment = String(order.status ?? '').trim().toLowerCase();
   const paymentSettled =
     paymentStatusNormalized === 'paid' || paymentStatusNormalized === 'completed';
+  const completedTableReturn = isFullyRefundedCompletedTable(order,
+    Array.isArray(order.payment_receipts) ? order.payment_receipts : []);
   const platformPaymentPresentation = paymentSettled
     ? resolvePlatformPaymentPresentation(order)
     : null;
@@ -372,6 +375,7 @@ export const OrderCard = memo<OrderCardProps>(({
   });
   const showPaymentPending =
     !paymentSettled &&
+    !completedTableReturn &&
     paymentStatusNormalized !== 'refunded' &&
     !['cancelled', 'canceled', 'refunded'].includes(orderStatusForPayment) &&
     totalNormalized > 0;
@@ -666,7 +670,11 @@ export const OrderCard = memo<OrderCardProps>(({
               {platformPaymentLabel}
             </span>
           )}
-          {showPaymentPending ? (
+          {completedTableReturn ? (
+            <span data-testid="order-card-payment-refunded" role="status" className="text-xs text-gray-500">
+              {t('payment.status.refunded', { defaultValue: 'Refunded' })}
+            </span>
+          ) : showPaymentPending ? (
             <span
               data-testid="order-card-payment-pending"
               role="status"

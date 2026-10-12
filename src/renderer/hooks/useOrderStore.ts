@@ -1105,8 +1105,41 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
       console.log('📡 Setting up real-time order update listeners...');
 
+      let disposed = false;
+      let lanRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+      let lanRefreshInFlight = false;
+      let lanRefreshPending = false;
+      const scheduleLanRefresh = () => {
+        if (disposed) return;
+        lanRefreshPending = true;
+        if (lanRefreshTimer || lanRefreshInFlight) return;
+        lanRefreshTimer = setTimeout(() => {
+          lanRefreshTimer = null;
+          if (disposed) return;
+          lanRefreshPending = false;
+          lanRefreshInFlight = true;
+          void get().silentRefresh().catch(() => {}).finally(() => {
+            lanRefreshInFlight = false;
+            if (lanRefreshPending) scheduleLanRefresh();
+          });
+        }, 150);
+      };
+      eventListeners.push(() => {
+        disposed = true;
+        lanRefreshPending = false;
+        if (lanRefreshTimer) clearTimeout(lanRefreshTimer);
+      });
+
       // Listen for real-time order updates from main process
-      const handleOrderRealtimeUpdate = (orderData: Partial<Order>) => {
+      const handleOrderRealtimeUpdate = (orderData: Partial<Order> & { source?: string; request_id?: string }) => {
+        if (!orderData?.id) {
+          // LAN publishes a hint only after its canonical transaction commits.
+          // Read the scoped local ledger; the hint is never an order row.
+          if (orderData?.source === 'lan' && typeof orderData.request_id === 'string' && orderData.request_id.trim()) {
+            scheduleLanRefresh();
+          }
+          return;
+        }
         debugLog('📡 Received real-time order update (remote wins):', orderData);
 
         // Always accept remote: merge/overwrite local snapshot with remote payload

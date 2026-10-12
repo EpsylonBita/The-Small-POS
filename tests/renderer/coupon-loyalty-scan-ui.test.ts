@@ -105,9 +105,7 @@ test('LoyaltyPage exposes scanner action and supports card, phone, and member-co
   assert.match(page, /text-yellow-400 border-yellow-500\/40/);
   assert.match(page, /text-zinc-300 border-zinc-400\/40/);
   assert.match(page, /text-amber-500 border-amber-500\/40/);
-  assert.match(page, /p-2 rounded-2xl \$\{isDark \? 'bg-zinc-800' : 'bg-gray-100'\}/);
   assert.match(page, /selectedCustomer\?\.id === customer\.id \? 'ring-2 ring-yellow-400' : ''/);
-  assert.match(page, /text-lg font-bold text-yellow-400/);
   assert.doesNotMatch(page, /bg-transparent text-white border border-cyan-500\/40/);
   assert.doesNotMatch(page, /bg-cyan-500\/15 text-cyan-100/);
   assert.doesNotMatch(page, /bg-cyan-50 text-cyan-800/);

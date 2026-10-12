@@ -794,7 +794,7 @@ const InventoryPage: React.FC = () => {
 
       {/* Adjust Stock Modal */}
       {showAdjustModal && selectedItem && renderModalPortal(
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1200]" onClick={closeAdjustModal}>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-[1200]" onClick={closeAdjustModal}>
           <motion.div
             ref={adjustDialogRef}
             role="dialog"
@@ -802,7 +802,7 @@ const InventoryPage: React.FC = () => {
             aria-labelledby={adjustTitleId}
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            className={`p-6 rounded-2xl border backdrop-blur-2xl ring-1 ${isDark ? 'bg-black/60 border-white/10 ring-white/15 text-white shadow-2xl shadow-black/50' : 'bg-white/60 border-white/70 ring-white/60 text-gray-950 shadow-2xl shadow-black/30'} w-full max-w-md`}
+            className={`p-6 rounded-2xl border shadow-xl max-h-[calc(100dvh-2rem)] overflow-y-auto ${isDark ? 'bg-zinc-950 border-white/10 text-white' : 'bg-white border-gray-200 text-gray-950'} w-full max-w-md`}
             onClick={(e: React.MouseEvent) => e.stopPropagation()}
           >
             <h3 id={adjustTitleId} className="text-xl font-bold mb-4">{t('inventory.adjustStock', 'Adjust Stock')}</h3>
@@ -840,7 +840,7 @@ const InventoryPage: React.FC = () => {
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(Number(e.target.value))}
                 disabled={adjustAction.disabled}
-                className={`flex-1 text-center text-2xl font-bold py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-100 border-gray-300'}`}
+                className={`min-w-0 flex-1 text-center text-2xl font-bold py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-100 border-gray-300'}`}
               />
               <button disabled={adjustAction.disabled} aria-label={t('common.actions.increase', { defaultValue: 'Increase' })} onClick={() => setAdjustmentQty(q => q + 1)} className={`inline-flex items-center justify-center p-3 rounded-xl border disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 active:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 active:bg-gray-300'}`}>
                 <Plus className="w-5 h-5" />

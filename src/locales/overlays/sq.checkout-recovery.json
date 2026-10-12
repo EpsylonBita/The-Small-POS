@@ -1,6 +1,9 @@
 {
   "modals": {
     "menu": {
+      "draftAwaitingReview": "Në pritje të verifikimit",
+      "draftReturnToOrders": "Kthehu te porositë",
+      "editDraftPending": "Ndryshimi fillestar është ruajtur për rikuperim. Kontrollo rezultatin para se të bësh një ndryshim tjetër.",
       "draftTargetCancelled": "Kjo porosi është anuluar. Ndryshimi i mëparshëm u arkivua dhe nuk mund të ruhet.",
       "draftReadFailed": "Shporta e ruajtur nuk mund të lexohet. Përfundimi është ndalur dhe shporta e mëparshme është ruajtur.",
       "draftSaveFailed": "Shporta nuk mund të ruhet. Përfundimi pret derisa ruajtja e qëndrueshme të ketë sukses.",
@@ -37,8 +40,10 @@
     "processing": "Duke rikthyer veprimin fillestar",
     "approval_required": "Anulimi kërkon miratim të ri nga stafi ose përgjegjësi. Rihapni faturën fillestare.",
     "auth_required": "Hyni me një seancë të autorizuar të stafit për të vazhduar.",
-    "conflict": "Një terminal tjetër e ndryshoi këtë faturë. Kontrolloni gjendjen aktuale përpara se të vazhdoni.",
-    "refresh": "Rifresko gjendjen"
+    "conflict": "Kërkesa origjinale duhet të verifikohet përpara se të vazhdoni.",
+    "refresh": "Rifresko gjendjen",
+    "confirmOriginalResult": "Verifiko anulimin fillestar",
+    "originalResultUnconfirmed": "Anulimi fillestar nuk u konfirmua dhe mbetet i ruajtur. Rilidhuni dhe kontrolloni faturën përpara se të vazhdoni."
   },
   "paymentIntegrity": {
     "reasonCodes": {

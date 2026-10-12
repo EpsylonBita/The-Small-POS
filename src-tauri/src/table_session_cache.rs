@@ -322,7 +322,7 @@ fn number(value: &Value, key: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("Invalid table snapshot {key}"))
 }
 
-fn validate(scope: &Scope, session: &Value) -> Result<i64, String> {
+pub(crate) fn validate(scope: &Scope, session: &Value) -> Result<i64, String> {
     uuid::Uuid::parse_str(text(session, "id")?)
         .map_err(|_| "Invalid table snapshot session identity")?;
     if text(session, "organization_id")? != scope.organization

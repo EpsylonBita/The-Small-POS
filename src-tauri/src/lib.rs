@@ -41,6 +41,7 @@ mod capture;
 mod checkout_drafts;
 mod commands;
 mod core_helpers;
+mod courier_integrity;
 mod customer_display;
 mod data_helpers;
 mod db;
@@ -93,6 +94,7 @@ mod storage;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod table_attempt_recovery;
+mod table_close_recovery;
 mod table_manual_cancellation;
 mod table_session_cache;
 mod terminal_helpers;
@@ -754,6 +756,25 @@ pub(crate) fn write_system_clipboard_text(text: &str) -> Result<(), String> {
 // App entry point
 // ============================================================================
 
+/// Transport restoration follows identity recovery and checked maintenance.
+/// The callback schedules the existing LAN owner exactly once; it cannot run
+/// while startup is still waiting on authoritative access reads.
+pub(crate) async fn reconcile_native_startup(
+    db: &db::DbState,
+    restore_transport: impl FnOnce(),
+) -> Result<repairs::RepairStagingJanitorReport, String> {
+    commands::settings::reconcile_startup_terminal_binding_with_access(db).await?;
+    let report = {
+        let connection = db
+            .conn
+            .lock()
+            .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE")?;
+        repairs::run_startup_staging_janitor(&connection)?
+    };
+    restore_transport();
+    Ok(report)
+}
+
 pub fn run() {
     let startup_mode = match startup_recovery::parse_process_startup_mode() {
         Ok(mode) => mode,
@@ -994,12 +1015,6 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             // Cancellation token for graceful shutdown of background tasks
             let cancel_token = tokio_util::sync::CancellationToken::new();
             app.manage(cancel_token.clone());
-            let lan_startup_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = lan_transport::restore_startup(lan_startup_app).await {
-                    warn!(error = %error, "Saved LAN receiver could not start; cloud sync remains available");
-                }
-            });
             {
                 let caller_id_app = app.handle().clone();
                 let caller_id_manager = Arc::clone(&caller_id_manager);
@@ -1021,54 +1036,40 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 }
             };
             let db_for_startup = db_for_sync.clone();
-
             {
                 let db_state = app.state::<db::DbState>();
-                if let Err(error) =
-                    commands::settings::reconcile_startup_terminal_binding(&db_state)
-                {
-                    error!("Terminal identity reconciliation failed; repair access remains blocked: {error}");
-                    repairs::latch_startup_maintenance_failure();
-                }
-            }
-
-            if let Some(db_for_startup) = db_for_startup.as_ref() {
-                match db_for_startup.conn.lock() {
-                    Ok(connection) => match repairs::run_startup_staging_janitor(&connection) {
-                        Ok(report) => {
-                            if report.cleanup_failures > 0 {
-                                warn!(
-                                    cleaned_terminal_rows = report.cleaned_terminal_rows,
-                                    deferred_live_queue_rows = report.deferred_live_queue_rows,
-                                    cleanup_failures = report.cleanup_failures,
-                                    orphan_part_files_removed = report.orphan_part_files_removed,
-                                    orphan_bin_files_removed = report.orphan_bin_files_removed,
-                                    "Repair staging startup janitor completed with deferred cleanup"
-                                );
-                            } else if report.cleaned_terminal_rows > 0
-                                || report.deferred_live_queue_rows > 0
-                                || report.orphan_part_files_removed > 0
-                                || report.orphan_bin_files_removed > 0
-                            {
-                                info!(
-                                    cleaned_terminal_rows = report.cleaned_terminal_rows,
-                                    deferred_live_queue_rows = report.deferred_live_queue_rows,
-                                    orphan_part_files_removed = report.orphan_part_files_removed,
-                                    orphan_bin_files_removed = report.orphan_bin_files_removed,
-                                    "Repair staging startup janitor completed"
-                                );
-                            }
+                let lan_startup_app = app.handle().clone();
+                match tauri::async_runtime::block_on(reconcile_native_startup(&db_state, || {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = lan_transport::restore_startup(lan_startup_app).await {
+                            warn!(error = %error, "Saved LAN receiver could not start; cloud sync remains available");
                         }
-                        Err(code) => {
+                    });
+                })) {
+                    Ok(report) => {
+                        if report.cleanup_failures > 0 {
                             warn!(
-                                error_code = %code,
-                                "Repair staging startup janitor failed closed"
+                                cleaned_terminal_rows = report.cleaned_terminal_rows,
+                                deferred_live_queue_rows = report.deferred_live_queue_rows,
+                                cleanup_failures = report.cleanup_failures,
+                                orphan_part_files_removed = report.orphan_part_files_removed,
+                                orphan_bin_files_removed = report.orphan_bin_files_removed,
+                                "Repair staging startup janitor completed with deferred cleanup"
+                            );
+                        } else if report != repairs::RepairStagingJanitorReport::default() {
+                            info!(
+                                cleaned_terminal_rows = report.cleaned_terminal_rows,
+                                deferred_live_queue_rows = report.deferred_live_queue_rows,
+                                cleanup_failures = report.cleanup_failures,
+                                orphan_part_files_removed = report.orphan_part_files_removed,
+                                orphan_bin_files_removed = report.orphan_bin_files_removed,
+                                "Repair staging startup janitor completed"
                             );
                         }
-                    },
-                    Err(_) => {
+                    }
+                    Err(error) => {
+                        error!("Terminal identity or staging reconciliation failed; startup remains blocked: {error}");
                         repairs::latch_startup_maintenance_failure();
-                        warn!("Repair staging startup janitor could not lock SQLite");
                     }
                 }
             }
@@ -1330,6 +1331,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 checkout_drafts::checkout_draft_inspect,
                 checkout_drafts::checkout_draft_resume_declined,
                 table_attempt_recovery::table_attempt_recovery_status,
+                table_attempt_recovery::table_attempt_recovery_confirm_original,
             // App lifecycle
             memory_trim::memory_trim_webview,
             commands::runtime::app_shutdown,

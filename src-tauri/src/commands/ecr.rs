@@ -119,6 +119,12 @@ pub(crate) fn direct_sale_admission(
     original: Option<&crate::payments::PaymentRecordInput>,
 ) -> Result<(), String> {
     if original.is_none() {
+        if crate::payments::ecommerce_holds_payment(conn, order_id)? {
+            return Err(
+                "ECOMMERCE_EXTERNAL_PAYMENT_REQUIRED: payment is handled in the online store"
+                    .into(),
+            );
+        }
         let room_charge_pending: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM orders WHERE id = ?1

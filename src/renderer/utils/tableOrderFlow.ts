@@ -13,6 +13,8 @@ interface TableLike {
   tableSessionId?: string | null;
   occupiedSince?: string | null;
   occupied_since?: string | null;
+  updatedAt?: string | null;
+  updated_at?: string | null;
   unpaidBalance?: number | string | null;
   balance?: {
     order_total?: number | string | null;
@@ -482,6 +484,25 @@ export function shouldApplyOptimisticTableOverride(
     if (tablePaymentLooksSettled(table)) {
       return false;
     }
+  }
+
+  // A check-read hint bridges a stale floor projection; it must never pin that
+  // old amount over subsequent canonical edits or a new check on the same table.
+  if ((override as { __forceBalanceOverride?: boolean }).__forceBalanceOverride === true) {
+    const hintedAt = Date.parse(String(override.updatedAt || override.updated_at || ''));
+    if (!Number.isFinite(hintedAt) || nowMs - hintedAt > 30_000) return false;
+    const currentSession = normalizeComparableId(table.tableSessionId ?? table.table_session_id);
+    const hintedSession = normalizeComparableId(override.tableSessionId ?? override.table_session_id);
+    const currentOrder = normalizeComparableId(table.currentOrderId ?? table.current_order_id);
+    const hintedOrder = normalizeComparableId(override.currentOrderId ?? override.current_order_id);
+    if (currentSession && hintedSession && currentSession !== hintedSession) return false;
+    if (currentOrder && hintedOrder && currentOrder !== hintedOrder) return false;
+    const canonicalAt = Date.parse(String(table.updatedAt || table.updated_at || ''));
+    if (Number.isFinite(canonicalAt) && canonicalAt >= hintedAt) return false;
+    if (table.balance && override.balance
+      && ['order_total', 'paid_total', 'outstanding_balance'].every(key =>
+        Number(table.balance?.[key as keyof NonNullable<TableLike['balance']>])
+          === Number(override.balance?.[key as keyof NonNullable<TableLike['balance']>]))) return false;
   }
 
   // A release override (table cleared after a final payment, or a stale reserved

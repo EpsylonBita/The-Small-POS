@@ -465,7 +465,7 @@ interface PluginFormState {
   store_url: string;
   chain_id: string;
   webhook_secret: string;
-  commission_pct: number;
+  commission_pct: string;
   auto_accept_orders: boolean;
   auto_accept_prep_minutes: number;
   sync_menu: boolean;
@@ -484,7 +484,7 @@ const createEmptyPluginForm = (): PluginFormState => ({
   store_url: '',
   chain_id: '',
   webhook_secret: '',
-  commission_pct: 20,
+  commission_pct: '20',
   auto_accept_orders: false,
   auto_accept_prep_minutes: 20,
   sync_menu: true,
@@ -544,6 +544,25 @@ const ADMIN_DASHBOARD_SETUP_PLUGIN_IDS = new Set([
   'wolt',
   'twint',
   'worldline_terminals',
+  'glovo',
+  'thefork',
+  'quandoo',
+  'opentable',
+  'dish',
+  'beds24',
+  'channex',
+  'simplybook',
+  'booksy',
+  'reservio',
+  'booking',
+  'airbnb',
+  'expedia',
+  'tripadvisor',
+  'stripe',
+  'viva',
+  'google_analytics',
+  'woocommerce',
+  'shopify',
 ]);
 
 const usesAdminDashboardSetup = (pluginId: string, readOnlyAdminSetup?: boolean): boolean =>
@@ -1443,6 +1462,9 @@ const IntegrationCard = memo<IntegrationCardProps>(({
               "becomes active with the first order received". Its card says
               so whatever its status, in Android's words
               (`integrations.wolt.adminManagedSetup`). */}
+          {integration.id === 'stripe' && (
+            <p className={`mt-2 text-xs ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>{t('integrations.stripeConnectionOnly')}</p>
+          )}
           {integration.id === 'wolt' && (
             <p className={`mt-2 text-xs font-medium ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
               {t(
@@ -1453,10 +1475,9 @@ const IntegrationCard = memo<IntegrationCardProps>(({
           )}
           {isAdminDashboardSetup && !paymentSetup && integration.id !== 'efood' && integration.id !== 'caller_id' && integration.id !== 'wolt' && integration.status === 'pending' && (
             <p className={`mt-2 text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
-              {t(
-                'integrations.adminSetup.pendingFirstOrder',
-                'Set up in the Admin Dashboard. The connection becomes active with the first order received.'
-              )}
+              {integration.id === 'box'
+                ? t('integrations.adminSetup.pendingFirstOrder', 'Set up in the Admin Dashboard. The connection becomes active with the first order received.')
+                : t('integrations.adminConnectionPreparation', 'Complete provider setup in the Admin Dashboard. This screen shows the connection status for this branch.')}
             </p>
           )}
           {isAdminDashboardSetup && integration.id !== 'efood' && integration.lastError && (
@@ -1468,8 +1489,8 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             <div className={`mt-3 grid grid-cols-2 gap-1 rounded-xl p-2 text-[11px] ${
               isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-50 text-gray-600'
             }`}>
-              <span>Sandbox</span><strong>{integration.sandboxStatus || 'not_configured'}</strong>
-              <span>Production</span><strong>{integration.productionStatus || 'not_configured'}</strong>
+              <span>{t('integrations.efood.sandbox')}</span><strong>{!integration.sandboxStatus || integration.sandboxStatus === 'not_configured' ? t('integrations.mydata.notConfigured', 'Not configured') : integration.sandboxStatus.replace(/_/g, ' ')}</strong>
+              <span>{t('integrations.efood.production')}</span><strong>{!integration.productionStatus || integration.productionStatus === 'not_configured' ? t('integrations.mydata.notConfigured', 'Not configured') : integration.productionStatus.replace(/_/g, ' ')}</strong>
               <span>{t('integrations.efood.targetTerminal', 'Target terminal')}</span>
               <strong>
                 {(integration.diagnostics as { target_terminal_configured?: boolean } | undefined)?.target_terminal_configured
@@ -1739,7 +1760,7 @@ export const IntegrationsPage: React.FC = () => {
     store_url: '',
     chain_id: '',
     webhook_secret: '',
-    commission_pct: 20,
+    commission_pct: '20',
     auto_accept_orders: false,
     auto_accept_prep_minutes: 20,
     sync_menu: true,
@@ -2232,7 +2253,7 @@ export const IntegrationsPage: React.FC = () => {
         store_url: '',
         chain_id: '',
         webhook_secret: '',
-        commission_pct: 20,
+        commission_pct: '20',
         auto_accept_orders: integration.settings?.auto_accept_orders ?? false,
         auto_accept_prep_minutes: integration.settings?.auto_accept_prep_minutes ?? 20,
         sync_menu: true,
@@ -2274,7 +2295,7 @@ export const IntegrationsPage: React.FC = () => {
       store_url: '',
       chain_id: '',
       webhook_secret: '',
-      commission_pct: 20,
+      commission_pct: '20',
       auto_accept_orders: integration.settings?.auto_accept_orders ?? false,
       auto_accept_prep_minutes: integration.settings?.auto_accept_prep_minutes ?? 20,
       sync_menu: true,
@@ -2562,10 +2583,15 @@ export const IntegrationsPage: React.FC = () => {
     });
 
     if (missing.length > 0) {
-      toast.error(`Missing required fields: ${missing.join(', ')}`);
+      toast.error(t('integrations.missingFields', { fields: missing.map(field => t(`integrations.fields.${({ api_key: 'apiKey', api_secret: 'apiSecret', merchant_id: 'merchantId', store_id: 'storeId', store_url: 'storeUrl', chain_id: 'chainId', webhook_secret: 'webhookSecret' } as const)[field]}`)).join(', ') }));
       return;
     }
 
+    const commission = /^(?:\d+(?:[.,]\d*)?|[.,]\d+)$/.test(pluginForm.commission_pct.trim()) ? Number(pluginForm.commission_pct.trim().replace(',', '.')) : null
+    if (config.supportsCommission && (commission === null || !Number.isFinite(commission) || commission < 0 || commission > 100)) {
+      toast.error(t('integrations.invalidCommission'))
+      return
+    }
     setPluginSaving(true);
     try {
       const credentials: Record<string, unknown> = {};
@@ -2578,7 +2604,7 @@ export const IntegrationsPage: React.FC = () => {
       if (pluginForm.webhook_secret.trim()) credentials.webhook_secret = pluginForm.webhook_secret.trim();
 
       if (config.supportsCommission) {
-        credentials.commission_pct = pluginForm.commission_pct;
+        credentials.commission_pct = commission;
       }
       if (config.supportsMenuSync) {
         credentials.sync_menu = pluginForm.sync_menu;
@@ -3175,7 +3201,7 @@ export const IntegrationsPage: React.FC = () => {
               setActivePlugin(null);
             }
           }}
-          title={activePlugin ? `${activePlugin.name} ${t('integrations.configuration', 'Configuration')}` : t('integrations.pluginConfiguration', 'Plugin configuration')}
+          title={activePlugin ? t('integrations.configuration', { name: activePlugin.name }) : t('integrations.pluginConfiguration', 'Plugin configuration')}
           size="lg"
           className="plugin-setup-modal !max-w-2xl"
           closeOnBackdrop={!pluginSaving}
@@ -3273,9 +3299,10 @@ export const IntegrationsPage: React.FC = () => {
                       {config.supportsCommission && (
                         <POSGlassInput
                           label={t('integrations.fields.commission', 'Commission (%)')}
-                          value={String(pluginForm.commission_pct)}
-                          onChange={(event) => setPluginForm(prev => ({ ...prev, commission_pct: Number(event.target.value || 0) }))}
-                          type="number"
+                          value={pluginForm.commission_pct}
+                          onChange={(event) => setPluginForm(prev => ({ ...prev, commission_pct: event.target.value }))}
+                          type="text"
+                          inputMode="decimal"
                           placeholder="20"
                           disabled={saveAction.disabled}
                         />

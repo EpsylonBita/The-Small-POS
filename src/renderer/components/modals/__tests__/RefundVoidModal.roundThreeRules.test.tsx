@@ -20,7 +20,9 @@ const mocks = vi.hoisted(() => ({
   // Stable across renders, as the real hooks are: the modal's loaders depend
   // on them.
   t: (key: string, options?: Record<string, unknown>) =>
-    typeof options?.defaultValue === 'string' ? (options.defaultValue as string) : key,
+    key === 'modals.refund.refunded' ? 'Refunded {{amount}}' :
+      key === 'modals.refund.maxRefund' ? `Maximum refundable: ${options?.amount ?? '{{amount}}'}` :
+      typeof options?.defaultValue === 'string' ? (options.defaultValue as string) : key,
   shift: {
     staff: { staffId: 'staff-1', databaseStaffId: '11111111-1111-4111-8111-111111111111' },
     activeShift: { id: '22222222-2222-4222-8222-222222222222', staff_id: 'staff-1' },
@@ -114,6 +116,39 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('the refund screen follows the shared rules (round 3 review)', () => {
+  it('shows the original native receipt timestamp without changing the payment', async () => {
+    const createdAt = '2026-10-09T13:35:10Z';
+    const original = payment('native-cash', 'cash', { created_at: undefined, createdAt });
+    await openModal([original], {});
+    const row = await screen.findByTestId('refund-payment-native-cash');
+    expect(row.textContent).toContain(new Date(createdAt).toLocaleString());
+    expect(row.textContent).not.toContain('Invalid Date');
+    expect(original.created_at).toBeUndefined();
+    expect(original.amount).toBe(12);
+  });
+
+  it('shows an unknown receipt date without inventing a timestamp', async () => {
+    await openModal([payment('undated-cash', 'cash', { created_at: '' })], {});
+    const row = await screen.findByTestId('refund-payment-undated-cash');
+    expect(row.textContent).toContain('—');
+    expect(row.textContent).not.toContain('Invalid Date');
+  });
+
+  it('shows the partial return amount once with a plain refunded label', async () => {
+    await openModal([payment('partially-returned', 'cash')], { totalRefunds: 4, remaining: 8 });
+    const row = await screen.findByTestId('refund-payment-partially-returned');
+    expect(row.textContent).not.toContain('{{amount}}');
+    expect(row.textContent).toContain('Refunded');
+  });
+
+  it('interpolates the maximum refundable amount exactly once in the refund form', async () => {
+    await openModal([payment('partial-cash', 'cash')], { totalRefunds: 4, remaining: 8 });
+    await openRefundForm();
+    const hint = screen.getByText(/^Maximum refundable:/).textContent || '';
+    expect(hint).not.toContain('{{amount}}');
+    expect(hint.match(/8[,.]00/g)).toHaveLength(1);
+  });
+
   it('never offers to void or refund the platform settlement row (R1)', async () => {
     await openModal([payment('settle-1', 'other', { platformSettlement: true })], {
       defaultRefundMethod: 'other',

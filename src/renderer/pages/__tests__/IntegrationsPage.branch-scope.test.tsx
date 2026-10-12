@@ -37,7 +37,10 @@ vi.mock('framer-motion', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (_key: string, fallback: string) => fallback,
+    t: (key: string, fallback?: string | Record<string, unknown>) => {
+      if (key === 'integrations.configuration') return `${typeof fallback === 'object' ? fallback.name : ''} settings`
+      return typeof fallback === 'string' ? fallback : key
+    },
   }),
 }))
 
@@ -241,6 +244,33 @@ describe('IntegrationsPage branch-scoped plugin licences', () => {
     cleanup()
   })
 
+  it.each([['12,5', 12.5], [',5', 0.5], ['0', 0], ['', null], ['101', null], ['12x', null]])('preserves commission draft %s and sends only validated percentages', async (draft, expected) => {
+    // Glovo is now admin-managed. Smood still exercises the legacy commission form.
+    serveCurrentBranch(branch => crmFor(branch, { plugin_id: 'smood', provider: 'smood', name: 'Smood', category: 'food_delivery' }))
+    mocks.posApiPost.mockResolvedValue({ success: false, error: 'Try again' })
+    render(<IntegrationsPage />)
+    await screen.findByText('Smood')
+    fireEvent.click(screen.getByRole('switch'))
+    await screen.findByRole('dialog', { name: 'Smood settings' })
+    fireEvent.change(screen.getByLabelText(/API Key/), { target: { value: 'test-key' } })
+    fireEvent.change(screen.getByLabelText(/API\/Webhook Secret/), { target: { value: 'test-secret' } })
+    fireEvent.change(screen.getByLabelText(/Store ID/), { target: { value: 'test-store' } })
+    const input = screen.getByLabelText('Commission (%)')
+    fireEvent.change(input, { target: { value: draft } })
+    expect(input).toHaveValue(draft)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    if (expected === null) {
+      expect(mocks.posApiPost).not.toHaveBeenCalled()
+      expect(mocks.toastError).toHaveBeenCalledWith('integrations.invalidCommission')
+    } else {
+      await waitFor(() => expect(mocks.posApiPost).toHaveBeenCalledTimes(1))
+      expect(mocks.posApiPost.mock.calls[0][1].credentials.commission_pct).toBe(expected)
+      await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('Try again'))
+      expect(screen.getByRole('dialog', { name: 'Smood settings' })).toBeInTheDocument()
+      expect(input).toHaveValue(draft)
+    }
+  })
+
   it('shows nothing purchased when the response names another branch', async () => {
     serveList({
       branch_id: 'branch-2',
@@ -322,7 +352,7 @@ describe('IntegrationsPage branch-scoped plugin licences', () => {
 
     await screen.findByText('CRM branch-1')
     fireEvent.click(screen.getByRole('switch'))
-    await screen.findByRole('dialog', { name: 'CRM branch-1 Configuration' })
+    await screen.findByRole('dialog', { name: 'CRM branch-1 settings' })
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'secret-for-branch-1' } })
     const staleSave = mocks.lastSaveClick
     expect(staleSave).toBeTypeOf('function')
@@ -339,7 +369,7 @@ describe('IntegrationsPage branch-scoped plugin licences', () => {
 
     // Reopening under branch-2 starts from an empty form.
     fireEvent.click(screen.getByRole('switch'))
-    await screen.findByRole('dialog', { name: 'CRM branch-2 Configuration' })
+    await screen.findByRole('dialog', { name: 'CRM branch-2 settings' })
     expect(screen.getByLabelText('API Key')).toHaveValue('')
     expect(JSON.stringify(mocks.posApiPost.mock.calls)).not.toContain('secret-for-branch-1')
   })
@@ -352,7 +382,7 @@ describe('IntegrationsPage branch-scoped plugin licences', () => {
 
     await screen.findByText('CRM branch-1')
     fireEvent.click(screen.getByRole('switch'))
-    await screen.findByRole('dialog', { name: 'CRM branch-1 Configuration' })
+    await screen.findByRole('dialog', { name: 'CRM branch-1 settings' })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(mocks.posApiPost).toHaveBeenCalledTimes(1))
 
@@ -411,7 +441,7 @@ describe('IntegrationsPage branch-scoped plugin licences', () => {
 
     await screen.findByText('CRM branch-1')
     fireEvent.click(screen.getByRole('switch'))
-    await screen.findByRole('dialog', { name: 'CRM branch-1 Configuration' })
+    await screen.findByRole('dialog', { name: 'CRM branch-1 settings' })
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'secret-for-branch-1' } })
     const staleSave = mocks.lastSaveClick
     expect(staleSave).toBeTypeOf('function')
@@ -448,13 +478,13 @@ describe('IntegrationsPage branch-scoped plugin licences', () => {
     const { rerender } = render(<IntegrationsPage />)
     await screen.findByText('CRM branch-1')
     fireEvent.click(screen.getByRole('switch'))
-    await screen.findByRole('dialog', { name: 'CRM branch-1 Configuration' })
+    await screen.findByRole('dialog', { name: 'CRM branch-1 settings' })
     await waitFor(() => expect(mocks.posApiGet).toHaveBeenCalledWith('/pos/terminals?branchId=branch-1'))
 
     switchIdentityTo('branch-2', rerender)
     await screen.findByText('CRM branch-2')
     fireEvent.click(screen.getByRole('switch'))
-    await screen.findByRole('dialog', { name: 'CRM branch-2 Configuration' })
+    await screen.findByRole('dialog', { name: 'CRM branch-2 settings' })
     await screen.findByRole('option', { name: 'New branch terminal' })
 
     await act(async () => { finishOldLookup(reply) })

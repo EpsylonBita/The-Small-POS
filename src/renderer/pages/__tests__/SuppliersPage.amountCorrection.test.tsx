@@ -1,5 +1,5 @@
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import en from '../../../locales/en.json';
 
@@ -10,7 +10,7 @@ import en from '../../../locales/en.json';
 // Root cause: `Number('1.234,50'.replace(',', '.'))` is NaN, which the form
 // skipped silently; the refusal code had no translated text.
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), error: vi.fn(), success: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), post: vi.fn(), error: vi.fn(), success: vi.fn() }));
 vi.mock('react-i18next', async () => ({
   useTranslation: (await import('../../test/en-translate')).useTranslationEn,
   initReactI18next: { type: '3rdParty', init: () => undefined },
@@ -38,7 +38,7 @@ vi.mock('../../../lib', () => ({
 vi.mock('../../utils/api-helpers', () => ({
   posApiGet: (...args: unknown[]) => mocks.get(...args),
   posApiPatch: (...args: unknown[]) => mocks.patch(...args),
-  posApiFetch: vi.fn(), posApiPost: vi.fn(),
+  posApiFetch: vi.fn(), posApiPost: (...args: unknown[]) => mocks.post(...args),
 }));
 vi.mock('../../services/offline-mutations', () => ({ offlineCommitSupplierImport: vi.fn() }));
 vi.mock('../../services/capture-client', () => ({
@@ -74,6 +74,54 @@ async function openCorrection() {
 }
 const typeAmount = (value: string) => fireEvent.change(screen.getByDisplayValue('25'), { target: { value } });
 const save = () => fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+
+describe('supplier payment entry', () => {
+  const labels = (en as any).suppliers.invoices;
+  async function openPayment() {
+    mocks.get.mockResolvedValue({ success: true, data: {
+      suppliers: [{ id: 'supplier-1', name: 'Test supplier', is_active: true }],
+      invoices: [{ id: 'payment-invoice', supplier_id: 'supplier-1', invoice_number: 'AUDIT-1', amount: 2000, status: 'unpaid', created_at: '2026-10-09', due_date: '2026-10-10' }],
+      currency: 'CHF',
+    } });
+    render(<SuppliersPage />);
+    fireEvent.click(await screen.findByRole('button', { name: labels.title, exact: true }));
+    fireEvent.click(await screen.findByText('#AUDIT-1'));
+    return screen.findByRole('textbox', { name: labels.paymentAmount });
+  }
+  beforeEach(() => mocks.post.mockReset());
+
+  it.each(['12abc', '1e3', '1.234', '12,3,4'])('rejects %s without a payment request', async value => {
+    const input = await openPayment();
+    fireEvent.change(input, { target: { value } });
+    fireEvent.click(screen.getByRole('button', { name: labels.recordPayment, exact: true }));
+    expect(mocks.post).not.toHaveBeenCalled();
+    expect(input).toHaveValue(value);
+  });
+
+  it.each(['1.234,50', '1,234.50'])('sends %s as 1234.50', async value => {
+    mocks.post.mockResolvedValue({ success: true, data: { success: true } });
+    const input = await openPayment();
+    fireEvent.change(input, { target: { value } });
+    fireEvent.click(screen.getByRole('button', { name: labels.recordPayment, exact: true }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('pos/supplier-invoices/payment-invoice/payments', expect.objectContaining({ amount: 1234.5 })));
+  });
+
+  it('blocks duplicate submission and dismissal, then retains a rejected draft', async () => {
+    let rejectPayment!: (error: Error) => void;
+    mocks.post.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectPayment = reject; }));
+    const input = await openPayment();
+    fireEvent.change(input, { target: { value: '12,50' } });
+    const submit = screen.getByRole('button', { name: labels.recordPayment, exact: true });
+    fireEvent.click(submit); fireEvent.click(submit);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: (en as any).common.close, exact: true }));
+    expect(input).toBeInTheDocument();
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectPayment(new Error('Offline')); });
+    expect(input).toHaveValue('12,50');
+    expect(submit).toBeEnabled();
+  });
+});
 
 describe('reading a typed invoice amount', () => {
   it.each([

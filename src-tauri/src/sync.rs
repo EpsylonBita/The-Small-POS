@@ -2822,7 +2822,15 @@ pub(crate) fn get_all_orders_since_utc(
                         WHERE op.order_id = orders.id
                           AND op.status = 'completed'
                     ), 0),
-                    integration_environment, is_test, currency
+                    integration_environment, is_test, currency,
+                    COALESCE((
+                        SELECT json_group_array(json_object('id',op.id,'order_id',op.order_id,
+                            'amount',op.amount,'currency',op.currency,'status',op.status))
+                        FROM order_payments op
+                        WHERE op.order_id = orders.id
+                          AND orders.status IN ('completed','delivered')
+                          AND NULLIF(TRIM(orders.table_session_id),'') IS NOT NULL
+                    ), '[]')
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
                AND lower(trim(COALESCE(order_context, ''))) <> 'repair_settlement'
@@ -2947,6 +2955,8 @@ pub(crate) fn get_all_orders_since_utc(
                 "isTest": row.get::<_, Option<i64>>(63)?.unwrap_or(0) != 0,
                 "is_test": row.get::<_, Option<i64>>(63)?.unwrap_or(0) != 0,
                 "currency": row.get::<_, Option<String>>(64)?,
+                "payment_receipts": serde_json::from_str::<Value>(&row.get::<_, String>(65)?)
+                    .unwrap_or_else(|_| serde_json::json!([])),
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -11572,6 +11582,107 @@ fn remote_payment_is_completed_money(remote_payment: &Value) -> bool {
     }
 }
 
+fn canonical_payment_collector_alias(
+    sources: &[&Value],
+    aliases: &[&str],
+) -> Result<Option<String>, String> {
+    let mut recorded = None;
+    for source in sources {
+        for alias in aliases {
+            let candidate = match source.get(*alias) {
+                None | Some(Value::Null) => continue,
+                Some(Value::String(value)) if value.trim().is_empty() => continue,
+                Some(Value::String(value)) => value.trim().to_string(),
+                _ => return Err("REMOTE_PAYMENT_COLLECTOR_INVALID".into()),
+            };
+            if recorded.as_ref().is_some_and(|value| value != &candidate) {
+                return Err("REMOTE_PAYMENT_COLLECTOR_CONFLICT".into());
+            }
+            recorded = Some(candidate);
+        }
+    }
+    Ok(recorded)
+}
+
+fn new_canonical_payment_provenance(
+    conn: &Connection,
+    local_order_id: &str,
+    remote: &Value,
+) -> Result<payments::AppliedCanonicalPaymentProvenance, String> {
+    let metadata = match remote.get("metadata") {
+        None | Some(Value::Null) => None,
+        Some(value @ Value::Object(_)) => Some(value.clone()),
+        Some(Value::String(raw)) => Some(
+            serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(Value::is_object)
+                .ok_or("REMOTE_PAYMENT_COLLECTOR_METADATA_INVALID")?,
+        ),
+        _ => return Err("REMOTE_PAYMENT_COLLECTOR_METADATA_INVALID".into()),
+    };
+    let empty = Value::Null;
+    let sources = [metadata.as_ref().unwrap_or(&empty), remote];
+    let staff_id = canonical_payment_collector_alias(&sources, &["staff_id", "staffId"])?;
+    let staff_shift_id =
+        canonical_payment_collector_alias(&sources, &["staff_shift_id", "staffShiftId"])?;
+    let collected_by =
+        canonical_payment_collector_alias(&sources, &["collected_by", "collectedBy"])?;
+    if collected_by
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "cashier_drawer" | "driver_shift"))
+    {
+        return Err("REMOTE_PAYMENT_COLLECTOR_INVALID".into());
+    }
+    let branch: Option<String> = conn
+        .query_row(
+            "SELECT branch_id FROM orders WHERE id=?1",
+            [local_order_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("read canonical payment order scope: {error}"))?;
+    let supplied_branch = canonical_payment_collector_alias(&sources, &["branch_id", "branchId"])?;
+    if supplied_branch
+        .as_ref()
+        .is_some_and(|value| branch.as_ref() != Some(value))
+    {
+        return Err("REMOTE_PAYMENT_COLLECTOR_SCOPE_MISMATCH".into());
+    }
+    let organization =
+        canonical_payment_collector_alias(&sources, &["organization_id", "organizationId"])?;
+    if organization.as_ref().is_some_and(|value| {
+        db::get_setting(conn, "terminal", "organization_id").as_ref() != Some(value)
+    }) {
+        return Err("REMOTE_PAYMENT_COLLECTOR_SCOPE_MISMATCH".into());
+    }
+    if let Some(shift_id) = staff_shift_id.as_deref() {
+        let known: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT staff_id, branch_id, role_type FROM staff_shifts WHERE id=?1",
+                [shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read recorded canonical collector scope: {error}"))?;
+        if let Some((known_staff, known_branch, role)) = known {
+            if branch.as_ref() != Some(&known_branch)
+                || staff_id.as_ref().is_some_and(|value| value != &known_staff)
+                || (collected_by.as_deref() == Some("cashier_drawer")
+                    && !matches!(role.as_str(), "cashier" | "manager"))
+                || (collected_by.as_deref() == Some("driver_shift") && role != "driver")
+            {
+                return Err("REMOTE_PAYMENT_COLLECTOR_SCOPE_MISMATCH".into());
+            }
+        }
+    }
+    // Unknown or closed historical shifts need no current local admission.
+    // Never fill an absent identity from a waiter, cashier or shift lookup.
+    Ok(payments::AppliedCanonicalPaymentProvenance {
+        staff_id,
+        staff_shift_id,
+        metadata,
+    })
+}
+
 /// Mirror one server payment row into the local ledger.
 ///
 /// A row that is not completed money (`voided`, `refunded`) never creates a
@@ -11959,7 +12070,9 @@ fn sync_remote_payment_into_local_with_context(
     });
     let input = payments::build_applied_canonical_payment_record_input(&payload)
         .map_err(|e| format!("prepare remote payment mirror: {e}"))?;
-    let mut options = payments::PaymentInsertOptions::applied(Some(remote_payment_id.clone()));
+    let provenance = new_canonical_payment_provenance(conn, &local_order_id, remote_payment)?;
+    let mut options =
+        payments::PaymentInsertOptions::applied_canonical(remote_payment_id.clone(), provenance);
     options.created_at = Some(created_at);
     options.updated_at = Some(updated_at.clone());
     let recorded = payments::record_payment_in_connection(conn, &input, &options)
@@ -12295,6 +12408,100 @@ mod lan_canonical_response_tests {
         conn.execute_batch("COMMIT").unwrap();
     }
     #[test]
+    fn mapped_full_api_parent_keeps_full_items_instead_of_scoped_check_items() {
+        let conn = connection();
+        let mut reply = response();
+        let mut mapped = parent();
+        let lines = mapped
+            .as_object_mut()
+            .unwrap()
+            .remove("order_items")
+            .unwrap();
+        mapped["items"] = lines;
+        reply["cafe_lan_snapshot"]["orders"] = json!([]);
+        reply["order"] = mapped;
+        for _ in 0..2 {
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            apply_lan_canonical_response(&conn, "/api/pos/orders", &reply).unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        let (total, raw): (f64, String) = conn
+            .query_row(
+                "SELECT total_amount,items FROM orders WHERE supabase_id=?1",
+                params![PARENT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let items: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(total, 30.0);
+        assert_eq!(items[0]["quantity"].as_f64(), Some(3.0));
+        assert_eq!(count(&conn, "orders"), 1);
+        assert_eq!(count(&conn, "order_payments"), 0);
+        assert_eq!(count(&conn, "sync_queue"), 0);
+        assert_eq!(count(&conn, "parity_sync_queue"), 0);
+    }
+    #[test]
+    fn mapped_full_parent_does_not_replace_malformed_authoritative_relation() {
+        let conn = connection();
+        let mut reply = response();
+        let order = &mut reply["cafe_lan_snapshot"]["orders"][0];
+        order["items"] = order["order_items"].clone();
+        order["order_items"] = Value::Null;
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(
+            apply_lan_canonical_response(&conn, "/api/pos/orders", &reply)
+                .unwrap_err()
+                .contains("full item snapshot")
+        );
+        assert_eq!(count(&conn, "orders"), 0);
+        assert_eq!(count(&conn, "branch_ops_cache"), 0);
+        conn.execute_batch("ROLLBACK").unwrap();
+    }
+    #[test]
+    fn scoped_check_items_never_substitute_a_missing_full_parent() {
+        let conn = connection();
+        let mut reply = response();
+        reply["cafe_lan_snapshot"]["orders"] = json!([]);
+        let order = &mut reply["cafe_lan_snapshot"]["sessions"][0]["order"];
+        let lines = order
+            .as_object_mut()
+            .unwrap()
+            .remove("order_items")
+            .unwrap();
+        order["items"] = lines;
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(
+            apply_lan_canonical_response(&conn, "/api/pos/orders", &reply)
+                .unwrap_err()
+                .contains("missing its full parent")
+        );
+        assert_eq!(count(&conn, "orders"), 0);
+        assert_eq!(count(&conn, "branch_ops_cache"), 0);
+        conn.execute_batch("ROLLBACK").unwrap();
+    }
+    #[test]
+    fn explicitly_scoped_parent_alias_is_refused_before_any_persistence() {
+        let conn = connection();
+        let mut reply = response();
+        let order = &mut reply["cafe_lan_snapshot"]["orders"][0];
+        let lines = order
+            .as_object_mut()
+            .unwrap()
+            .remove("order_items")
+            .unwrap();
+        order["items"] = lines;
+        order["table_service_scoped_items"] = json!(true);
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(
+            apply_lan_canonical_response(&conn, "/api/pos/orders", &reply)
+                .unwrap_err()
+                .contains("scoped check items")
+        );
+        assert_eq!(count(&conn, "orders"), 0);
+        assert_eq!(count(&conn, "branch_ops_cache"), 0);
+        conn.execute_batch("ROLLBACK").unwrap();
+    }
+    #[test]
     fn canonical_cancel_clears_parent_table_identity_without_second_dispatch() {
         let conn = connection();
         conn.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -12456,7 +12663,7 @@ fn apply_lan_canonical_response_inner(
         }
     }
     let mut parents = std::collections::BTreeMap::new();
-    for order in orders {
+    for mut order in orders {
         let id = lan_scoped_row(&order, &organization, &branch)?;
         let owner =
             str_any(&order, &["owner_terminal_id"]).ok_or("Canonical LAN order has no owner")?;
@@ -12468,6 +12675,21 @@ fn apply_lan_canonical_response_inner(
             .and_then(Value::as_i64)
             .filter(|version| *version >= 1)
             .ok_or("Canonical LAN order has no version")?;
+        if order
+            .get("table_service_scoped_items")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Err("Canonical LAN parent contains scoped check items".into());
+        }
+        // The authenticated full-parent API DTO calls this relation `items`.
+        // Normalize only here; never promote a session.order display projection.
+        // A present malformed canonical relation must still fail validation.
+        if order.get("order_items").is_none() {
+            if let Some(items) = order.get("items").cloned() {
+                order["order_items"] = items;
+            }
+        }
         let lines = order
             .get("order_items")
             .and_then(Value::as_array)
@@ -14443,6 +14665,41 @@ fn sync_remote_order_snapshot_into_local(
         return Ok(0);
     }
     crate::table_session_cache::remember_order_history(conn, remote_order)?;
+
+    // A trusted privacy tombstone outranks stale financial/version snapshots.
+    let privacy_metadata = remote_order
+        .get("ghost_metadata")
+        .or_else(|| remote_order.get("ghostMetadata"));
+    let parsed_privacy = privacy_metadata.and_then(|value| match value {
+        Value::String(raw) => serde_json::from_str::<Value>(raw).ok(),
+        other => Some(other.clone()),
+    });
+    let remote_redacted = parsed_privacy.as_ref().is_some_and(|metadata| {
+        matches!(
+            metadata
+                .pointer("/ecommerce/provider")
+                .and_then(Value::as_str),
+            Some("shopify") | Some("woocommerce")
+        ) && metadata
+            .pointer("/ecommerce/pii_redacted")
+            .and_then(Value::as_bool)
+            == Some(true)
+    });
+    let local_redacted: bool = conn.query_row(
+        "SELECT CASE WHEN json_valid(ghost_metadata) THEN COALESCE(json_extract(ghost_metadata,'$.ecommerce.pii_redacted'),0) ELSE 0 END=1 FROM orders WHERE id=?1",
+        params![local_order_id], |row| row.get(0)).map_err(|e| format!("read privacy tombstone: {e}"))?;
+    let redact_personal_data = || -> Result<(), String> {
+        conn.execute("UPDATE orders SET customer_name=NULL,customer_phone=NULL,customer_email=NULL,customer_id=NULL,
+            delivery_address=NULL,delivery_city=NULL,delivery_postal_code=NULL,delivery_floor=NULL,delivery_notes=NULL,
+            delivery_address_id=NULL,delivery_latitude=NULL,delivery_longitude=NULL,delivery_address_fingerprint=NULL,
+            name_on_ringer=NULL,notes=NULL,special_instructions=NULL,
+            ghost_metadata=json_set(COALESCE(ghost_metadata,'{}'),'$.ecommerce.pii_redacted',json('true')) WHERE id=?1", params![local_order_id])
+            .map_err(|e| format!("apply ecommerce privacy tombstone: {e}"))?;
+        Ok(())
+    };
+    if remote_redacted || local_redacted {
+        redact_personal_data()?;
+    }
     stamp_remote_folio_charge(conn, local_order_id, remote_order)?;
     let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
     let items_json = remote_order
@@ -14712,6 +14969,10 @@ fn sync_remote_order_snapshot_into_local(
     )
     .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))?;
     project_canonical_order_table_binding(conn, local_order_id, remote_order)?;
+
+    if remote_redacted || local_redacted {
+        redact_personal_data()?;
+    }
 
     if items_json
         .as_deref()
@@ -19729,6 +19990,50 @@ async fn sync_financial_batch(
     Ok(outcome)
 }
 
+/// Keep receipt-owned provenance; absent historical collectors remain unknown.
+fn merge_recorded_payment_sync_metadata(data: &Value, trace: Value) -> Value {
+    let recorded = data.get("metadata").cloned().unwrap_or(Value::Null);
+    let recorded = match recorded {
+        Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null),
+        value => value,
+    };
+    let mut metadata = recorded.as_object().cloned().unwrap_or_default();
+    if let Some(trace) = trace.as_object() {
+        for (key, value) in trace {
+            if value.is_null() {
+                // An older queued body without a tip/origin field cannot erase
+                // the original receipt's known annotation.
+                metadata.entry(key.clone()).or_insert(Value::Null);
+            } else {
+                metadata.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for (field, aliases) in [
+        ("staff_id", ["staff_id", "staffId"]),
+        ("staff_shift_id", ["staff_shift_id", "staffShiftId"]),
+        ("collected_by", ["collected_by", "collectedBy"]),
+    ] {
+        if aliases.iter().any(|alias| {
+            metadata
+                .get(*alias)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            continue;
+        }
+        if let Some(value) = aliases.iter().find_map(|alias| {
+            data.get(*alias)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }) {
+            metadata.insert(field.into(), Value::String(value.into()));
+        }
+    }
+    Value::Object(metadata)
+}
+
 /// Sync payment items individually to `/api/pos/payments`.
 ///
 /// Each payment is POSTed individually because the endpoint expects a single
@@ -20027,14 +20332,17 @@ async fn sync_payment_items(
             body["seat_number"] = serde_json::json!(seat_number);
         }
         // Include terminal_id as metadata for traceability
-        body["metadata"] = serde_json::json!({
-            "terminal_id": terminal_id,
-            "local_payment_id": entity_id,
-            "payment_origin": payment_origin,
-            "tip_recipient_role": tip_recipient_role,
-            "tip_recipient_staff_id": tip_recipient_staff_id,
-            "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
-        });
+        body["metadata"] = merge_recorded_payment_sync_metadata(
+            &data,
+            serde_json::json!({
+                "terminal_id": terminal_id,
+                "local_payment_id": entity_id,
+                "payment_origin": payment_origin,
+                "tip_recipient_role": tip_recipient_role,
+                "tip_recipient_staff_id": tip_recipient_staff_id,
+                "tip_recipient_staff_shift_id": tip_recipient_staff_shift_id,
+            }),
+        );
 
         if payment_method == "twint" {
             if let Some(metadata) = data.get("metadata").and_then(Value::as_object) {
@@ -23551,6 +23859,97 @@ mod tests {
     use super::*;
     use crate::db;
     use rusqlite::{params, types::ValueRef, Connection};
+
+    fn payment_sync_metadata_fixture(data: &Value) -> Value {
+        merge_recorded_payment_sync_metadata(
+            data,
+            serde_json::json!({
+                "terminal_id": "recording-till",
+                "local_payment_id": "original-local-receipt",
+                "payment_origin": "manual",
+                "tip_recipient_staff_id": null,
+            }),
+        )
+    }
+
+    #[test]
+    fn payment_sync_metadata_keeps_recorded_till_collector_instead_of_waiter() {
+        let data = serde_json::json!({
+            "staffId": "recorded-cashier", "staffShiftId": "recorded-till-shift",
+            "collectedBy": "cashier_drawer", "order_staff_shift_id": "foreign-waiter-shift",
+        });
+        let metadata = payment_sync_metadata_fixture(&data);
+        assert_eq!(metadata["staff_id"], "recorded-cashier");
+        assert_eq!(metadata["staff_shift_id"], "recorded-till-shift");
+        assert_eq!(metadata["collected_by"], "cashier_drawer");
+    }
+
+    #[test]
+    fn payment_sync_metadata_preserves_original_metadata_and_owned_trace_identity() {
+        let data = serde_json::json!({"metadata": {
+            "receipt_note": "original annotation", "provider": "original-provider",
+            "provider_proof": {"reference": "original-reference"},
+            "tip_recipient_staff_id": "original-tip-owner",
+            "terminal_id": "caller-terminal", "local_payment_id": "caller-receipt",
+        }});
+        for data in [
+            data.clone(),
+            serde_json::json!({"metadata": data["metadata"].to_string()}),
+        ] {
+            let metadata = payment_sync_metadata_fixture(&data);
+            assert_eq!(metadata["receipt_note"], "original annotation");
+            assert_eq!(
+                metadata["provider_proof"]["reference"],
+                "original-reference"
+            );
+            assert_eq!(metadata["provider"], "original-provider");
+            assert_eq!(metadata["tip_recipient_staff_id"], "original-tip-owner");
+            assert_eq!(metadata["terminal_id"], "recording-till");
+            assert_eq!(metadata["local_payment_id"], "original-local-receipt");
+        }
+    }
+
+    #[test]
+    fn payment_sync_metadata_historical_missing_collector_never_guesses() {
+        for metadata in [
+            Value::Null,
+            Value::String("unreadable legacy metadata".into()),
+            serde_json::json!({}),
+        ] {
+            let data = serde_json::json!({"metadata":metadata,"staffId":null,
+                "order_staff_id":"foreign-waiter", "order_staff_shift_id":"foreign-waiter-shift"});
+            let result = payment_sync_metadata_fixture(&data);
+            for field in [
+                "staff_id",
+                "staff_shift_id",
+                "collected_by",
+                "staffId",
+                "staffShiftId",
+            ] {
+                assert!(result.get(field).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn payment_sync_metadata_retained_original_aliases_keep_the_same_owner_and_identity() {
+        let data = serde_json::json!({"staffId":"later-cashier", "staffShiftId":"later-shift", "metadata": {
+            "staffId": "original-cashier", "staffShiftId": "original-shift",
+            "collectedBy": "cashier_drawer", "payment_origin": "manual",
+            "retained_original": {"order_id":"original-order","key":"original-key","amount_cents":1050,"currency":"CHF"},
+        }});
+        let first = payment_sync_metadata_fixture(&data);
+        let retry = payment_sync_metadata_fixture(&data);
+        assert_eq!(first, retry);
+        assert_eq!(retry["staffShiftId"], "original-shift");
+        assert_eq!(retry["staffId"], "original-cashier");
+        assert!(retry.get("staff_shift_id").is_none());
+        assert_eq!(
+            retry["retained_original"],
+            data["metadata"]["retained_original"]
+        );
+        assert_eq!(retry["local_payment_id"], "original-local-receipt");
+    }
 
     #[test]
     fn folio_backflow_requires_settlement_status_instead_of_room_charge_intent() {
@@ -27351,6 +27750,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status_b_after, "confirmed");
+    }
+
+    #[test]
+    fn get_all_orders_projects_original_return_receipts_without_changing_payment_status() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for id in ["returned-check", "unpaid-check"] {
+                conn.execute("INSERT INTO orders(id,items,total_amount,status,order_type,table_session_id,payment_status,sync_status,created_at,updated_at) VALUES(?1,'[]',9,'completed','dine-in',?1,'pending','synced','2099-10-10T12:00:00Z','2099-10-10T12:00:00Z')", [id]).unwrap();
+            }
+            conn.execute("INSERT INTO order_payments(id,order_id,amount,currency,method,status,created_at,updated_at) VALUES('returned-receipt','returned-check',9,'CHF','cash','refunded','2099-10-10T12:01:00Z','2099-10-10T12:01:00Z')", []).unwrap();
+        }
+        let orders = get_all_orders_since_utc(&db, None).unwrap();
+        let returned = orders
+            .iter()
+            .find(|order| order["id"] == "returned-check")
+            .unwrap();
+        assert_eq!(returned["paymentStatus"], "pending");
+        assert_eq!(
+            returned["payment_receipts"],
+            serde_json::json!([{"id":"returned-receipt","order_id":"returned-check","amount":9.0,"currency":"CHF","status":"refunded"}])
+        );
+        let unpaid = orders
+            .iter()
+            .find(|order| order["id"] == "unpaid-check")
+            .unwrap();
+        assert_eq!(unpaid["payment_receipts"], serde_json::json!([]));
+        let conn = db.conn.lock().unwrap();
+        let receipt: (String, f64) = conn
+            .query_row(
+                "SELECT status,amount FROM order_payments WHERE id='returned-receipt'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt, ("refunded".into(), 9.0));
     }
 
     #[test]
@@ -38693,7 +39128,11 @@ mod tests {
             "tableSessionId": "session-table-sync",
             "table_session_id": "session-table-sync",
             "seatNumber": 2,
-            "seat_number": 2
+            "seat_number": 2,
+            "staffId": "recorded-cashier",
+            "staffShiftId": "recorded-till-shift",
+            "collectedBy": "cashier_drawer",
+            "metadata": { "receipt_note": "original table receipt" }
         })
         .to_string();
 
@@ -38751,6 +39190,11 @@ mod tests {
                 assert!(request.contains(r#""tip_amount_cents":250"#));
                 assert!(request.contains(r#""table_session_id":"session-table-sync""#));
                 assert!(request.contains(r#""seat_number":2"#));
+                assert!(request.contains(r#""staff_id":"recorded-cashier""#));
+                assert!(request.contains(r#""staff_shift_id":"recorded-till-shift""#));
+                assert!(request.contains(r#""collected_by":"cashier_drawer""#));
+                assert!(request.contains(r#""receipt_note":"original table receipt""#));
+                assert!(request.contains(r#""idempotency_key":"payment:pay-table-sync""#));
             },
         );
         let item = load_sync_item(&db, queue_id);

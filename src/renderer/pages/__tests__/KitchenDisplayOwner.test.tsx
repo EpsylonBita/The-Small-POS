@@ -180,6 +180,21 @@ describe('persistent Windows KDS owner (strictly local)', () => {
     }
   });
 
+  it('renders distinct legacy tickets from the same minute and preserves a supplied waiter display code', async () => {
+    const first = 'ORD-20260827-dbec94b835c8f04f93f56601b7c98728';
+    const second = 'ORD-20260827-dbec94b835c8f04f93f56602b7c98728';
+    const created_at = new Date().toISOString();
+    state.local.orders = [order('legacy-a', { order_number: first, created_at }),
+      order('legacy-b', { order_number: second, created_at }),
+      order('numbered', { order_number: first, display_order_number: 'M1-0042', created_at })];
+    render(<Harness />); await flush();
+    const labels = screen.getAllByText(/^ORD #[0-9A-Z]{11}$/).map(node => node.textContent);
+    expect(labels).toHaveLength(2);
+    expect(new Set(labels).size).toBe(2);
+    expect(screen.getByText('M1-0042')).toBeTruthy();
+    expect(screen.queryByText(first)).toBeNull();
+  });
+
   it('one local owner read serves the page, the connected display and navigation', async () => {
     state.local.orders = [order('order-1')];
     const mounted = render(<Harness />); await flush();

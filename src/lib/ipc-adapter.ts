@@ -1808,7 +1808,7 @@ export interface PlatformBridge {
       status: string,
       extra?: { cancellationReason?: string; cancelledAt?: string } | string,
     ): Promise<IpcResult>;
-    updateItems(orderId: string, items: OrderItem[], context?: { orderNotes?: string; expectedVersion?: number; expectedLocalVersion?: number; tableSessionId?: string; clientEventId?: string; orderUpdates?: Partial<EditSettlementOrderUpdates>; financials?: Partial<OrderFinancialsUpdateParams> }): Promise<IpcResult>;
+    updateItems(orderId: string, items: OrderItem[], context?: { orderNotes?: string; expectedVersion?: number; expectedLocalVersion?: number; tableSessionId?: string; tableId?: string; clientEventId?: string; orderUpdates?: Partial<EditSettlementOrderUpdates>; financials?: Partial<OrderFinancialsUpdateParams> }): Promise<IpcResult>;
     previewEditSettlement(payload: {
       orderId: string;
       client_event_id?: string;
@@ -2123,6 +2123,7 @@ export interface PlatformBridge {
   shifts: {
     open(params: OpenShiftParams): Promise<IpcResult>;
     close(params: CloseShiftParams): Promise<IpcResult>;
+    pendingCashReturns(): Promise<any>;
     remoteCheckout(params: {
       shiftId: string;
       action: "preview" | "close";
@@ -2701,7 +2702,7 @@ export interface PlatformBridge {
       options?: DiagnosticsExportOptions,
     ): Promise<DiagnosticsExportResponse>;
     openExportDir(path: string): Promise<DiagnosticsOpenExportDirResponse>;
-    sendRemoteIncident(): Promise<RemoteIncidentReportResponse>;
+    sendRemoteIncident(options?: DiagnosticsExportOptions): Promise<RemoteIncidentReportResponse>;
     checkDeliveredOrders(): Promise<any>;
     fixMissingDriverIds(driverId: string): Promise<any>;
   };
@@ -2717,6 +2718,10 @@ export interface PlatformBridge {
     executeAction(request: RecoveryActionRequest): Promise<RecoveryActionResult>;
     recordActionLog(entry: RecoveryActionLogEntry): Promise<RecoveryActionLogEntry>;
     listActionLog(limit?: number): Promise<RecoveryActionLogEntry[]>;
+  };
+
+  tableAttemptRecovery: {
+    confirmOriginal(input: { clientEventId: string }): Promise<{ state: string }>;
   };
 
   // -- Repairs ---------------------------------------------------------------
@@ -3448,6 +3453,15 @@ export class TauriBridge implements PlatformBridge {
     trackActivity: () => this.inv("staff-auth:track-activity"),
   };
 
+  // This native command takes a named event identity, not positional arg0.
+  // The retained request and approval are selected exclusively by native.
+  tableAttemptRecovery = {
+    confirmOriginal: (input: { clientEventId: string }): Promise<{ state: string }> =>
+      this.tauriInvoke('table_attempt_recovery_confirm_original', {
+        clientEventId: input.clientEventId,
+      }),
+  };
+
   repairs: RepairBridge = {
     list: (input) => this.repairInvoke("repairs_list", input),
     workspace: (input) => this.repairInvoke("repairs_workspace", input),
@@ -3559,7 +3573,7 @@ export class TauriBridge implements PlatformBridge {
           })
         : this.inv("order:update-status", id, s);
     },
-    updateItems: (id: string, items: OrderItem[], context?: { orderNotes?: string; expectedVersion?: number; expectedLocalVersion?: number; tableSessionId?: string; clientEventId?: string; orderUpdates?: Partial<EditSettlementOrderUpdates>; financials?: Partial<OrderFinancialsUpdateParams> }) =>
+    updateItems: (id: string, items: OrderItem[], context?: { orderNotes?: string; expectedVersion?: number; expectedLocalVersion?: number; tableSessionId?: string; tableId?: string; clientEventId?: string; orderUpdates?: Partial<EditSettlementOrderUpdates>; financials?: Partial<OrderFinancialsUpdateParams> }) =>
       context
         ? this.inv("order:update-items", { orderId: id, items, ...context })
         : this.inv("order:update-items", id, items),
@@ -3878,6 +3892,7 @@ export class TauriBridge implements PlatformBridge {
   shifts = {
     open: (p: OpenShiftParams) => this.inv("shift:open", p),
     close: (p: CloseShiftParams) => this.inv("shift:close", p),
+    pendingCashReturns: () => this.adminFetch("/api/pos/shifts/remote-checkout"),
     // Satellite remote checkout (v1.4.84): server close via admin API, then
     // the local drawer credit so the received cash enters day math here.
     remoteCheckout: (p: {
@@ -4450,7 +4465,7 @@ export class TauriBridge implements PlatformBridge {
       this.inv("diagnostics:export", ...buildDiagnosticsExportArgs(options)),
     openExportDir: (path: string) =>
       this.inv("diagnostics:open-export-dir", { path }),
-    sendRemoteIncident: () => this.inv("diagnostics:send-remote-incident"),
+    sendRemoteIncident: (options?: DiagnosticsExportOptions) => this.inv("diagnostics:send-remote-incident", ...buildDiagnosticsExportArgs(options)),
     checkDeliveredOrders: () => this.inv("diagnostic:check-delivered-orders"),
     fixMissingDriverIds: (driverId: string) =>
       this.inv("diagnostic:fix-missing-driver-ids", driverId),

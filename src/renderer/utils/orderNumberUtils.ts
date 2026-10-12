@@ -1,3 +1,5 @@
+import { internalOrderReference } from '../../../../shared/utils/internal-order-reference';
+
 /**
  * Order Number Utility Functions
  * 
@@ -207,34 +209,21 @@ export function formatOrderNumberForDisplay(orderNumber: string): string {
   return orderNumber.startsWith('#') ? orderNumber : `#${orderNumber}`;
 }
 
-function formatOrderTime(createdAt?: string | null): string | null {
-  if (!createdAt) return null;
-
-  const date = new Date(createdAt);
-  if (Number.isNaN(date.getTime())) return null;
-
-  return new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date);
-}
-
-export function formatCompactOrderNumberForDisplay(orderNumber: string, createdAt?: string | null): string {
+export function formatCompactOrderNumberForDisplay(orderNumber: string, _createdAt?: string | null): string {
   if (!orderNumber) return '';
 
   const normalized = orderNumber.trim();
   const withoutHash = normalized.startsWith('#') ? normalized.slice(1).trim() : normalized;
   const hashMatch = withoutHash.match(/^([A-Za-z]+)-\d{8}-([a-f0-9]{32})$/i);
   if (hashMatch) {
-    const time = formatOrderTime(createdAt);
-    if (time) {
-      return `${hashMatch[1].toUpperCase()} ${time}`;
-    }
-    return `${hashMatch[1].toUpperCase()} #${hashMatch[2].slice(0, 6).toUpperCase()}`;
+    return internalOrderReference(withoutHash);
   }
 
-  const kioskBusinessPeriodMatch = withoutHash.match(/^([A-Za-z]+)-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-(\d+)$/);
+  if (/^(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.test(withoutHash)) {
+    return internalOrderReference(withoutHash);
+  }
+
+  const kioskBusinessPeriodMatch = withoutHash.match(/^(.+)-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-(\d+)$/);
   if (kioskBusinessPeriodMatch) {
     return `${kioskBusinessPeriodMatch[1].toUpperCase()} #${kioskBusinessPeriodMatch[2]}`;
   }
@@ -270,7 +259,7 @@ export function isBusinessOrderNumber(value?: string | null): boolean {
   }
   return (
     /^[A-Za-z]+-\d{8}-\d+$/.test(candidate) || // ORD-YYYYMMDD-NNNN
-    /^[A-Za-z]+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/.test(candidate) || // kiosk business period
+    /^.+-[A-Za-z0-9]{1,16}-\d{8}-\d{6}-\d+$/.test(candidate) || // configured kiosk prefix + business period
     /^K[A-Za-z]*-\d+$/i.test(candidate) // kiosk short
   );
 }

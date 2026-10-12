@@ -124,14 +124,16 @@ export function PlatformHeldPaymentNotice({
   // Two shapes, one meaning: do not take money from this customer. The
   // unsynced one adds why the day will also refuse to close.
   const unsynced = notice === "platform_settlement_unsynced";
-  const title = unsynced
+  const pending = notice === "external_payment_pending";
+  const refundReview = (notice === "woocommerce_refund_reporting" || notice === "shopify_refund_reporting");
+  const title = refundReview ? t("payment.platformHeld.refundReviewTitle") : pending ? t("payment.platformHeld.pendingTitle") : unsynced
     ? t("payment.platformHeld.unsyncedTitle", {
         defaultValue: "Platform payment not yet reconciled",
       })
     : t("payment.platformHeld.title", {
         defaultValue: "Payment already collected by the platform",
       });
-  const body = unsynced
+  const body = refundReview ? t("payment.platformHeld.refundReviewBody") : pending ? t("payment.platformHeld.pendingBody") : unsynced
     ? t("payment.platformHeld.unsyncedBody", {
         defaultValue:
           "The platform has collected the payment, but the record of that collection has not synced yet. Do not collect from the customer again. The day cannot be closed until the reconciliation completes.",
@@ -141,7 +143,7 @@ export function PlatformHeldPaymentNotice({
           "The payment has been collected by the platform. Do not take cash or card from the customer.",
       });
 
-  const tone = unsynced
+  const tone = unsynced || pending || refundReview
     ? "border-amber-400/40 bg-amber-500/10 text-amber-100"
     : "border-emerald-400/35 bg-emerald-500/10 text-emerald-100";
 
@@ -153,7 +155,7 @@ export function PlatformHeldPaymentNotice({
     >
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 shrink-0">
-          {unsynced ? (
+          {unsynced || pending || refundReview ? (
             <AlertTriangle className="h-4 w-4" />
           ) : (
             <ShieldCheck className="h-4 w-4" />

@@ -410,6 +410,20 @@ describe('ZReportModal gift card close', () => {
 
 
 describe('ZReportModal TWINT and conditional sections', () => {
+  it('uses the drawer expectation after waiter cash is received, without counting those sales twice', async () => {
+    serveReports(date => ({...baseReport(date), currency:'CHF',
+      sales:{totalOrders:11,totalSales:258.5,cashSales:171.5,cardSales:0}, daySummary:{total:171.5},
+      cashDrawer:{totalVariance:0,totalCashDrops:0,unreconciledCount:0,openingTotal:100,
+        cashSales:206,totalRefunds:87,driverCashGiven:0,driverCashReturned:52.5,expected:271.5,expected_cents:27150},
+    }));
+    renderModal();
+    await waitFor(()=>expect(submitButton()).toBeEnabled());
+    const moneyText = (amount: number, prefix = '') => prefix + formatCurrency(amount,'CHF').replace(/\s+/g,' ');
+    expect(screen.queryAllByText(moneyText(271.5)).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(moneyText(324))).toHaveLength(0);
+    expect(screen.queryAllByText(moneyText(119,'+')).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(moneyText(52.5,'+')).length).toBeGreaterThan(0);
+  });
   it('shows mixed cash/card/TWINT once and omits the empty expense ledger', async () => {
     serveReports(date => ({...baseReport(date),
       sales:{totalOrders:1,totalSales:55,cashSales:10,cardSales:20,twintSales:25},

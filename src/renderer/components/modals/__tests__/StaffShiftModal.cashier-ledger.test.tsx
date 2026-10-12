@@ -94,6 +94,7 @@ function makeBridge() {
     staffAuth: { refreshDirectory: vi.fn(async () => ({ success: true, currentTerminalId: fixture.scope.terminalId, staff: [] })), verifyCheckInPin: vi.fn(async () => ({ success: true })) },
     staffSchedule: { list: vi.fn(async () => ({ success: true, data: { staff: members } })) },
     shifts: {
+      pendingCashReturns: vi.fn(async () => ({ success: true, requires_receipt_check: false, active_waiter_count: 0, returns: [] })),
       getActive: vi.fn(async () => null), getActiveForBranch: vi.fn(async () => []), getCheckInEligibility: vi.fn(async () => ({ requiresCashierFirst: false })),
       getActiveCashierByTerminal: vi.fn(async () => ({ id: 'ordinary-cashier' })), open: vi.fn(), getById: vi.fn(async () => null),
       getSummary: vi.fn(async () => ({ success: true, data: summary(123.45) })), getExpenses: vi.fn(async () => []),
@@ -195,6 +196,59 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', () => {
     render(<StaffShiftModal {...props} />);
     await screen.findByTestId('staff-checkout-confirm-button');
     await waitFor(() => expect(screen.getAllByText(/-[€\s]*6[,.]00/).length).toBeGreaterThan(0));
+    expect(bridge.shifts.close).not.toHaveBeenCalled();
+  });
+
+  it('holds Main close while a self-closed waiter till still awaits receipt', async () => {
+    bridge.shifts.getSummary.mockResolvedValue({success:true,data:{...summary(0),currency:'EUR',cashierCash:{cashCollections:0,cashRefunds:0,currency:'EUR'}}});
+    bridge.shifts.pendingCashReturns.mockResolvedValue({success:true,requires_receipt_check:true,active_waiter_count:0,returns:[{
+      id:'waiter-close',staff_id:'waiter',staff_name:'Luca',terminal_id:'phone',currency:'EUR',
+      closing_cash_amount:10.5,expected_cash_amount:10.5,receiving_cashier_shift_id:SHIFT_ID,
+    }]});
+    render(<StaffShiftModal {...props} />);
+    const button=await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(()=>expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await screen.findByText('modals.staffShift.satelliteCheckout.receiveBeforeClose');
+    expect(bridge.shifts.pendingCashReturns).toHaveBeenCalledTimes(2);
+    expect(bridge.shifts.close).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake an offline pending-return check for zero cash', async () => {
+    bridge.shifts.getSummary.mockResolvedValue({success:true,data:{...summary(0),currency:'EUR',cashierCash:{cashCollections:0,cashRefunds:0,currency:'EUR'}}});
+    bridge.shifts.pendingCashReturns.mockRejectedValue(new Error('offline'));
+    render(<StaffShiftModal {...props} />);
+    const button=await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(()=>expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await screen.findByText('modals.staffShift.satelliteCheckout.pendingReadFailed');
+    expect(bridge.shifts.close).not.toHaveBeenCalled();
+  });
+  it('holds Main close while an active phone waiter can still collect cash', async () => {
+    bridge.shifts.getSummary.mockResolvedValue({success:true,data:{...summary(0),currency:'EUR',cashierCash:{cashCollections:0,cashRefunds:0,currency:'EUR'}}});
+    bridge.shifts.pendingCashReturns.mockResolvedValue({success:true,requires_receipt_check:true,active_waiter_count:1,returns:[]});
+    render(<StaffShiftModal {...props} />);
+    const button=await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(()=>expect(button).toBeEnabled());fireEvent.click(button);
+    await screen.findByText('modals.staffShift.satelliteCheckout.receiveBeforeClose');
+    expect(bridge.shifts.close).not.toHaveBeenCalled();
+  });
+
+  it('drops a held cash-return check when the cashier actor changes', async () => {
+    bridge.shifts.getSummary.mockResolvedValue({success:true,data:{...summary(0),currency:'EUR',cashierCash:{cashCollections:0,cashRefunds:0,currency:'EUR'}}});
+    const clear = {success:true,requires_receipt_check:true,active_waiter_count:0,returns:[]};
+    bridge.shifts.pendingCashReturns.mockResolvedValue(clear);
+    const view = render(<StaffShiftModal {...props} />);
+    const button = await screen.findByTestId('staff-checkout-confirm-button');
+    await waitFor(() => expect(button).toBeEnabled());
+    const held = deferred();
+    bridge.shifts.pendingCashReturns.mockImplementationOnce(() => held.promise);
+    fireEvent.click(button);
+    await waitFor(() => expect(bridge.shifts.pendingCashReturns).toHaveBeenCalledTimes(2));
+    fixture.sessionStaff = {...fixture.sessionStaff, staffId: OTHER_STAFF_ID};
+    view.rerender(<StaffShiftModal {...props} />);
+    await act(async () => {held.resolve(clear); await held.promise;});
+    expect(screen.queryByRole('dialog', {name: 'Confirm Zero Closing Cash'})).toBeNull();
     expect(bridge.shifts.close).not.toHaveBeenCalled();
   });
 });

@@ -133,6 +133,10 @@ vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
 // fabricates a fresh bridge per call re-arms that effect on every render and
 // loops the component. Partial mock; the rest of src/lib stays real.
 const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0, resumeError: null as string | null, inspection: { success: true, outcome: 'not_found', canCollect: false } as any }));
+const editRecoverySnapshot = vi.hoisted(() => vi.fn(async (): Promise<any> => ({ id: 'pre-edit-recovery-snapshot' })));
+const originalItemReplay = vi.hoisted(() => vi.fn(async (): Promise<any> => ({ success: true, orderId: 'original-order' })));
+beforeEach(() => { editRecoverySnapshot.mockReset().mockResolvedValue({ id: 'pre-edit-recovery-snapshot' }); });
+beforeEach(() => { originalItemReplay.mockReset().mockImplementation(async () => { draftStorage.inspection = { success: true, outcome: 'saved', orderId: 'original-order', canCollect: false }; return { success: true, orderId: 'original-order' }; }); });
 beforeEach(() => { draftStorage.draft = null; draftStorage.generation = 0; draftStorage.resumeError = null; draftStorage.inspection = { success: true, outcome: 'not_found', canCollect: false }; });
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
@@ -153,7 +157,8 @@ vi.mock('../../../../lib', async (importOriginal) => {
       return { success: true, scope: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' }, generation: draftStorage.generation, draft: draftStorage.draft };
     }),
     settings: { get: vi.fn(async () => null) },
-    orders: { getById: vi.fn(async () => null) },
+    orders: { getById: vi.fn(async () => null), updateItems: originalItemReplay },
+    recovery: { createPreActionSnapshot: editRecoverySnapshot },
     customers: {},
     loyalty: {
       getSettings: vi.fn(async () => null),
@@ -502,29 +507,87 @@ describe('MenuModal explicit immutable replay after crash before dispatch', () =
     cartItems: [{ id: 'line', name: 'Coffee', quantity: 1, totalPrice: 4 }],
     context: { orderType: 'pickup', editMode: true, editOrderId: 'original-order', editExpectedVersion: 7 }, state: {},
     submission: { action: 'edit', orderId: 'original-order', client_event_id: 'edit-event', expected_version: 7, total: 4, items: [{ id: 'line', name: 'Coffee', quantity: 1, totalPrice: 4 }] } });
+  it('offers a visible return to orders while preserving the pending original and never saving again', async () => {
+    draftStorage.draft = editor();
+    const frozen = JSON.stringify(draftStorage.draft);
+    const close = vi.fn(); const complete = vi.fn();
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onClose={close} onEditComplete={complete} />);
+    const button = await screen.findByRole('button', { name: 'Return to orders' });
+    expect(button).not.toBeDisabled(); fireEvent.click(button);
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+    expect(complete).not.toHaveBeenCalled();
+    expect(JSON.stringify(draftStorage.draft)).toBe(frozen);
+  });
   it('replays a frozen edit with the exact original event/version and clears only after native acceptance', async () => {
     draftStorage.draft = editor();
     const complete = vi.fn(async (input: any) => {
+      expect(editRecoverySnapshot).toHaveBeenCalledTimes(1);
       expect(input).toMatchObject({ orderId: 'original-order', client_event_id: 'edit-event', expected_version: 7 });
     });
     render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} />);
     fireEvent.click(await screen.findByText('Check original checkout'));
     await waitFor(() => expect(complete).toHaveBeenCalledTimes(1)); await waitFor(() => expect(draftStorage.draft).toBeNull());
   });
+  it.each(['unconfirmed', 'unavailable'])('keeps the original untouched when its recovery snapshot is %s', async failure => {
+    draftStorage.draft = editor(); const frozen = JSON.stringify(draftStorage.draft);
+    if (failure === 'unconfirmed') editRecoverySnapshot.mockResolvedValue({ success: false });
+    else editRecoverySnapshot.mockRejectedValue(new Error('SNAPSHOT_UNAVAILABLE'));
+    const complete = vi.fn(); const close = vi.fn();
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} onClose={close} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(editRecoverySnapshot).toHaveBeenCalledTimes(1);
+    expect(complete).not.toHaveBeenCalled(); expect(close).not.toHaveBeenCalled();
+    expect(JSON.stringify(draftStorage.draft)).toBe(frozen);
+  });
   it('fresh authorization can retry the same frozen edit after an uncertain denial without rebasing', async () => {
     draftStorage.draft = editor();
     draftStorage.inspection = { success: true, outcome: 'uncertain', canCollect: false, recovery: { recoveryState: 'auth_required' } };
-    const complete = vi.fn().mockRejectedValueOnce(new Error('AUTHORIZATION_REQUIRED')).mockResolvedValue(undefined);
+    originalItemReplay.mockRejectedValueOnce(new Error('AUTHORIZATION_REQUIRED'));
+    const complete = vi.fn();
     render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} />);
     fireEvent.click(await screen.findByText('Check original checkout'));
-    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(originalItemReplay).toHaveBeenCalledTimes(1));
     await act(async () => {});
     expect(draftStorage.draft.checkoutRequestId).toBe('edit-event');
     fireEvent.click(screen.getByText('Check original checkout'));
-    await waitFor(() => expect(complete).toHaveBeenCalledTimes(2));
-    expect(complete.mock.calls[1][0]).toEqual(complete.mock.calls[0][0]);
-    expect(complete.mock.calls[1][0]).toMatchObject({ client_event_id: 'edit-event', expected_version: 7, orderId: 'original-order' });
+    await waitFor(() => expect(originalItemReplay).toHaveBeenCalledTimes(2));
+    expect(originalItemReplay.mock.calls[1]).toEqual(originalItemReplay.mock.calls[0]);
+    expect(complete).not.toHaveBeenCalled();
     await waitFor(() => expect(draftStorage.draft).toBeNull());
+  });
+  it('uses the native original item journal without a fresh parent edit preflight after the canonical version advances', async () => {
+    draftStorage.draft = editor(); draftStorage.draft.context.editOriginalOrder = { id: 'original-order', table_session_id: 'original-check', version: 7 };
+    draftStorage.inspection = { success: true, outcome: 'uncertain', canCollect: false, recovery: { recoveryState: 'conflict' } };
+    const complete = vi.fn(async () => { throw new Error('ORDER_VERSION_CONFLICT'); }); const close = vi.fn();
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} onClose={close} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(originalItemReplay).toHaveBeenCalledWith('original-order', editor().submission.items, expect.objectContaining({clientEventId:'edit-event', expectedVersion:7, tableSessionId:'original-check'}));
+    expect(complete).not.toHaveBeenCalled(); expect(editRecoverySnapshot).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1)); expect(draftStorage.draft).toBeNull();
+  });
+  it('keeps a native original held when its mirror acknowledgement is still uncertain', async () => {
+    draftStorage.draft = editor(); const frozen = JSON.stringify(draftStorage.draft);
+    draftStorage.inspection = { success: true, outcome: 'uncertain', canCollect: false, recovery: { recoveryState: 'conflict' } };
+    originalItemReplay.mockResolvedValue({ success: true }); const complete = vi.fn(); const close = vi.fn();
+    render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} onClose={close} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(originalItemReplay).toHaveBeenCalledTimes(1); expect(complete).not.toHaveBeenCalled(); expect(close).not.toHaveBeenCalled();
+    expect(JSON.stringify(draftStorage.draft)).toBe(frozen);
+  });
+  it('does not dispatch or change a native original already being processed', async () => {
+    draftStorage.draft = editor(); const frozen = JSON.stringify(draftStorage.draft);
+    draftStorage.inspection = { success: true, outcome: 'uncertain', canCollect: false, recovery: { recoveryState: 'processing' } };
+    const complete = vi.fn(); render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(originalItemReplay).not.toHaveBeenCalled(); expect(complete).not.toHaveBeenCalled(); expect(editRecoverySnapshot).not.toHaveBeenCalled();
+    expect(JSON.stringify(draftStorage.draft)).toBe(frozen);
+  });
+  it('does not mint or send an event when the frozen native edit identity is missing', async () => {
+    draftStorage.draft = editor(); delete draftStorage.draft.submission.client_event_id; const frozen = JSON.stringify(draftStorage.draft);
+    draftStorage.inspection = { success: true, outcome: 'uncertain', canCollect: false, recovery: { recoveryState: 'conflict' } };
+    const complete = vi.fn(); render(<MenuModal {...baseProps} isOpen editMode editOrderId="original-order" onEditComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout')); await act(async () => {});
+    expect(originalItemReplay).not.toHaveBeenCalled(); expect(complete).not.toHaveBeenCalled(); expect(JSON.stringify(draftStorage.draft)).toBe(frozen);
   });
   it('absence of a card reservation never permits new collection or erases the frozen cart', async () => {
     draftStorage.draft = { ...editor(), draftId: 'frozen-card', checkoutRequestId: 'card-request',

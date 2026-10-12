@@ -126,6 +126,7 @@
       "batchDiscountApplied": "Remise appliquée aux articles sélectionnés"
     },
     "errors": {
+      "checkChanged": "L’addition a changé. Vérifiez les articles et le solde mis à jour avant de continuer.",
       "tableMutationBlocked": "Une action précédente sur la table attend une confirmation. Vérifiez l’action enregistrée dans l’état de synchronisation avant toute autre modification.",
       "tableMutationRefused": "La modification de la table n’a pas été acceptée. Actualisez l’addition et vérifiez votre sélection avant de réessayer.",
       "tableMutationBatchRefused": "La modification de la table n’a pas été acceptée. Articles sélectionnés non envoyés : {{count}}. Actualisez l’addition et vérifiez votre sélection avant de réessayer.",
@@ -195,5 +196,58 @@
       "minutes": "{{minutes}} min"
     },
     "floorPlanAriaLabel": "Plan des tables"
+  },
+  "waiterService": {
+    "unreadRejections": "Refus à consulter : {{count}}",
+    "rejectionSummary": "Refusé par {{waiter}} · Table {{table}}",
+    "acknowledgeRejection": "Marquer comme vu",
+    "rejectedChangeHelp": "La modification proposée n’a pas été appliquée. L’addition et l’attribution sont restées inchangées.",
+    "rejectedQrHelp": "La demande du client reste sur le terminal principal pour être réattribuée.",
+    "noticeSaveFailed": "Impossible d’enregistrer la confirmation. Appuyez à nouveau sur « Marquer comme vu ».",
+    "qrRequest": "Demande par QR de table",
+    "awaitingAssignment": "Choisissez un serveur. La note change après son acceptation.",
+    "chooseWaiter": "Choisir un serveur",
+    "assign": "Envoyer au serveur",
+    "noActiveWaiters": "Aucun serveur avec un service actif n’est disponible.",
+    "requests": "Demandes de service",
+    "incoming": "Demande pour votre table",
+    "accept": "Accepter",
+    "reject": "Refuser",
+    "table": "Table {{table}}",
+    "destination": "Destination : table {{table}}",
+    "sent": "Envoyé pour acceptation. L’addition reste inchangée jusqu’à l’acceptation.",
+    "awaitingDelivery": "Votre décision est enregistrée et attend son envoi.",
+    "stale": "Le statut des demandes de service n’a pas pu être confirmé. Vérifiez la connexion et réessayez.",
+    "empty": "Aucune demande de service.",
+    "status": {
+      "pending": "En attente d’acceptation",
+      "accepted": "Accepté",
+      "rejected": "Refusé",
+      "superseded": "Modifié — vérifier à nouveau"
+    },
+    "kind": {
+      "assign_waiter": "Transfert au serveur",
+      "append_items": "Articles supplémentaires",
+      "transfer_item": "Transfert d’articles",
+      "move_table": "Déplacer la table",
+      "merge_table": "Fusionner les tables"
+    },
+    "signIn": "Confirmer avec votre code personnel",
+    "pin": "Code personnel",
+    "signInFailed": "Connexion non confirmée. Réessayez.",
+    "mainResolutionTitle": "Décision du terminal principal",
+    "mainResolutionHelp": "Attribuez à un autre serveur, prenez en charge sur le terminal principal ou refusez définitivement la demande.",
+    "reassign": "Attribuer pour une nouvelle acceptation",
+    "takeItems": "Prendre uniquement les nouveaux articles",
+    "rejectionReason": "Motif du refus définitif",
+    "finalReject": "Refuser définitivement",
+    "finalRejectHelp": "Seule cette demande est refusée. Les articles et paiements existants sont conservés.",
+    "resolutionRefused": "L’action n’a pas été appliquée car la situation a changé. Vérifiez la demande et choisissez à nouveau.",
+    "resolutionStatus": {
+      "reject_final": "Refus définitif par le terminal principal",
+      "reassign": "Réattribué pour une nouvelle acceptation",
+      "main_items": "Nouveaux articles pris en charge par le terminal principal"
+    },
+    "itemResponsibility": "Responsable des articles · {{name}}"
   }
 }

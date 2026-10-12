@@ -126,6 +126,7 @@
       "batchDiscountApplied": "Rabatt auf ausgewählte Artikel angewendet"
     },
     "errors": {
+      "checkChanged": "Die Tischrechnung hat sich geändert. Prüfen Sie die aktualisierten Artikel und den offenen Betrag, bevor Sie fortfahren.",
       "tableMutationBlocked": "Eine vorherige Tischaktion wartet auf Bestätigung. Prüfen Sie die gespeicherte Aktion im Sync-Zustand, bevor Sie eine weitere Änderung vornehmen.",
       "tableMutationRefused": "Die Tischänderung wurde nicht angenommen. Aktualisieren Sie die Rechnung und prüfen Sie Ihre Auswahl, bevor Sie es erneut versuchen.",
       "tableMutationBatchRefused": "Die Tischänderung wurde nicht angenommen. Nicht gesendete ausgewählte Artikel: {{count}}. Aktualisieren Sie die Rechnung und prüfen Sie Ihre Auswahl, bevor Sie es erneut versuchen.",
@@ -195,5 +196,58 @@
       "minutes": "{{minutes}} Min."
     },
     "floorPlanAriaLabel": "Tischplan"
+  },
+  "waiterService": {
+    "unreadRejections": "Ablehnungen zur Prüfung: {{count}}",
+    "rejectionSummary": "Abgelehnt von {{waiter}} · Tisch {{table}}",
+    "acknowledgeRejection": "Als gesehen markieren",
+    "rejectedChangeHelp": "Die vorgeschlagene Änderung wurde nicht angewendet. Rechnung und Zuweisung blieben unverändert.",
+    "rejectedQrHelp": "Die Kundenanfrage bleibt am Hauptterminal zur erneuten Zuweisung.",
+    "noticeSaveFailed": "Die Bestätigung konnte nicht gespeichert werden. Tippen Sie erneut auf „Als gesehen markieren“.",
+    "qrRequest": "Anfrage über den Tisch-QR-Code",
+    "awaitingAssignment": "Wählen Sie eine Servicekraft. Die Rechnung ändert sich erst nach ihrer Annahme.",
+    "chooseWaiter": "Servicekraft auswählen",
+    "assign": "An Servicekraft senden",
+    "noActiveWaiters": "Es sind keine Servicekräfte mit aktiver Schicht verfügbar.",
+    "requests": "Serviceanfragen",
+    "incoming": "Anfrage für Ihren Tisch",
+    "accept": "Annehmen",
+    "reject": "Ablehnen",
+    "table": "Tisch {{table}}",
+    "destination": "Ziel: Tisch {{table}}",
+    "sent": "Zur Annahme gesendet. Die Rechnung bleibt bis zur Annahme unverändert.",
+    "awaitingDelivery": "Ihre Entscheidung ist gespeichert und wartet auf Übermittlung.",
+    "stale": "Der Status der Serviceanfragen konnte nicht bestätigt werden. Prüfen Sie die Verbindung und versuchen Sie es erneut.",
+    "empty": "Keine Serviceanfragen.",
+    "status": {
+      "pending": "Wartet auf Annahme",
+      "accepted": "Angenommen",
+      "rejected": "Abgelehnt",
+      "superseded": "Geändert — erneut prüfen"
+    },
+    "kind": {
+      "assign_waiter": "Kellnerübergabe",
+      "append_items": "Zusätzliche Artikel",
+      "transfer_item": "Artikel übertragen",
+      "move_table": "Tisch verschieben",
+      "merge_table": "Tische zusammenführen"
+    },
+    "signIn": "Mit Ihrer Mitarbeiter-PIN bestätigen",
+    "pin": "Mitarbeiter-PIN",
+    "signInFailed": "Anmeldung nicht bestätigt. Erneut versuchen.",
+    "mainResolutionTitle": "Entscheidung am Hauptterminal",
+    "mainResolutionHelp": "Einem anderen Kellner zuweisen, am Hauptterminal übernehmen oder die Anfrage endgültig ablehnen.",
+    "reassign": "Zur erneuten Annahme zuweisen",
+    "takeItems": "Nur neue Artikel am Hauptterminal übernehmen",
+    "rejectionReason": "Grund für die endgültige Ablehnung",
+    "finalReject": "Endgültig ablehnen",
+    "finalRejectHelp": "Nur diese Anfrage wird abgelehnt. Vorhandene Artikel und Zahlungen bleiben erhalten.",
+    "resolutionRefused": "Die Aktion wurde wegen einer geänderten Situation nicht angewendet. Prüfen Sie die Anfrage und wählen Sie erneut.",
+    "resolutionStatus": {
+      "reject_final": "Vom Hauptterminal endgültig abgelehnt",
+      "reassign": "Zur erneuten Annahme zugewiesen",
+      "main_items": "Neue Artikel vom Hauptterminal übernommen"
+    },
+    "itemResponsibility": "Artikelverantwortung · {{name}}"
   }
 }

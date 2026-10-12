@@ -1484,6 +1484,9 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
 
         // Compute staff earnings for this shift (all role types)
+        if role_type == "driver" {
+            freeze_driver_earning_tenders(&conn, &shift_id, &now)?;
+        }
         let (order_count, shift_cash_sales, shift_card_sales, total_sales) =
             compute_shift_close_totals(&conn, &shift_id, &role_type, &shift_check_in_time, &now)?;
 
@@ -2929,6 +2932,21 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             .filter_map(|r| r.ok())
             .collect();
         for delivery in &mut driver_deliveries {
+            let (cash, card) = driver_earning_tender_cents(
+                &conn,
+                delivery["id"].as_str().unwrap_or_default(),
+                Cents::round_half_even(delivery["cash_collected"].as_f64().unwrap_or(0.0)).as_i64(),
+                Cents::round_half_even(delivery["card_amount"].as_f64().unwrap_or(0.0)).as_i64(),
+            )?;
+            delivery["cash_collected"] = json!(Cents::new(cash).to_f64_dp2());
+            delivery["card_amount"] = json!(Cents::new(card).to_f64_dp2());
+            delivery["payment_method"] = json!(if cash > 0 && card > 0 {
+                "mixed"
+            } else if card > 0 {
+                "card"
+            } else {
+                "cash"
+            });
             let returned = crate::staff_cash_returns::sum(
                 &conn,
                 delivery["order_id"].as_str(),
@@ -4582,24 +4600,119 @@ fn compute_shift_payment_totals(
     compute_shift_payment_totals_in_window(conn, shift_id, role_type, None, None)
 }
 
+/// Open courier previews and checkout read the current receipts. A mirrored
+/// earning may arrive before its payment and retain a stale zero. Reading a
+/// preview never settles the earning or rewrites a closed/transferred shift.
+fn driver_earning_tender_cents(
+    conn: &Connection,
+    earning_id: &str,
+    recorded_cash: i64,
+    recorded_card: i64,
+) -> Result<(i64, i64), String> {
+    let live_order: Option<String> = conn
+        .query_row(
+            "SELECT de.order_id FROM driver_earnings de
+             JOIN staff_shifts ss ON ss.id = de.staff_shift_id
+             JOIN orders o ON o.id = de.order_id
+             WHERE de.id = ?1 AND ss.status = 'active' AND ss.check_out_time IS NULL
+               AND COALESCE(de.settled, 0) = 0 AND COALESCE(de.is_transferred, 0) = 0
+               AND ss.role_type = 'driver' AND ss.staff_id = de.driver_id
+               AND ss.branch_id = de.branch_id AND o.branch_id = de.branch_id
+               AND o.driver_id = de.driver_id AND o.order_type = 'delivery'
+               AND COALESCE(o.is_ghost, 0) = 0",
+            [earning_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read current driver earning scope: {error}"))?;
+    let Some(order_id) = live_order else {
+        return Ok((recorded_cash, recorded_card));
+    };
+    let (_, cash, card, _) = crate::order_ownership::get_order_payment_totals(conn, &order_id)?;
+    Ok((
+        Cents::round_half_even(cash).as_i64(),
+        Cents::round_half_even(card).as_i64(),
+    ))
+}
+
+/// Freeze the preview's receipt amounts only during an actual close, inside
+/// its transaction. Subsequent closed-shift prints must retain those amounts.
+fn freeze_driver_earning_tenders(
+    conn: &Connection,
+    shift_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(cash_collected_cents,CAST(ROUND(cash_collected*100) AS INTEGER),0),
+                    COALESCE(card_amount_cents,CAST(ROUND(card_amount*100) AS INTEGER),0)
+         FROM driver_earnings WHERE staff_shift_id=?1
+           AND COALESCE(settled,0)=0 AND COALESCE(is_transferred,0)=0"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([shift_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (id, saved_cash, saved_card) in rows {
+        let (cash, card) = driver_earning_tender_cents(conn, &id, saved_cash, saved_card)?;
+        if (cash, card) == (saved_cash, saved_card) {
+            continue;
+        }
+        let method = if cash > 0 && card > 0 {
+            "mixed"
+        } else if card > 0 {
+            "card"
+        } else {
+            "cash"
+        };
+        conn.execute(
+            "UPDATE driver_earnings SET cash_collected=?1,cash_collected_cents=?2,
+             card_amount=?3,card_amount_cents=?4,cash_to_return=?1,cash_to_return_cents=?2,
+             payment_method=?5,updated_at=?6 WHERE id=?7",
+            params![
+                Cents::new(cash).to_f64_dp2(),
+                cash,
+                Cents::new(card).to_f64_dp2(),
+                card,
+                method,
+                now,
+                id
+            ],
+        )
+        .map_err(|e| format!("freeze driver receipt totals: {e}"))?;
+        let payload = crate::order_ownership::build_driver_earning_sync_payload(conn, &id)?;
+        crate::order_ownership::enqueue_or_refresh_driver_earning_sync_row(conn, &id, &payload)?;
+    }
+    Ok(())
+}
+
 fn compute_driver_shift_earning_totals(
     conn: &Connection,
     shift_id: &str,
 ) -> Result<(i64, f64, f64, f64), String> {
-    let mut stmt=conn.prepare("SELECT order_id,COALESCE(cash_collected_cents,CAST(ROUND(cash_collected*100) AS INTEGER),0),COALESCE(card_amount_cents,CAST(ROUND(card_amount*100) AS INTEGER),0) FROM driver_earnings WHERE staff_shift_id=?1 AND COALESCE(settled,0)=0 AND COALESCE(is_transferred,0)=0").map_err(|e|e.to_string())?;
+    let mut stmt=conn.prepare("SELECT order_id,COALESCE(cash_collected_cents,CAST(ROUND(cash_collected*100) AS INTEGER),0),COALESCE(card_amount_cents,CAST(ROUND(card_amount*100) AS INTEGER),0),id FROM driver_earnings WHERE staff_shift_id=?1 AND COALESCE(settled,0)=0 AND COALESCE(is_transferred,0)=0").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([shift_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let (mut cash, mut card) = (0, 0);
-    for (order, original_cash, original_card) in &rows {
+    for (order, saved_cash, saved_card, earning_id) in &rows {
+        let (original_cash, original_card) =
+            driver_earning_tender_cents(conn, earning_id, *saved_cash, *saved_card)?;
         cash += (original_cash
             - crate::staff_cash_returns::sum(conn, Some(order), Some(shift_id))?)
         .max(0);

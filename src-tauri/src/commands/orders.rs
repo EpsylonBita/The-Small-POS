@@ -4059,30 +4059,105 @@ pub async fn order_get_by_customer_phone(
         payload_arg0_as_string(arg0, &["customerPhone", "customer_phone", "phone"])
             .or(arg1)
             .ok_or("Missing customer phone")?;
+    let all_orders = sync::get_all_orders_since_utc(&db, None)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let organization_id = db::get_setting(&conn, "terminal", "organization_id")
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| storage::get_credential("organization_id"))
+        .unwrap_or_default();
+    let branch_id = db::get_setting(&conn, "terminal", "branch_id")
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| storage::get_credential("branch_id"))
+        .unwrap_or_default();
+    let filtered = customer_history_for_scope(
+        &conn,
+        all_orders,
+        &customer_phone,
+        &organization_id,
+        &branch_id,
+    )?;
+
+    Ok(serde_json::json!({ "success": true, "orders": filtered }))
+}
+
+fn customer_history_for_scope(
+    conn: &rusqlite::Connection,
+    orders: Vec<Value>,
+    customer_phone: &str,
+    organization_id: &str,
+    branch_id: &str,
+) -> Result<Vec<Value>, String> {
     let normalized = customer_phone
         .chars()
-        .filter(|c| !matches!(c, ' ' | '-' | '(' | ')'))
+        .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '(' | ')' | '.'))
         .collect::<String>();
-    let all_orders = sync::get_all_orders(&db)?;
-    let filtered: Vec<serde_json::Value> = all_orders
+    if normalized.is_empty() || organization_id.trim().is_empty() || branch_id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn
+        .prepare("SELECT id FROM orders WHERE organization_id = ?1 AND branch_id = ?2")
+        .map_err(|error| error.to_string())?;
+    let scoped_ids = statement
+        .query_map([organization_id, branch_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(orders
         .into_iter()
         .filter(|o| {
+            if !o
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| scoped_ids.contains(id))
+            {
+                return false;
+            }
             let phone = o
                 .get("customerPhone")
                 .and_then(|v| v.as_str())
                 .or_else(|| o.get("customer_phone").and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .chars()
-                .filter(|c| !matches!(c, ' ' | '-' | '(' | ')'))
+                .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '(' | ')' | '.'))
                 .collect::<String>();
-            !phone.is_empty() && (phone.contains(&normalized) || normalized.contains(&phone))
+            phone == normalized
         })
-        .collect();
+        .rev()
+        .collect())
+}
 
-    Ok(serde_json::json!({
-        "success": true,
-        "orders": filtered
-    }))
+#[cfg(test)]
+mod customer_history_scope_tests {
+    use super::*;
+
+    #[test]
+    fn customer_history_requires_exact_phone_and_current_organization() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE orders(id TEXT, organization_id TEXT, branch_id TEXT); INSERT INTO orders VALUES ('own','org-1','branch-1'),('foreign','org-2','branch-2'),('other-branch','org-1','branch-3'),('unknown',NULL,NULL);").unwrap();
+        let orders = vec![
+            serde_json::json!({"id":"own","customer_phone":"+41 (21) 555-0301"}),
+            serde_json::json!({"id":"foreign","customer_phone":"+41215550301"}),
+            serde_json::json!({"id":"other-branch","customer_phone":"+41215550301"}),
+            serde_json::json!({"id":"unknown","customer_phone":"+41215550301"}),
+        ];
+        let history = customer_history_for_scope(
+            &conn,
+            orders.clone(),
+            "+41 21 555.0301",
+            "org-1",
+            "branch-1",
+        )
+        .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["id"], "own");
+        for (phone, org) in [("0301", "org-1"), ("", "org-1"), ("+41215550301", "")] {
+            assert!(
+                customer_history_for_scope(&conn, orders.clone(), phone, org, "branch-1")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 }
 
 /// What the local status write decided.
@@ -4128,6 +4203,7 @@ pub(crate) fn apply_order_status_in_connection(
     now: &str,
 ) -> Result<LocalStatusChange, String> {
     let (actual_order_id, remote_order_id) = resolve_order_id_with_remote(conn, order_id_raw)?;
+    payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, Some(status))?;
     ensure_box_order_mutation_allowed(&conn, &actual_order_id, status, BoxOrderMutation::Generic)?;
     let previous_status = ensure_order_status_transition_allowed(&conn, &actual_order_id, status)?;
     // Fix review 30/09/2026 (founder rule, Android parity): money taken on
@@ -4362,6 +4438,7 @@ fn convert_pickup_order_to_delivery_inner(
     let now = chrono::Utc::now().to_rfc3339();
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let actual_order_id = resolve_renderer_order_id(&conn, &order_id)?;
+    payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
     let paid_claim:bool=conn.query_row("SELECT LOWER(COALESCE(payment_status,'')) IN ('paid','completed','partial','partially_paid') FROM orders WHERE id=?1",[&actual_order_id],|row|row.get(0)).map_err(|e|e.to_string())?;
     if paid_claim || payments::load_principal_paid_for_order(&conn, &actual_order_id)? > 0.0 {
         return Err("ORDER_EDIT_SETTLEMENT_REQUIRED".into());
@@ -4713,6 +4790,8 @@ fn ensure_full_order_item_replacement_safe(
     order_id: &str,
     expected_version: Option<i64>,
     requested_session: Option<&str>,
+    append_items: Option<&[Value]>,
+    requested_table: Option<&str>,
 ) -> Result<(), String> {
     if room_charge_is_unconfirmed(conn, order_id)? {
         return Err("FOLIO_CHARGE_RECONCILIATION_REQUIRED: synchronize the room charge before changing its items.".to_string());
@@ -4723,12 +4802,17 @@ fn ensure_full_order_item_replacement_safe(
         NULLIF(TRIM(table_id),''),COALESCE(items,'[]'),COALESCE(remote_version,version,1) FROM orders WHERE id=?1",
         rusqlite::params![order_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)))
         .map_err(|error|format!("Read order edit scope: {error}"))?;
-    if balance.net_paid > 0.005
-        || balance.completed_payment_count > 0
-        || matches!(
-            payment_status.trim().to_ascii_lowercase().as_str(),
-            "paid" | "completed" | "partial" | "partially_paid"
-        )
+    let scoped_append = remote_id.is_some()
+        && session_id.is_some()
+        && requested_session.is_some()
+        && append_items.is_some_and(|items| is_table_append_only(&items_json, items));
+    if !scoped_append
+        && (balance.net_paid > 0.005
+            || balance.completed_payment_count > 0
+            || matches!(
+                payment_status.trim().to_ascii_lowercase().as_str(),
+                "paid" | "completed" | "partial" | "partially_paid"
+            ))
     {
         return Err("Paid order item changes require the settlement/refund workflow.".into());
     }
@@ -4756,8 +4840,10 @@ fn ensure_full_order_item_replacement_safe(
     let session_id = requested_session
         .ok_or("An exact table check is required before replacing table order items.")?;
     let remote_id = remote_id.ok_or("Sync the table order before changing a server check.")?;
-    let table_id =
-        table_id.ok_or("Table order ownership is unavailable; refresh before editing.")?;
+    let table_id = requested_table
+        .map(str::to_string)
+        .or(table_id)
+        .ok_or("Table order ownership is unavailable; refresh before editing.")?;
     let cached = crate::table_session_cache::load(
         conn,
         &serde_json::json!({"sessionId":session_id,"orderId":remote_id,"tableId":table_id}),
@@ -4766,7 +4852,47 @@ fn ensure_full_order_item_replacement_safe(
     if session.pointer("/order/version").and_then(Value::as_i64) != expected_version {
         return Err("Saved table check version changed. Refresh before editing.".into());
     }
+    if scoped_append {
+        return Ok(());
+    }
     ensure_snapshot_has_complete_unpaid_order(session, &items_json, &remote_id)
+}
+
+// This only admits a remote atomic append. Local replacement and ordinary paid
+// settlement retain their guards; the server rechecks all recorded line fields.
+fn is_table_append_only(original_json: &str, items: &[Value]) -> bool {
+    let Ok(original) = serde_json::from_str::<Vec<Value>>(original_json) else {
+        return false;
+    };
+    if original.is_empty() {
+        return false;
+    }
+    let next: Vec<Value> = items.iter().map(canonical_item_edit_payload).collect();
+    let mut ids = HashSet::new();
+    for line in &next {
+        if let Some(id) = line.get("id").and_then(Value::as_str) {
+            if !ids.insert(id) {
+                return false;
+            }
+        }
+    }
+    original.iter().map(canonical_item_edit_payload).all(|old| {
+        let Some(id) = old.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(line) = next
+            .iter()
+            .find(|line| line.get("id").and_then(Value::as_str) == Some(id))
+        else {
+            return false;
+        };
+        let quantity = value_f64(line, &["quantity"]).unwrap_or(-1.0);
+        quantity.is_finite()
+            && quantity >= value_f64(&old, &["quantity"]).unwrap_or(f64::INFINITY)
+            && line.get("menu_item_id") == old.get("menu_item_id")
+            && line.get("retail_product_id") == old.get("retail_product_id")
+            && line.get("unit_price") == old.get("unit_price")
+    })
 }
 
 fn ensure_snapshot_has_complete_unpaid_order(
@@ -4802,6 +4928,26 @@ fn ensure_snapshot_has_complete_unpaid_order(
         .and_then(Value::as_array)
         .ok_or(blocked)?;
     for allocation in allocations {
+        // Independent-parent transfers create a new canonical line owned in
+        // full by this parent. Its provenance is history, not a shared claim.
+        // Legacy same-parent transfers still need the scoped editing route.
+        let independent_incoming = allocation
+            .pointer("/metadata/transferred_from_order_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != remote_id && uuid::Uuid::parse_str(id).is_ok())
+            && allocation
+                .pointer("/metadata/transferred_from_order_item_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    uuid::Uuid::parse_str(id).is_ok()
+                        && allocation.get("order_item_id").and_then(Value::as_str) != Some(id)
+                })
+            && allocation
+                .get("transferred_from_item_id")
+                .map_or(true, Value::is_null)
+            && allocation
+                .get("transferred_to_session_id")
+                .map_or(true, Value::is_null);
         if money_or_quantity(allocation.get("paid_quantity"))? > 0.0005
             || matches!(
                 allocation.get("status").and_then(Value::as_str),
@@ -4811,9 +4957,10 @@ fn ensure_snapshot_has_complete_unpaid_order(
                 .get("order_id")
                 .and_then(Value::as_str)
                 .is_some_and(|id| id != remote_id)
-            || allocation
-                .pointer("/metadata/transferred_from_session_id")
-                .is_some()
+            || (!independent_incoming
+                && allocation
+                    .pointer("/metadata/transferred_from_session_id")
+                    .is_some())
             || allocation
                 .pointer("/metadata/transferred_to_session_id")
                 .is_some()
@@ -4920,6 +5067,9 @@ fn try_metadata_only_item_edit(
     let Some(event) = payload.client_event_id.as_deref() else {
         return Ok(None);
     };
+    if crate::table_session_cache::existing_item_edit_attempt(conn, &actual, event)?.is_some() {
+        return Ok(None);
+    }
     let audit_id = format!("order-header-edit:{event}");
     let prior:Option<String>=conn.query_row("SELECT payload_json FROM recovery_action_log WHERE id=?1 AND action_id='order_header_edit'",[&audit_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     if let Some(prior) = prior {
@@ -4998,6 +5148,59 @@ fn try_metadata_only_item_edit(
     Ok(Some(actual))
 }
 
+fn validate_item_edit_ack(
+    answer: &Value,
+    request: &Value,
+    expected_version: Option<i64>,
+) -> Result<(), String> {
+    let canonical = answer
+        .get("data")
+        .filter(|order| order.get("id") == request.get("id"))
+        .ok_or("Canonical order edit response has no matching order")?;
+    if canonical
+        .get("order_items")
+        .or_else(|| canonical.get("items"))
+        .and_then(Value::as_array)
+        .is_none()
+        || canonical
+            .get("version")
+            .and_then(Value::as_i64)
+            .is_none_or(|version| version < expected_version.unwrap_or(1))
+    {
+        return Err("Canonical order edit response has no complete item/version snapshot".into());
+    }
+    Ok(())
+}
+
+fn metadata_item_edit_candidate(
+    conn: &rusqlite::Connection,
+    payload: &OrderUpdateItemsPayload,
+) -> Result<Option<String>, String> {
+    let actual = resolve_renderer_order_id(conn, &payload.order_id)?;
+    // A canonical pull may already contain this edit. Its retained original
+    // still owns acknowledgement; never reclassify it as a new header edit.
+    if let Some(event) = payload.client_event_id.as_deref() {
+        if crate::table_session_cache::existing_item_edit_attempt(conn, &actual, event)?.is_some() {
+            return Ok(None);
+        }
+    }
+    let prior=payload.client_event_id.as_ref().is_some_and(|event| conn.query_row("SELECT EXISTS(SELECT 1 FROM recovery_action_log WHERE id=?1 AND action_id='order_header_edit')",[format!("order-header-edit:{event}")],|r|r.get::<_,bool>(0)).unwrap_or(false));
+    if !prior
+        && payload.client_event_id.is_some()
+        && is_metadata_only_item_edit(
+            conn,
+            &actual,
+            &payload.items,
+            payload.order_updates.as_ref(),
+            payload.financials.as_ref(),
+        )?
+    {
+        Ok(Some(actual))
+    } else {
+        Ok(None)
+    }
+}
+
 #[tauri::command]
 pub async fn order_update_items(
     arg0: Option<serde_json::Value>,
@@ -5010,22 +5213,7 @@ pub async fn order_update_items(
     let payload = parse_order_update_items_payload(Some(request.clone()), None)?;
     let header_candidate = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let actual = resolve_renderer_order_id(&conn, &payload.order_id)?;
-        let prior=payload.client_event_id.as_ref().is_some_and(|event| conn.query_row("SELECT EXISTS(SELECT 1 FROM recovery_action_log WHERE id=?1 AND action_id='order_header_edit')",[format!("order-header-edit:{event}")],|r|r.get::<_,bool>(0)).unwrap_or(false));
-        if !prior
-            && payload.client_event_id.is_some()
-            && is_metadata_only_item_edit(
-                &conn,
-                &actual,
-                &payload.items,
-                payload.order_updates.as_ref(),
-                payload.financials.as_ref(),
-            )?
-        {
-            Some(actual)
-        } else {
-            None
-        }
+        metadata_item_edit_candidate(&conn, &payload)?
     };
     let header_preflight = if let Some(order) = header_candidate {
         let cached = {
@@ -5063,6 +5251,7 @@ pub async fn order_update_items(
     let header_fields = edit_header_wire_fields(order_updates.as_ref())?;
     let expected_version = payload.expected_version;
     let table_session_id = payload.table_session_id;
+    let requested_table_id = value_str(&request, &["tableId", "table_id"]);
     let client_event_id = payload
         .client_event_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -5123,6 +5312,8 @@ pub async fn order_update_items(
                 &actual,
                 expected_version,
                 table_session_id.as_deref(),
+                Some(&items),
+                requested_table_id.as_deref(),
             )?;
             let (remote,status,table,guests):(Option<String>,String,Option<String>,Option<i64>)=conn.query_row(
             "SELECT NULLIF(TRIM(supabase_id),''),status,table_id,guest_count FROM orders WHERE id=?1",
@@ -5133,7 +5324,7 @@ pub async fn order_update_items(
                 let canonical_items: Vec<Value> =
                     merged.iter().map(canonical_item_edit_payload).collect();
                 let mut body = serde_json::json!({"id":remote,"status":status,"items":canonical_items,
-                "expected_version":expected_version,"table_id":table,"table_session_id":table_session_id,
+                "expected_version":expected_version,"table_id":requested_table_id.as_ref().or(table.as_ref()),"table_session_id":table_session_id,
                 "guest_count":guests,"client_event_id":client_event_id});
                 if let Some(notes) = &notes {
                     body["special_instructions"] = serde_json::json!(notes);
@@ -5173,23 +5364,7 @@ pub async fn order_update_items(
                 "Order edit was not confirmed. Reconnect and retry the original change: {error}"
             )
         })?;
-        let canonical = answer
-            .get("data")
-            .filter(|order| order.get("id") == request.get("id"))
-            .ok_or("Canonical order edit response has no matching order")?;
-        if canonical
-            .get("order_items")
-            .and_then(Value::as_array)
-            .is_none()
-            || canonical
-                .get("version")
-                .and_then(Value::as_i64)
-                .is_none_or(|version| version < expected_version.unwrap_or(1))
-        {
-            return Err(
-                "Canonical order edit response has no complete item/version snapshot".into(),
-            );
-        }
+        validate_item_edit_ack(&answer, &request, expected_version)?;
         let scoped_session = crate::table_attempt_recovery::confirm_foreground_item(
             &db,
             &resolved_order_id,
@@ -5210,11 +5385,14 @@ pub async fn order_update_items(
             .unchecked_transaction()
             .map_err(|error| format!("Begin durable order item edit: {error}"))?;
         let actual_order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
+        payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
         ensure_full_order_item_replacement_safe(
             &conn,
             &actual_order_id,
             expected_version,
             table_session_id.as_deref(),
+            None,
+            None,
         )?;
         let queued_base_version: i64 = conn
             .query_row(
@@ -5352,6 +5530,71 @@ fn canonical_item_edit_payload(item: &Value) -> Value {
 #[cfg(test)]
 mod table_item_scope_guard_tests {
     use super::*;
+    #[test]
+    fn retained_edit_ack_accepts_the_api_items_relation_without_rebasing_the_original() {
+        let request = serde_json::json!({"id":"original-order","expected_version":5});
+        let answer = serde_json::json!({"success":true,"data":{"id":"original-order","version":7,"items":[{"id":"original-line","quantity":1,"unit_price":24,"total_price":24}],"edit_replayed":true,"edit_event_version":7}});
+        validate_item_edit_ack(&answer, &request, Some(5))
+            .expect("the full canonical API items relation confirms the exact original");
+    }
+
+    #[test]
+    fn retained_edit_ack_refuses_incomplete_wrong_and_malformed_relations() {
+        let request = serde_json::json!({"id":"original-order"});
+        let good = serde_json::json!({"success":true,"data":{"id":"original-order","version":7,"order_items":[]}});
+        assert!(validate_item_edit_ack(&good, &request, Some(5)).is_ok());
+        for change in [
+            serde_json::json!({"id":"other"}),
+            serde_json::json!({"version":4}),
+            serde_json::json!({"version":null}),
+            serde_json::json!({"order_items":null,"items":[]}),
+            serde_json::json!({"order_items":{},"items":[]}),
+        ] {
+            let mut answer = good.clone();
+            answer["data"]
+                .as_object_mut()
+                .unwrap()
+                .extend(change.as_object().unwrap().clone());
+            assert!(
+                validate_item_edit_ack(&answer, &request, Some(5)).is_err(),
+                "{answer}"
+            );
+        }
+        let missing =
+            serde_json::json!({"success":true,"data":{"id":"original-order","version":7}});
+        assert!(validate_item_edit_ack(&missing, &request, Some(5)).is_err());
+    }
+
+    #[test]
+    fn scoped_append_keeps_originals_and_allows_a_new_round_only() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let original = serde_json::json!([{"id":id,"quantity":2,"unit_price":7}]);
+        let old = original[0].clone();
+        assert!(is_table_append_only(
+            &original.to_string(),
+            &[
+                old.clone(),
+                serde_json::json!({"quantity":1,"unit_price":10.5})
+            ]
+        ));
+        assert!(is_table_append_only(
+            &original.to_string(),
+            &[serde_json::json!({"id":id,"quantity":3,"unit_price":7})]
+        ));
+        assert!(!is_table_append_only(&original.to_string(), &[]));
+        assert!(!is_table_append_only(
+            &original.to_string(),
+            &[serde_json::json!({"id":id,"quantity":1,"unit_price":7})]
+        ));
+        assert!(!is_table_append_only(
+            &original.to_string(),
+            &[serde_json::json!({"id":id,"quantity":2,"unit_price":8})]
+        ));
+        assert!(!is_table_append_only(
+            &original.to_string(),
+            &[old.clone(), old]
+        ));
+    }
     fn snapshot(quantity: f64) -> Value {
         serde_json::json!({
             "balance":{"paid_total":0},"order":{"order_items":[{"id":"line","quantity":quantity}]},
@@ -5379,6 +5622,35 @@ mod table_item_scope_guard_tests {
         let mut foreign = snapshot(3.0);
         foreign["items"][0]["order_id"] = serde_json::json!("another-order");
         assert!(ensure_snapshot_has_complete_unpaid_order(&foreign, parent, "parent").is_err());
+    }
+    #[test]
+    fn independent_incoming_line_can_be_edited_only_as_a_complete_unpaid_parent() {
+        let parent = r#"[{"id":"line","quantity":3}]"#;
+        let mut incoming = snapshot(3.0);
+        incoming["items"][0]["metadata"] = serde_json::json!({
+            "transferred_from_order_id":"11111111-1111-4111-8111-111111111111",
+            "transferred_from_order_item_id":"22222222-2222-4222-8222-222222222222",
+            "transferred_from_session_id":"33333333-3333-4333-8333-333333333333"
+        });
+        assert!(ensure_snapshot_has_complete_unpaid_order(&incoming, parent, "parent").is_ok());
+        let mut partial = incoming.clone();
+        partial["order"]["order_items"][0]["quantity"] = serde_json::json!(1);
+        assert!(ensure_snapshot_has_complete_unpaid_order(&partial, parent, "parent").is_err());
+        let mut paid = incoming.clone();
+        paid["items"][0]["paid_quantity"] = serde_json::json!(1);
+        assert!(ensure_snapshot_has_complete_unpaid_order(&paid, parent, "parent").is_err());
+        let mut linked = incoming.clone();
+        linked["items"][0]["transferred_from_item_id"] = serde_json::json!("allocation-source");
+        assert!(ensure_snapshot_has_complete_unpaid_order(&linked, parent, "parent").is_err());
+        let mut same_parent = incoming.clone();
+        same_parent["items"][0]["metadata"]["transferred_from_order_id"] =
+            serde_json::json!("parent");
+        assert!(ensure_snapshot_has_complete_unpaid_order(&same_parent, parent, "parent").is_err());
+        let mut unknown_origin = incoming;
+        unknown_origin["items"][0]["metadata"]["transferred_from_order_item_id"] = Value::Null;
+        assert!(
+            ensure_snapshot_has_complete_unpaid_order(&unknown_origin, parent, "parent").is_err()
+        );
     }
     #[test]
     fn canonical_edit_keeps_line_identity_separate_from_menu_identity() {
@@ -6006,6 +6278,7 @@ pub async fn orders_apply_edit_settlement(
         // Freshness is checked by the uncached canonical preview before the
         // picker; a physically confirmed delta is never expired by time.
         let admission = |conn: &rusqlite::Connection| -> Result<(), String> {
+            payments::ensure_ecommerce_order_mutation_allowed(conn, &actual_order_id, None)?;
             let local = payload
                 .expected_local_version
                 .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
@@ -6047,6 +6320,7 @@ pub async fn orders_apply_edit_settlement(
         )?
     } else {
         refuse_identity_less_item_edit(&payload)?;
+        payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
         let prepared = prepare_edit_settlement(&conn, &actual_order_id, &payload)?;
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| format!("begin transaction: {e}"))?;
@@ -6916,6 +7190,7 @@ fn update_order_financials_in_connection(
         .max(0.0);
 
     let actual_order_id = resolve_renderer_order_id(conn, &payload.order_id)?;
+    payments::ensure_ecommerce_order_mutation_allowed(conn, &actual_order_id, None)?;
     if room_charge_is_unconfirmed(conn, &actual_order_id)? {
         return Err("FOLIO_CHARGE_RECONCILIATION_REQUIRED: synchronize the room charge before changing its amount.".to_string());
     }
@@ -7189,6 +7464,9 @@ pub async fn order_delete(
     let actual_order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let actual_order_id = resolve_renderer_deletable_order_id(&conn, &order_id_raw)?;
+        if let Some(id) = actual_order_id.as_ref() {
+            payments::ensure_ecommerce_order_mutation_allowed(&conn, id, None)?;
+        }
         // R7 (round 3, 01/10/2026): the admin's delete broadcast is a server
         // deletion. An order with payment rows or inside a closed Z is kept,
         // hidden as deleted; any other order is deleted here too.
@@ -8662,6 +8940,7 @@ fn decline_order_locally_with_box_confirmation(
 ) -> Result<(String, Option<String>, serde_json::Value), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (order_id, remote_order_id) = resolve_order_id_with_remote(&conn, order_id_raw)?;
+    payments::ensure_ecommerce_order_mutation_allowed(&conn, &order_id, Some("cancelled"))?;
     ensure_generic_table_cancellation_allowed(&conn, &order_id)?;
     let payload = serde_json::json!({
         "orderId": order_id,
@@ -10180,6 +10459,7 @@ pub async fn order_update_type(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
+    payments::ensure_ecommerce_order_mutation_allowed(&conn, &order_id, None)?;
     let mut emitted_status: Option<String> = None;
     if order_type == "pickup" {
         // Keyring-first; plaintext `local_settings` is backward-compat fallback.
@@ -15077,6 +15357,84 @@ mod transition_tests {
 #[cfg(test)]
 mod paid_edit_ledger_tests {
     use super::*;
+    fn retained_edit_after_pull_fixture(
+        conn: &Connection,
+    ) -> (Value, OrderUpdateItemsPayload, String) {
+        let mut request = journaled_edit_fixture(conn, false);
+        request["items"].as_array_mut().unwrap().pop();
+        let mut original = serde_json::json!({"id":"remote-edit","status":"pending","expected_version":1,"items":request["items"]});
+        original["client_event_id"] = request["client_event_id"].clone();
+        crate::table_session_cache::item_edit_attempt(conn, "legacy-edit", &mut original).unwrap();
+        let raw = conn
+            .query_row(
+                "SELECT request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE table_attempt_recovery_v1 SET status='conflict',generation=1",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE orders SET version=2,remote_version=2,sync_status='synced' WHERE id='legacy-edit'",[]).unwrap();
+        let payload = parse_order_update_items_payload(Some(request.clone()), None).unwrap();
+        (request, payload, raw)
+    }
+
+    #[test]
+    fn retained_edit_ack_does_not_start_a_metadata_preflight_after_canonical_pull() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let (_, payload, _) = retained_edit_after_pull_fixture(&conn);
+        assert_eq!(
+            metadata_item_edit_candidate(&conn, &payload).unwrap(),
+            None,
+            "the original item edit owns recovery before metadata classification"
+        );
+    }
+
+    #[test]
+    fn retained_edit_ack_does_not_become_a_new_header_edit_after_canonical_pull() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let (request, payload, raw) = retained_edit_after_pull_fixture(&conn);
+        assert_eq!(
+            try_metadata_only_item_edit(&conn, &payload, &request, None)
+                .expect("original recovery must bypass current-version metadata checks"),
+            None
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            raw
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='orders'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM recovery_action_log WHERE action_id='order_header_edit'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
     use crate::db;
     use rusqlite::{params, Connection};
 

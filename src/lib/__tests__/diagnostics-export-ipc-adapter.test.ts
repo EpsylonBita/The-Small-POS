@@ -40,6 +40,10 @@ beforeEach(() => {
 })
 
 describe('diagnostics export IPC arguments', () => {
+  it('keeps the operator Health view when sending the ZIP to support', async () => {
+    await new TauriBridge().diagnostics.sendRemoteIncident({ healthView })
+    expect(invoke).toHaveBeenCalledWith('diagnostics_send_remote_incident', { arg0: { healthView } })
+  })
   it('sends the shared Health view snapshot with the export options', async () => {
     await new TauriBridge().diagnostics.export({
       includeLogs: true,

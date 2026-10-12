@@ -677,22 +677,31 @@ pub async fn diagnostics_export(
 
 #[tauri::command]
 pub async fn diagnostics_send_remote_incident(
+    arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
+    use tauri::Manager;
     let health = build_system_health_payload(&db, &sync_state).await?;
-    let candidate = incident_reporting::classify_incidents(&health)
-        .into_iter()
-        .find(|candidate| {
-            matches!(
-                candidate.severity,
-                incident_reporting::PosIncidentSeverity::Critical
-                    | incident_reporting::PosIncidentSeverity::High
-            )
-        })
-        .unwrap_or_else(|| incident_reporting::manual_incident_candidate(&health));
-
-    let response = incident_reporting::send_candidate_report(&db, &candidate, &health).await?;
+    let candidate = incident_reporting::manual_incident_candidate(&health);
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    let zip_path = diagnostics::export_diagnostics_bundle(
+        &db,
+        &data_dir,
+        diagnostics::DiagnosticsExportOptions::default(),
+        parse_diagnostics_export_health_view(&arg0),
+    )?;
+    let response = incident_reporting::send_candidate_report_with_bundle(
+        &db,
+        &candidate,
+        &health,
+        Some(&zip_path),
+    )
+    .await?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -701,6 +710,9 @@ pub async fn diagnostics_send_remote_incident(
         "status": response.get("status").and_then(Value::as_str).unwrap_or("open"),
         "deduped": response.get("deduped").and_then(Value::as_bool).unwrap_or(false),
         "alertSent": response.get("alertSent").and_then(Value::as_bool).unwrap_or(false),
+        "alertStatus": response.get("alertStatus"),
+        "bundleStored": response.get("bundleStored"),
+        "path": zip_path,
         "lastSentAt": Utc::now().to_rfc3339(),
     }))
 }

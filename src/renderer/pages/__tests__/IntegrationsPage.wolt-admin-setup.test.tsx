@@ -38,7 +38,7 @@ vi.mock('framer-motion', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (_key: string, fallback: string) => fallback,
+    t: (key: string, fallback?: string) => fallback ?? key,
   }),
 }))
 
@@ -194,6 +194,19 @@ describe('Wolt card is Admin-Dashboard-managed on the till', () => {
       data: { branch_id: 'branch-1', integrations: items },
     })
   }
+
+  it.each(['glovo', 'beds24', 'shopify', 'stripe'])('prepares %s in admin and displays branch status without credentials', async id => {
+    serve([woltItem({ plugin_id: id, provider: id, name: id, category: 'hotel' })])
+    render(<IntegrationsPage />)
+    await screen.findByText(id)
+    if (id === 'stripe') expect(screen.getByText('integrations.stripeConnectionOnly')).toBeInTheDocument()
+    expect(cardInfo(id).getByText('Pending')).toBeInTheDocument()
+    expect(screen.getByText('Complete provider setup in the Admin Dashboard. This screen shows the connection status for this branch.')).toBeInTheDocument()
+    expectNoCredentialSurface()
+    fireEvent.click(screen.getByRole('button', { name: 'Open Admin Dashboard' }))
+    await waitFor(() => expect(mocks.openExternalUrl).toHaveBeenCalledWith(`https://admin.example/plugins?plugin=${id}&branch_id=branch-1&organization_id=org-1`))
+    expect(mocks.posApiPost).not.toHaveBeenCalled()
+  })
 
   it('routes a pending Wolt card to the Admin Dashboard and never opens the credential modal', async () => {
     serve([woltItem()])

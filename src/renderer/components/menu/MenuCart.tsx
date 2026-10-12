@@ -102,6 +102,7 @@ interface MenuCartProps {
   onManualDiscountChange?: (mode: 'percentage' | 'fixed', value: number) => void;
   editMode?: boolean; // When true, shows "Save Changes" instead of "Complete Order"
   isSaving?: boolean; // When true, shows loading state on save button
+  submissionBlocked?: boolean; // A retained original needs verification before another submission
   orderType?: 'pickup' | 'delivery' | 'dine-in'; // Order type for minimum order validation
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
   deliveryFee?: number;
@@ -155,6 +156,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   onManualDiscountChange,
   editMode = false,
   isSaving = false,
+  submissionBlocked = false,
   orderType,
   minimumOrderAmount = 0,
   deliveryFee = 0,
@@ -921,6 +923,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     uniqueCartItems.length === 0 ||
     isAppliedDiscountOverMax ||
     isSaving ||
+    submissionBlocked ||
     (isBelowMinimum && !editMode) ||
     // A zone that was not checked never blocks the order (founder rule,
     // 2026-09-29): the notice below says so and offers the re-pick.
@@ -1733,6 +1736,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </svg>
               {t('common.actions.saving', { defaultValue: 'Saving...' })}
             </span>
+          ) : submissionBlocked ? (
+            t('modals.menu.draftAwaitingReview', { defaultValue: 'Awaiting verification' })
           ) : editMode ? (
             t('modals.menu.saveChanges') || t('common.saveChanges')
           ) : (

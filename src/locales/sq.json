@@ -3725,7 +3725,8 @@
         "printingStalled": {
           "one": "Kuponat presin dhe nuk printohen: 1 printim pret prej {{duration}}.",
           "other": "Kuponat presin dhe nuk printohen: {{count}} printime në pritje, më i vjetri prej {{duration}}."
-        }
+        },
+        "courierCashReview": "Paratë e korrierëve duhen kontrolluar"
       },
       "recommendations": {
         "doNotClearData": "Mos fshi asnjë të dhënë.",
@@ -3783,9 +3784,11 @@
         "viaMainTerminal": "Përmes terminalit kryesor"
       },
       "support": {
-        "sentToast": "Raporti diagnostik iu dërgua suportit.",
+        "sentToast": "Super Admin e mori ZIP-in. Njoftimi në Telegram u konfirmua ose ishte dërguar pak më parë.",
         "sendFailedToast": "Diagnostika s'iu dërgua dot suportit. Provo përsëri më vonë.",
-        "received": "Suporti e mori raportin diagnostik.",
+        "received": "Super Admin e mori ZIP-in. Njoftimi në Telegram u konfirmua ose ishte dërguar pak më parë.",
+        "notificationFailed": "ZIP-i është i disponueshëm te Super Admin, por njoftimi në Telegram nuk u konfirmua.",
+        "reportReceived": "Super Admin mori raportin diagnostikues.",
         "incidentId": "ID e incidentit: {{id}}",
         "sendFailed": "Diagnostika s'u dërgua dot tani. POS-i do të vazhdojë të punojë dhe mund të provosh përsëri më vonë.",
         "safeLocal": "POS-i mund të vazhdojë të punojë lokalisht. Mos e rivendos dhe mos fshi të dhëna, veç nëse ta kërkon suporti."
@@ -4809,6 +4812,11 @@
       "satelliteTerminalChip": "te {{terminal}}",
       "satelliteTotalsChip": "{{orders}} porosi · {{sales}}",
       "satelliteCheckout": {
+        "awaitingReceipt": "Para në pritje të marrjes",
+        "receive": "Merr paratë",
+        "received": "U morën {{counted}}. Priteshin {{expected}}.",
+        "receiveBeforeClose": "Merrni paratë e turneve të mbyllura nga përzgjedhja e stafit përpara mbylljes së arkës kryesore.",
+        "pendingReadFailed": "Dorëzimet në pritje nuk u kontrolluan. Kontrolloni lidhjen dhe shtypni Rifresko.",
         "back": "Mbrapa",
         "title": "Dorëzimi i keshit — {{name}}",
         "loading": "Duke ngarkuar shifrat e turnit nga serveri…",
@@ -5105,6 +5113,7 @@
       "submitFailed": "Dështoi: {{error}}",
       "resolveBlockerCash": "Regjistro pagesë me kesh",
       "resolveBlockerCard": "Regjistro pagesë me kartë",
+      "recordPaymentOriginalCurrencyMissing": "Monedha origjinale e kësaj porosie nuk është ruajtur. Ndryshimi i shtetit të dyqanit nuk e zgjidh problemin. Mbështetja duhet të kontrollojë faturën origjinale përpara se të regjistrohet pagesa.",
       "recordConfirmTitle": "Ta regjistrosh këtë pagesë?",
       "recordConfirmMessage": "Regjistro {{amount}} ({{method}}) për porosinë {{order}} vetëm nëse klienti e ka paguar tashmë. Nuk debitohet asgjë dhe regjistrimi mban emrin tënd.",
       "recordConfirmAction": "Regjistroje",
@@ -6410,7 +6419,8 @@
       "newReservation": "Rezervo",
       "markMaintenance": "Kalo në mirëmbajtje",
       "markCleaned": "U pastrua",
-      "markBackInService": "Sërish në përdorim"
+      "markBackInService": "Sërish në përdorim",
+      "history": "Historiku"
     },
     "filters": {
       "search": "Kërko tavolina...",
@@ -6462,7 +6472,11 @@
       "switchToGrid": "Kalo te pamja në rrjetë"
     },
     "noTables": "S'ka tavolina të konfiguruara",
-    "configureInAdmin": "Konfiguro tavolinat te paneli i adminit"
+    "configureInAdmin": "Konfiguro tavolinat te paneli i adminit",
+    "historyLoadFailed": "Historiku nuk u ngarkua. Rilidhu dhe provo sërish.",
+    "historyLoadMore": "Ngarko më shumë",
+    "historyTitle": "Historiku i tavolinës {{table}}",
+    "noHistory": "Kjo tavolinë s'ka historik porosish"
   },
   "reservations": {
     "title": "Rezervime",
@@ -8548,7 +8562,7 @@
     "togglePlugin": "Ndiz/fik integrimin",
     "lastSync": "Sinkronizuar",
     "configure": "Konfiguro",
-    "configuration": "Konfigurimi",
+    "configuration": "Cilësimet e {{name}}",
     "pluginConfiguration": "Konfigurimi i integrimit",
     "credentialsHelp": "Shkruaj kredencialet që të ka dhënë platforma. Lëri fushat bosh për të mbajtur vlerat që janë tani.",
     "partnerRequired": "Kërkohet partner",
@@ -8602,7 +8616,9 @@
       "openAdmin": "Hap panelin e adminit",
       "adminUrlMissing": "URL-ja e panelit të adminit s'është konfiguruar në këtë terminal.",
       "adminLinkCopied": "Linku i panelit të adminit u kopjua.",
-      "adminOpenFailed": "Paneli i adminit s'u hap dot."
+      "adminOpenFailed": "Paneli i adminit s'u hap dot.",
+      "sandbox": "Mjedisi i testimit",
+      "production": "Mjedisi real"
     },
     "callerId": {
       "setupInAdmin": "Konfiguro Caller ID te paneli i adminit",
@@ -8827,7 +8843,9 @@
     "routingEmpty": "S'u gjet asnjë terminal për këtë degë.",
     "wolt": {
       "adminManagedSetup": "Wolt lidhet te paneli i adminit me llogarinë tënde Wolt; në POS s'shkruhet asnjë çelës API. Ky ekran tregon vetëm statusin."
-    }
+    },
+    "invalidCommission": "Vendosni një komision nga 0 deri në 100.",
+    "missingFields": "Plotësoni fushat e detyrueshme: {{fields}}"
   },
   "errorBoundary": {
     "whatCanYouDo": "Çfarë mund të bësh?",
@@ -9408,6 +9426,16 @@
         "title": "Kupona që nuk printohen: {{count}}",
         "summary": "Printimi më i vjetër pret prej {{duration}}. Porositë ruhen gjithsesi.",
         "guidance": "Kontrollo që printeri të jetë i ndezur, të ketë letër dhe të jetë i lidhur, pastaj printo një kupon prove nga cilësimet e printerit. Nëse kuponat ende nuk printohen, kontakto suportin. Mos fshi asnjë të dhënë."
+      },
+      "courierCashMissing": {
+        "title": "Mungojnë para në regjistrimin e korrierit",
+        "summary": "Porosia #{{orderNumber}} ka {{amount}} {{currency}} në pagesa me para në dorë, por shuma e ruajtur për korrierin është zero.",
+        "guidance": "Kontrolloni pagesën dhe turnin përpara mbylljes dhe dërgoni diagnostikimin te mbështetja. Diferenca nuk provon se paratë nuk u kthyen."
+      },
+      "courierCashIncomplete": {
+        "title": "Kontrolli i parave të korrierëve nuk përfundoi",
+        "summary": "Nuk u kontrolluan të gjitha regjistrimet përkatëse.",
+        "guidance": "Rifreskoni gjendjen dhe dërgoni diagnostikimin te mbështetja nëse problemi vazhdon."
       }
     }
   },

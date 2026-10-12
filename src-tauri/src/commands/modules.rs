@@ -5,11 +5,89 @@ use tauri::Emitter;
 use crate::{db, storage};
 
 #[derive(Debug)]
-struct AuthoritativeRepairAccess {
+pub(crate) struct AuthoritativeRepairAccess {
     organization_id: String,
     branch_id: String,
     terminal_id: String,
     repairs_enabled: bool,
+}
+
+impl AuthoritativeRepairAccess {
+    pub(crate) fn matches(&self, organization: &str, branch: &str, terminal: &str) -> bool {
+        self.organization_id == organization
+            && self.branch_id == branch
+            && self.terminal_id == terminal
+    }
+}
+
+/// The sole fixed-path, online-only read admitted for interrupted access
+/// verification. Its captured native binding is checked again by the owner
+/// before publication; redirects and cached module replies are never admitted.
+pub(crate) async fn fetch_bound_repair_access(
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+) -> Result<AuthoritativeRepairAccess, String> {
+    let base = crate::api::resolve_admin_base(admin_url).map_err(|error| error.to_string())?;
+    let mut endpoint = url::Url::parse(&base).map_err(|_| "REPAIR_NATIVE_ENDPOINT_UNAVAILABLE")?;
+    endpoint.set_path("/api/pos/modules/enabled");
+    endpoint
+        .query_pairs_mut()
+        .append_pair("terminal_id", terminal_id);
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "REPAIR_NATIVE_ENDPOINT_UNAVAILABLE")?;
+    let mut response = client
+        .get(endpoint)
+        .timeout(std::time::Duration::from_secs(30))
+        .header("x-pos-client-version", env!("CARGO_PKG_VERSION"))
+        .header("X-POS-API-Key", api_key)
+        .header("x-terminal-id", terminal_id)
+        .send()
+        .await
+        .map_err(|_| "REPAIR_AUTHORITATIVE_FETCH_FAILED")?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "REPAIR_AUTHORITATIVE_HTTP_{}",
+            response.status().as_u16()
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "REPAIR_AUTHORITATIVE_FETCH_FAILED")?
+    {
+        if body.len().saturating_add(chunk.len()) > 256 * 1024 {
+            return Err("REPAIR_AUTHORITATIVE_RESPONSE_TOO_LARGE".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let response: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| "REPAIR_AUTHORITATIVE_MODULES_INVALID")?;
+    if response.get("success") == Some(&serde_json::Value::Bool(false)) {
+        return Err("REPAIR_AUTHORITATIVE_ACCESS_DENIED".to_string());
+    }
+    parse_authoritative_repair_access(response.get("data").unwrap_or(&response), terminal_id)
+}
+
+pub(crate) fn resume_bound_repair_access(
+    db: &db::DbState,
+    access: &AuthoritativeRepairAccess,
+    decision: crate::repairs::RepairAccessDecision,
+    snapshot: &crate::repairs::RepairAccessRecoverySnapshot,
+) -> Result<crate::repairs::RepairAccessReconciliation, String> {
+    crate::repairs::resume_authoritative_access_reconciliation(
+        db,
+        &access.organization_id,
+        &access.branch_id,
+        &access.terminal_id,
+        access.repairs_enabled,
+        decision,
+        snapshot,
+    )
 }
 
 fn canonical_uuid(value: &str) -> Option<String> {
@@ -294,7 +372,7 @@ fn persisted_staff_session_id(raw: &str) -> Result<String, String> {
     canonical_uuid(session_id).ok_or_else(|| "REPAIR_STAFF_SESSION_REQUIRED".to_string())
 }
 
-async fn finalize_repair_access_if_signed_in(
+pub(crate) async fn finalize_repair_access_if_signed_in(
     db: &db::DbState,
     access: &AuthoritativeRepairAccess,
     pending: &crate::repairs::RepairAccessReconciliation,
@@ -352,9 +430,14 @@ pub async fn modules_fetch_from_admin(
     };
     let path = format!("/api/pos/modules/enabled?terminal_id={terminal_id}");
     let access_decision = crate::repairs::start_authoritative_access_decision()?;
+    let binding_digest = crate::commands::settings::current_access_binding_digest()?;
 
     match crate::admin_fetch_detailed(Some(&db), &path, "GET", None).await {
         Ok(resp) => {
+            if crate::commands::settings::current_access_binding_digest()? != binding_digest {
+                crate::repairs::latch_authoritative_access_pending(access_decision)?;
+                return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+            }
             let payload = if let Some(data) = resp.get("data") {
                 data
             } else {
@@ -376,13 +459,24 @@ pub async fn modules_fetch_from_admin(
                     return Ok(failure);
                 }
             };
-            let pending = crate::repairs::begin_authoritative_access_reconciliation(
+            if binding_digest.is_some() {
+                let organization = storage::get_credential_strict("organization_id")?
+                    .ok_or("REPAIR_NATIVE_SCOPE_REQUIRED")?;
+                let branch = storage::get_credential_strict("branch_id")?
+                    .ok_or("REPAIR_NATIVE_SCOPE_REQUIRED")?;
+                if !repair_access.matches(organization.as_str(), branch.as_str(), &terminal_id) {
+                    crate::repairs::latch_authoritative_access_pending(access_decision)?;
+                    return Err("REPAIR_AUTHORITATIVE_IDENTITY_MISMATCH".to_string());
+                }
+            }
+            let pending = crate::repairs::begin_bound_authoritative_access_reconciliation(
                 &db,
                 &repair_access.organization_id,
                 &repair_access.branch_id,
                 &repair_access.terminal_id,
                 repair_access.repairs_enabled,
                 access_decision,
+                binding_digest.as_deref(),
             )?;
             let repair_access_state = if pending.is_disabled() {
                 "module_required"

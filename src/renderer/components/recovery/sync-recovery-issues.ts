@@ -1817,10 +1817,31 @@ const buildIntegrityIssue = (
       adjustmentId: issue.adjustmentId ?? null,
       lastError: issue.lastError ?? null,
       legacyParityRowId: issue.legacyParityRowId ?? null,
+      shiftId: issue.shiftId ?? null,
+      driverId: issue.driverId ?? null,
+      shiftStatus: issue.shiftStatus ?? null,
+      currency: issue.currency ?? null,
+      recordedCashCents: issue.recordedCashCents ?? null,
+      receiptCashCents: issue.receiptCashCents ?? null,
+      differenceCents: issue.differenceCents ?? null,
+      amount: ((issue.differenceCents ?? 0) / 100).toFixed(2),
+      orderNumber: issue.orderNumber ?? issue.orderId ?? '—',
     },
   };
 
   switch (issue.reasonCode) {
+    case 'courier_cash_missing_from_earning':
+    case 'courier_cash_check_incomplete': {
+      const family = issue.reasonCode === 'courier_cash_missing_from_earning' ? 'courierCashMissing' : 'courierCashIncomplete';
+      return {
+        id: `integrity-courier-${issue.entityId}`, code: issue.reasonCode,
+        severity: 'warning', status: 'blocking',
+        titleKey: `recovery.issues.${family}.title`,
+        summaryKey: `recovery.issues.${family}.summary`,
+        guidanceKey: `recovery.issues.${family}.guidance`,
+        actions: [createContactDevAction()], ...common,
+      };
+    }
     case 'order_payment_waiting_parent':
       return {
         id: `integrity-order-payment-${issue.entityId}`,

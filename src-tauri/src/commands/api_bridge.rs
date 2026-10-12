@@ -34,10 +34,11 @@ fn table_mutation_failure_payload(
     original: &crate::sync_queue::SyncQueueItem,
     error: &api::AdminFetchError,
 ) -> Result<serde_json::Value, String> {
-    let waiting = error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("outstanding balance");
+    let waiting = crate::sync_queue::is_table_session_close_waiting_payment_response(
+        error.status().unwrap_or(0),
+        &error.to_string(),
+        original,
+    );
     let refused = !waiting
         && original.claim_generation == 1
         && original.attempts == 0
@@ -145,6 +146,50 @@ mod table_mutation_wire_tests {
             assert_eq!(saved["client_event_id"], body["client_event_id"]);
             assert_eq!(original.status, "processing");
             assert_eq!(crate::sync_queue::get_length(&conn).unwrap(), 1);
+        }
+    }
+    #[test]
+    fn table_mutation_wire_close_waits_on_both_canonical_outstanding_money_spellings() {
+        for message in [
+            "Cannot close a table session with outstanding money",
+            "Cannot close a table session with an outstanding balance",
+        ] {
+            let conn = fixture();
+            let body = json!({"action":"close","status":"closed","force":false,"client_event_id":"original-close"});
+            let original = retain(&conn, &body);
+            let error = api::AdminFetchError::from_http_response_for_test(
+                409,
+                &json!({"success":false,"error":message}).to_string(),
+            );
+            let answer = table_mutation_failure_payload(&conn, &original, &error).unwrap();
+            assert_eq!(answer["code"], "TABLE_MUTATION_RETAINED");
+            assert_eq!(answer["queued"], true);
+            assert!(!crate::sync_queue::table_mutation_was_refused(&conn, &original).unwrap());
+            let saved: String = conn
+                .query_row(
+                    "SELECT data FROM parity_sync_queue WHERE id=?1",
+                    [&original.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(saved, original.data);
+        }
+    }
+    #[test]
+    fn table_mutation_wire_balance_words_cannot_downgrade_auth_or_non_close_refusal() {
+        for (status, action) in [(403, "close"), (409, "set_guest_count")] {
+            let conn = fixture();
+            let original = retain(
+                &conn,
+                &json!({"action":action,"guest_count":2,"client_event_id":"original"}),
+            );
+            let error = api::AdminFetchError::from_http_response_for_test(
+                status,
+                r#"{"success":false,"error":"Cannot close a table session with an outstanding balance"}"#,
+            );
+            let answer = table_mutation_failure_payload(&conn, &original, &error).unwrap();
+            assert_eq!(answer["code"], "TABLE_MUTATION_REFUSED");
+            assert!(crate::sync_queue::table_mutation_was_refused(&conn, &original).unwrap());
         }
     }
     #[test]
@@ -510,6 +555,11 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         // (ManualCardAdmissionService refuses a cached one): caching it would
         // only store a stale answer nothing may use (review 06/10/2026).
         && route != "/api/pos/payments/manual-admission"
+        // This response is personal to a verified staff session. Its durable
+        // journal belongs to the service inbox; a terminal-wide GET cache must
+        // never substitute another actor's snapshot or retain authorization.
+        && route != "/api/pos/waiter-service-requests"
+        && !route.starts_with("/api/pos/waiter-service-requests/")
         && !is_caller_id_admin_route(path)
         && !is_repair_admin_route(path)
         && !is_delta_cursor_admin_get(path)
@@ -518,6 +568,64 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         // outage; substituting individual cached pages can mix revisions.
         && route != "/api/pos/sync-version"
         && !snapshot_page
+}
+
+fn waiter_service_staff_session<'a>(
+    method: &str,
+    path: &str,
+    options: &'a serde_json::Value,
+) -> Result<Option<&'a str>, &'static str> {
+    // Preserve the generic bridge's header isolation everywhere else. Only
+    // this fixed live endpoint accepts a PIN-issued, server-verified UUID.
+    if !matches!(method, "GET" | "POST")
+        || canonical_admin_route(path) != "/api/pos/waiter-service-requests"
+    {
+        return Ok(None);
+    }
+    let Some(headers) = options.get("headers").and_then(|value| value.as_object()) else {
+        return Ok(None);
+    };
+    let mut values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("x-staff-session-id"));
+    let Some((_, value)) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err("SERVICE_STAFF_SESSION_INVALID");
+    }
+    let session = value.as_str().ok_or("SERVICE_STAFF_SESSION_INVALID")?;
+    let parsed = uuid::Uuid::parse_str(session).map_err(|_| "SERVICE_STAFF_SESSION_INVALID")?;
+    if parsed.to_string() != session.to_ascii_lowercase() {
+        return Err("SERVICE_STAFF_SESSION_INVALID");
+    }
+    Ok(Some(session))
+}
+
+async fn admin_fetch_with_request_headers(
+    db: &db::DbState,
+    path: &str,
+    method: &str,
+    body: Option<serde_json::Value>,
+    options: &serde_json::Value,
+) -> Result<serde_json::Value, api::AdminFetchError> {
+    let session = waiter_service_staff_session(method, path, options).map_err(str::to_string)?;
+    if let Some(session) = session {
+        crate::validate_admin_api_path(path)?;
+        let (admin_url, api_key) = crate::resolve_admin_endpoint(Some(db)).await?;
+        api::fetch_from_admin_detailed_with_staff_session(
+            &admin_url,
+            &api_key,
+            path,
+            method,
+            body,
+            Some(session),
+            api::DEFAULT_TIMEOUT,
+        )
+        .await
+    } else {
+        crate::admin_fetch_detailed(Some(db), path, method, body).await
+    }
 }
 
 fn admin_api_cache_key(path: &str) -> String {
@@ -839,7 +947,7 @@ pub async fn api_fetch_from_admin(
         }
     };
 
-    match crate::admin_fetch_detailed(Some(&db), &final_path, &method, body).await {
+    match admin_fetch_with_request_headers(&db, &final_path, &method, body, &opts).await {
         Ok(v) => {
             if let Some(original) = &table_original {
                 let conn = db
@@ -1012,6 +1120,81 @@ mod dto_tests {
     const OLD_TERMINAL: &str = "33333333-3333-4333-8333-333333333333";
     const NEW_ORG: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const NEW_BRANCH: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    #[test]
+    fn waiter_service_header_is_narrow_uuid_only_and_never_a_cached_get() {
+        let opts =
+            serde_json::json!({"headers":{"X-Staff-Session-Id":OLD_ORG,"x-terminal-id":"forged"}});
+        for method in ["GET", "POST"] {
+            assert_eq!(
+                waiter_service_staff_session(method, "/api/pos/waiter-service-requests", &opts),
+                Ok(Some(OLD_ORG))
+            );
+        }
+        for path in [
+            "/api/pos/orders",
+            "/api/pos/waiter-service-requests/other",
+            "https://other/api/pos/waiter-service-requests",
+            "/api/pos/waiter-service-requests/../orders",
+        ] {
+            assert_eq!(waiter_service_staff_session("GET", path, &opts), Ok(None));
+        }
+        assert_eq!(
+            waiter_service_staff_session("DELETE", "/api/pos/waiter-service-requests", &opts),
+            Ok(None)
+        );
+        for value in [
+            serde_json::json!("bad\r\nheader"),
+            serde_json::json!(true),
+            serde_json::json!(format!(" {OLD_ORG}")),
+        ] {
+            assert!(waiter_service_staff_session(
+                "GET",
+                "/api/pos/waiter-service-requests",
+                &serde_json::json!({"headers":{"x-staff-session-id":value}})
+            )
+            .is_err());
+        }
+        assert!(!is_cacheable_admin_get(
+            "GET",
+            "/api/pos/waiter-service-requests?limit=30"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn waiter_service_native_dispatch_preserves_pin_session_but_not_caller_terminal_headers()
+    {
+        let server = crate::tests::fake_http::MockServer::new("{\"success\":true}");
+        let _keyring = seed_command_identity(server.url.as_str());
+        let database = crate::tests::harness::TestDb::open();
+        seed_command_db(&database.state, server.url.as_str());
+        let options = serde_json::json!({"headers":{"x-staff-session-id":NEW_ORG,"x-terminal-id":"forged","x-pos-api-key":"forged"}});
+        for method in ["GET", "POST"] {
+            let body = (method == "POST")
+                .then(|| serde_json::json!({"action":"resolve","client_event_id":"original"}));
+            admin_fetch_with_request_headers(
+                &database.state,
+                "/api/pos/waiter-service-requests",
+                method,
+                body,
+                &options,
+            )
+            .await
+            .expect("native dispatch");
+        }
+        let requests = server.recorded();
+        assert_eq!(requests.len(), 2);
+        for request in &requests {
+            assert_eq!(request.header("x-staff-session-id"), Some(NEW_ORG));
+            assert_eq!(request.header("x-terminal-id"), Some(OLD_TERMINAL));
+            assert_ne!(request.header("x-pos-api-key"), Some("forged"));
+        }
+        assert_eq!(
+            requests[1].json_body().unwrap()["client_event_id"],
+            "original"
+        );
+    }
 
     #[tokio::test]
     async fn parent_connection_test_refuses_to_use_cloud_health_as_parent_proof() {

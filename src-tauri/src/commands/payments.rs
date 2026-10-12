@@ -623,6 +623,20 @@ pub async fn payment_record(
     }
     let requested_input = payments::build_payment_record_input(&payload)?;
     let terminal_approved = payment_payload_has_terminal_approval(&payload);
+    // Refuse a new tender before fiscal hardware can collect it. A card already
+    // approved, or an explicitly confirmed TWINT receipt, must still reach the
+    // existing durable recovery owner if the ordinary ledger refuses the write.
+    if !terminal_approved && requested_input.method != "twint" {
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let order_id =
+            resolve_order_id(&conn, &requested_input.order_id).ok_or("Order not found")?;
+        if payments::ecommerce_holds_payment(&conn, &order_id)? {
+            return Err(
+                "ECOMMERCE_EXTERNAL_PAYMENT_REQUIRED: payment is handled in the online store"
+                    .into(),
+            );
+        }
+    }
     let order_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let order_id =

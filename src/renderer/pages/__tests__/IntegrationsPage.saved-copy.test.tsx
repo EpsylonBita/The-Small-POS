@@ -135,7 +135,7 @@ const items = [
     is_purchased: true, is_enabled: true, status: 'connected', read_only_admin_setup: true,
   },
   {
-    plugin_id: 'google_analytics', provider: 'google_analytics', name: 'Google Analytics', branch_id: 'branch-1',
+    plugin_id: 'acme_analytics', provider: 'acme_analytics', name: 'ACME Analytics', branch_id: 'branch-1',
     is_purchased: true, is_active: true, is_enabled: true, status: 'connected', requires_partner_credentials: false,
   },
   {
@@ -194,7 +194,7 @@ describe('Integrations page: the saved copy of the plugin list', () => {
     expect(within(banner).getByText(BANNER_TITLE)).toBeInTheDocument()
     expect(banner).toHaveTextContent(SAVED_AT)
 
-    for (const name of ['Wolt', 'Google Analytics', 'Worldline', 'myDATA']) {
+    for (const name of ['Wolt', 'ACME Analytics', 'Worldline', 'myDATA']) {
       const card = cardInfo(name)
       expect(card.getByText('Status unknown')).toBeInTheDocument()
       expect(card.queryByText('Connected')).not.toBeInTheDocument()
@@ -210,7 +210,7 @@ describe('Integrations page: the saved copy of the plugin list', () => {
       expect(toggle).toBeDisabled()
       expect(toggle).toHaveAttribute('aria-checked', 'false')
     }
-    expect(cardRow('Google Analytics').getByText('Unknown')).toBeInTheDocument()
+    expect(cardRow('ACME Analytics').getByText('Unknown')).toBeInTheDocument()
     expect(statValue('Connected')).toBe('0')
   })
 
@@ -235,9 +235,9 @@ describe('Integrations page: the saved copy of the plugin list', () => {
     await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('Plugins refreshed'))
     expect(screen.queryByTestId('integrations-saved-copy')).not.toBeInTheDocument()
     expect(cardInfo('Wolt').getByText('Connected')).toBeInTheDocument()
-    expect(cardInfo('Google Analytics').queryByText('Status unknown')).not.toBeInTheDocument()
-    expect(cardRow('Google Analytics').getByRole('switch')).not.toBeDisabled()
-    expect(cardRow('Google Analytics').getByRole('switch')).toHaveAttribute('aria-checked', 'true')
+    expect(cardInfo('ACME Analytics').queryByText('Status unknown')).not.toBeInTheDocument()
+    expect(cardRow('ACME Analytics').getByRole('switch')).not.toBeDisabled()
+    expect(cardRow('ACME Analytics').getByRole('switch')).toHaveAttribute('aria-checked', 'true')
     expect(cardInfo('Worldline').getByText('Awaiting verification')).toBeInTheDocument()
   })
 

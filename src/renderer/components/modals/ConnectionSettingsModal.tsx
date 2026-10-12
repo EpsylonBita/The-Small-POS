@@ -1240,6 +1240,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               {t('settings.deviceSetup.connectionCodeHelp', { defaultValue: 'Paste the connection code from your dashboard.' })}
             </p>
             <textarea
+              aria-label={t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
               value={connectionCode}
               onChange={e => setConnectionCode(e.target.value)}
               className="liquid-glass-modal-input w-full min-h-[72px] font-mono text-xs"
@@ -1253,6 +1254,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">{t('settings.deviceSetup.registerId', 'Register ID')}</label>
                   <input
                     value={terminalId}
+                    aria-label={t('settings.deviceSetup.registerId', 'Register ID')}
                     onChange={e => setTerminalId(e.target.value)}
                     className="liquid-glass-modal-input w-full"
                     placeholder={t('modals.connectionSettings.terminalPlaceholder')}
@@ -1264,6 +1266,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                   </label>
                   <input
                     value={adminDashboardUrl}
+                    aria-label={t('settings.deviceSetup.dashboardAddress', 'Dashboard address')}
                     onChange={e => setAdminDashboardUrl(e.target.value)}
                     className="liquid-glass-modal-input w-full"
                     placeholder={t('settings.deviceSetup.dashboardAddressPlaceholder', { defaultValue: 'https://your-dashboard.example.com' })}
@@ -1275,6 +1278,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                 <div className="relative">
                   <input
                     value={apiKey}
+                    aria-label={t('settings.deviceSetup.posKey', 'POS key')}
                     onChange={e => setApiKey(e.target.value)}
                     type={showApiKey ? 'text' : 'password'}
                     className="liquid-glass-modal-input w-full pr-12"

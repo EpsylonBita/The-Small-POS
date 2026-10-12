@@ -498,6 +498,8 @@ fn refund_payment_with_cash_handler(
         &order_id,
         client_idempotency_key.as_deref(),
     )?;
+
+    crate::payments::ensure_ecommerce_payment_reversal_allowed(conn, &payment_id)?;
     if crate::payments::payment_is_platform_settlement(conn, &payment_id)? {
         return Err(crate::payments::PLATFORM_SETTLEMENT_NOT_REVERSIBLE.into());
     }
@@ -559,6 +561,10 @@ fn refund_payment_with_cash_handler(
             }));
         }
     }
+
+    // This is a new return: the exact saved adjustment returned above remains
+    // recoverable even when parent ownership is no longer observable.
+    let _ = crate::payments::ecommerce_disposition(conn, &order_id)?;
 
     // R5: a refund always names its tender: the caller's, else the
     // payment's own (cash, card or other).
@@ -978,6 +984,7 @@ pub fn void_payment_with_adjustment(
 
     // Shared rule R1 (round 3 review): the platform's settlement row is never
     // voided at the till (see `refund_payment_in_connection`).
+    crate::payments::ensure_ecommerce_payment_reversal_allowed(&conn, payment_id)?;
     if crate::payments::payment_is_platform_settlement(&conn, payment_id)? {
         return Err(crate::payments::PLATFORM_SETTLEMENT_NOT_REVERSIBLE.into());
     }
@@ -1004,6 +1011,10 @@ pub fn void_payment_with_adjustment(
             ))
         }
     }
+    // Only a still-completed receipt reaches fresh void admission. Preserve
+    // the precise already-voided/refunded result above for original recovery.
+    let _ = crate::payments::ecommerce_disposition(&conn, &order_id)?;
+
     // A 1.4.119 placeholder records no money (item D3, round 2 review): a
     // void would take money out of an order that never counted it in.
     if crate::payments::payment_is_placeholder(&conn, payment_id)? {
@@ -1471,6 +1482,155 @@ mod tests {
         .expect("insert payment");
 
         pay_id
+    }
+
+    fn deny_ecommerce_parent_metadata_read(conn: &Connection) {
+        unsafe extern "C" fn deny(
+            _: *mut std::ffi::c_void,
+            action: std::ffi::c_int,
+            table: *const std::ffi::c_char,
+            column: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+        ) -> std::ffi::c_int {
+            if action == rusqlite::ffi::SQLITE_READ && !table.is_null() && !column.is_null() {
+                let table = unsafe { std::ffi::CStr::from_ptr(table) }.to_bytes();
+                let column = unsafe { std::ffi::CStr::from_ptr(column) }.to_bytes();
+                if table == b"orders" && column == b"ghost_metadata" {
+                    return rusqlite::ffi::SQLITE_DENY;
+                }
+            }
+            rusqlite::ffi::SQLITE_OK
+        }
+        // The callback is static and has no borrowed state; the handle stays
+        // alive under the fixture lock for every statement that uses it.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(conn.handle(), Some(deny), std::ptr::null_mut())
+        };
+        assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+    }
+
+    fn unavailable_ecommerce_parent(db: &DbState, order: &str, read_denied: bool) {
+        let conn = db.conn.lock().unwrap();
+        if read_denied {
+            deny_ecommerce_parent_metadata_read(&conn);
+        } else {
+            conn.execute("UPDATE orders SET ghost_metadata='{' WHERE id=?1", [order])
+                .unwrap();
+        }
+        let amount: f64 = conn
+            .query_row(
+                "SELECT total_amount FROM orders WHERE id=?1",
+                [order],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(amount, 12.0);
+    }
+
+    fn ecommerce_return_snapshot(db: &DbState, payment: &str) -> (String, i64, i64, i64) {
+        let conn = db.conn.lock().unwrap();
+        let (status, cents) = conn
+            .query_row(
+                "SELECT status,amount_cents FROM order_payments WHERE id=?1",
+                [payment],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let adjustments = conn
+            .query_row("SELECT count(*) FROM payment_adjustments", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let queue = conn
+            .query_row(
+                "SELECT count(*) FROM parity_sync_queue WHERE table_name='payment_adjustments'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (status, cents, adjustments, queue)
+    }
+
+    #[test]
+    fn ecommerce_unavailable_parent_refuses_fresh_refund_and_void() {
+        for read_denied in [false, true] {
+            for refund in [false, true] {
+                let db = test_db();
+                let payment = seed_order_and_payment(&db, "ecommerce-fresh-return", 12.0);
+                let before = ecommerce_return_snapshot(&db, &payment);
+                unavailable_ecommerce_parent(&db, "ecommerce-fresh-return", read_denied);
+                let error = if refund {
+                    refund_payment(&db, &serde_json::json!({"paymentId":payment,"amount":1,"reason":"QA", "idempotencyKey":"ecommerce-new-return"})).unwrap_err()
+                } else {
+                    void_payment_with_adjustment(&db, &payment, "QA", None, None).unwrap_err()
+                };
+                assert!(error.contains("ECOMMERCE_METADATA_UNAVAILABLE"), "{error}");
+                assert_eq!(ecommerce_return_snapshot(&db, &payment), before);
+            }
+        }
+    }
+
+    #[test]
+    fn ecommerce_saved_refund_replays_with_unavailable_parent_without_new_money() {
+        for read_denied in [false, true] {
+            let db = test_db();
+            let payment = seed_order_and_payment(&db, "ecommerce-saved-return", 12.0);
+            let input = serde_json::json!({"paymentId":payment,"amount":1,"reason":"QA", "idempotencyKey":"ecommerce-original-return"});
+            let original = refund_payment(&db, &input).unwrap();
+            let before = ecommerce_return_snapshot(&db, &payment);
+            unavailable_ecommerce_parent(&db, "ecommerce-saved-return", read_denied);
+            let replay = refund_payment(&db, &input).unwrap();
+            assert_eq!(replay["duplicate"], true);
+            assert_eq!(replay["adjustmentId"], original["adjustmentId"]);
+            assert_eq!(replay["amount"], original["amount"]);
+            assert_eq!(ecommerce_return_snapshot(&db, &payment), before);
+        }
+    }
+
+    #[test]
+    fn ecommerce_saved_void_retains_original_status_with_unavailable_parent() {
+        for read_denied in [false, true] {
+            let db = test_db();
+            let payment = seed_order_and_payment(&db, "ecommerce-saved-void", 12.0);
+            void_payment_with_adjustment(&db, &payment, "QA", None, None).unwrap();
+            let before = ecommerce_return_snapshot(&db, &payment);
+            unavailable_ecommerce_parent(&db, "ecommerce-saved-void", read_denied);
+            let error = void_payment_with_adjustment(&db, &payment, "QA", None, None).unwrap_err();
+            assert!(error.contains("already voided"), "{error}");
+            assert_eq!(ecommerce_return_snapshot(&db, &payment), before);
+        }
+    }
+
+    #[test]
+    fn ecommerce_original_provider_receipt_refusal_precedes_unavailable_parent() {
+        for reference in [
+            "woocommerce:11111111-1111-4111-8111-111111111111:42:payment",
+            "shopify:11111111-1111-4111-8111-111111111111:transaction:42",
+        ] {
+            let db = test_db();
+            let payment = seed_order_and_payment(&db, "ecommerce-provider-return", 12.0);
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE order_payments SET transaction_ref=?1 WHERE id=?2",
+                    params![reference, payment],
+                )
+                .unwrap();
+            }
+            let before = ecommerce_return_snapshot(&db, &payment);
+            unavailable_ecommerce_parent(&db, "ecommerce-provider-return", true);
+            let error = refund_payment(
+                &db,
+                &serde_json::json!({"paymentId":payment,"amount":1,"reason":"QA"}),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("ECOMMERCE_EXTERNAL_PAYMENT_REQUIRED"),
+                "{error}"
+            );
+            assert_eq!(ecommerce_return_snapshot(&db, &payment), before);
+        }
     }
 
     /// A payment set aside for review is never refunded or voided through the

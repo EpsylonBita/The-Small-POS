@@ -420,6 +420,13 @@ pub(crate) struct PaymentRecordInput {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct AppliedCanonicalPaymentProvenance {
+    pub staff_id: Option<String>,
+    pub staff_shift_id: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct PaymentInsertOptions {
     pub payment_id: Option<String>,
     pub remote_payment_id: Option<String>,
@@ -431,6 +438,8 @@ pub(crate) struct PaymentInsertOptions {
     pub sync_order_owner_with_payment: bool,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    /// Internal pull evidence for a NEW receipt, never a renderer JSON mode.
+    pub applied_canonical_provenance: Option<AppliedCanonicalPaymentProvenance>,
     /// Record the payment set aside for review instead of as a collection
     /// (`payment_review`): money that moved but found the order covered.
     pub set_aside: Option<SetAsideInsert>,
@@ -461,6 +470,7 @@ impl PaymentInsertOptions {
             sync_order_owner_with_payment: true,
             created_at: None,
             updated_at: None,
+            applied_canonical_provenance: None,
             set_aside: None,
             platform_settlement: false,
         }
@@ -478,8 +488,20 @@ impl PaymentInsertOptions {
             sync_order_owner_with_payment: true,
             created_at: None,
             updated_at: None,
+            applied_canonical_provenance: None,
             set_aside: None,
             platform_settlement: false,
+        }
+    }
+
+    pub(crate) fn applied_canonical(
+        remote_payment_id: String,
+        provenance: AppliedCanonicalPaymentProvenance,
+    ) -> Self {
+        Self {
+            sync_order_owner_with_payment: false,
+            applied_canonical_provenance: Some(provenance),
+            ..Self::applied(Some(remote_payment_id))
         }
     }
 
@@ -498,6 +520,7 @@ impl PaymentInsertOptions {
             sync_order_owner_with_payment: false,
             created_at: None,
             updated_at: None,
+            applied_canonical_provenance: None,
             set_aside: Some(set_aside),
             platform_settlement: false,
         }
@@ -2209,6 +2232,14 @@ pub(crate) fn resolve_local_payment_currency(
     conn: &Connection,
     input: &PaymentRecordInput,
 ) -> Result<String, String> {
+    resolve_local_payment_currency_and_collector(conn, input, &mut None)
+}
+
+fn resolve_local_payment_currency_and_collector(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+    collecting_cashier: &mut Option<(String, String)>,
+) -> Result<String, String> {
     use crate::fiscal::payload_builder::{normalize_currency_code, resolve_order_payment_currency};
     if let Some(reference) = input.transaction_ref.as_deref() {
         let original: Option<(String, Option<String>, String, i64, String)> = conn.query_row(
@@ -2306,13 +2337,19 @@ pub(crate) fn resolve_local_payment_currency(
         }
         return Err("PAYMENT_CURRENCY_UNAVAILABLE".into());
     }
-    // New money is admitted only in its order and owning shift's recorded unit.
+    // New money is admitted only in its order and collecting shift's recorded unit.
     // Approved ECR/fiscal originals and durable recovery journals returned above.
-    let (order_branch, order_shift): (String, Option<String>) = conn
+    let (order_branch, order_shift, table_session, order_type): (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = conn
         .query_row(
-            "SELECT COALESCE(branch_id, ''), staff_shift_id FROM orders WHERE id = ?1",
+            "SELECT COALESCE(branch_id, ''), staff_shift_id, table_session_id,
+                    COALESCE(order_type, 'dine-in') FROM orders WHERE id = ?1",
             params![input.order_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|error| format!("read fresh payment operating scope: {error}"))?;
     let order_currency =
@@ -2331,13 +2368,60 @@ pub(crate) fn resolve_local_payment_currency(
     if crate::shifts::require_operating_currency(conn, &order_branch)? != currency {
         return Err("ORDER_CURRENCY_MISMATCH".to_string());
     }
-    let payment_shift = input.requested_staff_shift_id.clone().or(order_shift).or_else(|| conn.query_row(
-        "SELECT id FROM staff_shifts WHERE branch_id = ?1 AND status = 'active' AND role_type IN ('cashier', 'manager') ORDER BY check_in_time DESC LIMIT 1",
-        params![order_branch], |row| row.get::<_, String>(0),
-    ).optional().ok().flatten());
+    let fresh_table_collection = input.payment_origin == "manual"
+        && order_type.eq_ignore_ascii_case("dine-in")
+        && table_session
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+    let current_terminal = fresh_table_collection
+        .then(|| crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn))
+        .flatten();
+    let payment_shift = if fresh_table_collection {
+        match input.requested_staff_shift_id.as_deref() {
+            Some(id) => Some(id.to_string()),
+            None => match current_terminal.as_deref() {
+                Some(terminal) => order_ownership::resolve_active_cashier_assignment(
+                    conn,
+                    &order_branch,
+                    terminal,
+                )?
+                .map(|(shift, _)| shift),
+                None => None,
+            },
+        }
+    } else {
+        input.requested_staff_shift_id.clone().or(order_shift).or_else(|| conn.query_row(
+            "SELECT id FROM staff_shifts WHERE branch_id = ?1 AND status = 'active' AND role_type IN ('cashier', 'manager') ORDER BY check_in_time DESC LIMIT 1",
+            params![order_branch], |row| row.get::<_, String>(0),
+        ).optional().ok().flatten())
+    };
     let payment_shift = payment_shift.ok_or_else(|| "SHIFT_CURRENCY_UNAVAILABLE".to_string())?;
     if crate::shifts::require_shift_operating_currency(conn, &payment_shift)? != currency {
         return Err("SHIFT_CURRENCY_MISMATCH".to_string());
+    }
+    if fresh_table_collection {
+        let (role, staff, status, terminal): (String, String, String, String) = conn
+            .query_row(
+                "SELECT role_type, staff_id, status, COALESCE(terminal_id, '')
+             FROM staff_shifts WHERE id = ?1",
+                params![payment_shift],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| format!("read table payment collector: {error}"))?;
+        if status != "active" || !matches!(role.as_str(), "cashier" | "manager") {
+            return Err("SHIFT_CURRENCY_UNAVAILABLE".into());
+        }
+        if current_terminal.as_deref() != Some(terminal.as_str()) {
+            return Err("PAYMENT_COLLECTOR_TERMINAL_MISMATCH".into());
+        }
+        if input
+            .requested_staff_id
+            .as_deref()
+            .is_some_and(|id| id != staff)
+        {
+            return Err("PAYMENT_COLLECTOR_STAFF_MISMATCH".into());
+        }
+        *collecting_cashier = Some((payment_shift, staff));
     }
     if !input.currency.trim().is_empty()
         && normalize_currency_code(&input.currency).as_deref() != Some(currency.as_str())
@@ -2353,11 +2437,18 @@ pub(crate) fn prepare_local_payment_currency(
 ) -> Result<(), String> {
     let mut input = build_payment_record_input(payload)?;
     input.order_id = resolve_order_id(conn, &input.order_id).unwrap_or(input.order_id);
-    let currency = resolve_local_payment_currency(conn, &input)?;
-    payload
-        .as_object_mut()
-        .ok_or("Invalid payment payload")?
-        .insert("currency".to_string(), Value::String(currency));
+    let mut collecting_cashier = None;
+    let currency =
+        resolve_local_payment_currency_and_collector(conn, &input, &mut collecting_cashier)?;
+    let fields = payload.as_object_mut().ok_or("Invalid payment payload")?;
+    fields.insert("currency".to_string(), Value::String(currency));
+    if let Some((shift, staff)) = collecting_cashier {
+        // Freeze the validated collector before fiscal/card dispatch. Recovery
+        // then retains this original context instead of a later active cashier.
+        fields.insert("staffShiftId".into(), Value::String(shift));
+        fields.insert("staffId".into(), Value::String(staff));
+        fields.insert("collectedBy".into(), Value::String("cashier_drawer".into()));
+    }
     Ok(())
 }
 
@@ -2366,6 +2457,28 @@ pub(crate) fn record_payment_in_connection(
     input: &PaymentRecordInput,
     options: &PaymentInsertOptions,
 ) -> Result<RecordedPayment, String> {
+    if let Some(provenance) = options.applied_canonical_provenance.as_ref() {
+        if input.payment_origin != "sync_reconstructed"
+            || options
+                .remote_payment_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            || options.sync_status != "synced"
+            || options.sync_state.as_deref() != Some("applied")
+            || options.enqueue_sync
+            || options.update_cash_drawer
+            || options.sync_order_owner_with_payment
+            || options.mark_order_sync_pending_on_owner_change
+            || options.set_aside.is_some()
+            || options.platform_settlement
+            || provenance
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.is_object())
+        {
+            return Err("CANONICAL_PAYMENT_PROVENANCE_MODE_INVALID".into());
+        }
+    }
     if options.enqueue_sync {
         crate::edit_settlement_recovery::require_original_financial_attempt(
             conn,
@@ -2394,7 +2507,14 @@ pub(crate) fn record_payment_in_connection(
         }
         resolved_input.currency = original;
     } else if options.enqueue_sync {
-        resolved_input.currency = resolve_local_payment_currency(conn, input)?;
+        let mut collecting_cashier = None;
+        resolved_input.currency =
+            resolve_local_payment_currency_and_collector(conn, input, &mut collecting_cashier)?;
+        if let Some((shift, staff)) = collecting_cashier {
+            resolved_input.requested_staff_shift_id = Some(shift);
+            resolved_input.requested_staff_id = Some(staff);
+            resolved_input.collected_by = Some("cashier_drawer".into());
+        }
     } else if crate::fiscal::payload_builder::normalize_currency_code(&input.currency).is_none() {
         return Err("PAYMENT_CURRENCY_UNAVAILABLE".into());
     }
@@ -2489,6 +2609,7 @@ pub(crate) fn record_payment_in_connection(
         order_staff_shift_id,
         order_staff_id,
         is_ghost,
+        is_table_check,
     ): (
         Option<String>,
         String,
@@ -2497,6 +2618,7 @@ pub(crate) fn record_payment_in_connection(
         Option<String>,
         Option<String>,
         Option<String>,
+        bool,
         bool,
     ) = conn
         .query_row(
@@ -2508,7 +2630,9 @@ pub(crate) fn record_payment_in_connection(
                 driver_id,
                 staff_shift_id,
                 staff_id,
-                COALESCE(is_ghost, 0)
+                COALESCE(is_ghost, 0),
+                (LOWER(COALESCE(order_type, 'dine-in')) = 'dine-in'
+                 AND TRIM(COALESCE(table_session_id, '')) <> '')
              FROM orders
              WHERE id = ?1",
             params![input.order_id],
@@ -2522,6 +2646,7 @@ pub(crate) fn record_payment_in_connection(
                     row.get(5)?,
                     row.get(6)?,
                     row.get::<_, i64>(7)? != 0,
+                    row.get::<_, bool>(8)?,
                 ))
             },
         )
@@ -2549,6 +2674,21 @@ pub(crate) fn record_payment_in_connection(
     // prepaid money and platform-rider COD never enter this till, whatever
     // the order row says. A platform order OUR driver carries resolves to
     // `None` here and collects normally.
+    // Only the native canonical mirror owner can supply these insert options.
+    // payment_origin arrives in renderer input and cannot authorize a collection.
+    let canonical_ecommerce_mirror = options
+        .remote_payment_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        && !options.enqueue_sync
+        && !options.update_cash_drawer
+        && options.sync_state.as_deref() == Some("applied")
+        && options.sync_status == "synced";
+    if !canonical_ecommerce_mirror && ecommerce_holds_payment(conn, &input.order_id)? {
+        return Err(
+            "ECOMMERCE_EXTERNAL_PAYMENT_REQUIRED: payment is handled in the online store".into(),
+        );
+    }
     if matches!(
         input.method.trim().to_ascii_lowercase().as_str(),
         "cash" | "card" | "twint"
@@ -2636,63 +2776,71 @@ pub(crate) fn record_payment_in_connection(
             .filter(|value| !value.is_empty())
             .is_some();
 
-    let (resolved_shift_id, resolved_staff_id) = if options.platform_settlement {
-        // A later cashier or country change cannot take ownership of an old
-        // platform receivable that is only now reaching this terminal.
-        (order_staff_shift_id.clone(), order_staff_id.clone())
-    } else if explicit_cashier_drawer_shift {
-        let shift_id = input
-            .requested_staff_shift_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_string())
-            .ok_or("Cashier-collected payments require a cashier shift context")?;
-        let Some((role_type, shift_staff_id, _)) =
-            load_shift_role_status_and_staff(conn, &shift_id)?
-        else {
-            return Err(format!(
-                "Requested cashier shift {shift_id} does not exist for this payment"
-            ));
-        };
-        if role_type != "cashier" && role_type != "manager" {
-            return Err(format!(
-                "Requested shift {shift_id} is not a cashier or manager drawer"
-            ));
-        }
-        let staff_id = input
-            .requested_staff_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_string())
-            .or(Some(shift_staff_id));
-        (Some(shift_id), staff_id)
-    } else if mirrored_with_order_shift {
-        (order_staff_shift_id.clone(), order_staff_id.clone())
-    } else if keep_delivery_unassigned {
-        (None, None)
-    } else if cashier_collected_delivery_cash {
-        return Err(
-            "Cashier-collected delivery payments require a cashier shift context".to_string(),
-        );
-    } else {
-        order_ownership::resolve_order_owner(
-            conn,
-            &order_type,
-            &branch_id,
-            &terminal_id,
-            driver_id.as_deref(),
-            input
+    let (resolved_shift_id, resolved_staff_id) =
+        if let Some(provenance) = options.applied_canonical_provenance.as_ref() {
+            // A canonical receipt already names its collector. Missing historical
+            // provenance stays unknown, even if this till has an active cashier.
+            (
+                provenance.staff_shift_id.clone(),
+                provenance.staff_id.clone(),
+            )
+        } else if options.platform_settlement {
+            // A later cashier or country change cannot take ownership of an old
+            // platform receivable that is only now reaching this terminal.
+            (order_staff_shift_id.clone(), order_staff_id.clone())
+        } else if explicit_cashier_drawer_shift {
+            let shift_id = input
                 .requested_staff_shift_id
                 .as_deref()
-                .or(order_staff_shift_id.as_deref()),
-            input
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .ok_or("Cashier-collected payments require a cashier shift context")?;
+            let Some((role_type, shift_staff_id, _)) =
+                load_shift_role_status_and_staff(conn, &shift_id)?
+            else {
+                return Err(format!(
+                    "Requested cashier shift {shift_id} does not exist for this payment"
+                ));
+            };
+            if role_type != "cashier" && role_type != "manager" {
+                return Err(format!(
+                    "Requested shift {shift_id} is not a cashier or manager drawer"
+                ));
+            }
+            let staff_id = input
                 .requested_staff_id
                 .as_deref()
-                .or(order_staff_id.as_deref()),
-        )?
-    };
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(Some(shift_staff_id));
+            (Some(shift_id), staff_id)
+        } else if mirrored_with_order_shift {
+            (order_staff_shift_id.clone(), order_staff_id.clone())
+        } else if keep_delivery_unassigned {
+            (None, None)
+        } else if cashier_collected_delivery_cash {
+            return Err(
+                "Cashier-collected delivery payments require a cashier shift context".to_string(),
+            );
+        } else {
+            order_ownership::resolve_order_owner(
+                conn,
+                &order_type,
+                &branch_id,
+                &terminal_id,
+                driver_id.as_deref(),
+                input
+                    .requested_staff_shift_id
+                    .as_deref()
+                    .or(order_staff_shift_id.as_deref()),
+                input
+                    .requested_staff_id
+                    .as_deref()
+                    .or(order_staff_id.as_deref()),
+            )?
+        };
     let (tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id) =
         resolve_tip_recipient(
             conn,
@@ -2712,6 +2860,7 @@ pub(crate) fn record_payment_in_connection(
     }
 
     if options.sync_order_owner_with_payment
+        && !is_table_check
         && (resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id)
     {
         let update_sql = if options.mark_order_sync_pending_on_owner_change {
@@ -2771,7 +2920,9 @@ pub(crate) fn record_payment_in_connection(
         ),
         None => (
             "completed",
-            if input.method == "twint" {
+            if let Some(provenance) = options.applied_canonical_provenance.as_ref() {
+                provenance.metadata.as_ref().map(Value::to_string)
+            } else if input.method == "twint" {
                 input.metadata.as_ref().map(Value::to_string)
             } else {
                 None
@@ -2866,6 +3017,7 @@ pub(crate) fn record_payment_in_connection(
     recompute_order_payment_state(conn, &input.order_id, &updated_at, &payment_id)?;
 
     if order_type.eq_ignore_ascii_case("delivery")
+        && options.applied_canonical_provenance.is_none()
         && matches!(input.collected_by.as_deref(), Some("driver_shift"))
     {
         match input.method.as_str() {
@@ -3150,8 +3302,107 @@ pub(crate) fn platform_settlement_kind(
 /// `platform_held` set-aside was ignored, so the cancel of an order the
 /// server had called platform-held was refused as "record the payment".
 pub(crate) fn order_money_is_store_collectable(conn: &Connection, order_id: &str) -> bool {
-    platform_settlement_kind(conn, order_id).is_none()
+    !ecommerce_holds_payment(conn, order_id).unwrap_or(true)
+        && platform_settlement_kind(conn, order_id).is_none()
         && !order_has_platform_held_set_aside(conn, order_id)
+}
+
+pub(crate) fn ecommerce_disposition(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Option<String>, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT ghost_metadata FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "ECOMMERCE_METADATA_UNAVAILABLE".to_string())?;
+    let Some(raw) = raw.as_deref().filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let metadata: Value =
+        serde_json::from_str(raw).map_err(|_| "ECOMMERCE_METADATA_UNAVAILABLE".to_string())?;
+    if metadata.is_null() {
+        return Ok(None);
+    }
+    if !metadata.is_object() {
+        return Err("ECOMMERCE_METADATA_UNAVAILABLE".into());
+    }
+    let Some(ecommerce) = metadata.get("ecommerce").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    if !ecommerce.is_object() {
+        return Err("ECOMMERCE_METADATA_UNAVAILABLE".into());
+    }
+    if !matches!(
+        ecommerce.get("provider").and_then(Value::as_str),
+        Some("woocommerce" | "shopify")
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(
+        ecommerce
+            .get("payment_disposition")
+            .and_then(Value::as_str)
+            .unwrap_or("awaiting_external")
+            .to_string(),
+    ))
+}
+
+pub(crate) fn ecommerce_holds_payment(conn: &Connection, order_id: &str) -> Result<bool, String> {
+    Ok(ecommerce_disposition(conn, order_id)?.is_some_and(|value| value != "merchant_cod"))
+}
+
+pub(crate) fn ensure_ecommerce_order_mutation_allowed(
+    conn: &Connection,
+    order_id: &str,
+    next_status: Option<&str>,
+) -> Result<(), String> {
+    if ecommerce_disposition(conn, order_id)?.is_none() {
+        return Ok(());
+    }
+    if let Some(next) = next_status {
+        let current: String = conn
+            .query_row(
+                "SELECT status FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("read ecommerce order status: {error}"))?;
+        let final_statuses = ["cancelled", "canceled", "refunded"];
+        if next == current
+            || (!final_statuses.contains(&next) && !final_statuses.contains(&current.as_str()))
+        {
+            return Ok(());
+        }
+    }
+    Err(
+        "ECOMMERCE_ORDER_ROUTE_REQUIRED: edit, cancel or refund this order in the online store"
+            .into(),
+    )
+}
+
+pub(crate) fn ensure_ecommerce_payment_reversal_allowed(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<(), String> {
+    let reference: Option<String> = conn
+        .query_row(
+            "SELECT transaction_ref FROM order_payments WHERE id = ?1",
+            params![payment_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("read ecommerce payment receipt: {error}"))?;
+    if reference.is_some_and(|value| {
+        (value.starts_with("woocommerce:") && value.ends_with(":payment"))
+            || (value.starts_with("shopify:") && value.contains(":transaction:"))
+    }) {
+        return Err(
+            "ECOMMERCE_EXTERNAL_PAYMENT_REQUIRED: refund the original online payment".into(),
+        );
+    }
+    Ok(())
 }
 
 /// The completed cash/card rows on an order the PLATFORM settles.
@@ -4428,6 +4679,12 @@ pub(crate) fn update_payment_method_for_payment_with_actor(
 
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, order_id_raw).ok_or("Order not found")?;
+    if ecommerce_holds_payment(&conn, &order_id)? {
+        return Err(
+            "ECOMMERCE_EXTERNAL_PAYMENT_REQUIRED: Online-store payment evidence is immutable"
+                .into(),
+        );
+    }
     let (order_status, current_payment_status): (String, String) = conn
         .query_row(
             "SELECT COALESCE(status, 'pending'),
@@ -5271,6 +5528,126 @@ mod tests {
         }
     }
 
+    // Test-only SQLite C API authorizer: denies the real metadata-column read
+    // while ordinary order headers remain readable. No dependency feature,
+    // fake statement result, production handle, or live database is involved.
+    fn deny_ecommerce_metadata_read(conn: &Connection) {
+        unsafe extern "C" fn deny(
+            _: *mut std::ffi::c_void,
+            action: std::ffi::c_int,
+            table: *const std::ffi::c_char,
+            column: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+        ) -> std::ffi::c_int {
+            if action == rusqlite::ffi::SQLITE_READ && !table.is_null() && !column.is_null() {
+                let table = unsafe { std::ffi::CStr::from_ptr(table) }.to_bytes();
+                let column = unsafe { std::ffi::CStr::from_ptr(column) }.to_bytes();
+                if table == b"orders" && column == b"ghost_metadata" {
+                    return rusqlite::ffi::SQLITE_DENY;
+                }
+            }
+            rusqlite::ffi::SQLITE_OK
+        }
+        // The callback is static and has no borrowed state; the handle stays
+        // alive under the fixture lock for every statement that uses it.
+        let code = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(conn.handle(), Some(deny), std::ptr::null_mut())
+        };
+        assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+    }
+
+    #[test]
+    fn ecommerce_unavailable_metadata_refuses_mutation_with_readable_header() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        deny_ecommerce_metadata_read(&conn);
+        let total: f64 = conn
+            .query_row(
+                "SELECT total_amount FROM orders WHERE id='principal-tip-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 12.0);
+        assert!(conn
+            .query_row(
+                "SELECT ghost_metadata FROM orders WHERE id='principal-tip-order'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .is_err());
+        for status in [None, Some("pending"), Some("cancelled")] {
+            assert!(
+                ensure_ecommerce_order_mutation_allowed(&conn, "principal-tip-order", status)
+                    .is_err(),
+                "metadata observation failure must never authorize an order mutation"
+            );
+        }
+    }
+
+    #[test]
+    fn ecommerce_unavailable_metadata_never_reports_store_collectable() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        deny_ecommerce_metadata_read(&conn);
+        assert!(
+            !order_money_is_store_collectable(&conn, "principal-tip-order"),
+            "an unavailable ownership read cannot establish store money authority"
+        );
+    }
+
+    #[test]
+    fn ecommerce_corrupt_metadata_never_authorizes_mutation_or_collection() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders SET ghost_metadata='{' WHERE id='principal-tip-order'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            ensure_ecommerce_order_mutation_allowed(&conn, "principal-tip-order", None).is_err()
+        );
+        assert!(!order_money_is_store_collectable(
+            &conn,
+            "principal-tip-order"
+        ));
+    }
+
+    #[test]
+    fn ecommerce_ordinary_missing_metadata_keeps_existing_authority() {
+        let db = test_db();
+        principal_tip_order(&db);
+        let conn = db.conn.lock().unwrap();
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("null"),
+            Some("{}"),
+            Some(r#"{"ecommerce":null}"#),
+        ] {
+            conn.execute(
+                "UPDATE orders SET ghost_metadata=?1 WHERE id='principal-tip-order'",
+                [raw],
+            )
+            .unwrap();
+            assert_eq!(
+                ecommerce_disposition(&conn, "principal-tip-order").unwrap(),
+                None
+            );
+            assert!(order_money_is_store_collectable(
+                &conn,
+                "principal-tip-order"
+            ));
+            ensure_ecommerce_order_mutation_allowed(&conn, "principal-tip-order", None).unwrap();
+        }
+    }
+
     #[test]
     fn operating_currency_fresh_payment_requires_original_order_and_shift_units() {
         let db = test_db();
@@ -5296,6 +5673,281 @@ mod tests {
         assert_eq!(
             resolve_local_payment_currency(&conn, &input).unwrap_err(),
             "ORDER_CURRENCY_UNAVAILABLE"
+        );
+    }
+
+    fn waiter_check_cashier_fixture() -> DbState {
+        waiter_check_cashier_fixture_with_currency("CHF")
+    }
+
+    fn waiter_check_cashier_fixture_with_currency(collector_currency: &str) -> DbState {
+        let db = test_db();
+        configure_current_money_fixture(&db, "b1", "CHF", false);
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "terminal_id", "main-terminal").unwrap();
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('collecting-shift','collecting-cashier','b1','main-terminal','cashier','now','active',?1,'now','now')", params![collector_currency]).unwrap();
+        conn.execute("INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opening_amount_cents,currency,opened_at,created_at,updated_at) VALUES('collecting-drawer','collecting-shift','collecting-cashier','b1','main-terminal',100,10000,?1,'now','now','now')", params![collector_currency]).unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,order_type,payment_status,branch_id,terminal_id,staff_shift_id,staff_id,table_session_id,currency,created_at,updated_at) VALUES('waiter-check','[]',10.5,1050,'pending','dine-in','pending','b1','waiter-terminal','foreign-waiter-shift','original-waiter','table-session','CHF','now','now')", []).unwrap();
+        drop(conn);
+        db
+    }
+
+    fn waiter_check_cash_payload() -> Value {
+        serde_json::json!({"orderId":"waiter-check","method":"cash","amount":10.5,"idempotencyKey":"waiter-check-original-cash"})
+    }
+
+    #[test]
+    fn cashier_currency_waiter_check_uses_collector_without_reassigning_waiter() {
+        let db = waiter_check_cashier_fixture();
+        record_payment(&db, &waiter_check_cash_payload()).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let receipt: (String, String, String) = conn.query_row("SELECT currency,staff_shift_id,staff_id FROM order_payments WHERE order_id='waiter-check'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(
+            receipt,
+            (
+                "CHF".into(),
+                "collecting-shift".into(),
+                "collecting-cashier".into()
+            )
+        );
+        let owner: (String, String, String) = conn
+            .query_row(
+                "SELECT staff_shift_id,staff_id,terminal_id FROM orders WHERE id='waiter-check'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            owner,
+            (
+                "foreign-waiter-shift".into(),
+                "original-waiter".into(),
+                "waiter-terminal".into()
+            )
+        );
+        let cash: f64 = conn
+            .query_row(
+                "SELECT total_cash_sales FROM cash_drawer_sessions WHERE id='collecting-drawer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cash, 10.5);
+    }
+
+    #[test]
+    fn cashier_currency_explicit_missing_shift_does_not_fall_back() {
+        let db = waiter_check_cashier_fixture();
+        let mut payload = waiter_check_cash_payload();
+        payload["staffShiftId"] = serde_json::json!("explicit-missing-shift");
+        assert!(record_payment(&db, &payload)
+            .unwrap_err()
+            .contains("read shift currency"));
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM order_payments", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn cashier_currency_known_collector_mismatch_is_refused() {
+        let db = waiter_check_cashier_fixture_with_currency("EUR");
+        assert_eq!(
+            record_payment(&db, &waiter_check_cash_payload()).unwrap_err(),
+            "SHIFT_CURRENCY_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn cashier_currency_no_active_cashier_does_not_use_order_waiter() {
+        let db = waiter_check_cashier_fixture();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE staff_shifts SET status='closed' WHERE id='collecting-shift'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            record_payment(&db, &waiter_check_cash_payload()).unwrap_err(),
+            "SHIFT_CURRENCY_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn cashier_currency_explicit_shift_branch_fence_remains() {
+        let db = waiter_check_cashier_fixture();
+        db.conn.lock().unwrap().execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('foreign-branch-shift','other-cashier','other-branch','other-terminal','cashier','now','active','CHF','now','now')", []).unwrap();
+        let mut payload = waiter_check_cash_payload();
+        payload["staffShiftId"] = serde_json::json!("foreign-branch-shift");
+        assert_eq!(
+            record_payment(&db, &payload).unwrap_err(),
+            "OPERATING_CURRENCY_BRANCH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn cashier_currency_current_terminal_takes_precedence_over_other_cashier() {
+        let db = waiter_check_cashier_fixture();
+        db.conn.lock().unwrap().execute("INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at) VALUES('other-till-shift','other-cashier','b1','other-terminal','cashier','zz-later','active','EUR','now','now')", []).unwrap();
+        record_payment(&db, &waiter_check_cash_payload()).unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT staff_shift_id FROM order_payments WHERE order_id='waiter-check'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "collecting-shift"
+        );
+    }
+
+    #[test]
+    fn cashier_currency_original_receipt_replay_preflight_keeps_collector_and_currency() {
+        let db = waiter_check_cashier_fixture();
+        let payload = waiter_check_cash_payload();
+        record_payment(&db, &payload).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE staff_shifts SET status='closed' WHERE id='collecting-shift'",
+                [],
+            )
+            .unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "USD").unwrap();
+        }
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut retry = payload.clone();
+            prepare_local_payment_currency(&conn, &mut retry).unwrap();
+            assert_eq!(retry["currency"], "CHF");
+            assert!(retry.get("staffShiftId").is_none());
+        }
+        // Generic cash already refuses a fully covered second save. The
+        // currency preflight must retain original money without reopening it.
+        assert!(record_payment(&db, &payload)
+            .unwrap_err()
+            .contains("exceeds outstanding balance"));
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM order_payments WHERE order_id='waiter-check'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT currency,staff_shift_id FROM order_payments WHERE order_id='waiter-check'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("CHF".into(), "collecting-shift".into())
+        );
+    }
+
+    #[test]
+    fn cashier_currency_explicit_ineligible_collector_never_falls_back() {
+        for (role, status, terminal, expected) in [
+            (
+                "cashier",
+                "closed",
+                "main-terminal",
+                "SHIFT_CURRENCY_UNAVAILABLE",
+            ),
+            (
+                "server",
+                "active",
+                "main-terminal",
+                "SHIFT_CURRENCY_UNAVAILABLE",
+            ),
+            (
+                "cashier",
+                "active",
+                "other-terminal",
+                "PAYMENT_COLLECTOR_TERMINAL_MISMATCH",
+            ),
+        ] {
+            let db = waiter_check_cashier_fixture();
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO staff_shifts(id,staff_id,branch_id,terminal_id,role_type,check_in_time,status,currency,created_at,updated_at)
+                 VALUES('explicit-shift','explicit-staff','b1',?1,?2,'now',?3,'CHF','now','now')",
+                params![terminal, role, status],
+            ).unwrap();
+            let mut payload = waiter_check_cash_payload();
+            payload["staffShiftId"] = serde_json::json!("explicit-shift");
+            assert_eq!(record_payment(&db, &payload).unwrap_err(), expected);
+            assert_eq!(
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .query_row("SELECT count(*) FROM order_payments", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn cashier_currency_staff_identity_must_match_explicit_shift() {
+        let db = waiter_check_cashier_fixture();
+        let mut payload = waiter_check_cash_payload();
+        payload["staffShiftId"] = serde_json::json!("collecting-shift");
+        payload["staffId"] = serde_json::json!("different-staff");
+        assert_eq!(
+            record_payment(&db, &payload).unwrap_err(),
+            "PAYMENT_COLLECTOR_STAFF_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn cashier_currency_preflight_freezes_collector_and_remote_mirror_keeps_waiter() {
+        let db = waiter_check_cashier_fixture();
+        let conn = db.conn.lock().unwrap();
+        let mut payload = waiter_check_cash_payload();
+        prepare_local_payment_currency(&conn, &mut payload).unwrap();
+        assert_eq!(payload["currency"], "CHF");
+        assert_eq!(payload["staffShiftId"], "collecting-shift");
+        assert_eq!(payload["staffId"], "collecting-cashier");
+        assert_eq!(payload["collectedBy"], "cashier_drawer");
+
+        payload["paymentOrigin"] = serde_json::json!("sync_reconstructed");
+        payload.as_object_mut().unwrap().remove("staffShiftId");
+        payload.as_object_mut().unwrap().remove("staffId");
+        payload.as_object_mut().unwrap().remove("collectedBy");
+        let input = build_payment_record_input(&payload).unwrap();
+        let recorded = record_payment_in_connection(
+            &conn,
+            &input,
+            &PaymentInsertOptions::applied(Some("remote-table-payment".into())),
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT staff_shift_id,staff_id FROM order_payments WHERE id=?1",
+                params![recorded.payment_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("foreign-waiter-shift".into(), "original-waiter".into())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT staff_shift_id FROM orders WHERE id='waiter-check'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "foreign-waiter-shift"
         );
     }
 

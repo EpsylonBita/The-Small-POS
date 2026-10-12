@@ -1715,7 +1715,8 @@ test('OrderDashboard list-mode table cards keep compact opaque tiles and conditi
   assert.equal((card.match(/\{statusLabel\}/g) ?? []).length, 1, 'only one visible status line');
   assert.match(card, /\{hasOpenCheck && <span className="table-workspace-check">/);
   assert.match(card, /\{occupiedSince && <span><Clock3/);
-  assert.match(card, /\{orderId && <span><ReceiptText/);
+  assert.match(card, /\{orderNumber && <span><ReceiptText[^>]*\/>\{orderNumber\}/);
+  assert.doesNotMatch(card, /<ReceiptText[^>]*\/>\{orderId\}/);
   assert.match(card, /role="progressbar" aria-label=\{t\('tablesDashboard\.paid', 'Paid'\)\} aria-valuenow=\{paidPercent\}/);
   assert.match(cssDeclarations(css, '.table-workspace-grid'), /grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)/);
   assert.match(cssDeclarations(css, '.table-workspace-grid'), /align-items:\s*start/);
@@ -3190,7 +3191,9 @@ test('the table check prepares a scoped cancellation before it asks the reason',
   assert.match(source, /manualReturn=\{cancelPlan\.requiresReturn \? \{ amountCents: cancelPlan\.amountCents, currency: cancelPlan\.currency \} : undefined\}/);
   const service = readFileSync(path.join(process.cwd(), 'src', 'renderer', 'services', 'TableManualCancellation.ts'), 'utf8');
   assert.match(service, /invoke\('order_prepare_manual_cancel', \{ orderId, tableSessionId \}\)/);
-  assert.match(service, /plan\?\.success !== true \|\| plan\.orderId !== orderId \|\| plan\.tableSessionId !== tableSessionId/);
+  assert.match(service, /plan\?\.success !== true[\s\S]*?plan\.tableSessionId !== tableSessionId/);
+  assert.match(service, /if \(plan\.orderId !== orderId\) \{[\s\S]*?bridge\.orders\.getById\(orderId\)/);
+  assert.match(service, /local\.id !== plan\.orderId[\s\S]*?\(local\.supabase_id \?\? local\.supabaseId\) !== orderId[\s\S]*?\(local\.table_session_id \?\? local\.tableSessionId\) !== tableSessionId/);
   assert.match(service, /typeof plan\.generation !== 'string' \|\| typeof plan\.requestId !== 'string' \|\| !plan\.requestId/);
   assert.match(service, /throw new Error\('CANCELLATION_PAYMENT_CHANGED'\);/);
 });

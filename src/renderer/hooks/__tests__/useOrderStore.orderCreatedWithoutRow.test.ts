@@ -60,4 +60,17 @@ describe('useOrderStore order-created without its row', () => {
     expect(fetchOrdersMock).not.toHaveBeenCalled();
     warn.mockRestore();
   });
+
+  it('keeps an accepted table QR visible without asking Main to approve it again', async () => {
+    const accepted = { ...pendingEfoodOrder, id: 'accepted-qr', order_number: 'ORD-20261011-42d0bf26b7204caa94949da625b03234',
+      plugin: 'web', external_plugin_order_id: null,
+      ghost_metadata: { customer_intake_id: '42d0bf26-b720-4caa-9494-9da625b03234',
+        kiosk: { entryMode: 'table', checkoutCommitted: true } } };
+    fetchOrdersMock.mockResolvedValue([accepted, pendingEfoodOrder]);
+    listeners.get('order-created')?.({ orderId: 'accepted-qr' });
+    await vi.waitFor(() => {
+      expect(useOrderStore.getState().orders.map(row => row.id)).toContain('accepted-qr');
+      expect(useOrderStore.getState().pendingExternalOrders.map(row => row.id)).toEqual(['ef-1']);
+    });
+  });
 });

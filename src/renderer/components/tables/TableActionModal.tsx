@@ -7,6 +7,7 @@ import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ShoppingCart, Calendar, Users, Minus, Plus, CheckCircle2, Pencil, UserX, Ban } from 'lucide-react';
 import './table-action-modal.css';
+import { TableHistoryPanel } from './TableHistoryPanel';
 
 interface TableActionModalProps {
   table: RestaurantTable;
@@ -34,6 +35,8 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const [guestCount, setGuestCount] = useState(() => normalizeCovers(table.guestCount || 1));
+  const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => { setHistoryOpen(false); }, [table.id, isOpen]);
   useEffect(() => { setGuestCount(normalizeCovers(table.guestCount || 1)); }, [table.id, table.guestCount]);
 
   const statusLabels: Record<TableStatus, string> = {
@@ -93,7 +96,10 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
       })}</span></div>
       {table.notes && <p className="table-action-notes">{table.notes}</p>}
     </section>
-    <div className="table-action-covers">
+    {historyOpen ? <>
+      <button type="button" className="table-action-button" onClick={() => setHistoryOpen(false)}>{t('common.back', { defaultValue: 'Back' })}</button>
+      <TableHistoryPanel key={table.id} tableId={table.id} />
+    </> : <><div className="table-action-covers">
       <div className="table-action-covers-copy"><label htmlFor="table-action-covers">{t('tableActionModal.covers', { defaultValue: 'Covers' })}</label>
         <p>{t('tableActionModal.coversDescription', { defaultValue: 'Guests on this check' })}</p></div>
       <div className="table-action-stepper">
@@ -108,6 +114,7 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
       defaultValue: 'Open balance: {{amount}}', amount: formatCurrency(table.unpaidBalance),
     })}</p>}
     <div className="table-action-list">
+      {action(t('tables.actions.history', { defaultValue: 'History' }), <Calendar size={20} aria-hidden="true" />, () => setHistoryOpen(true))}
       {action(t('tableActionModal.newOrder', { defaultValue: 'New Order' }), <ShoppingCart size={20} aria-hidden="true" />, handleNewOrder, newOrderDescription, blocksGuestActions, 'table-action-button--primary')}
       {blocksGuestActions && action(isCleaningTable ? t('tableActionModal.markCleaned', { defaultValue: 'Cleaned' })
         : isMaintenanceTable ? t('tableActionModal.markBackInService', { defaultValue: 'Back in service' })
@@ -127,6 +134,7 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
           : t('tableActionModal.newReservationDescription', { defaultValue: 'Book this table for a future time' }), isMaintenanceTable || isUnavailableTable)}
     </div>
     <p className="table-action-hint">{hint}</p>
+    </>}
   </LiquidGlassModal>;
 });
 TableActionModal.displayName = 'TableActionModal';

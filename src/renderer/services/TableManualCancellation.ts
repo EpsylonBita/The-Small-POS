@@ -22,13 +22,24 @@ export interface TableCancellationPlan {
 }
 
 export async function prepareTableCancellation(orderId: string, tableSessionId: string): Promise<TableCancellationPlan> {
-  const plan = await getBridge().invoke('order_prepare_manual_cancel', { orderId, tableSessionId });
-  if (plan?.success !== true || plan.orderId !== orderId || plan.tableSessionId !== tableSessionId
+  const bridge = getBridge();
+  const plan = await bridge.invoke('order_prepare_manual_cancel', { orderId, tableSessionId });
+  if (plan?.success !== true || typeof plan.orderId !== 'string' || !plan.orderId || plan.tableSessionId !== tableSessionId
     || typeof plan.generation !== 'string' || typeof plan.requestId !== 'string' || !plan.requestId
     || !Number.isSafeInteger(plan.amountCents) || plan.amountCents < 0
     || (plan.pending && (!plan.reason?.trim() || (plan.requiresReturn && !['cash_drawer', 'bank'].includes(plan.returnChannel))))
     || (plan.requiresReturn && (plan.amountCents <= 0 || !/^[A-Z]{3}$/.test(plan.currency)))) {
     throw new Error('CANCELLATION_PAYMENT_CHANGED');
+  }
+  if (plan.orderId !== orderId) {
+    // Native preparation resolves a canonical UUID to this till's local order.
+    // Prove that alias and its check from the native ledger; never accept an
+    // arbitrary returned ID or rewrite the retained plan/event identity.
+    const local = await bridge.orders.getById(orderId) as unknown as Record<string, unknown> | null;
+    if (!local || local.id !== plan.orderId || (local.supabase_id ?? local.supabaseId) !== orderId
+      || (local.table_session_id ?? local.tableSessionId) !== tableSessionId) {
+      throw new Error('CANCELLATION_PAYMENT_CHANGED');
+    }
   }
   return plan;
 }

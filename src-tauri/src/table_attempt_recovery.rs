@@ -616,6 +616,201 @@ pub fn table_attempt_recovery_status(db: tauri::State<'_, DbState>) -> Result<Va
     status(&conn)
 }
 
+/// An operator may read a selected original cancellation receipt after a
+/// snapshot admission failure. This never revives another refused operation.
+fn select_original_cancel(
+    conn: &Connection,
+    event: &str,
+) -> Result<Option<(Scope, Attempt)>, String> {
+    if event.trim().is_empty() || event.len() > 255 {
+        return Err("RECOVERY_REQUEST_INVALID".into());
+    }
+    let scope = table_session_cache::current_scope(conn)?;
+    schema(conn)?;
+    let row: Option<(String, Option<String>, String, String, Option<String>, i64, i64)> = conn.query_row(
+        "SELECT local_order_id,session_id,request_json,status,last_error_code,generation,attempts
+         FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2
+           AND terminal_id=?3 AND owner_terminal_id=?4 AND kind='whole_order_cancel' AND client_event_id=?5",
+        params![scope.organization, scope.branch, scope.terminal, scope.owner, event],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let (order, session, raw, status, code, generation, attempts) =
+        row.ok_or("RECOVERY_ORIGINAL_UNAVAILABLE")?;
+    if status == "applied" {
+        return Ok(None);
+    }
+    if status != "conflict" || code.as_deref() != Some("CANONICAL_SNAPSHOT_REVIEW_REQUIRED") {
+        return Err("RECOVERY_ORIGINAL_CONFIRMATION_NOT_ALLOWED".into());
+    }
+    generation
+        .checked_add(1)
+        .filter(|value| *value > 0)
+        .ok_or("RECOVERY_ORIGINAL_CHANGED")?;
+    let request: Value = serde_json::from_str(&raw).map_err(|_| "RECOVERY_REQUEST_INVALID")?;
+    if request.get("client_event_id").and_then(Value::as_str) != Some(event)
+        || request.get("action").and_then(Value::as_str) != Some("whole_order_cancel")
+        || session
+            .as_deref()
+            .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+        || request
+            .get("approved_staff_id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+    {
+        return Err("RECOVERY_REQUEST_INVALID".into());
+    }
+    let original_parent: Option<String> = conn.query_row(
+        "SELECT COALESCE(NULLIF(supabase_id,''),id) FROM orders WHERE id=?1 AND organization_id=?2 AND branch_id=?3",
+        params![order, scope.organization, scope.branch], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if original_parent
+        .as_deref()
+        .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+    {
+        return Err("RECOVERY_ORIGINAL_ORDER_UNAVAILABLE".into());
+    }
+    Ok(Some((
+        scope,
+        Attempt {
+            kind: "whole_order_cancel".into(),
+            event: event.into(),
+            order,
+            session,
+            request,
+            generation,
+            attempts,
+        },
+    )))
+}
+
+fn claim_original_cancel(
+    conn: &Connection,
+    scope: &Scope,
+    attempt: &Attempt,
+    snapshot_id: &str,
+) -> Result<Attempt, String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let next_generation = attempt
+        .generation
+        .checked_add(1)
+        .filter(|value| *value > 0)
+        .ok_or("RECOVERY_ORIGINAL_CHANGED")?;
+    let before: String = tx.query_row(
+        "SELECT json_object('status',status,'attempts',attempts,'generation',generation,
+            'next_retry_at',next_retry_at,'lease_until',lease_until,'last_error_code',last_error_code,
+            'updated_at',updated_at,'remedyVersion',1,'snapshotId',?6)
+         FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
+           AND owner_terminal_id=?4 AND kind='whole_order_cancel' AND client_event_id=?5",
+        params![scope.organization, scope.branch, scope.terminal, scope.owner, attempt.event, snapshot_id],
+        |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    let claimed = tx.execute(
+        "UPDATE table_attempt_recovery_v1 SET status='processing',generation=generation+1,lease_until=?1,updated_at=?2
+         WHERE organization_id=?3 AND branch_id=?4 AND terminal_id=?5 AND owner_terminal_id=?6
+           AND kind='whole_order_cancel' AND client_event_id=?7 AND generation=?8 AND status='conflict'
+           AND last_error_code='CANONICAL_SNAPSHOT_REVIEW_REQUIRED'",
+        params![(Utc::now()+Duration::seconds(120)).to_rfc3339(), Utc::now().to_rfc3339(),
+            scope.organization, scope.branch, scope.terminal, scope.owner, attempt.event, attempt.generation],
+    ).map_err(|e| e.to_string())?;
+    if claimed != 1 {
+        return Err("RECOVERY_ORIGINAL_CHANGED".into());
+    }
+    tx.execute("INSERT INTO table_attempt_recovery_audit_v1(organization_id,branch_id,terminal_id,kind,client_event_id,before_json,outcome,created_at)
+        VALUES(?1,?2,?3,'whole_order_cancel',?4,?5,'original_confirmation_selected',?6)",
+        params![scope.organization, scope.branch, scope.terminal, attempt.event, before, Utc::now().to_rfc3339()])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(Attempt {
+        generation: next_generation,
+        ..attempt.clone()
+    })
+}
+
+fn original_cancel_evidence(
+    conn: &Connection,
+    scope: &Scope,
+    attempt: &Attempt,
+) -> Result<(String, String), String> {
+    conn.query_row(
+        "SELECT r.request_json,COALESCE(NULLIF(o.supabase_id,''),o.id)
+         FROM table_attempt_recovery_v1 r JOIN orders o ON o.id=r.local_order_id
+           AND o.organization_id=r.organization_id AND o.branch_id=r.branch_id
+         WHERE r.organization_id=?1 AND r.branch_id=?2 AND r.terminal_id=?3 AND r.owner_terminal_id=?4
+           AND r.kind='whole_order_cancel' AND r.client_event_id=?5",
+        params![scope.organization, scope.branch, scope.terminal, scope.owner, attempt.event],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).map_err(|_| "RECOVERY_ORIGINAL_ORDER_UNAVAILABLE".into())
+}
+
+async fn confirm_original_with_transport(
+    db: &DbState,
+    event: &str,
+    transport: &dyn Transport,
+) -> Result<Value, String> {
+    let (selected, original) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let selected = select_original_cancel(&conn, event)?;
+        let original = selected
+            .as_ref()
+            .map(|(scope, attempt)| original_cancel_evidence(&conn, scope, attempt))
+            .transpose()?;
+        (selected, original)
+    };
+    let Some((scope, attempt)) = selected else {
+        return Ok(json!({"state":"applied"}));
+    };
+    let original = original.ok_or("RECOVERY_ORIGINAL_ORDER_UNAVAILABLE")?;
+    // The restore point contains the refused original, before even scheduling
+    // metadata changes. Snapshot failure must leave both intent and mirrors intact.
+    let point = crate::recovery::create_pre_recovery_action_snapshot(db)?;
+    let attempt = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (current, selected) =
+            select_original_cancel(&conn, event)?.ok_or("RECOVERY_ORIGINAL_CHANGED")?;
+        if current.organization != scope.organization
+            || current.branch != scope.branch
+            || current.terminal != scope.terminal
+            || current.owner != scope.owner
+            || selected.order != attempt.order
+            || selected.session != attempt.session
+            || selected.generation != attempt.generation
+            || selected.attempts != attempt.attempts
+            || original_cancel_evidence(&conn, &current, &selected)? != original
+        {
+            return Err("RECOVERY_ORIGINAL_CHANGED".into());
+        }
+        claim_original_cancel(&conn, &scope, &attempt, &point.id)?
+    };
+    let mut result = dispatch(transport, &attempt).await;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if original_cancel_evidence(&conn, &scope, &attempt)? != original {
+        return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
+    }
+    if let Ok(Some(response)) = &result {
+        if response.pointer("/event/order_id").and_then(Value::as_str) != Some(original.1.as_str())
+        {
+            result = Err(Failure::guarded("CANONICAL_RECEIPT_IDENTITY_CHANGED"));
+        }
+    }
+    finish(&conn, &scope, &attempt, result)
+}
+
+#[tauri::command]
+pub async fn table_attempt_recovery_confirm_original(
+    db: tauri::State<'_, DbState>,
+    app: tauri::AppHandle,
+    client_event_id: String,
+) -> Result<Value, String> {
+    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+    let event =
+        confirm_original_with_transport(&db, &client_event_id, &NativeTransport(&db)).await?;
+    let _ = app.emit("table_attempt_recovery", &event);
+    if event["state"] == "applied" && event.get("clientEventId").is_some() {
+        let _ = app.emit("order_realtime_update", json!({"source":"crash_recovery","orderId":event["orderId"],"client_event_id":event["clientEventId"]}));
+    }
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +928,513 @@ mod tests {
         scoped["total_amount"] = json!(0);
         json!({"success":true,"committed":true,"event":{"client_event_id":"cancel-original","action":"whole_order_cancel","approved_staff_id":ACTOR,"session_id":SESSION,"order_id":ORDER,"terminal_id":TERMINAL},
             "cafe_lan_snapshot":{"orders":[parent],"sessions":[{"id":SESSION,"organization_id":ORG,"branch_id":BRANCH,"active_order_id":ORDER,"snapshot_revision":2,"status":"cancelled","order":scoped,"items":[],"payments":[],"tables":[],"balance":{"order_total":0,"paid_total":0,"outstanding_balance":0,"tip_total":0}}],"tables":[],"payments":[]}})
+    }
+    fn original_conflict(db: &DbState) -> (String, String) {
+        let local = setup(db);
+        let conn = db.conn.lock().unwrap();
+        remember_cancel(
+            &conn,
+            &local,
+            SESSION,
+            "cancel-original",
+            "Guest left",
+            ACTOR,
+        )
+        .unwrap();
+        conn.execute("UPDATE table_attempt_recovery_v1 SET status='conflict',last_error_code='CANONICAL_SNAPSHOT_REVIEW_REQUIRED'", []).unwrap();
+        let raw = conn
+            .query_row(
+                "SELECT request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (local, raw)
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_reads_selected_receipt_and_admits_once_after_restart() {
+        let disk = crate::tests::harness::TestDb::open();
+        let (local, original) = original_conflict(&disk.state);
+        let disk = disk.restart();
+        let transport = fake(Some(cancel_receipt()));
+        let confirmed = confirm_original_with_transport(&disk.state, "cancel-original", &transport)
+            .await
+            .unwrap();
+        assert_eq!(confirmed["state"], json!("applied"));
+        let points = crate::recovery::list_recovery_points(&disk.state).unwrap();
+        assert_eq!(
+            points.len(),
+            1,
+            "operator admission requires its full restore point"
+        );
+        assert_eq!(
+            points[0].kind,
+            crate::recovery::RecoveryPointKind::PreRecoveryAction
+        );
+        let saved = Connection::open_with_flags(
+            &points[0].snapshot_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(saved.query_row("SELECT status,generation,request_json FROM table_attempt_recovery_v1 WHERE kind='whole_order_cancel'", [],
+            |r| Ok((r.get::<_, String>(0)?,r.get::<_, i64>(1)?,r.get::<_, String>(2)?))).unwrap(),
+            ("conflict".into(),0,original.clone()), "snapshot must precede the processing claim");
+        assert_eq!(
+            saved
+                .query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+            "pending"
+        );
+        drop(saved);
+        assert_eq!(
+            transport.calls.lock().unwrap().len(),
+            1,
+            "must read the selected original receipt"
+        );
+        assert!(transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, method, body)| method == "GET" && body.is_none()));
+        {
+            let conn = disk.state.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "cancelled"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT request_json FROM table_attempt_recovery_v1",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                original
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM table_attempt_recovery_audit_v1 WHERE outcome='applied'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            let audit: String = conn.query_row("SELECT before_json FROM table_attempt_recovery_audit_v1 WHERE outcome='original_confirmation_selected'", [], |r| r.get(0)).unwrap();
+            let audit: Value = serde_json::from_str(&audit).unwrap();
+            assert_eq!(audit["snapshotId"], json!(points[0].id));
+            assert_eq!(audit["remedyVersion"], json!(1));
+            assert_eq!(audit["status"], json!("conflict"));
+            assert_eq!(audit["generation"], json!(0));
+        }
+        assert_eq!(
+            confirm_original_with_transport(&disk.state, "cancel-original", &transport)
+                .await
+                .unwrap()["state"],
+            json!("applied")
+        );
+        assert_eq!(
+            transport.calls.lock().unwrap().len(),
+            1,
+            "already admitted original must be quiet"
+        );
+        assert_eq!(
+            crate::recovery::list_recovery_points(&disk.state)
+                .unwrap()
+                .len(),
+            1,
+            "already admitted original creates no additional snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_snapshot_failure_prevents_claim_or_dispatch() {
+        let disk = crate::tests::harness::TestDb::open();
+        let (local, original) = original_conflict(&disk.state);
+        let root = crate::recovery::recovery_root_for_db(&disk.state);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("points"), b"blocked snapshot directory").unwrap();
+        let transport = fake(Some(cancel_receipt()));
+        assert!(
+            confirm_original_with_transport(&disk.state, "cancel-original", &transport)
+                .await
+                .is_err()
+        );
+        assert!(transport.calls.lock().unwrap().is_empty());
+        let conn = disk.state.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT status,generation,request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?
+                ))
+            )
+            .unwrap(),
+            ("conflict".into(), 0, original)
+        );
+        assert_eq!(
+            conn.query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_never_claims_another_pending_item_edit() {
+        let disk = crate::tests::harness::TestDb::open();
+        let (local, original) = original_conflict(&disk.state);
+        {
+            let conn = disk.state.conn.lock().unwrap();
+            remember_item(&conn, &local, &request()).unwrap();
+            due(&conn);
+        }
+        let transport = fake(Some(cancel_receipt()));
+        let confirmed = confirm_original_with_transport(&disk.state, "cancel-original", &transport)
+            .await
+            .unwrap();
+        assert_eq!(confirmed["state"], json!("applied"));
+        assert!(transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(
+                |(path, method, body)| path.contains("/operations/cancel-original?")
+                    && method == "GET"
+                    && body.is_none()
+            ));
+        let conn = disk.state.conn.lock().unwrap();
+        let retained: (String, String) = conn.query_row("SELECT status,request_json FROM table_attempt_recovery_v1 WHERE kind='whole_order_cancel'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(retained, ("applied".into(), original));
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM table_attempt_recovery_v1 WHERE kind='item_edit'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_rejects_wrong_kind_state_or_owner_without_network() {
+        for change in [
+            "status='pending'",
+            "status='processing'",
+            "last_error_code='AUTHORIZATION_REQUIRED'",
+            "kind='item_edit'",
+            "owner_terminal_id='foreign'",
+        ] {
+            let disk = crate::tests::harness::TestDb::open();
+            original_conflict(&disk.state);
+            disk.state
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE table_attempt_recovery_v1 SET {change}"),
+                    [],
+                )
+                .unwrap();
+            let transport = fake(Some(cancel_receipt()));
+            assert!(
+                confirm_original_with_transport(&disk.state, "cancel-original", &transport)
+                    .await
+                    .is_err(),
+                "{change}"
+            );
+            assert!(transport.calls.lock().unwrap().is_empty(), "{change}");
+        }
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_retains_uncommitted_or_invalid_original() {
+        for reply in [
+            None,
+            Some({
+                let mut reply = cancel_receipt();
+                reply["event"]["approved_staff_id"] = json!(ORG);
+                reply
+            }),
+            Some({
+                let mut reply = cancel_receipt();
+                reply["cafe_lan_snapshot"]["sessions"][0]["branch_id"] = json!(ORG);
+                reply
+            }),
+        ] {
+            let disk = crate::tests::harness::TestDb::open();
+            let (local, original) = original_conflict(&disk.state);
+            let transport = fake(reply);
+            let confirmed =
+                confirm_original_with_transport(&disk.state, "cancel-original", &transport)
+                    .await
+                    .unwrap();
+            assert_ne!(confirmed["state"], json!("applied"));
+            assert_eq!(transport.calls.lock().unwrap().len(), 1);
+            assert!(transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, method, body)| method == "GET" && body.is_none()));
+            let conn = disk.state.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT request_json FROM table_attempt_recovery_v1",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                original
+            );
+            assert_eq!(
+                conn.query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "pending"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_refuses_another_parent_with_a_valid_receipt_scope() {
+        let disk = crate::tests::harness::TestDb::open();
+        let (local, original) = original_conflict(&disk.state);
+        let mut receipt = cancel_receipt();
+        receipt["event"]["order_id"] = json!(ACTOR);
+        receipt["cafe_lan_snapshot"]["orders"][0]["id"] = json!(ACTOR);
+        receipt["cafe_lan_snapshot"]["sessions"][0]["active_order_id"] = json!(ACTOR);
+        receipt["cafe_lan_snapshot"]["sessions"][0]["order"]["id"] = json!(ACTOR);
+        let result =
+            confirm_original_with_transport(&disk.state, "cancel-original", &fake(Some(receipt)))
+                .await
+                .unwrap();
+        assert_eq!(result["state"], json!("conflict"));
+        assert_eq!(
+            result["errorCode"],
+            json!("CANONICAL_RECEIPT_IDENTITY_CHANGED")
+        );
+        let conn = disk.state.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM orders", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            original
+        );
+    }
+
+    struct OriginalCancelRace<'a> {
+        db: &'a DbState,
+        change: &'static str,
+    }
+    impl Transport for OriginalCancelRace<'_> {
+        fn send(
+            &self,
+            path: String,
+            method: &'static str,
+            body: Option<Value>,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                assert!(path.contains("/operations/cancel-original?"));
+                assert_eq!(method, "GET");
+                assert!(body.is_none());
+                let conn = self.db.conn.lock().unwrap();
+                match self.change {
+                    "request" => {
+                        conn.execute(
+                            "UPDATE table_attempt_recovery_v1 SET request_json=request_json||' '",
+                            [],
+                        )
+                        .unwrap();
+                    }
+                    "generation" => {
+                        conn.execute(
+                            "UPDATE table_attempt_recovery_v1 SET generation=generation+1",
+                            [],
+                        )
+                        .unwrap();
+                    }
+                    "owner" => {
+                        crate::db::set_setting(&conn, "terminal", "owner_terminal_db_id", ACTOR)
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(cancel_receipt())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_checks_frozen_bytes_generation_and_binding_after_await() {
+        for change in ["request", "generation", "owner"] {
+            let disk = crate::tests::harness::TestDb::open();
+            let (local, original) = original_conflict(&disk.state);
+            let transport = OriginalCancelRace {
+                db: &disk.state,
+                change,
+            };
+            let result =
+                confirm_original_with_transport(&disk.state, "cancel-original", &transport).await;
+            if change == "generation" {
+                assert_eq!(result.unwrap()["state"], json!("stale"));
+            } else {
+                assert!(result.is_err(), "{change}");
+            }
+            let conn = disk.state.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "pending"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT request_json FROM table_attempt_recovery_v1",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                if change == "request" {
+                    original + " "
+                } else {
+                    original
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn original_cancel_confirmation_preserves_conflicting_local_work() {
+        let disk = crate::tests::harness::TestDb::open();
+        let (local, original) = original_conflict(&disk.state);
+        disk.state
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE orders SET sync_status='pending',total_amount=99 WHERE id=?1",
+                [&local],
+            )
+            .unwrap();
+        let result = confirm_original_with_transport(
+            &disk.state,
+            "cancel-original",
+            &fake(Some(cancel_receipt())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["state"], json!("conflict"));
+        let conn = disk.state.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT total_amount FROM orders WHERE id=?1",
+                [&local],
+                |r| r.get::<_, f64>(0)
+            )
+            .unwrap(),
+            99.0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn original_cancel_confirmation_claim_and_scope_fences_reject_late_results() {
+        let disk = crate::tests::harness::TestDb::open();
+        let (local, original) = original_conflict(&disk.state);
+        let conn = disk.state.conn.lock().unwrap();
+        let (scope, selected) = select_original_cancel(&conn, "cancel-original")
+            .unwrap()
+            .expect("selected original");
+        let attempt =
+            claim_original_cancel(&conn, &scope, &selected, "test-restore-point").unwrap();
+        assert!(
+            claim_original_cancel(&conn, &scope, &selected, "test-restore-point").is_err(),
+            "duplicate operator claim"
+        );
+        conn.execute(
+            "UPDATE table_attempt_recovery_v1 SET generation=generation+1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            finish(&conn, &scope, &attempt, Ok(Some(cancel_receipt()))).unwrap()["state"],
+            json!("stale")
+        );
+        crate::db::set_setting(&conn, "terminal", "owner_terminal_db_id", ACTOR).unwrap();
+        assert!(finish(&conn, &scope, &attempt, Ok(Some(cancel_receipt()))).is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT request_json FROM table_attempt_recovery_v1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            original
+        );
+        assert_eq!(
+            conn.query_row("SELECT status FROM orders WHERE id=?1", [&local], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "pending"
+        );
     }
     #[tokio::test]
     async fn crash_attempt_item_disk_restart_replays_immutable_body_and_applies_before_ack() {

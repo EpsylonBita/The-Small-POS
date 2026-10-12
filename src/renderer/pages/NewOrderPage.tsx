@@ -68,6 +68,7 @@ import {
 } from '../utils/checkoutMoneySettings';
 import { useCheckoutRequestId } from '../hooks/useCheckoutRequestId';
 import { getCheckoutDraftStore } from '../services/CheckoutDraftStore';
+import { shouldAutomaticallyRestoreCheckoutDraft } from '../utils/checkoutDraftRestoration';
 import { isCheckoutOutcomeUnknown, notifyCheckoutOutcomeUnknown } from '../utils/checkoutOutcome';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 
@@ -506,7 +507,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     if (!organizationId || !branchId || !terminalId) return;
     let mounted = true;
     void getCheckoutDraftStore().then(owner => owner.load()).then(saved => {
-      if (mounted && saved && (saved.cartItems.length || saved.phase === 'checkout_pending')) {
+      if (mounted && saved && shouldAutomaticallyRestoreCheckoutDraft(saved)) {
         restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
       }
     }).catch(() => { /* Native read errors are shown at cart admission. */ });

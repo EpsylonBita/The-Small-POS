@@ -51,6 +51,25 @@ const checkoutButton = () => screen.getByRole('button', { name: 'menu.cart.compl
 
 afterEach(cleanup)
 
+describe('MenuCart: retained submission status', () => {
+  it('blocks another save while awaiting verification without displaying an active save spinner', () => {
+    const onCheckout = vi.fn()
+    renderCart({ editMode: true, isSaving: false, submissionBlocked: true, onCheckout })
+    const button = screen.getByRole('button', { name: 'Awaiting verification' })
+    expect(button).toBeDisabled()
+    expect(button.querySelector('.animate-spin')).toBeNull()
+    fireEvent.click(button)
+    expect(onCheckout).not.toHaveBeenCalled()
+  })
+
+  it('shows an active save only while a request is running', () => {
+    renderCart({ editMode: true, isSaving: true, submissionBlocked: true })
+    const button = screen.getByRole('button', { name: 'Saving...' })
+    expect(button).toBeDisabled()
+    expect(button.querySelector('.animate-spin')).not.toBeNull()
+  })
+})
+
 describe('MenuCart: delivery zone not checked', () => {
   it('lets the order through with a notice and a re-pick action (founder rule), never "out of zone"', () => {
     const onRepick = vi.fn()

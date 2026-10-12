@@ -535,11 +535,11 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
     expect(h.store.createOrder).not.toHaveBeenCalled();
   });
 
-  it('restores and completes an edit, then creates the next checkout with its own persisted identity', async () => {
+  it('restores an editable draft and completes its edit before the next checkout gets its own persisted identity', async () => {
     targetOrder('flow-after-edit');
     const request = { orderId: 'old-paid-order', client_event_id: 'restored-edit-event', expected_version: 3,
       expected_local_version: 1, items: [], action: { type: 'none' } };
-    h.state.checkoutDraft = { draftId: 'edit-draft', checkoutRequestId: 'restored-edit-event', phase: 'checkout_pending', cartItems: [{}],
+    h.state.checkoutDraft = { draftId: 'edit-draft', checkoutRequestId: 'restored-edit-event', phase: 'editing', cartItems: [{}],
       context: { editMode: true, editOrderId: 'old-paid-order', orderType: 'pickup' },
       submission: { ...request, action: 'edit_settlement', settlementAction: request.action, settlementRequest: request } };
     render(<OrderFlow />);

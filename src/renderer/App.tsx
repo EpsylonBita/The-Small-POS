@@ -17,6 +17,7 @@ import { ErrorBoundary } from "./components/error/ErrorBoundary";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
+import { WaiterServiceRequestManager } from "./components/notices/WaiterServiceRequestManager";
 import { IncomingOrderAlertManager } from "./components/notices/IncomingOrderAlertManager";
 import { AppRoutes } from "./AppRoutes";
 import { GlobalCashierGate } from './components/GlobalCashierGate';
@@ -1702,6 +1703,7 @@ function AppContent() {
                 stays visible to staff no matter what screen they are on;
                 hides immediately when `user` clears on logout. */}
             <CancellationNoticeManager enabled={Boolean(user)} />
+            <WaiterServiceRequestManager enabled={Boolean(user)} />
 
             {/* Incoming platform / customer orders waiting for accept /
                 decline. Mounted here, beside the routes and never inside

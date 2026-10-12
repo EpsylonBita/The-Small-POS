@@ -157,7 +157,7 @@ test('new checkout requires readable tax settings and canonical edits preserve s
     'a fulfilled IPC without committed success cannot clear the correction');
 
   const api = readFileSync(path.join(process.cwd(), '..', 'admin-dashboard', 'src', 'services', 'pos', 'pos-orders-api-service.ts'), 'utf8');
-  assert.match(api, /const branchComplianceSettings = await this\.getBranchComplianceSettings\(terminal\.branch_id\)\s+const computed = this\.computeOrderTotals\(/);
+  assert.match(api, /const branchComplianceSettings = await this\.getBranchComplianceSettings\(terminal\.branch_id\)\s+(?:const|let) computed = this\.computeOrderTotals\(/);
   for (const [field, result] of [
     ['subtotal', 'computedSubtotal'], ['tax_amount', 'taxAmount'],
     ['discount_amount', 'discountAmount'], ['total_amount', 'computedTotal'],

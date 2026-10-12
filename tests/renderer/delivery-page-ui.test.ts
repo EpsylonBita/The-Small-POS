@@ -36,6 +36,6 @@ test('DeliveryPage driver assignment modal keeps accessible close and hidden scr
   assert.match(source, /delivery=\{selectedDelivery\}/);
   assert.match(source, /aria-label=\{t\('common\.close', 'Close'\)\}/);
   assert.match(source, /className="flex-1 overflow-y-auto scrollbar-hide p-4"/);
-  assert.match(source, /onClick=\{onClose\}/);
+  assert.match(source, /onClick=\{close\}/);
   assert.match(source, /onClick=\{handleAssign\}/);
 });

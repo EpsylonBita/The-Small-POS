@@ -279,6 +279,31 @@ describe('ZReportModal Record cash / Record card', { timeout: 20_000 }, () => {
     expect(await screen.findByText(i18n.t('modals.zReport.setAsideShiftRequired'))).toBeTruthy();
   });
 
+  it.each([
+    { code: 'ORDER_CURRENCY_UNAVAILABLE', reply: 'rejection' },
+    { code: 'PAYMENT_CURRENCY_UNAVAILABLE', reply: 'rejection' },
+    { code: 'ORDER_CURRENCY_UNAVAILABLE', reply: 'refusal' },
+  ])(
+    'explains $code ($reply) as missing historical evidence without suggesting a country change', async ({ code, reply }) => {
+      mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
+      if (reply === 'refusal') {
+        mock.resolvePaymentBlocker.mockResolvedValueOnce({ success: false, error: code });
+      } else {
+        mock.resolvePaymentBlocker.mockRejectedValueOnce(code);
+      }
+      const i18n = await renderModal('el');
+      fireEvent.click(await recordCashButton(i18n));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: i18n.t('modals.zReport.recordConfirmAction') }));
+      });
+      expect(await screen.findByText(i18n.t('modals.zReport.resolveBlockerFailed', {
+        orderNumber: 'A-0120',
+        error: i18n.t('modals.zReport.recordPaymentOriginalCurrencyMissing'),
+      }))).toBeTruthy();
+      expect(mock.resolvePaymentBlocker).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('tells the operator a record already made was not added twice', async () => {
     mock.generateZReport.mockResolvedValue(reportWith([unrecordedFinding()]));
     mock.resolvePaymentBlocker.mockResolvedValue({

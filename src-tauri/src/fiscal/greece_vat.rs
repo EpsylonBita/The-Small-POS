@@ -27,6 +27,8 @@ pub const GREECE_DEFAULT_VAT_REGION_PROFILE: &str = "mainland";
 pub const GREECE_DELIVERY_FEE_VAT_CATEGORY_CODE: &str = "gr_reduced_13";
 /// A tip is outside the scope of VAT.
 pub const GREECE_TIP_VAT_CATEGORY_CODE: &str = "gr_out_of_scope";
+/// An explicit owner receipt quote, not a Greek fiscal VAT classification.
+const POS_RECEIPT_ZERO_VAT_CATEGORY: &str = "pos_receipt_zero";
 
 /// Local settings (category `tax`) the server feed fills from the branch's
 /// Greek compliance row.
@@ -281,7 +283,11 @@ pub fn calculate_greece_fiscal_breakdown(
                 .unwrap_or(1.0);
             let original_gross_cents = js_cents(f64::max(0.0, quantity * line.unit_price));
             let (vat_category_code, vat_rate) =
-                resolve_greece_vat_category(line.vat_category_code.as_deref(), region);
+                if line.vat_category_code.as_deref() == Some(POS_RECEIPT_ZERO_VAT_CATEGORY) {
+                    (POS_RECEIPT_ZERO_VAT_CATEGORY, 0.0)
+                } else {
+                    resolve_greece_vat_category(line.vat_category_code.as_deref(), region)
+                };
             Normalized {
                 id: line
                     .id
@@ -300,7 +306,9 @@ pub fn calculate_greece_fiscal_breakdown(
                 original_gross_cents,
                 participates_in_discount_allocation: line
                     .participates_in_discount_allocation
-                    .unwrap_or(vat_rate > 0.0),
+                    .unwrap_or(
+                        vat_rate > 0.0 || vat_category_code == POS_RECEIPT_ZERO_VAT_CATEGORY,
+                    ),
             }
         })
         .collect();
@@ -909,7 +917,7 @@ mod tests {
     fn port_reproduces_every_shared_order_vat_vector() {
         let vectors: Value = serde_json::from_str(ORDER_VAT_VECTORS).expect("vectors parse");
         let cases = vectors["cases"].as_array().expect("vector cases");
-        assert_eq!(cases.len(), 23, "the frozen vector set has 23 cases");
+        assert_eq!(cases.len(), 27, "the frozen vector set has 27 cases");
         for case in cases {
             let name = case["name"].as_str().unwrap();
             let input = vector_input(&case["input"]);

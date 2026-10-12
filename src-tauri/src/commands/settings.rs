@@ -304,6 +304,51 @@ fn api_key_digest(api_key: &str) -> String {
     format!("{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
+/// Full native authority fingerprint; never persist the raw credential tuple.
+/// This is lock-free so the Repairs transition owner can capture it without
+/// reversing the settings -> transition -> SQLite lock order.
+pub(crate) fn current_access_binding_digest() -> Result<Option<String>, String> {
+    let mut values = Vec::new();
+    for key in [
+        "organization_id",
+        "branch_id",
+        "terminal_id",
+        "admin_dashboard_url",
+        "pos_api_key",
+    ] {
+        let Some(value) = storage::get_credential_strict(key)
+            .map_err(|_| "TERMINAL_CREDENTIAL_READ_FAILED".to_string())?
+        else {
+            return Ok(None);
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        values.push(value.to_string());
+    }
+    let authority = Zeroizing::new(values);
+    let url = api::normalize_admin_url(&authority[3]);
+    api::resolve_admin_base(&url).map_err(|_| "TERMINAL_MANAGED_TUPLE_CONFLICT".to_string())?;
+    if api::extract_terminal_id_from_connection_string(&authority[4])
+        .as_deref()
+        .is_some_and(|terminal| terminal != authority[2])
+        || api::extract_admin_url_from_connection_string(&authority[4])
+            .is_some_and(|encoded| api::normalize_admin_url(&encoded) != url)
+    {
+        return Err("TERMINAL_MANAGED_TUPLE_CONFLICT".to_string());
+    }
+    let frozen = serde_json::to_vec(&(
+        &authority[0],
+        &authority[1],
+        &authority[2],
+        url,
+        api_key_digest(&authority[4]),
+    ))
+    .map_err(|_| "TERMINAL_MANAGED_TUPLE_CONFLICT".to_string())?;
+    Ok(Some(format!("{:x}", Sha256::digest(frozen))))
+}
+
 fn terminal_identity_rollback_binding(
     journal: &TerminalRebindCandidateJournal,
 ) -> Result<crate::repairs::TerminalIdentityRollbackBinding, String> {
@@ -1782,6 +1827,149 @@ pub(crate) fn reconcile_startup_terminal_binding(
 ) -> Result<Option<String>, String> {
     with_settings_durability_owner(|| reconcile_startup_terminal_binding_under_lock(db))
 }
+
+/// Recover only interrupted access verification, through its authoritative
+/// owner. A real terminal intent continues through the original journal path.
+pub(crate) async fn reconcile_startup_terminal_binding_with_access(
+    db: &db::DbState,
+) -> Result<Option<String>, String> {
+    if crate::repairs::verified_access_pending()? {
+        let decision = crate::repairs::start_authoritative_access_decision()?;
+        with_settings_durability_owner(|| {
+            ensure_no_terminal_transition_intent(db)?;
+            let authority =
+                resolve_strict_terminal_authority(db)?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+            verify_sqlite_binding_mirror(db, &authority)?;
+            let digest =
+                current_access_binding_digest()?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+            crate::repairs::restore_verified_access_pending(
+                &authority.binding.organization_id,
+                &authority.binding.branch_id,
+                &authority.binding.terminal_id,
+                &digest,
+                decision,
+            )
+        })?;
+        return reconcile_startup_terminal_binding(db);
+    }
+    if !crate::repairs::access_reconciliation_pending()? {
+        match reconcile_startup_terminal_binding(db) {
+            Ok(result) => return Ok(result),
+            Err(error) if error == "TERMINAL_REBIND_CANDIDATE_REQUIRED" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let decision = crate::repairs::start_authoritative_access_decision()?;
+    let (authority, snapshot) = with_settings_durability_owner(|| {
+        ensure_no_terminal_transition_intent(db)?;
+        let authority = resolve_strict_terminal_authority(db)?
+            .ok_or_else(|| "TERMINAL_MANAGED_TUPLE_MISSING".to_string())?;
+        verify_sqlite_binding_mirror(db, &authority)?;
+        let digest = current_access_binding_digest()?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+        let snapshot = crate::repairs::capture_access_recovery(
+            &authority.binding.organization_id,
+            &authority.binding.branch_id,
+            &authority.binding.terminal_id,
+            &digest,
+            decision,
+        )?;
+        Ok((authority, snapshot))
+    })?;
+    let payload = serde_json::json!({
+        "terminalId": authority.binding.terminal_id, "organizationId": authority.binding.organization_id,
+        "branchId": authority.binding.branch_id, "adminDashboardUrl": authority.binding.admin_dashboard_url,
+        "apiKey": authority.api_key.as_str(),
+    });
+    let validated = validate_terminal_binding_candidate(&payload).await?;
+    for key in [
+        "terminalId",
+        "organizationId",
+        "branchId",
+        "adminDashboardUrl",
+        "apiKey",
+    ] {
+        if validated.get(key) != payload.get(key) {
+            return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+        }
+    }
+    with_settings_durability_owner(|| {
+        ensure_no_terminal_transition_intent(db)?;
+        verify_sqlite_binding_mirror(db, &authority)?;
+        crate::repairs::check_access_recovery_snapshot(&snapshot, decision)
+    })?;
+    let access = super::modules::fetch_bound_repair_access(
+        &authority.binding.admin_dashboard_url,
+        &authority.api_key,
+        &authority.binding.terminal_id,
+    )
+    .await?;
+    if !access.matches(
+        &authority.binding.organization_id,
+        &authority.binding.branch_id,
+        &authority.binding.terminal_id,
+    ) {
+        return Err("REPAIR_AUTHORITATIVE_IDENTITY_MISMATCH".to_string());
+    }
+    let pending = with_settings_durability_owner(|| {
+        ensure_no_terminal_transition_intent(db)?;
+        let current =
+            resolve_strict_terminal_authority(db)?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+        if current.binding != authority.binding
+            || current.api_key.as_str() != authority.api_key.as_str()
+        {
+            return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+        }
+        verify_sqlite_binding_mirror(db, &current)?;
+        super::modules::resume_bound_repair_access(db, &access, decision, &snapshot)
+    })?;
+    if !pending.is_disabled() {
+        // This owner checks the real persisted staff session/actor lease. No
+        // session is a supported deferred state, never an inferred actor.
+        if let Err(error) =
+            super::modules::finalize_repair_access_if_signed_in(db, &access, &pending).await
+        {
+            tracing::warn!(error_code = %error, "Repair access remains pending its verified staff bootstrap");
+        }
+    }
+    reconcile_startup_terminal_binding(db)
+}
+
+fn ensure_no_terminal_transition_intent(db: &db::DbState) -> Result<(), String> {
+    let connection = db
+        .conn
+        .lock()
+        .map_err(|_| "TERMINAL_TRANSITION_READ_FAILED")?;
+    for key in [
+        TERMINAL_CONNECTION_REBIND_PENDING_KEY,
+        TERMINAL_CONNECTION_REBIND_CANDIDATE_KEY,
+    ] {
+        if db::get_setting(&connection, "sync", key).is_some() {
+            return Err("TERMINAL_REBIND_CANDIDATE_REQUIRED".to_string());
+        }
+    }
+    drop(connection);
+    if crate::repairs::terminal_identity_rollback_publication_pending()? {
+        return Err("TERMINAL_REBIND_PENDING".to_string());
+    }
+    Ok(())
+}
+
+/// Checked native read for the transition owner after its reader drain. It
+/// acquires no settings mutex and never reconstructs identity from SQLite.
+pub(crate) fn verify_current_access_binding(db: &db::DbState, digest: &str) -> Result<(), String> {
+    ensure_no_terminal_transition_intent(db)?;
+    let authority =
+        resolve_strict_terminal_authority(db)?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+    verify_sqlite_binding_mirror(db, &authority)?;
+    if current_access_binding_digest()?.as_deref() != Some(digest) {
+        return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "../tests/main_startup_access.rs"]
+mod main_startup_access_tests;
 
 fn reconcile_startup_terminal_binding_under_lock(
     db: &db::DbState,

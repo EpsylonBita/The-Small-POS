@@ -412,6 +412,7 @@ const SuppliersPage: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const paymentPendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -580,6 +581,7 @@ const SuppliersPage: React.FC = () => {
   }, []);
 
   const closeInvoiceDetails = useCallback(() => {
+    if (paymentPendingRef.current) return;
     setSelectedInvoiceId(null);
   }, []);
 
@@ -1551,11 +1553,11 @@ const SuppliersPage: React.FC = () => {
   };
 
   const recordInvoicePayment = async (amountOverride?: number) => {
-    if (!selectedInvoice) return;
+    if (!selectedInvoice || paymentPendingRef.current || saving) return;
 
-    const amount = amountOverride ?? toNumber(paymentAmount);
+    const amount = amountOverride ?? parseInvoiceAmountInput(paymentAmount);
     const remaining = getInvoiceRemainingAmount(selectedInvoice);
-    if (amount <= 0) {
+    if (amount === null || !Number.isFinite(amount) || amount <= 0) {
       toast.error(t('suppliers.invoices.paymentAmountRequired', 'Enter a payment amount'));
       return;
     }
@@ -1564,6 +1566,7 @@ const SuppliersPage: React.FC = () => {
       return;
     }
 
+    paymentPendingRef.current = true;
     setSaving(true);
     try {
       const result = await posApiPost<{ success: boolean; invoice?: Invoice; error?: string }>(
@@ -1588,6 +1591,7 @@ const SuppliersPage: React.FC = () => {
     } catch (paymentError) {
       toast.error(paymentError instanceof Error ? paymentError.message : t('suppliers.invoices.paymentFailed', 'Could not record payment'));
     } finally {
+      paymentPendingRef.current = false;
       setSaving(false);
     }
   };
@@ -2131,7 +2135,7 @@ const SuppliersPage: React.FC = () => {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={() => setSelectedInvoiceId(null)}
+            onClick={closeInvoiceDetails}
           >
             <motion.div
               ref={invoiceDialogRef}
@@ -2160,7 +2164,8 @@ const SuppliersPage: React.FC = () => {
                   <p className={`mt-1 truncate text-sm ${subtleClass}`}>{selectedInvoiceSupplierName}</p>
                 </div>
                 <button
-                  onClick={() => setSelectedInvoiceId(null)}
+                  onClick={closeInvoiceDetails}
+                  disabled={saving}
                   className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border ${iconButtonClass}`}
                   aria-label={t('common.close', 'Close')}
                 >
@@ -2203,9 +2208,10 @@ const SuppliersPage: React.FC = () => {
                       <div className="mt-4 space-y-3">
                         <div className="grid gap-3 sm:grid-cols-3">
                           <input
-                            type="number"
-                            min="0"
-                            step="0.01"
+                            type="text"
+                            inputMode="decimal"
+                            disabled={saving}
+                            aria-label={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                             value={paymentAmount}
                             onChange={(event) => setPaymentAmount(event.target.value)}
                             className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
@@ -2213,6 +2219,7 @@ const SuppliersPage: React.FC = () => {
                           />
                           <select
                             value={paymentMethod}
+                            disabled={saving}
                             onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}
                             className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
                           >
@@ -2225,6 +2232,7 @@ const SuppliersPage: React.FC = () => {
                           <input
                             type="date"
                             value={paymentDate}
+                            disabled={saving}
                             onChange={(event) => setPaymentDate(event.target.value)}
                             className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
                           />
@@ -2232,12 +2240,14 @@ const SuppliersPage: React.FC = () => {
                         <div className="grid gap-3 sm:grid-cols-2">
                           <input
                             value={paymentReference}
+                            disabled={saving}
                             onChange={(event) => setPaymentReference(event.target.value)}
                             className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
                             placeholder={t('suppliers.invoices.reference', 'Reference')}
                           />
                           <input
                             value={paymentNotes}
+                            disabled={saving}
                             onChange={(event) => setPaymentNotes(event.target.value)}
                             className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
                             placeholder={t('suppliers.invoices.paymentNotes', 'Payment notes')}

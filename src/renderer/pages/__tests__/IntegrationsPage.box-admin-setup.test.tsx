@@ -276,10 +276,10 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
   it('keeps the credential toggle for a plugin the server does not mark admin-managed', async () => {
     serve([
       {
-        plugin_id: 'glovo',
-        provider: 'glovo',
-        name: 'Glovo',
-        category: 'delivery',
+        plugin_id: 'acme_crm',
+        provider: 'acme_crm',
+        name: 'ACME CRM',
+        category: 'other',
         is_purchased: true,
         status: 'inactive',
         read_only_admin_setup: false,
@@ -287,9 +287,18 @@ describe('BOX card is Admin-Dashboard-managed on the till', () => {
     ])
     render(<IntegrationsPage />)
 
-    await screen.findByText('Glovo')
+    await screen.findByText('ACME CRM')
     expect(screen.getByRole('switch')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Open Admin Dashboard' })).not.toBeInTheDocument()
+  })
+
+  it.each(['glovo', 'google_analytics'])('keeps %s admin-managed when an older server sends a false setup flag', async pluginId => {
+    serve([{ plugin_id: pluginId, provider: pluginId, name: pluginId, is_purchased: true,
+      status: 'inactive', read_only_admin_setup: false }])
+    render(<IntegrationsPage />)
+    await screen.findByRole('heading', { name: pluginId })
+    expectNoCredentialSurface()
+    expect(screen.getByRole('button', { name: 'Open Admin Dashboard' })).toBeInTheDocument()
   })
 
   it('manual refresh updates direct enable state and the separate legacy reporting flag together', async () => {

@@ -408,13 +408,13 @@ test('SuppliersPage invoice details modal closes on Escape via the same topmost-
   );
   assert.match(source, /<h2 id=\{invoiceTitleId\}[^>]*>\{formatDate\(getInvoiceDisplayDate\(selectedInvoice\)\)\}<\/h2>/);
 
-  assert.match(source, /const closeInvoiceDetails = useCallback\(\(\) => \{\s*setSelectedInvoiceId\(null\);\s*\}, \[\]\);/);
+  assert.match(source, /const closeInvoiceDetails = useCallback\(\(\) => \{\s*if \(paymentPendingRef\.current\) return;\s*setSelectedInvoiceId\(null\);\s*\}, \[\]\);/);
   assert.match(source, /if \(!selectedInvoiceId\) \{\s*return;\s*\}/);
   assert.match(source, /dialogs\.length > 0 && dialogs\[dialogs\.length - 1\] !== invoiceDialogRef\.current/);
   assert.match(source, /event\.preventDefault\(\);\s*closeInvoiceDetails\(\);/);
   assert.ok(
-    (source.match(/onClick=\{\(\) => setSelectedInvoiceId\(null\)\}/g) || []).length >= 2,
-    'invoice backdrop + X must still close by clearing selectedInvoiceId',
+    (source.match(/onClick=\{closeInvoiceDetails\}/g) || []).length >= 2,
+    'invoice backdrop + X must use the shared close handler that guards pending payments',
   );
 
   // The import drawer Escape behavior is preserved (its own ref/gate untouched), so the

@@ -329,3 +329,302 @@ fn a_gift_card_row_is_left_to_its_return_import() {
         "its return import decides, not the pull"
     );
 }
+
+mod canonical_collector {
+    use super::*;
+
+    const STAFF: &str = "887b95e5-69d3-4820-98a9-00ef928f36e5";
+    const COLLECTOR_SHIFT: &str = "ecfdc532-881f-4028-b5a5-1188db039c01";
+
+    fn seed(conn: &Connection, order_type: &str) {
+        seed_order(conn, order_type);
+        seed_drawer(conn, 0);
+        crate::db::set_setting(conn, "terminal", "organization_id", "org-mirror").unwrap();
+        crate::db::set_setting(conn, "terminal", "branch_id", BRANCH).unwrap();
+        conn.execute(
+            "UPDATE orders SET staff_id='original-waiter', staff_shift_id='original-waiter-shift'
+             WHERE id=?1",
+            [LOCAL_ORDER],
+        )
+        .unwrap();
+    }
+
+    fn collector() -> Value {
+        json!({ "staff_id": STAFF, "staff_shift_id": COLLECTOR_SHIFT,
+            "collected_by": "cashier_drawer", "original_annotation": "kept" })
+    }
+
+    fn provenance(conn: &Connection) -> (Option<String>, Option<String>, Option<Value>) {
+        conn.query_row(
+            "SELECT staff_id, staff_shift_id, metadata FROM order_payments WHERE remote_payment_id=?1",
+            [REMOTE_PAYMENT],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Option<String>>(2)?
+                .map(|raw| serde_json::from_str(&raw).unwrap()))),
+        ).unwrap()
+    }
+
+    fn unchanged_collection_side_effects(conn: &Connection) {
+        let owner: (String, String) = conn
+            .query_row(
+                "SELECT staff_id, staff_shift_id FROM orders WHERE id=?1",
+                [LOCAL_ORDER],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            owner,
+            ("original-waiter".into(), "original-waiter-shift".into())
+        );
+        let cash: i64 = conn
+            .query_row(
+                "SELECT total_cash_sales_cents FROM cash_drawer_sessions WHERE staff_shift_id=?1",
+                [SHIFT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cash, 0,
+            "a canonical mirror never collects into this drawer"
+        );
+        for table in ["sync_queue", "parity_sync_queue"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "no payment or ownership queue on {table}");
+        }
+    }
+
+    #[test]
+    fn new_mirror_preserves_recorded_collector_in_object_and_text_aliases() {
+        for metadata in [
+            collector(),
+            json!({ "staffId": STAFF, "staffShiftId": COLLECTOR_SHIFT,
+            "collectedBy": "cashier_drawer", "original_annotation": "kept" }),
+            Value::String(collector().to_string()),
+        ] {
+            let td = TestDb::open();
+            let conn = td.state.conn.lock().unwrap();
+            seed(&conn, "dine-in");
+            let mut remote = server_payment("completed", "2026-09-30T10:05:00Z");
+            remote["metadata"] = metadata.clone();
+            remote["table_session_id"] = json!("recorded-table-session");
+            remote["seat_number"] = json!(2);
+            mirror(&conn, &remote);
+            let expected = match metadata {
+                Value::String(raw) => serde_json::from_str(&raw).unwrap(),
+                other => other,
+            };
+            assert_eq!(
+                provenance(&conn),
+                (
+                    Some(STAFF.into()),
+                    Some(COLLECTOR_SHIFT.into()),
+                    Some(expected)
+                )
+            );
+            let receipt: (i64, i64, String, String, String, String, String, i64) = conn.query_row(
+                "SELECT amount_cents,tip_amount_cents,currency,status,payment_origin,sync_state,table_session_id,seat_number
+                 FROM order_payments WHERE remote_payment_id=?1", [REMOTE_PAYMENT],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)),
+            ).unwrap();
+            assert_eq!(
+                receipt,
+                (
+                    1300,
+                    0,
+                    "EUR".into(),
+                    "completed".into(),
+                    "sync_reconstructed".into(),
+                    "applied".into(),
+                    "recorded-table-session".into(),
+                    2
+                )
+            );
+            unchanged_collection_side_effects(&conn);
+        }
+    }
+
+    #[test]
+    fn missing_collector_does_not_choose_waiter_or_current_cashier() {
+        for (metadata, staff, shift) in [
+            (json!({}), None, None),
+            (json!({"staff_id": STAFF}), Some(STAFF), None),
+            (json!({"staff_shift_id": SHIFT}), None, Some(SHIFT)),
+        ] {
+            let td = TestDb::open();
+            let conn = td.state.conn.lock().unwrap();
+            seed(&conn, "dine-in");
+            let mut remote = server_payment("completed", "2026-09-30T10:05:00Z");
+            remote["metadata"] = metadata.clone();
+            mirror(&conn, &remote);
+            assert_eq!(
+                provenance(&conn),
+                (
+                    staff.map(String::from),
+                    shift.map(String::from),
+                    Some(metadata)
+                )
+            );
+            unchanged_collection_side_effects(&conn);
+        }
+    }
+
+    #[test]
+    fn malformed_contradictory_or_foreign_collector_is_refused_before_insertion() {
+        for metadata in [
+            json!({ "staff_id": STAFF, "staffId": "another-person" }),
+            json!({ "staff_shift_id": 27 }),
+            json!({ "collected_by": "invented-handler" }),
+            json!({ "staff_id": STAFF, "branch_id": "other-branch" }),
+            json!({ "staff_id": STAFF, "organization_id": "other-org" }),
+            json!([STAFF]),
+            json!("{not-json"),
+        ] {
+            let td = TestDb::open();
+            let conn = td.state.conn.lock().unwrap();
+            seed(&conn, "dine-in");
+            let mut remote = server_payment("completed", "2026-09-30T10:05:00Z");
+            remote["metadata"] = metadata;
+            assert!(crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).is_err());
+            assert!(local_rows(&conn).is_empty());
+            unchanged_collection_side_effects(&conn);
+        }
+    }
+
+    #[test]
+    fn known_collector_shift_must_match_branch_and_recorded_staff_but_may_be_closed() {
+        for (branch, staff, accepted) in [
+            (BRANCH, STAFF, true),
+            ("foreign-branch", STAFF, false),
+            (BRANCH, "other-staff", false),
+        ] {
+            let td = TestDb::open();
+            let conn = td.state.conn.lock().unwrap();
+            seed(&conn, "dine-in");
+            conn.execute("INSERT INTO staff_shifts(currency,id,staff_id,role_type,branch_id,check_in_time,status,created_at,updated_at)
+                VALUES('EUR',?1,?2,'cashier',?3,'old','closed','old','old')", params![COLLECTOR_SHIFT, staff, branch]).unwrap();
+            let mut remote = server_payment("completed", "2026-09-30T10:05:00Z");
+            remote["metadata"] = collector();
+            let result = crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote);
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "known scope must match; closed historical shifts are valid"
+            );
+            if accepted {
+                assert_eq!(provenance(&conn).0.as_deref(), Some(STAFF));
+            } else {
+                assert!(local_rows(&conn).is_empty());
+            }
+            unchanged_collection_side_effects(&conn);
+        }
+    }
+
+    #[test]
+    fn existing_receipt_provenance_remains_frozen_even_with_conflicting_pull_metadata() {
+        let td = TestDb::open();
+        let conn = td.state.conn.lock().unwrap();
+        seed(&conn, "dine-in");
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,
+            payment_origin,staff_id,staff_shift_id,remote_payment_id,sync_status,sync_state,metadata,created_at,updated_at)
+            VALUES('original-receipt',?1,'cash',13,1300,'EUR','completed','manual',?2,?3,?4,'synced','applied',?5,'old','old')",
+            params![LOCAL_ORDER, STAFF, COLLECTOR_SHIFT, REMOTE_PAYMENT, collector().to_string()]).unwrap();
+        let before = provenance(&conn);
+        let mut remote = server_payment("completed", "2026-09-30T11:00:00Z");
+        remote["metadata"] =
+            json!({ "staff_id": "later-staff", "staffId": "conflict", "staff_shift_id": SHIFT });
+        mirror(&conn, &remote);
+        assert_eq!(provenance(&conn), before);
+        assert_eq!(local_rows(&conn).len(), 1);
+        unchanged_collection_side_effects(&conn);
+    }
+
+    #[test]
+    fn remote_driver_marker_is_evidence_without_a_second_driver_collection() {
+        let td = TestDb::open();
+        let conn = td.state.conn.lock().unwrap();
+        seed(&conn, "delivery");
+        conn.execute("INSERT INTO driver_earnings(id,driver_id,staff_shift_id,order_id,branch_id,
+            total_earning,payment_method,cash_collected,cash_collected_cents,cash_to_return,cash_to_return_cents,created_at,updated_at)
+            VALUES('earning','driver-original',NULL,?1,?2,0,'cash',0,0,0,0,'old','old')",
+            params![LOCAL_ORDER, BRANCH]).unwrap();
+        let mut remote = server_payment("completed", "2026-09-30T10:05:00Z");
+        remote["metadata"] = json!({ "staff_id": "driver-original", "staff_shift_id": "original-waiter-shift", "collected_by": "driver_shift" });
+        mirror(&conn, &remote);
+        assert_eq!(provenance(&conn).0.as_deref(), Some("driver-original"));
+        let cents: i64 = conn
+            .query_row(
+                "SELECT cash_collected_cents FROM driver_earnings WHERE id='earning'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cents, 0);
+        unchanged_collection_side_effects(&conn);
+    }
+
+    #[test]
+    fn internal_provenance_cannot_authorize_collection_queue_drawer_or_owner_writes() {
+        for invalid in 0..8 {
+            let td = TestDb::open();
+            let conn = td.state.conn.lock().unwrap();
+            seed(&conn, "dine-in");
+            let mut input = crate::payments::build_applied_canonical_payment_record_input(&json!({
+                "orderId": LOCAL_ORDER, "method": "cash", "amount": 13, "currency": "EUR",
+                "paymentOrigin": "sync_reconstructed",
+            }))
+            .unwrap();
+            let mut options = crate::payments::PaymentInsertOptions::applied_canonical(
+                REMOTE_PAYMENT.into(),
+                crate::payments::AppliedCanonicalPaymentProvenance {
+                    staff_id: Some(STAFF.into()),
+                    staff_shift_id: Some(COLLECTOR_SHIFT.into()),
+                    metadata: Some(collector()),
+                },
+            );
+            match invalid {
+                0 => options.enqueue_sync = true,
+                1 => options.update_cash_drawer = true,
+                2 => options.sync_order_owner_with_payment = true,
+                3 => options.remote_payment_id = None,
+                4 => options.sync_state = Some("pending".into()),
+                5 => options.sync_status = "pending".into(),
+                6 => input.payment_origin = "manual".into(),
+                _ => {
+                    options
+                        .applied_canonical_provenance
+                        .as_mut()
+                        .unwrap()
+                        .metadata = Some(json!([]))
+                }
+            }
+            let error =
+                crate::payments::record_payment_in_connection(&conn, &input, &options).unwrap_err();
+            assert_eq!(error, "CANONICAL_PAYMENT_PROVENANCE_MODE_INVALID");
+            assert!(local_rows(&conn).is_empty());
+            unchanged_collection_side_effects(&conn);
+        }
+    }
+
+    #[test]
+    fn public_json_does_not_create_internal_provenance_authority() {
+        let input = crate::payments::build_payment_record_input(&json!({
+            "orderId": LOCAL_ORDER, "method": "cash", "amount": 13, "currency": "EUR",
+            "applied_canonical_provenance": { "staff_id": STAFF, "staff_shift_id": COLLECTOR_SHIFT },
+            "trustedCanonical": true,
+        })).unwrap();
+        assert_eq!(input.payment_origin, "manual");
+        assert!(input.requested_staff_id.is_none());
+        assert!(input.requested_staff_shift_id.is_none());
+        assert!(crate::payments::PaymentInsertOptions::local()
+            .applied_canonical_provenance
+            .is_none());
+        assert!(
+            crate::payments::PaymentInsertOptions::applied(Some(REMOTE_PAYMENT.into()))
+                .applied_canonical_provenance
+                .is_none()
+        );
+    }
+}

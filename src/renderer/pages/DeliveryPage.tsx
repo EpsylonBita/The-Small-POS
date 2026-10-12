@@ -12,7 +12,7 @@ import { formatCurrency } from '../utils/format';
  * @since 2.3.0
  */
 
-import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { toast } from 'react-hot-toast';
@@ -73,6 +73,7 @@ interface Delivery {
   driverId?: string;
   driverName?: string;
   orderTotal?: number;
+  currency?: string | null;
   orderItems?: Array<{ name: string; quantity: number }>;
   paymentStatus?: 'paid' | 'unpaid' | 'cod';
   estimatedDeliveryTime?: string;
@@ -236,6 +237,7 @@ const mapOrderToDelivery = (order: Record<string, any>): Delivery | null => {
     driverId: order.driver_id || order.driverId,
     driverName: order.driver_name || order.driverName,
     orderTotal: Number(order.total_amount ?? order.totalAmount ?? 0) || 0,
+    currency: order.currency ?? null,
     orderItems: Array.isArray(order.items)
       ? order.items.map((item: any) => ({
           name: item.name || item.item_name || 'Item',
@@ -390,14 +392,14 @@ const DeliveryCard = memo<DeliveryCardProps>(({
         </button>
 
         {/* Order Info */}
-        {delivery.orderTotal && (
+        {delivery.orderTotal != null && (
           <div className={`flex items-center gap-3 mb-3 text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
             <div className="flex items-center gap-1.5">
               <Package className="w-4 h-4" />
               <span>{delivery.orderItems?.length || 0} items</span>
             </div>
             <span>•</span>
-            <span className="font-medium">{formatCurrency(delivery.orderTotal)}</span>
+            <span className="font-medium">{formatCurrency(delivery.orderTotal, delivery.currency ?? null)}</span>
             {delivery.paymentStatus === 'paid' && (
               <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-200' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
                 PAID
@@ -448,11 +450,11 @@ interface DriverAssignmentModalProps {
   onClose: () => void;
   delivery: Delivery | null;
   drivers: Driver[];
-  onAssign: (deliveryId: string, driverId: string) => void;
+  onAssign: (deliveryId: string, driverId: string) => Promise<boolean>;
   isDark: boolean;
 }
 
-const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
+export const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
   isOpen,
   onClose,
   delivery,
@@ -463,22 +465,36 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
   const { t } = useTranslation();
   const [selectedDriverId, setSelectedDriverId] = useState<string | null>(null);
 
+  const [isAssigning, setIsAssigning] = useState(false);
+  const assigningRef = useRef(false);
+  const close = () => { if (!assigningRef.current) onClose(); };
+  useEffect(() => { if (!isOpen) setSelectedDriverId(null); }, [isOpen]);
+
   if (!isOpen || !delivery) return null;
 
   const availableDrivers = drivers.filter(d => d.status.isAvailable);
 
-  const handleAssign = () => {
-    if (selectedDriverId) {
-      onAssign(delivery.id, selectedDriverId);
-      setSelectedDriverId(null);
-      onClose();
+  const handleAssign = async () => {
+    if (!selectedDriverId || assigningRef.current) return;
+    assigningRef.current = true;
+    setIsAssigning(true);
+    try {
+      if (await onAssign(delivery.id, selectedDriverId)) {
+        setSelectedDriverId(null);
+        onClose();
+      }
+    } catch {
+      toast.error(t('delivery.assignFailed', 'Failed to assign driver'));
+    } finally {
+      assigningRef.current = false;
+      setIsAssigning(false);
     }
   };
 
   return renderModalPortal(
     <div className="fixed inset-0 z-[1200] flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={close} />
 
       {/* Modal */}
       <motion.div
@@ -486,7 +502,7 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.15 }}
         className={`relative w-full max-w-lg mx-4 rounded-2xl shadow-2xl shadow-black/40 max-h-[80vh] flex flex-col backdrop-blur-2xl ring-1 ${
-          isDark ? 'bg-black/60 border border-white/10 ring-white/15' : 'bg-white/60 border border-white/70 ring-white/60'
+          isDark ? 'bg-zinc-950 border border-zinc-800' : 'bg-white border border-gray-200'
         }`}
       >
         {/* Header */}
@@ -500,9 +516,10 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
             </p>
           </div>
           <button
-            onClick={onClose}
+            onClick={close}
             aria-label={t('common.close', 'Close')}
-            className={`p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${isDark ? 'active:bg-zinc-800 text-zinc-400' : 'active:bg-gray-100 text-gray-500'}`}
+            disabled={isAssigning}
+            className={`min-w-11 min-h-11 p-2 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 active:scale-95 ${isDark ? 'active:bg-zinc-800 text-zinc-400' : 'active:bg-gray-100 text-gray-500'}`}
           >
             <X className="w-5 h-5" />
           </button>
@@ -521,6 +538,8 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
               {availableDrivers.map(driver => (
                 <button
                   key={driver.id}
+                  disabled={isAssigning}
+                  aria-pressed={selectedDriverId === driver.id}
                   onClick={() => setSelectedDriverId(driver.id)}
                   className={`w-full p-3 rounded-2xl border-2 transition-all duration-150 active:scale-[0.99] text-left ${
                     selectedDriverId === driver.id
@@ -556,7 +575,8 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
         <div className={`p-4 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
           <button
             onClick={handleAssign}
-            disabled={!selectedDriverId}
+            disabled={!selectedDriverId || isAssigning}
+            aria-busy={isAssigning}
             className={`w-full py-3 rounded-xl font-medium transition-all duration-200 ${
               selectedDriverId
                 ? isDark ? 'bg-zinc-100 text-black active:bg-white active:scale-[0.98]' : 'bg-black text-white active:bg-zinc-800 active:scale-[0.98]'
@@ -755,12 +775,15 @@ const DeliveryPage: React.FC = () => {
             ? t('delivery.savedLocallyQueued', 'Saved locally and queued for sync')
             : t('delivery.driverAssigned', 'Driver assigned'),
         );
+        return true;
       } else {
         toast.error(response?.error || t('delivery.assignFailed', 'Failed to assign driver'));
+        return false;
       }
     } catch (err) {
       console.error('[DeliveryPage] Error assigning driver:', err);
       toast.error(t('delivery.assignFailed', 'Failed to assign driver'));
+      return false;
     }
   }, [bridge.orders, drivers, t]);
 

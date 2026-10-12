@@ -3681,7 +3681,8 @@
         "printingStalled": {
           "one": "Des reçus attendent et ne s’impriment pas : 1 impression attend depuis {{duration}}.",
           "other": "Des reçus attendent et ne s’impriment pas : {{count}} impressions en attente, la plus ancienne depuis {{duration}}."
-        }
+        },
+        "courierCashReview": "Les espèces des livreurs doivent être vérifiées"
       },
       "recommendations": {
         "doNotClearData": "N'effacez aucune donnée.",
@@ -3739,9 +3740,11 @@
         "viaMainTerminal": "Via le terminal principal"
       },
       "support": {
-        "sentToast": "Rapport de diagnostic envoyé à l’assistance.",
+        "sentToast": "Le Super Admin a reçu le ZIP. La notification Telegram est confirmée ou a déjà été envoyée récemment.",
         "sendFailedToast": "Impossible d'envoyer les diagnostics à l'assistance. Réessayez plus tard.",
-        "received": "L’assistance a reçu le rapport de diagnostic.",
+        "received": "Le Super Admin a reçu le ZIP. La notification Telegram est confirmée ou a déjà été envoyée récemment.",
+        "notificationFailed": "Le ZIP est disponible dans le Super Admin, mais la notification Telegram n’a pas été confirmée.",
+        "reportReceived": "Le Super Admin a reçu le rapport de diagnostic.",
         "incidentId": "ID de l’incident : {{id}}",
         "sendFailed": "Les diagnostics n'ont pas pu être envoyés pour le moment. Le POS continue de fonctionner et vous pourrez réessayer plus tard.",
         "safeLocal": "Le POS peut continuer à fonctionner en local. Ne le réinitialisez pas et n'effacez aucune donnée, sauf si l'assistance vous le demande."
@@ -4809,6 +4812,11 @@
       "satelliteTerminalChip": "sur {{terminal}}",
       "satelliteTotalsChip": "{{orders}} commandes · {{sales}}",
       "satelliteCheckout": {
+        "awaitingReceipt": "Espèces en attente de réception",
+        "receive": "Recevoir les espèces",
+        "received": "{{counted}} reçus. Montant attendu : {{expected}}.",
+        "receiveBeforeClose": "Recevez les espèces des services terminés depuis la sélection du personnel avant de fermer la caisse principale.",
+        "pendingReadFailed": "Impossible de vérifier les remises en attente. Vérifiez la connexion et appuyez sur Actualiser.",
         "back": "Retour",
         "title": "Remise de caisse — {{name}}",
         "loading": "Chargement des chiffres du service…",
@@ -5101,6 +5109,7 @@
       "submitFailed": "Échec : {{error}}",
       "resolveBlockerCash": "Enregistrer le Paiement Espèces",
       "resolveBlockerCard": "Enregistrer le Paiement Carte",
+      "recordPaymentOriginalCurrencyMissing": "La devise d’origine de cette commande n’a pas été enregistrée. Changer le pays du commerce ne corrige pas ce problème. Le support doit vérifier le reçu d’origine avant tout enregistrement de paiement.",
       "recordConfirmTitle": "Enregistrer ce paiement ?",
       "recordConfirmMessage": "Enregistrez {{amount}} ({{method}}) pour la commande {{order}} uniquement si le client l'a déjà payé. Rien n'est débité, et l'enregistrement garde votre nom.",
       "recordConfirmAction": "Enregistrer",
@@ -6410,7 +6419,8 @@
       "newReservation": "Réserver",
       "markMaintenance": "Marquer en maintenance",
       "markCleaned": "Nettoyée",
-      "markBackInService": "Remettre en service"
+      "markBackInService": "Remettre en service",
+      "history": "Historique"
     },
     "filters": {
       "search": "Rechercher des tables...",
@@ -6462,7 +6472,11 @@
       "switchToGrid": "Passer à la vue grille"
     },
     "noTables": "Aucune table configurée",
-    "configureInAdmin": "Configurez les tables dans le tableau de bord d'administration"
+    "configureInAdmin": "Configurez les tables dans le tableau de bord d'administration",
+    "historyLoadFailed": "Impossible de charger l’historique. Reconnectez-vous et réessayez.",
+    "historyLoadMore": "Afficher plus",
+    "historyTitle": "Historique de la table {{table}}",
+    "noHistory": "Aucun historique de commande pour cette table"
   },
   "reservations": {
     "title": "Réservations",
@@ -8548,7 +8562,7 @@
     "togglePlugin": "Activer/désactiver le plugin",
     "lastSync": "Synchronisé",
     "configure": "Configurer",
-    "configuration": "Configuration",
+    "configuration": "Paramètres {{name}}",
     "pluginConfiguration": "Configuration du plugin",
     "credentialsHelp": "Saisissez les identifiants fournis par la plateforme. Laissez les champs vides pour conserver les valeurs existantes.",
     "partnerRequired": "Partenaire requis",
@@ -8602,7 +8616,9 @@
       "openAdmin": "Ouvrir le tableau de bord d'administration",
       "adminUrlMissing": "L'URL du tableau de bord d'administration n'est pas configurée sur ce terminal.",
       "adminLinkCopied": "Lien du tableau de bord d'administration copié.",
-      "adminOpenFailed": "Impossible d'ouvrir le tableau de bord d'administration."
+      "adminOpenFailed": "Impossible d'ouvrir le tableau de bord d'administration.",
+      "sandbox": "Environnement de test",
+      "production": "Environnement de production"
     },
     "callerId": {
       "setupInAdmin": "Configurer l'identification de l'appelant dans le tableau de bord d'administration",
@@ -8827,7 +8843,9 @@
     "routingEmpty": "Aucun terminal trouvé pour cette succursale.",
     "wolt": {
       "adminManagedSetup": "Wolt se connecte dans l'Admin Dashboard avec votre compte Wolt ; aucune clé API à saisir sur le POS. Cet écran affiche seulement son statut."
-    }
+    },
+    "invalidCommission": "Saisissez une commission de 0 à 100.",
+    "missingFields": "Renseignez les champs obligatoires : {{fields}}"
   },
   "errorBoundary": {
     "whatCanYouDo": "Que pouvez-vous faire ?",
@@ -9408,6 +9426,16 @@
         "title": "Reçus non imprimés : {{count}}",
         "summary": "La plus ancienne impression attend depuis {{duration}}. Les commandes restent enregistrées.",
         "guidance": "Vérifiez que l’imprimante est allumée, qu’elle a du papier et qu’elle est connectée, puis imprimez un reçu de test depuis les paramètres d’imprimante. Si les reçus ne s’impriment toujours pas, contactez l’assistance. N’effacez aucune donnée."
+      },
+      "courierCashMissing": {
+        "title": "Espèces absentes du montant enregistré pour le livreur",
+        "summary": "La commande #{{orderNumber}} comporte {{amount}} {{currency}} en espèces, mais le montant enregistré pour le livreur est nul.",
+        "guidance": "Vérifiez le paiement et le service avant le décompte et envoyez les diagnostics au support. Cet écart ne prouve pas que les espèces n’ont pas été restituées."
+      },
+      "courierCashIncomplete": {
+        "title": "Vérification des espèces des livreurs incomplète",
+        "summary": "Toutes les écritures concernées n’ont pas pu être vérifiées.",
+        "guidance": "Actualisez l’état et envoyez les diagnostics au support si le problème persiste."
       }
     }
   },

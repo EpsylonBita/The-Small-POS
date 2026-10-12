@@ -27,6 +27,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
 import { useI18n } from '../../contexts/i18n-context';
+import { serviceResponsibilityNames } from '../../../../../shared/pos/tables/service-responsibility';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
   isOwingCancelDismissed,
@@ -59,6 +60,7 @@ import {
 } from '../../utils/tableCheckPayments';
 import { formatCurrency } from '../../utils/format';
 import { formatTableDisplayNumber } from '../../utils/table-display';
+import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../../utils/orderNumberUtils';
 import { shiftBelongsToCurrentBusinessDay } from '../../utils/business-day-shift';
 import { translateRoleName } from '../../utils/role-labels';
 import { renderModalPortal } from '../../utils/render-modal-portal';
@@ -142,6 +144,10 @@ interface TableSessionAllocation {
 
 interface TableSessionDetails {
   id: string;
+  organization_id?: string | null;
+  branch_id?: string | null;
+  snapshot_revision?: number | null;
+  currency?: string | null;
   primary_table_id?: string | null;
   active_order_id?: string | null;
   guest_count?: number | null;
@@ -156,6 +162,8 @@ interface TableSessionDetails {
     table_number?: string | number | null;
     table_session_id?: string | null;
     order_number?: string | null;
+    display_order_number?: string | null;
+    created_at?: string | null;
     total_amount?: number | string | null;
     payment_status?: string | null;
     version?: number | null;
@@ -313,7 +321,7 @@ const buildTransferPricingPayload = (
   };
 };
 
-const emitTableSessionBalanceUpdate = (
+export const emitTableSessionBalanceUpdate = (
   tableId: string | null | undefined,
   session: TableSessionDetails | null | undefined,
   guestCount?: unknown,
@@ -447,6 +455,8 @@ const buildLocalSessionFromOrder = (table: RestaurantTable, order: Order, itemFa
     order: {
       id: order.id,
       order_number: (order as any).order_number || (order as any).orderNumber || null,
+      display_order_number: (order as any).display_order_number || (order as any).displayOrderNumber || null,
+      created_at: (order as any).created_at || (order as any).createdAt || null,
       total_amount: orderTotal,
       payment_status: paymentStatus,
       order_items: orderItems,
@@ -597,6 +607,8 @@ const mergeSessionWithLocalOrder = (
       ...(remoteSession.order || localSession.order || { id: String(localOrder.id) }),
       id: remoteSession.order?.id || localSession.order?.id || String(localOrder.id),
       order_number: localSession.order?.order_number || remoteSession.order?.order_number || null,
+      display_order_number: localSession.order?.display_order_number || remoteSession.order?.display_order_number || null,
+      created_at: localSession.order?.created_at || remoteSession.order?.created_at || null,
       total_amount: orderTotal,
       payment_status: paymentStatus,
       order_items: discountedOrderItems,
@@ -1038,6 +1050,29 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
   );
 };
 
+// Standalone Tables callers do not supply an order list. Its identity must stay
+// stable so local dialog state does not trigger a new canonical check load.
+const EMPTY_LOCAL_ORDERS: Order[] = [];
+
+// Prop identity changes on dashboard polling. Drafts belong to the canonical
+// check's revision and contents, rather than to those parent array identities.
+const checkDraftRevision = (session: TableSessionDetails): string => JSON.stringify([
+  session.id, session.organization_id, session.branch_id, session.primary_table_id,
+  session.active_order_id, session.snapshot_revision, session.currency, session.status,
+  session.guest_count, session.opened_by_waiter_id, session.metadata?.current_waiter_id,
+  session.order?.id, session.order?.version, session.order?.total_amount,
+  session.order?.payment_status, session.order?.order_items,
+  session.balance, session.items,
+]);
+
+const isOlderCheckRevision = (previous: TableSessionDetails | null, next: TableSessionDetails): boolean =>
+  previous?.id === next.id && (
+    (typeof previous.snapshot_revision === 'number' && typeof next.snapshot_revision === 'number'
+      && next.snapshot_revision < previous.snapshot_revision)
+    || (previous.order?.id === next.order?.id && typeof previous.order?.version === 'number'
+      && typeof next.order?.version === 'number' && next.order.version < previous.order.version)
+  );
+
 export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   isOpen,
   table: selectedTable,
@@ -1046,7 +1081,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   onAddItems,
   onRefreshTables,
   onRefreshOrders,
-  localOrders = [],
+  localOrders = EMPTY_LOCAL_ORDERS,
 }) => {
   const { t } = useI18n();
   const tr = useCallback(
@@ -1081,12 +1116,25 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   useEffect(() => { setMovedTableId(null); }, [selectedTable?.id]);
   const table = tables.find(candidate => candidate.id === movedTableId) || selectedTable;
   const [session, setSession] = useState<TableSessionDetails | null>(null);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const loadScope = table ? JSON.stringify([
+    table.organizationId, table.branchId, table.id, table.tableSessionId, table.currentOrderId,
+  ]) : null;
+  const currentLoadScopeRef = useRef(loadScope);
+  currentLoadScopeRef.current = isOpen ? loadScope : null;
+  const loadedScopeRef = useRef<string | null>(null);
+  const loadGenerationRef = useRef(0);
   const canonicalOrderRef = useRef<Order | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSavedSession, setIsSavedSession] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [secondaryModal, setSecondaryModal] = useState<SecondaryModal>(null);
+  const secondaryModalRef = useRef(secondaryModal);
+  secondaryModalRef.current = secondaryModal;
   const [selectedItem, setSelectedItem] = useState<TableSessionOrderItem | null>(null);
   const [itemActionMode, setItemActionMode] = useState<ItemActionMode>('menu');
   const [paymentAmount, setPaymentAmount] = useState('');
@@ -1155,6 +1203,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     () => tables.filter(candidate => candidate.id !== table?.id && candidate.status === 'available'),
     [table?.id, tables],
   );
+  const itemTransferTables = useMemo(() => tables.filter(candidate =>
+    candidate.id !== table?.id && candidate.tableSessionId !== session?.id &&
+    (candidate.status === 'available' || candidate.status === 'occupied'),
+  ), [table?.id, tables, session?.id]);
   const mergeTables = useMemo(() => tables.filter(candidate =>
     candidate.id !== table?.id && candidate.tableSessionId !== session?.id &&
     (candidate.status === 'available' || candidate.status === 'occupied'),
@@ -1293,19 +1345,58 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   const isSessionLocalOnly = isLocalSessionId(session?.id);
 
   const loadSession = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
     if (!isOpen || !table) {
+      loadedScopeRef.current = null;
+      sessionRef.current = null;
+      setSession(null);
+      setSecondaryModal(null);
       return;
     }
-
-    setIsLoading(true);
+    const canApply = () => generation === loadGenerationRef.current
+      && currentLoadScopeRef.current === loadScope;
+    const isBackgroundRefresh = loadedScopeRef.current === loadScope && sessionRef.current !== null;
+    loadedScopeRef.current = loadScope;
     setLoadError(null);
-    setIsSavedSession(false);
-    setSession(null);
-    setSecondaryModal(null);
-    if (pressTimerRef.current) clearTimeout(pressTimerRef.current);
-    canonicalOrderRef.current = null;
+    if (!isBackgroundRefresh) {
+      setIsLoading(true);
+      setIsSavedSession(false);
+      sessionRef.current = null;
+      setSession(null);
+      setSecondaryModal(null);
+      if (pressTimerRef.current) clearTimeout(pressTimerRef.current);
+      canonicalOrderRef.current = null;
+    }
     let localPaymentSnapshot: { payments: PaymentHistoryRecord[]; paidItems: PaidItemRecord[] } = { payments: [], paidItems: [] };
     const applySession = (nextSession: TableSessionDetails) => {
+      if (!canApply()) return;
+      const previous = sessionRef.current;
+      if (isBackgroundRefresh && previous?.id === nextSession.id
+        && Number(previous.snapshot_revision || 0) > Number(nextSession.snapshot_revision || 0)) return;
+      // A canonical remote finalization removes the active action surface.
+      // Retained original requests remain with their recovery owner; this
+      // does not send another close/cancellation or alter any payment.
+      if (isBackgroundRefresh && previous
+        && !['closed', 'cancelled'].includes(String(previous.status))
+        && ['closed', 'cancelled'].includes(String(nextSession.status))) {
+        sessionRef.current = null;
+        setSession(null);
+        setSecondaryModal(null);
+        onCloseRef.current();
+        return;
+      }
+      // Accepted service requests may move this check after the initiating
+      // dialog has closed. A detached physical-table view must not keep
+      // presenting actions under its old table binding.
+      if (nextSession.primary_table_id && nextSession.primary_table_id !== table.id
+        && nextSession.tables?.some(link => link.table_id === nextSession.primary_table_id && !link.released_at)
+        && !nextSession.tables.some(link => link.table_id === table.id && !link.released_at)) {
+        sessionRef.current = null;
+        setSession(null);
+        setSecondaryModal(null);
+        onCloseRef.current();
+        return;
+      }
       const ownerSessionId = nextSession.order?.table_session_id || (localOrder as any)?.table_session_id || (localOrder as any)?.tableSessionId;
       const absorbedSessionIds = [
         ...(Array.isArray(nextSession.metadata?.merged_session_ids) ? nextSession.metadata.merged_session_ids.filter((id): id is string => typeof id === 'string') : []),
@@ -1328,8 +1419,22 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         nextSession = { ...nextSession, balance: { ...nextSession.balance, paid_total: receiptPaid, tip_total: receiptTips,
           outstanding_balance: due, payment_status: due <= 0.005 ? 'paid' : receiptPaid > 0 ? 'partially_paid' : 'pending' } };
       }
+      const checkChanged = previous !== null && checkDraftRevision(previous) !== checkDraftRevision(nextSession);
+      sessionRef.current = nextSession;
       setSession(nextSession);
       const covers = normalizeGuestCount(nextSession.guest_count || table.guestCount || 1);
+      if (previous && !checkChanged) return;
+      if (checkChanged) {
+        if (secondaryModalRef.current) {
+          toast.error(tr('errors.checkChanged', 'The check changed. Review its updated items and balance before continuing.'));
+        }
+        setSecondaryModal(null);
+        setSelectedItem(null);
+        setBatchSelectedItemIds([]);
+        setTipAmount('0.00');
+        setSeatNumber('');
+        setTransferSeatNumber('');
+      }
       setGuestCount(covers);
       setPaymentAmount(Number(nextSession.balance?.outstanding_balance || 0).toFixed(2));
       emitTableSessionBalanceUpdate(table.id, nextSession, covers);
@@ -1355,6 +1460,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       // degrades to the in-memory local orders instead of stranding the modal on the
       // loading spinner (a never-settling promise never reaches try/catch/finally).
       const bridgeOrders = (await resolveWithTimeout(fetchBridgeOrders(), [] as Order[])) as any[];
+      if (!canApply()) return;
 
       localOrder =
         findOpenTableOrderForTable(bridgeOrders, table) ||
@@ -1381,6 +1487,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         fetchLocalPaymentSnapshot(localOrder?.id),
         { payments: [], paidItems: [] },
       );
+      if (!canApply()) return;
 
       let sessionId = table.tableSessionId;
       if (!sessionId) {
@@ -1388,6 +1495,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           const listResult = await posApiGet<{ success?: boolean; sessions?: TableSessionDetails[] }>(
             `/api/pos/table-sessions?table_id=${encodeURIComponent(table.id)}`,
           );
+          if (!canApply()) return;
           if (!listResult.success || listResult.data?.success === false) {
             throw new Error(listResult.error || tr('errors.loadSessionsFailed', 'Failed to load table sessions'));
           }
@@ -1404,6 +1512,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       const repairOrderReference = table.currentOrderId || localOrderRepairId;
 
       if (!sessionId && repairOrderReference) {
+        if (!canApply()) return;
         const repairPayload = buildTableSessionOpenPayload({
           table,
           orderId: repairOrderReference,
@@ -1417,13 +1526,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             '/api/pos/table-sessions',
             repairPayload,
           );
+          if (!canApply()) return;
           if (!openResult.success || openResult.data?.success === false || !openResult.data?.session) {
             throw new Error(openResult.error || openResult.data?.error || tr('errors.reopenFailed', 'Failed to reopen table check'));
           }
 
           sessionId = openResult.data.session.id;
           await Promise.resolve(onRefreshTables());
+          if (!canApply()) return;
         } catch (openError) {
+          if (!canApply()) return;
           if (isRetryableTableServiceError(openError)) {
             try {
               await enqueueTableSessionOpen({
@@ -1461,6 +1573,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       const detailResult = await posApiGet<{ success?: boolean; session?: TableSessionDetails }>(
         `/api/pos/table-sessions/${encodeURIComponent(sessionId)}`,
       );
+      if (!canApply()) return;
       if (!detailResult.success || detailResult.data?.success === false || !detailResult.data?.session) {
         if (localFallback) {
           applySession(localFallback);
@@ -1469,9 +1582,22 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         throw new Error(detailResult.error || tr('errors.loadCheckFailed', 'Failed to load table check'));
       }
 
-      await applyLocalTableSessionSnapshot(detailResult.data.session, localOrder?.id);
+      const canonical = detailResult.data.session;
+      if (canonical.id !== sessionId
+        || (canonical.organization_id && canonical.organization_id !== table.organizationId)
+        || (canonical.branch_id && canonical.branch_id !== table.branchId)) {
+        throw new Error(tr('errors.loadCheckFailed', 'Failed to load table check'));
+      }
+      if (isOlderCheckRevision(sessionRef.current, canonical)) {
+        setIsSavedSession(true);
+        return;
+      }
+      await applyLocalTableSessionSnapshot(canonical, localOrder?.id);
+      if (!canApply()) return;
+      setIsSavedSession(false);
       applySession(mergeSessionWithLocalOrder(table, detailResult.data.session, localOrder || null, translatedItemFallback));
     } catch (error) {
+      if (!canApply()) return;
       if (localFallback) {
         applySession(localFallback);
         return;
@@ -1481,9 +1607,10 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
           const cached = await getBridge().invoke('orders:get-table-session-snapshot', {
             sessionId: requestedSessionId, tableId: table.id, orderId: table.currentOrderId || undefined,
           });
+          if (!canApply()) return;
           if (cached?.success === true && cached.stale === true && cached.session?.id === requestedSessionId) {
             setIsSavedSession(true);
-            applySession(cached.session);
+            if (!isOlderCheckRevision(sessionRef.current, cached.session)) applySession(cached.session);
             return;
           }
         } catch (cacheError) {
@@ -1491,15 +1618,17 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
         }
       }
       console.error('[TableCheckManagerModal] Failed to load table check:', error);
+      if (isBackgroundRefresh) setIsSavedSession(true);
       setLoadError(tr('errors.loadCheckFailed', 'Failed to load table check'));
       toast.error(error instanceof Error ? error.message : tr('errors.loadCheckFailed', 'Failed to load table check'));
     } finally {
-      setIsLoading(false);
+      if (canApply()) setIsLoading(false);
     }
-  }, [isOpen, localOrders, onRefreshTables, table, tr, translatedItemFallback]);
+  }, [isOpen, loadScope, localOrders, onRefreshTables, table, tr, translatedItemFallback]);
 
   useEffect(() => {
     void loadSession();
+    return () => { ++loadGenerationRef.current; };
   }, [loadSession]);
 
   useEffect(() => {
@@ -1742,7 +1871,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       client_event_id: `pos-tauri-table-${body.action}-${crypto.randomUUID()}`,
     };
     try {
-      const result = await posApiPatch<{ success?: boolean; session?: TableSessionDetails; error?: string }>(
+      const result = await posApiPatch<{ success?: boolean; session?: TableSessionDetails; service_request?: unknown; error?: string }>(
         `/api/pos/table-sessions/${encodeURIComponent(session.id)}`,
         requestBody,
       );
@@ -1752,9 +1881,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       const nextSession = result.data?.session || session;
       await applyLocalTableSessionSnapshot(nextSession);
       setSession(nextSession);
-      toast.success(successMessage);
+      toast.success(result.data?.service_request ? String(t('waiterService.sent')) : successMessage);
       closeSecondaryModal();
-      if (body.action === 'move_table' && nextSession.primary_table_id) {
+      if (!result.data?.service_request && body.action === 'move_table' && nextSession.primary_table_id) {
         emitCompatEvent('table-session-settled', { tableId: table?.id, tableSessionId: session.id, releaseStatus: 'available' });
         emitTableSessionBalanceUpdate(nextSession.primary_table_id, nextSession);
         setMovedTableId(nextSession.primary_table_id);
@@ -1785,7 +1914,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       action: 'close',
       status: 'closed',
       release_status: 'cleaning',
-      force: true,
+      force: false,
       client_event_id: `pos-tauri-table-close-${crypto.randomUUID()}`,
     };
 
@@ -1822,7 +1951,11 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       // Native dispatch retains unknown replies. A queued close is not an ACK
       // and must never project the physical table as released.
       console.warn('[TableCheckManagerModal] Table close awaiting acknowledgement:', error);
-      toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
+      if (isRetainedTableMutationError(error)) {
+        toast.success(tr('messages.tableActionQueued', 'Table action queued for sync'));
+      } else {
+        toast.error(tr('errors.paymentSavedTableCloseFailed', 'The payment is recorded, but the table could not be released. Retry closing the check; do not collect the payment again.'));
+      }
       closeSecondaryModal();
       return;
     }
@@ -2205,7 +2338,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       client_event_id: `pos-tauri-table-item-transfer-${crypto.randomUUID()}`,
     };
     try {
-      const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; target_session?: TableSessionDetails; error?: string }>(
+      const result = await posApiPost<{ success?: boolean; source_session?: TableSessionDetails; target_session?: TableSessionDetails; service_request?: unknown; error?: string }>(
         `/api/pos/table-sessions/${encodeURIComponent(session.id)}/items/transfer`,
         transferPayload,
       );
@@ -2216,8 +2349,8 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
       setSession(nextSourceSession);
       emitTableSessionBalanceUpdate(table?.id, nextSourceSession, nextSourceSession.guest_count ?? table?.guestCount);
       if (result.data?.target_session) emitTableSessionBalanceUpdate(targetTableId, result.data.target_session);
-      else emitTargetTransferBalanceUpdate(targetTableId, Number((itemUnitPrice(selectedTransferItem) * requestedQuantity).toFixed(2)));
-      toast.success(tr('messages.itemMoved', 'Item moved to target table'));
+      else if (!result.data?.service_request) emitTargetTransferBalanceUpdate(targetTableId, Number((itemUnitPrice(selectedTransferItem) * requestedQuantity).toFixed(2)));
+      toast.success(result.data?.service_request ? String(t('waiterService.sent')) : tr('messages.itemMoved', 'Item moved to target table'));
       closeSecondaryModal();
       await refreshAll();
     } catch (error) {
@@ -2502,9 +2635,13 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     return null;
   }
 
+  const staffOrderNumber = formatCompactOrderNumberForDisplay(getVisibleOrderNumber({
+    display_order_number: session?.order?.display_order_number ?? undefined,
+    order_number: session?.order?.order_number ?? undefined,
+  }), session?.order?.created_at || session?.opened_at);
   const mainSubtitle = [
-    session?.order?.order_number
-      ? tr('labels.orderNumber', 'Order {{number}}', { number: session.order.order_number })
+    staffOrderNumber
+      ? tr('labels.orderNumber', 'Order {{number}}', { number: staffOrderNumber })
       : tr('labels.openTableSession', 'Open table session'),
     linkedTableLabels.length > 0 ? linkedTableLabels.join(', ') : null,
   ].filter(Boolean).join(' · ');
@@ -2704,6 +2841,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                           </span>
                           <div className="min-w-0">
                             <p className="truncate text-base font-semibold text-gray-900 dark:text-white">{itemDisplayName(item, translatedItemFallback)}</p>
+                            {serviceResponsibilityNames(session?.items, item.id).map(name => <p key={name} className="text-xs text-gray-600 dark:text-zinc-300">{t('waiterService.itemResponsibility', { name })}</p>)}
                             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-zinc-300">
                               <span>{tr('labels.quantityShortValue', 'Qty {{quantity}}', { quantity: Number(item.quantity || 0) })}</span>
                               <span className="h-1 w-1 rounded-full bg-slate-500/40 dark:bg-white/25" />
@@ -3016,7 +3154,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <TableDestinationPicker
                     value={targetTableId}
                     onChange={setTargetTableId}
-                    options={availableTables}
+                    options={itemTransferTables}
                     optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
                     emptyLabel={tr('labels.selectTable', 'Select table')}
                     labelledBy="table-check-batch-target"
@@ -3266,7 +3404,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <TableDestinationPicker
                     value={targetTableId}
                     onChange={setTargetTableId}
-                    options={availableTables}
+                    options={itemTransferTables}
                     optionLabel={(candidate) => tr('labels.tableNumber', 'Table {{number}}', { number: formatTableDisplayNumber(candidate.tableNumber) })}
                     emptyLabel={tr('labels.selectTable', 'Select table')}
                     labelledBy="table-check-transfer-target"

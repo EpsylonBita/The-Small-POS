@@ -2,6 +2,7 @@ import { shiftSummaryCurrency } from '../../utils/shift-currency';
 import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import { recordedFolioCurrency } from '../../utils/folio-currency';
 import { submitSatelliteHandover } from '../../utils/satellite-handover';
+import { readPendingWaiterReturns, type PendingWaiterReturn } from '../../utils/pending-waiter-returns';
 import { satelliteHandoverMessage } from '../../utils/satelliteHandoverText';
 import { SatelliteHandoverReleasePanel } from './SatelliteHandoverReleasePanel';
 import React, { useState, useEffect, useRef } from 'react';
@@ -662,6 +663,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   // terminal and live totals. Closing them from here lands with the
   // remote-checkout flow; until then tapping explains where the shift runs.
   const [satelliteShiftsByStaffId, setSatelliteShiftsByStaffId] = useState<Map<string, any>>(new Map());
+  const [pendingWaiterReturns, setPendingWaiterReturns] = useState<PendingWaiterReturn[]>([]);
+  const [waiterReturnsError, setWaiterReturnsError] = useState(false);
+  const waiterReturnsRequired = useRef<boolean | null>(null);
+  const [waiterReturnsReload, setWaiterReturnsReload] = useState(0);
   // Satellite remote checkout (v1.4.84): pane state, server preview, entry.
   const [satelliteCheckout, setSatelliteCheckout] = useState<{
     shift: any;
@@ -1226,6 +1231,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     return () => giftMounted.current && epoch === giftEpoch.current;
   };
   const rediscoverGiftClose = () => setGiftDiscoveryNonce((value) => value + 1);
+
+  useEffect(() => {
+    waiterReturnsRequired.current = null;
+    setPendingWaiterReturns([]);
+    setWaiterReturnsError(false);
+    if (!isOpen || isMobileWaiter) return;
+    let current = true;
+    void readPendingWaiterReturns(bridge.shifts).then(result => {
+      if (!current) return;
+      waiterReturnsRequired.current = result.required;
+      setPendingWaiterReturns(result.returns);
+    }).catch(() => { if (current) setWaiterReturnsError(true); });
+    return () => { current = false; };
+  }, [giftOpenKey, isMobileWaiter, waiterReturnsReload]);
 
   useEffect(() => {
     giftMounted.current = true;
@@ -2353,7 +2372,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
-  const handleStaffSelect = async (staffMember: StaffMember) => {
+  const handleStaffSelect = async (staffMember: StaffMember, closedReturn?: PendingWaiterReturn) => {
     // Retire the previous selection before any asynchronous work for the new cashier.
     giftEpoch.current += 1;
     setGiftRecoveryTarget(null);
@@ -2366,7 +2385,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     // Satellite shift: enter the remote-checkout pane — the main register
     // reviews the server-computed figures and receives the cash (v1.4.84).
-    const satelliteShift = satelliteShiftsByStaffId.get(staffMember.id);
+    const satelliteShift = closedReturn ? { ...closedReturn, self_closed: true, remote_terminal_name: closedReturn.terminal_id } : satelliteShiftsByStaffId.get(staffMember.id);
     if (satelliteShift) {
       setSatelliteCheckout({ shift: satelliteShift, staff: staffMember });
       setSatelliteCountedCash('');
@@ -3197,6 +3216,27 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       console.log('❌ No active shift or staff found');
       setError(t('modals.staffShift.noActiveShift'));
       return;
+    }
+
+    if (isCashierCheckoutRole && (waiterReturnsRequired.current !== false || waiterReturnsError)) {
+      const guard = captureGiftGuard();
+      const shiftId = String(effectiveShift.id);
+      const valid = () => guard() && giftShiftId.current === shiftId;
+      try {
+        const pending = await readPendingWaiterReturns(bridge.shifts);
+        if (!valid()) return;
+        setPendingWaiterReturns(pending.returns);
+        setWaiterReturnsError(false);
+        waiterReturnsRequired.current = pending.required;
+        if (pending.returns.length || pending.active) {
+          setError(t('modals.staffShift.satelliteCheckout.receiveBeforeClose'));
+          return;
+        }
+      } catch {
+        if (!valid()) return;
+        setError(t('modals.staffShift.satelliteCheckout.pendingReadFailed'));
+        return;
+      }
     }
 
     if (isCashierCheckoutRole && handleGiftCheckoutIntent()) {
@@ -4363,6 +4403,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setSatellitePending(false);
       setSatelliteResult({ counted: outcome.counted, expected: outcome.expected, currency: outcome.currency,
         variance: outcome.variance, staffName: satelliteCheckout.staff.name });
+      setWaiterReturnsReload(value => value + 1);
       void loadStaff();
     } catch (failure) {
       setError(
@@ -4408,7 +4449,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {satelliteResult ? (
             <div className={`mt-4 ${checkoutInsetSurfaceClass}`} data-testid="satellite-checkout-success">
               <p className="text-base font-bold liquid-glass-modal-text">
-                {t('modals.staffShift.satelliteCheckout.success', {
+                {t(satelliteCheckout.shift.self_closed ? 'modals.staffShift.satelliteCheckout.received' : 'modals.staffShift.satelliteCheckout.success', {
                   defaultValue:
                     'Shift closed. Expected {{expected}}, received {{counted}}.',
                   expected: formatSatelliteMoney(satelliteResult.expected),
@@ -4444,7 +4485,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   ['card', t('modals.staffShift.satelliteCheckout.cardSales', { defaultValue: 'Card sales' }), formatSatelliteMoney(figures.total_card_sales)],
                   ['float', t('modals.staffShift.satelliteCheckout.openingFloat', { defaultValue: 'Opening float' }), formatSatelliteMoney(figures.opening_cash_amount)],
                   ['expected', t('modals.staffShift.satelliteCheckout.expectedCash', { defaultValue: 'Expected cash' }), formatSatelliteMoney(figures.expected_cash_amount)],
-                ].map(([key, label, value]) => (
+                ].filter(([key]) => !satelliteCheckout.shift.self_closed || key === 'expected' || key === 'float').map(([key, label, value]) => (
                   <div key={key as string}>
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                       {label}
@@ -4487,7 +4528,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               >
                 {satelliteSubmitting
                   ? t('modals.staffShift.satelliteCheckout.closing', { defaultValue: 'Closing…' })
-                  : satellitePending ? t('modals.staffShift.satelliteCheckout.retry') : t('modals.staffShift.satelliteCheckout.confirm', {
+                  : satellitePending ? t('modals.staffShift.satelliteCheckout.retry') : t(satelliteCheckout.shift.self_closed ? 'modals.staffShift.satelliteCheckout.receive' : 'modals.staffShift.satelliteCheckout.confirm', {
                       defaultValue: 'Close shift & receive cash',
                     })}
               </button>
@@ -6320,6 +6361,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </div>
           ) : (
             <div className="grid gap-6 xl:grid-cols-2">
+              {(pendingWaiterReturns.length > 0 || waiterReturnsError) && <section className={`${checkInSurfaceClass} xl:col-span-2`}>
+                <h4 className="text-xl font-black liquid-glass-modal-text">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
+                {waiterReturnsError && <p role="alert">{t('modals.staffShift.satelliteCheckout.pendingReadFailed')}</p>}
+                <div className="mt-3 flex flex-wrap gap-3">
+                  {pendingWaiterReturns.map(row => {
+                    const member = availableStaff.find(person => person.id === row.staff_id);
+                    return <button key={row.id} type="button" disabled={!member}
+                      onClick={() => member && void handleStaffSelect(member, row)}
+                      className="rounded-2xl border border-yellow-400 px-5 py-3 text-left font-bold liquid-glass-modal-text">
+                      {row.staff_name || member?.name} · {formatCurrency(row.closing_cash_amount, row.currency)}
+                      <span className="block text-sm font-normal">{t('modals.staffShift.satelliteCheckout.receive')}</span>
+                    </button>;
+                  })}
+                  <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="rounded-2xl border px-5 py-3">{t('common.refresh')}</button>
+                </div>
+              </section>}
               <section className={checkInSurfaceClass}>
                 <div className="flex items-start justify-between gap-4">
                   <div>

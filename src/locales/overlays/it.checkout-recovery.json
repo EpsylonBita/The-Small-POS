@@ -1,6 +1,9 @@
 {
   "modals": {
     "menu": {
+      "draftAwaitingReview": "In attesa di verifica",
+      "draftReturnToOrders": "Torna agli ordini",
+      "editDraftPending": "La modifica originale è salvata per il recupero. Verifica il risultato prima di effettuare un’altra modifica.",
       "draftTargetCancelled": "Questo ordine è stato annullato. La modifica precedente è stata archiviata e non può essere salvata.",
       "draftReadFailed": "Il carrello salvato non può essere letto. La conferma è sospesa e il carrello precedente viene conservato.",
       "draftSaveFailed": "Il carrello non può essere salvato. La conferma attende un salvataggio permanente riuscito.",
@@ -37,8 +40,10 @@
     "processing": "Ripristino dell’operazione originale",
     "approval_required": "L’annullamento richiede una nuova approvazione del personale o del responsabile. Riapri il conto originale.",
     "auth_required": "Accedi con una sessione autorizzata per continuare.",
-    "conflict": "Un altro terminale ha modificato questo conto. Controlla lo stato attuale prima di continuare.",
-    "refresh": "Aggiorna stato"
+    "conflict": "La richiesta originale deve essere verificata prima di continuare.",
+    "refresh": "Aggiorna stato",
+    "confirmOriginalResult": "Verifica l’annullamento originale",
+    "originalResultUnconfirmed": "L’annullamento originale non è stato confermato e resta salvato. Riconnettiti e controlla il conto prima di continuare."
   },
   "paymentIntegrity": {
     "reasonCodes": {

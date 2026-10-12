@@ -126,6 +126,7 @@
       "batchDiscountApplied": "Discount applied to selected items"
     },
     "errors": {
+      "checkChanged": "The check changed. Review its updated items and balance before continuing.",
       "tableMutationBlocked": "A previous table action is awaiting confirmation. Review the saved action in Sync Health before making another change.",
       "tableMutationRefused": "The table change was not accepted. Refresh the check and review your selection before trying again.",
       "tableMutationBatchRefused": "The table change was not accepted. Selected items not sent: {{count}}. Refresh the check and review your selection before trying again.",
@@ -195,5 +196,58 @@
       "minutes": "{{minutes}}m"
     },
     "floorPlanAriaLabel": "Table floor plan"
+  },
+  "waiterService": {
+    "unreadRejections": "Rejections to review: {{count}}",
+    "rejectionSummary": "Rejected by {{waiter}} · Table {{table}}",
+    "acknowledgeRejection": "Mark as seen",
+    "rejectedChangeHelp": "The proposed change was not applied. The check and assignment were left unchanged.",
+    "rejectedQrHelp": "The customer request remains on Main for reassignment.",
+    "noticeSaveFailed": "Could not save the acknowledgement. Tap “Mark as seen” again.",
+    "qrRequest": "Table QR request",
+    "awaitingAssignment": "Choose a waiter. The bill changes after their acceptance.",
+    "chooseWaiter": "Choose a waiter",
+    "assign": "Send to waiter",
+    "noActiveWaiters": "No waiters with an active shift are available.",
+    "requests": "Service requests",
+    "incoming": "Request for your table",
+    "accept": "Accept",
+    "reject": "Reject",
+    "table": "Table {{table}}",
+    "destination": "Destination: table {{table}}",
+    "sent": "Sent for acceptance. The check remains unchanged until the waiter accepts.",
+    "awaitingDelivery": "Your decision is saved and waiting for delivery.",
+    "stale": "Service request status could not be confirmed. Check the connection and try again.",
+    "empty": "No service requests.",
+    "status": {
+      "pending": "Pending acceptance",
+      "accepted": "Accepted",
+      "rejected": "Rejected",
+      "superseded": "Changed — review again"
+    },
+    "kind": {
+      "assign_waiter": "Waiter handover",
+      "append_items": "Additional items",
+      "transfer_item": "Item transfer",
+      "move_table": "Move table",
+      "merge_table": "Merge tables"
+    },
+    "signIn": "Confirm your staff PIN",
+    "pin": "Staff PIN",
+    "signInFailed": "Login could not be confirmed. Try again.",
+    "mainResolutionTitle": "Main decision for this order",
+    "mainResolutionHelp": "Assign another waiter, take responsibility on Main, or finally reject this request.",
+    "reassign": "Assign for new acceptance",
+    "takeItems": "Take only new items on Main",
+    "rejectionReason": "Reason for final rejection",
+    "finalReject": "Final rejection",
+    "finalRejectHelp": "Only this request is rejected. Existing items and payments are preserved.",
+    "resolutionRefused": "The action was not applied because the state changed. Review the request and choose again.",
+    "resolutionStatus": {
+      "reject_final": "Finally rejected by Main",
+      "reassign": "Reassigned for new acceptance",
+      "main_items": "Main took the new items"
+    },
+    "itemResponsibility": "Item responsibility · {{name}}"
   }
 }

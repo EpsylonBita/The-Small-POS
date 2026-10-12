@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   snapshot: vi.fn(),
   cancelWithApproval: vi.fn(),
   confirmPrivilegedAction: vi.fn(),
+  toastError: vi.fn(),
   t: (_key: string, options: any) =>
     String(options?.defaultValue || _key).replace(/\{\{(\w+)\}\}/g, (_match, name) =>
       String(options?.[name] ?? ''),
@@ -53,7 +54,7 @@ vi.mock('../../../utils/format', () => ({
 }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => ({ 'modals.orderCancellation.confirm': 'Cancel the order', 'modals.orderCancellation.keepOrder': 'Keep order', 'modals.orderCancellation.cashDrawer': 'Cash drawer', 'modals.orderCancellation.bank': 'Bank' }[key] ?? key) }) }));
 vi.mock('react-hot-toast', () => ({
-  default: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() }),
+  default: Object.assign(vi.fn(), { success: vi.fn(), error: mocks.toastError, dismiss: vi.fn() }),
 }));
 vi.mock('framer-motion', () => ({
   AnimatePresence: ({ children }: any) => children,
@@ -124,12 +125,13 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     mocks.orders.mockResolvedValue([order]);
     mocks.payments.mockResolvedValue([]);
     mocks.snapshot.mockReset().mockResolvedValue({ netPaid: 0, outstandingAmount: 30, cancelRefusal: null });
-    mocks.get.mockResolvedValue({ success: true, data: { success: true, session } });
+    mocks.get.mockReset().mockResolvedValue({ success: true, data: { success: true, session } });
     mocks.patch.mockReset().mockResolvedValue({ success: true, data: { success: true } });
     mocks.cancelWithApproval.mockReset().mockResolvedValue({ success: true, orderId: 'local-order', data: { workflow: {
       affected_session_ids: [sessionId, 'sibling-check'], affected_table_ids: ['T01', 'T02'],
     } } });
     mocks.emit.mockClear();
+    mocks.toastError.mockClear();
     onClose.mockClear();
   });
 
@@ -172,6 +174,147 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     expect(mocks.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({ tableId: 'T01', releaseStatus: 'available' }));
     expect(mocks.emit).toHaveBeenCalledWith('table-session-settled', expect.objectContaining({ tableId: 'T02', releaseStatus: 'available' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('keeps waiter selection open when the standalone caller omits localOrders', async () => {
+    // Bound subsequent reads so the broken reload loop fails through observable UI,
+    // rather than leaving the test runner in an unbounded promise/render loop.
+    mocks.get.mockResolvedValueOnce({ success: true, data: { success: true, session } })
+      .mockImplementation(() => new Promise(() => {}));
+    mocks.directory.mockResolvedValue({ staff: [{ id: 'waiter-1', name: 'Alice Waiter', isActive: true, canLoginPos: true }] });
+    render(<TableCheckManagerModal isOpen tables={[table]} table={table} onClose={onClose}
+      onAddItems={vi.fn()} onRefreshOrders={refresh} onRefreshTables={refresh} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Assign' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    fireEvent.click(within(sheet).getByRole('button', { name: /Alice Waiter/ }));
+    expect(within(sheet).getByRole('button', { name: 'Save Waiter' })).toBeInTheDocument();
+    expect(screen.getAllByRole('dialog')).toContain(sheet);
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a payment draft through a periodic same-check parent snapshot refresh, including the read in flight', async () => {
+    const canonical = { ...session, snapshot_revision: 21, order: { ...session.order, version: 7 } };
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: canonical } });
+    const base = { isOpen: true, table, tables: [table], localOrders: [order] as any, onClose,
+      onAddItems: vi.fn(), onRefreshOrders: refresh, onRefreshTables: refresh };
+    const view = render(<TableCheckManagerModal {...base} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    const fields = within(sheet).getAllByRole('textbox');
+    fireEvent.change(fields[0], { target: { value: '12.34' } });
+    fireEvent.change(fields[1], { target: { value: '1.50' } });
+    fireEvent.change(fields[2], { target: { value: '2' } });
+    let finishRead!: (value: unknown) => void;
+    mocks.get.mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+    view.rerender(<TableCheckManagerModal {...base} table={{ ...table }} localOrders={[{ ...order }] as any}
+      onRefreshTables={vi.fn()} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByRole('dialog')).toContain(sheet);
+    expect(within(sheet).getAllByRole('textbox').map(field => (field as HTMLInputElement).value)).toEqual(['12.34', '1.50', '2']);
+    await act(async () => { finishRead({ success: true, data: { success: true, session: { ...canonical } } }); });
+    expect(screen.getAllByRole('dialog')).toContain(sheet);
+    expect(within(sheet).getAllByRole('textbox').map(field => (field as HTMLInputElement).value)).toEqual(['12.34', '1.50', '2']);
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it('invalidates a payment draft visibly when the same check has a newer canonical version', async () => {
+    const canonical = { ...session, snapshot_revision: 21, order: { ...session.order, version: 7 } };
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: canonical } });
+    const base = { isOpen: true, table, tables: [table], localOrders: [order] as any, onClose,
+      onAddItems: vi.fn(), onRefreshOrders: refresh, onRefreshTables: refresh };
+    const view = render(<TableCheckManagerModal {...base} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+    mocks.get.mockResolvedValue({ success: true, data: { success: true,
+      session: { ...canonical, snapshot_revision: 22, order: { ...canonical.order, version: 8 } } } });
+    view.rerender(<TableCheckManagerModal {...base} localOrders={[{ ...order, version: 8 }] as any} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Pay Table' })).not.toBeInTheDocument());
+    expect(mocks.toastError).toHaveBeenCalledWith('The check changed. Review its updated items and balance before continuing.');
+    expect(mocks.cancelWithApproval).not.toHaveBeenCalled();
+  });
+
+  it('does not apply an older response after a newer parent refresh has completed', async () => {
+    // Keep this race isolated from local item decoration: both replies carry
+    // their own complete canonical items.
+    mocks.orders.mockResolvedValue([]);
+    const canonical = { ...session, snapshot_revision: 21, order: { ...session.order, version: 7 } };
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: canonical } });
+    const base = { isOpen: true, table, tables: [table], localOrders: [] as any, onClose,
+      onAddItems: vi.fn(), onRefreshOrders: refresh, onRefreshTables: refresh };
+    const view = render(<TableCheckManagerModal {...base} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    let finishOlderRead!: (value: unknown) => void;
+    mocks.get.mockImplementationOnce(() => new Promise(resolve => { finishOlderRead = resolve; }));
+    view.rerender(<TableCheckManagerModal {...base} localOrders={[] as any} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+    const latest = { ...canonical, snapshot_revision: 22,
+      order: { ...canonical.order, version: 8, order_items: [{ ...line, name: 'Fresh Coffee' }] } };
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: latest } });
+    view.rerender(<TableCheckManagerModal {...base} localOrders={[] as any} />);
+    await waitFor(() => expect(screen.getByText('Fresh Coffee')).toBeInTheDocument());
+    await act(async () => { finishOlderRead({ success: true, data: { success: true, session: canonical } }); });
+    expect(screen.getByText('Fresh Coffee')).toBeInTheDocument();
+    expect(screen.queryByText('Coffee')).not.toBeInTheDocument();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'orders:apply-table-session-snapshot')).toHaveLength(2);
+  });
+
+  it('does not persist a pending reply after closing the check', async () => {
+    let finishRead!: (value: unknown) => void;
+    mocks.get.mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+    const base = { isOpen: true, table, tables: [table], localOrders: [order] as any, onClose,
+      onAddItems: vi.fn(), onRefreshOrders: refresh, onRefreshTables: refresh };
+    const view = render(<TableCheckManagerModal {...base} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(1));
+    view.rerender(<TableCheckManagerModal {...base} isOpen={false} />);
+    await act(async () => { finishRead({ success: true, data: { success: true, session } }); });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'orders:apply-table-session-snapshot')).toHaveLength(0);
+    expect(mocks.emit).not.toHaveBeenCalled();
+  });
+
+  it('does not persist or display a reply belonging to another check', async () => {
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: { ...session, id: 'another-check' } } });
+    render(<TableCheckManagerModal isOpen tables={[table]} table={table} localOrders={[order] as any}
+      onClose={onClose} onAddItems={vi.fn()} onRefreshOrders={refresh} onRefreshTables={refresh} />);
+    await waitFor(() => expect(screen.queryByText('Loading table check...')).not.toBeInTheDocument());
+    expect(screen.queryByText('Coffee')).not.toBeInTheDocument();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'orders:apply-table-session-snapshot')).toHaveLength(0);
+    expect(mocks.toastError).toHaveBeenCalled();
+  });
+
+  it.each([{ organization_id: 'another-org' }, { branch_id: 'another-branch' }])(
+    'does not persist a reply with another tenant scope: %j', async foreignScope => {
+      mocks.get.mockResolvedValue({ success: true, data: { success: true, session: { ...session, ...foreignScope } } });
+      render(<TableCheckManagerModal isOpen tables={[table]} table={table} localOrders={[order] as any}
+        onClose={onClose} onAddItems={vi.fn()} onRefreshOrders={refresh} onRefreshTables={refresh} />);
+      await waitFor(() => expect(screen.queryByText('Loading table check...')).not.toBeInTheDocument());
+      expect(screen.queryByText('Coffee')).not.toBeInTheDocument();
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'orders:apply-table-session-snapshot')).toHaveLength(0);
+      expect(mocks.toastError).toHaveBeenCalled();
+    },
+  );
+
+  it('retains the newer check as read-only when a subsequent response regresses its revision', async () => {
+    const canonical = { ...session, snapshot_revision: 22, order: { ...session.order, version: 8 } };
+    mocks.get.mockResolvedValue({ success: true, data: { success: true, session: canonical } });
+    const base = { isOpen: true, table, tables: [table], localOrders: [order] as any, onClose,
+      onAddItems: vi.fn(), onRefreshOrders: refresh, onRefreshTables: refresh };
+    const view = render(<TableCheckManagerModal {...base} />);
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+    const sheet = screen.getAllByRole('dialog').at(-1)!;
+    fireEvent.change(within(sheet).getAllByRole('textbox')[0], { target: { value: '12.34' } });
+    mocks.get.mockResolvedValue({ success: true, data: { success: true,
+      session: { ...canonical, snapshot_revision: 21, order: { ...canonical.order, version: 7 } } } });
+    view.rerender(<TableCheckManagerModal {...base} localOrders={[{ ...order }] as any} />);
+    await waitFor(() => expect(screen.getByText(/Saved check — amounts may be stale/)).toBeInTheDocument());
+    expect(screen.getAllByRole('dialog')).toContain(sheet);
+    expect((within(sheet).getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('12.34');
+    expect(within(sheet).getByRole('button', { name: 'Cash' })).toBeDisabled();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'orders:apply-table-session-snapshot')).toHaveLength(1);
+    expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
   it('offers the return channel before the reason for a fully paid manual table', async () => {

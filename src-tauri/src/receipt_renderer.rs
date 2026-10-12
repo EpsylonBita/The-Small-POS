@@ -3394,7 +3394,8 @@ fn append_customizations_html_v2(
     if !without_items.is_empty() {
         for customization in without_items {
             mods.push(format!(
-                "- {}",
+                "- {} {}",
+                esc(receipt_label(lang, "Without")),
                 esc(&customization_display(lang, customization, false))
             ));
         }
@@ -13103,6 +13104,39 @@ mod tests {
         let classic_large = count_sequence(&classic_render.bytes, &[0x1D, 0x21, 0x01]);
         let modern_large = count_sequence(&modern_render.bytes, &[0x1D, 0x21, 0x01]);
         assert!(modern_large > classic_large);
+    }
+
+    #[test]
+    fn efood_receipt_preview_marks_removed_material_in_greek() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "EFOOD-5847".to_string(),
+            order_type: "pickup".to_string(),
+            items: vec![ReceiptItem {
+                name: "Club sandwich λαχανικών".to_string(),
+                quantity: 1.0,
+                total: 6.7,
+                customizations: vec![ReceiptCustomizationLine {
+                    name: "Ντομάτα".to_string(),
+                    quantity: 1.0,
+                    is_without: true,
+                    ..ReceiptCustomizationLine::default()
+                }],
+                ..ReceiptItem::default()
+            }],
+            platform_slip: Some(PlatformSlipInfo {
+                plugin: "efood".to_string(),
+                short_code: Some("5847".to_string()),
+                ..PlatformSlipInfo::default()
+            }),
+            ..OrderReceiptDoc::default()
+        });
+        let cfg = LayoutConfig {
+            language: "el".to_string(),
+            ..LayoutConfig::default()
+        };
+        let html = render_html(&doc, &cfg);
+        assert!(html.contains("Χωρίς"));
+        assert!(html.contains("Ντομάτα"));
     }
 
     #[test]

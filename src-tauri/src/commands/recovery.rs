@@ -1142,6 +1142,19 @@ async fn recovery_execute_action_core(
             let item_id = request_param_str(&request, "sampleItemId")
                 .or_else(|| request_field_str(&request, "entityId").map(ToOwned::to_owned))
                 .ok_or_else(|| "Missing parity item id".to_string())?;
+            if crate::table_close_recovery::confirm_selected_close(
+                db,
+                sync_state.as_ref(),
+                cancellation,
+                &item_id,
+            )
+            .await
+            .map_err(auth::GuardedCommandError::from)?
+            {
+                return Ok(json!({"success":true,"requiresRefresh":true,
+                    "verification":{"status":"passed"},
+                    "message":"The original table close was confirmed as already completed. No payment or table was changed."}));
+            }
             let should_repair_parent_wait = sync::guarded_renderer_local_mutation(
                 db,
                 sync_state.as_ref(),

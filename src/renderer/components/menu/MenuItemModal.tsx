@@ -618,13 +618,20 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             const isLittle = selectedItem?.isLittle || false;
                             const isWithout = selectedItem?.isWithout || false;
 
-                            // Helper function to convert hex to vivid rgba with strong saturation boost
+                            // Keep configured category colors on borders; use a neutral readable card.
                             const hexToVividRgba = (hex: string, alpha: number) => {
                               const r = parseInt(hex.slice(1, 3), 16);
                               const g = parseInt(hex.slice(3, 5), 16);
                               const b = parseInt(hex.slice(5, 7), 16);
                               return `rgba(${r}, ${g}, ${b}, ${alpha})`;
                             };
+                            const surfaceColor = isWithout ? '#EF4444' : color;
+                            const neutral = resolvedTheme === 'dark' ? [15, 23, 42] : [255, 255, 255];
+                            const tint = isWithout ? 0.12 : isSelected ? 0.16 : 0.05;
+                            const surfaceChannels = [1, 3, 5].map((offset, index) => {
+                              const channel = parseInt(surfaceColor.slice(offset, offset + 2), 16);
+                              return Math.round((Number.isFinite(channel) ? channel : neutral[index]) * tint + neutral[index] * (1 - tint));
+                            });
 
                             return (
                               <div
@@ -636,31 +643,23 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                     : 'active:scale-[0.98]'
                                   }`}
                                 style={{
-                                  backgroundColor: isSelected
-                                    ? isWithout
-                                      ? resolvedTheme === 'dark'
-                                        ? 'rgba(239, 68, 68, 0.5)'
-                                        : 'rgba(239, 68, 68, 0.24)'
-                                      : hexToVividRgba(color, resolvedTheme === 'dark' ? 0.7 : 0.42)
-                                    : hexToVividRgba(color, resolvedTheme === 'dark' ? 0.45 : 0.22),
+                                  backgroundColor: `rgb(${surfaceChannels.join(', ')})`,
                                   borderColor: isSelected && !isWithout
                                     ? hexToVividRgba(color, 1)
                                     : hexToVividRgba(color, 0.6),
-                                  boxShadow: isSelected
-                                    ? `0 4px 15px ${hexToVividRgba(color, 0.5)}, inset 0 1px 0 rgba(255,255,255,0.2)`
-                                    : `0 2px 8px ${hexToVividRgba(color, 0.25)}`
                                 }}
                               >
                                 {/* Main clickable area for toggle */}
                                 <button
                                   onClick={() => handleIngredientToggle(ingredient, !isSelected)}
-                                  className="w-full text-left"
+                                  aria-pressed={isSelected}
+                                  className="w-full min-h-11 text-left"
                                 >
                                   <div className="flex flex-col gap-1 pr-8">
                                     <span
                                       className={`ingredient-text-crisp font-semibold text-sm line-clamp-2 ${isWithout ? 'line-through text-red-400' : ''}`}
                                       style={{
-                                        color: isWithout ? undefined : (resolvedTheme === 'dark' ? '#f1f5f9' : '#1e293b'),
+                                        color: isWithout ? (resolvedTheme === 'dark' ? '#FCA5A5' : '#991B1B') : (resolvedTheme === 'dark' ? '#f1f5f9' : '#1e293b'),
                                         textRendering: 'geometricPrecision',
                                         WebkitFontSmoothing: 'subpixel-antialiased'
                                       }}
@@ -668,22 +667,21 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       {isWithout && <Ban className="w-3 h-3 inline-block mr-1 text-red-400" aria-hidden="true" />}
                                       {getIngredientName(ingredient)}
                                       {isLittle && isSelected && !isWithout && (
-                                        <span className="ml-1 text-xs text-orange-400 font-medium">({t('menu.itemModal.little')})</span>
+                                        <span className="ml-1 text-xs font-medium" style={{ color: resolvedTheme === 'dark' ? '#FCD34D' : '#92400E' }}>({t('menu.itemModal.little')})</span>
                                       )}
                                     </span>
                                     {getIngredientUnitPrice(ingredient) > 0 && !isWithout && (
                                       <span
                                         className="text-xs font-bold"
                                         style={{
-                                          color: resolvedTheme === 'dark' ? '#4ade80' : '#16a34a',
-                                          textShadow: resolvedTheme === 'dark' ? '0 0 2px rgba(74, 222, 128, 0.3)' : 'none'
+                                          color: resolvedTheme === 'dark' ? '#f1f5f9' : '#1e293b',
                                         }}
                                       >
                                         +{formatCurrency(getIngredientUnitPrice(ingredient))}
                                       </span>
                                     )}
                                     {isWithout && (
-                                      <span className="text-xs text-red-400 font-medium">
+                                      <span className="text-xs font-medium" style={{ color: resolvedTheme === 'dark' ? '#FCA5A5' : '#991B1B' }}>
                                         {t('menu.itemModal.withoutLabel') || 'Without'}
                                       </span>
                                     )}

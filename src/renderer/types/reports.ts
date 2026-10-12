@@ -241,6 +241,9 @@ export interface ZReportData {
     openingTotal?: number;
     driverCashGiven?: number;
     driverCashReturned?: number;
+    /** Gross receipts and cash refunds collected by these drawers, before staff returns. */
+    cashSales?: number;
+    totalRefunds?: number;
     /** Canonical expected drawer cash; with a gift close it already includes gift card cash once. */
     expected?: number;
     expected_cents?: number;

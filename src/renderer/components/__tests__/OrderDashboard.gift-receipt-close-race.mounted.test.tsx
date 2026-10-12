@@ -48,6 +48,7 @@ const h = vi.hoisted(() => {
     recordPayment: 'ok' as 'ok' | 'lost',
     ordinaryBooked: null as null | { id: string; ref: string },
     orders: [] as Array<Record<string, unknown>>,
+    tables: [] as Array<Record<string, unknown>>,
     // The one host reread to hold: after the gift import or the ordinary write.
     holdRefreshOn: null as null | 'import' | 'record',
     refreshArmed: false,
@@ -302,7 +303,7 @@ vi.mock('../../hooks/useAcquiredModules', async (importOriginal) => {
   return { ...actual, useAcquiredModules: () => value };
 });
 vi.mock('../../hooks/useTables', () => {
-  const value = { tables: [], refetch: vi.fn(), updateTableStatus: vi.fn() };
+  const value = { get tables() { return h.state.tables; }, refetch: vi.fn(), updateTableStatus: vi.fn() };
   return { useTables: () => value };
 });
 vi.mock('../../hooks/useRooms', () => {
@@ -442,6 +443,12 @@ vi.mock('../modals/MenuModal', () => ({
   ); },
 }));
 vi.mock('../../services/CheckoutDraftStore', () => ({ getCheckoutDraftStore: async () => ({ load: async () => h.state.checkoutDraft }) }));
+vi.mock('../recovery/TableAttemptRecoveryNotice', () => ({
+  TableAttemptRecoveryNotice: ({ onReviewEdit }: { onReviewEdit?: (eventId: string) => Promise<boolean> }) => <>
+    <button data-testid="review-saved-edit" onClick={() => void onReviewEdit?.(h.state.checkoutDraft?.checkoutRequestId)}>review original edit</button>
+    <button data-testid="review-other-edit" onClick={() => void onReviewEdit?.('other-original-event')}>review another edit</button>
+  </>,
+}));
 vi.mock('../modals/SplitPaymentModal', () => ({
   SplitPaymentModal: ({ orderId, onClose }: { orderId: string; onClose: () => void }) => (
     <div data-testid="split-payment-modal" data-order-id={orderId}>
@@ -681,13 +688,20 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     expect(h.native.recordPayment).not.toHaveBeenCalled();
   });
 
-  it('restores and completes an edit, then creates the next checkout using its new persisted identity', async () => {
+  it('keeps a pending edit closed after refresh and reviews the unchanged original only on selection', async () => {
     targetOrder('dashboard-next-create');
     const settlementRequest = { orderId:'old-paid-order',client_event_id:'restored-edit-event',expected_version:3,expected_local_version:1,items:[],action:{type:'none'} };
     h.state.checkoutDraft = { phase:'checkout_pending',checkoutRequestId:'restored-edit-event',cartItems:[{id:'line'}],
       context:{editMode:true,editOrderId:'old-paid-order',orderType:'pickup'},
       submission:{...settlementRequest,action:'edit_settlement',settlementAction:settlementRequest.action,settlementRequest} };
-    render(<OrderDashboard />);
+    const original = JSON.stringify(h.state.checkoutDraft);
+    render(<FoodDashboard />);
+    await settle();
+    expect(screen.queryByTestId('edit-complete')).toBeNull();
+    expect(JSON.stringify(h.state.checkoutDraft)).toBe(original);
+    expect(h.bridge.orders.applyEditSettlement).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('review-saved-edit'));
     fireEvent.click(await screen.findByTestId('edit-complete'));
     await waitFor(() => expect(screen.queryByTestId('edit-complete')).toBeNull());
     expect(h.bridge.orders.applyEditSettlement).toHaveBeenCalledWith(settlementRequest);
@@ -697,6 +711,20 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
     fireEvent.click(await screen.findByTestId('menu-complete'));
     await waitFor(() => expect(h.store.createOrder.mock.calls.length).toBe(calls+1));
     expect(h.store.createOrder).toHaveBeenLastCalledWith(expect.objectContaining({clientRequestId:'new-delivery-durable-id'}));
+  });
+
+  it('cannot open a different retained edit from the recovery notice', async () => {
+    h.state.checkoutDraft = { phase:'checkout_pending',checkoutRequestId:'selected-original-event',cartItems:[{id:'line'}],
+      context:{editMode:true,editOrderId:'original-order',orderType:'pickup'} };
+    const original = JSON.stringify(h.state.checkoutDraft);
+    render(<OrderDashboard />);
+    await settle();
+    fireEvent.click(screen.getByTestId('review-other-edit'));
+    await settle();
+    expect(screen.queryByTestId('edit-complete')).toBeNull();
+    expect(JSON.stringify(h.state.checkoutDraft)).toBe(original);
+    expect(h.bridge.orders.applyEditSettlement).not.toHaveBeenCalled();
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
   });
 
   it('discards an unsubmitted restored cart and admits a new durable checkout identity', async () => {
@@ -919,6 +947,39 @@ describe('OrderDashboard gift receipt kept across an early Close (mounted host)'
 
 // Reuse the mounted host's native/store boundary above, avoiding a second copy
 // of the dashboard's large fixture for this history regression.
+describe('OrderDashboard staff order number on table tiles (mounted host)', () => {
+  const canonicalId = '100e676d-fef2-45a8-bd1d-d51d16149fb7';
+  beforeEach(() => {
+    Object.assign(h.modules, { hasDeliveryModule: false, hasTablesModule: true });
+    h.state.tables = [{ id: 'table-1', tableNumber: 'TP06', status: 'occupied', capacity: 10,
+      currentOrderId: canonicalId, tableSessionId: 'session-1', currentWaiterName: 'Ana Novak',
+      tableCheckTotal: 10.5, tableCheckPaid: 0, tableCheckDue: 10.5 }];
+    h.state.orders = [{ id: 'native-order', supabase_id: canonicalId, status: 'pending', orderType: 'dine-in',
+      table_id: 'table-1', order_number: 'ORD-20261010-1ea711cbfd03e5efc93e924138a8c836',
+      display_order_number: 'M1-0042', items: [], totalAmount: 10.5 }];
+  });
+  afterEach(() => { cleanup(); h.state.tables = []; });
+
+  it('shows the saved staff number for a canonical table reference, preserving the waiter', async () => {
+    render(<OrderDashboard />);
+    fireEvent.click(await screen.findByRole('tab', { name: /^Tables/ }));
+    const tile = await screen.findByRole('button', { name: '#TP06 · Occupied' });
+    expect(within(tile).getByText('M1-0042')).toBeInTheDocument();
+    expect(within(tile).getByText('Ana Novak')).toBeInTheDocument();
+    expect(tile).not.toHaveTextContent(canonicalId.slice(0, 10));
+    expect(tile).not.toHaveTextContent('ORD-20261010-1ea711');
+  });
+
+  it('keeps an open check usable while its order number is unavailable, without exposing its UUID', async () => {
+    h.state.orders = [];
+    render(<OrderDashboard />);
+    fireEvent.click(await screen.findByRole('tab', { name: /^Tables/ }));
+    const tile = await screen.findByRole('button', { name: '#TP06 · Occupied' });
+    expect(within(tile).getByText('Ana Novak')).toBeInTheDocument();
+    expect(tile).not.toHaveTextContent(canonicalId.slice(0, 10));
+  });
+});
+
 describe('OrderDashboard completion history without delivery (mounted host)', () => {
   beforeEach(() => {
     Object.assign(h.modules, { hasDeliveryModule: false, hasTablesModule: true });

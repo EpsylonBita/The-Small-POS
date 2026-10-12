@@ -126,6 +126,7 @@
       "batchDiscountApplied": "Sconto applicato agli articoli selezionati"
     },
     "errors": {
+      "checkChanged": "Il conto è cambiato. Controlla gli articoli e il saldo aggiornati prima di continuare.",
       "tableMutationBlocked": "Un’azione precedente sul tavolo è in attesa di conferma. Controlla l’azione salvata in «Stato sincronizzazione» prima di apportare altre modifiche.",
       "tableMutationRefused": "La modifica del tavolo non è stata accettata. Aggiorna il conto e controlla la selezione prima di riprovare.",
       "tableMutationBatchRefused": "La modifica del tavolo non è stata accettata. Articoli selezionati non inviati: {{count}}. Aggiorna il conto e controlla la selezione prima di riprovare.",
@@ -195,5 +196,58 @@
       "minutes": "{{minutes}} min"
     },
     "floorPlanAriaLabel": "Pianta dei tavoli"
+  },
+  "waiterService": {
+    "unreadRejections": "Rifiuti da controllare: {{count}}",
+    "rejectionSummary": "Rifiutato da {{waiter}} · Tavolo {{table}}",
+    "acknowledgeRejection": "Segna come visto",
+    "rejectedChangeHelp": "La modifica proposta non è stata applicata. Il conto e l’assegnazione sono rimasti invariati.",
+    "rejectedQrHelp": "La richiesta del cliente rimane sul terminale principale per una nuova assegnazione.",
+    "noticeSaveFailed": "Impossibile salvare la conferma. Tocca di nuovo «Segna come visto».",
+    "qrRequest": "Richiesta dal QR del tavolo",
+    "awaitingAssignment": "Scegli un cameriere. Il conto cambia dopo la sua accettazione.",
+    "chooseWaiter": "Scegli un cameriere",
+    "assign": "Invia al cameriere",
+    "noActiveWaiters": "Non ci sono camerieri con un turno attivo disponibili.",
+    "requests": "Richieste di servizio",
+    "incoming": "Richiesta per il tuo tavolo",
+    "accept": "Accetta",
+    "reject": "Rifiuta",
+    "table": "Tavolo {{table}}",
+    "destination": "Destinazione: tavolo {{table}}",
+    "sent": "Inviato per accettazione. Il conto resta invariato fino all’accettazione.",
+    "awaitingDelivery": "La decisione è salvata e attende l’invio.",
+    "stale": "Non è stato possibile confermare lo stato delle richieste di servizio. Controlla la connessione e riprova.",
+    "empty": "Nessuna richiesta di servizio.",
+    "status": {
+      "pending": "In attesa di accettazione",
+      "accepted": "Accettato",
+      "rejected": "Rifiutato",
+      "superseded": "Modificato — controlla di nuovo"
+    },
+    "kind": {
+      "assign_waiter": "Passaggio al cameriere",
+      "append_items": "Articoli aggiuntivi",
+      "transfer_item": "Trasferimento articoli",
+      "move_table": "Sposta tavolo",
+      "merge_table": "Unisci tavoli"
+    },
+    "signIn": "Conferma con il tuo PIN personale",
+    "pin": "PIN personale",
+    "signInFailed": "Accesso non confermato. Riprova.",
+    "mainResolutionTitle": "Decisione del terminale principale",
+    "mainResolutionHelp": "Assegna a un altro cameriere, prendi in carico sul terminale principale o rifiuta definitivamente la richiesta.",
+    "reassign": "Assegna per una nuova accettazione",
+    "takeItems": "Prendi in carico solo i nuovi articoli",
+    "rejectionReason": "Motivo del rifiuto definitivo",
+    "finalReject": "Rifiuta definitivamente",
+    "finalRejectHelp": "Viene rifiutata solo questa richiesta. Gli articoli e i pagamenti esistenti restano invariati.",
+    "resolutionRefused": "L’azione non è stata applicata perché la situazione è cambiata. Controlla la richiesta e scegli di nuovo.",
+    "resolutionStatus": {
+      "reject_final": "Rifiutato definitivamente dal terminale principale",
+      "reassign": "Riassegnato per una nuova accettazione",
+      "main_items": "Nuovi articoli presi in carico dal terminale principale"
+    },
+    "itemResponsibility": "Responsabile degli articoli · {{name}}"
   }
 }

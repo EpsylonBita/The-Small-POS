@@ -6,6 +6,7 @@ import i18next from 'i18next';
 
 import type { DiagnosticsSystemHealth } from '../../src/lib';
 import { buildSyncRecoveryIssues } from '../../src/renderer/components/recovery/sync-recovery-issues';
+import { buildSimpleHealthSummary } from '../../../shared/pos/health/health-summary';
 import type { SyncQueueItem } from '../../../shared/pos/sync-queue-types';
 
 const baseSystemHealth = (overrides: Partial<DiagnosticsSystemHealth> = {}) =>
@@ -37,6 +38,23 @@ const addressRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
   data: '{"is_default":true}', organizationId: 'org-1', createdAt: '2026-09-13T00:00:00Z',
   attempts: 1, lastAttempt: null, errorMessage: 'CUSTOMER_ADDRESS_DEFAULT_CONFLICT', nextRetryAt: null,
   retryDelayMs: 0, priority: 0, moduleType: 'customers', conflictStrategy: 'manual', version: 1, status: 'failed', ...overrides,
+});
+
+test('zero courier cash is visible with empty queues and offers support, not a financial mutation', () => {
+  const result = buildSyncRecoveryIssues({ systemHealth: baseSystemHealth(), integrity: { valid: false, issues: [{
+    entityType: 'driver_earning', entityId: 'earning-49', orderId: 'order-49', orderNumber: '00049',
+    reasonCode: 'courier_cash_missing_from_earning', suggestedFix: 'contact_support',
+    shiftId: 'shift-49', currency: 'EUR', recordedCashCents: 0, receiptCashCents: 1520, differenceCents: 1520,
+  }] } });
+  const issue = result.issues.find(item => item.code === 'courier_cash_missing_from_earning')!;
+  assert.equal(issue.params?.differenceCents, 1520);
+  assert.equal(issue.params?.amount, '15.20');
+  assert.deepEqual(issue.actions.map(action => action.id), ['contactDev']);
+  const summary = buildSimpleHealthSummary({ health: baseSystemHealth(),
+    syncStatus: { isOnline: true, pendingItems: 0, failedPaymentItems: 0 },
+    isShiftActive: true, supportStatus: 'not_sent', parityItems: [], extras: { courierCashIssues: 1 } });
+  assert.equal(summary.state, 'support_needed');
+  assert.equal(summary.problem, 'courierCashReview');
 });
 const addressResult = (rows: SyncQueueItem[], total = rows.length) => buildSyncRecoveryIssues({
   systemHealth: baseSystemHealth({parityQueueStatus: {total, failed:total, pending:0, conflicts:0}}),

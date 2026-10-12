@@ -772,9 +772,20 @@ pub(crate) fn collect_financial_integrity(db: &db::DbState) -> Result<serde_json
 
     issues.extend(load_legacy_financial_parity_orphan_issues(&conn)?);
 
+    let courier_cash = crate::courier_integrity::collect(&conn).unwrap_or_else(|_| {
+        serde_json::json!({"status":"unavailable", "issues":[{
+            "entityType":"driver_earning", "entityId":"check-unavailable",
+            "reasonCode":"courier_cash_check_incomplete", "suggestedFix":"contact_support"
+        }]})
+    });
+    if let Some(courier_issues) = courier_cash["issues"].as_array() {
+        issues.extend(courier_issues.iter().cloned());
+    }
+
     Ok(serde_json::json!({
         "valid": issues.is_empty(),
         "issues": issues,
+        "courierCash": courier_cash,
     }))
 }
 
