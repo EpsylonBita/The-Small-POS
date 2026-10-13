@@ -5,6 +5,7 @@ import { useWaiterServiceInbox } from '../../hooks/useWaiterServiceInbox'
 import type { WaiterServiceRequest } from '../../../../../shared/types/waiter-service-request'
 import { serviceRequestModifiers } from '../../../../../shared/pos/tables/service-request-modifiers'
 import { serviceRequestOrderLabel } from '../../../../../shared/pos/tables/service-request-order-label'
+import { SERVICE_OVERVIEW_OPEN_EVENT } from '../../../../../shared/pos/tables/WaiterServiceInbox'
 import { useShift } from '../../contexts/shift-context'
 import { getSecureSessionSync, setSecureSession } from '../../lib/secure-session-cache'
 import { posApiPost } from '../../utils/api-helpers'
@@ -24,6 +25,9 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
   const blocking = !!current || !!mainCurrent
   const rejections = inbox.rejections || []
   useEffect(() => { if (!enabled) { setOverview(false); setPin('');setRecipients({}) } }, [enabled])
+  // The full list is opened from Settings → mobile terminals, not from a permanent chip.
+  useEffect(() => { const open = () => setOverview(true); window.addEventListener(SERVICE_OVERVIEW_OPEN_EVENT, open)
+    return () => window.removeEventListener(SERVICE_OVERVIEW_OPEN_EVENT, open) }, [])
   const renewLogin = async () => {
     const original = getSecureSessionSync()
     const staffId = staff?.databaseStaffId || staff?.staffId
@@ -69,7 +73,7 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
   </div>
   if (!enabled || !inbox.available) return null
   return <>
-    {(inbox.requests.length > 0 || !!inbox.resolutionHistory?.length || inbox.stale) && <div className="fixed bottom-5 left-5 z-[9000] flex max-w-sm flex-col gap-2">
+    {inbox.actionable && <div className="fixed bottom-5 left-5 z-[9000] flex max-w-sm flex-col gap-2">
       {rejections.length > 0 && <button data-testid="waiter-service-rejection-alert" onClick={() => setOverview(true)}
         className="rounded-xl border border-red-500 bg-red-50 px-4 py-3 text-left text-red-900 shadow-lg dark:bg-red-950 dark:text-red-100">
         <span role="alert" className="block font-bold">{t('waiterService.unreadRejections', { count: rejections.length })}</span>
@@ -77,7 +81,7 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
       </button>}
       <button data-testid="waiter-service-overview" onClick={() => setOverview(true)}
         className="rounded-xl border border-gray-300 bg-white px-4 py-3 text-gray-900 shadow-lg dark:border-gray-700 dark:bg-gray-900 dark:text-white">
-        {t('waiterService.requests')} · {inbox.stale ? '…' : inbox.requests.filter(r => r.status === 'pending').length}</button>
+        {t('waiterService.requests')} · {inbox.requests.filter(r => r.status === 'pending').length}</button>
     </div>}
     <LiquidGlassModal isOpen={blocking || overview} onClose={blocking ? () => {} : () => setOverview(false)} closeOnBackdrop={!blocking} closeOnEscape={!blocking}
       title={t(current ? 'waiterService.incoming' : mainCurrent ? 'waiterService.mainResolutionTitle' : 'waiterService.requests')} size="lg" closeDisabled={blocking} closeMode={blocking ? 'request' : undefined}>

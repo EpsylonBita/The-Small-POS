@@ -4,7 +4,7 @@ import { getSecureSessionSync } from '../lib/secure-session-cache'
 import { getResolvedTerminalIdentity } from '../services/terminal-credentials'
 import { posApiGet, posApiFetch, posApiPost } from '../utils/api-helpers'
 import { onEvent, offEvent, emitCompatEvent } from '../../lib'
-import { WaiterServiceInbox, emptyServiceInbox, pendingRecipientRequest, pendingMainResolution, unreadServiceRejections, serviceRequestOverview } from '../../../../shared/pos/tables/WaiterServiceInbox'
+import { WaiterServiceInbox, emptyServiceInbox, pendingRecipientRequest, pendingMainResolution, unreadServiceRejections, serviceRequestOverview, hasActionableServiceWork, isServiceInboxNotApplicable, SERVICE_INBOX_NOT_APPLICABLE } from '../../../../shared/pos/tables/WaiterServiceInbox'
 import { buildCustomerIntakeAssignment } from '../../../../shared/pos/tables/service-request-assignment'
 import { buildMainServiceResolution, MainServiceResolutionRefused, mainResolutionRefusalCodes } from '../../../../shared/pos/tables/service-request-resolution'
 import type { MainServiceResolutionAction } from '../../../../shared/types/waiter-service-request'
@@ -53,10 +53,12 @@ export function useWaiterServiceInbox(enabled: boolean) {
         onCanonicalChange: () => { if (!cancelled) emitCompatEvent('table-session-balance-updated', {}) },
         onConfirmed: receipt => { if (!cancelled && receipt.status === 'accepted') emitCompatEvent('table-session-balance-updated', {}) },
         fetch: async () => { const result = await posApiGet('pos/waiter-service-requests', options)
+          if (!result.success && isServiceInboxNotApplicable(result)) throw new Error(SERVICE_INBOX_NOT_APPLICABLE)
           if (!result.success || result.stale || result.data?.success !== true) throw new Error('SERVICE_INBOX_UNAVAILABLE')
           if (result.data.requires_staff_login) throw new Error('SERVICE_LOGIN_REQUIRED')
           return { requests: result.data.requests, recipientStaffId: result.data.recipient_staff_id,waiters:result.data.waiters||[],sourceTerminalId:result.data.request_source_terminal_id,
-            isMain:result.data.is_main,resolutionSourceTerminalId:result.data.resolution_source_terminal_id,resolutionHistory:result.data.resolutions||[] } },
+            isMain:result.data.is_main,resolutionSourceTerminalId:result.data.resolution_source_terminal_id,resolutionHistory:result.data.resolutions||[],
+            enabled:typeof result.data.enabled==='boolean'?result.data.enabled:undefined } },
         onResolutionConfirmed:receipt=>{if(receipt.affected_session_ids.some(id=>typeof id==='string'))emitCompatEvent('table-session-balance-updated',{})},
         resolve:async intent=>{
           const result=await posApiFetch('pos/waiter-service-requests',{...options,method:'POST',body:JSON.stringify(buildMainServiceResolution(intent))})
@@ -81,16 +83,19 @@ export function useWaiterServiceInbox(enabled: boolean) {
       ref.current = inbox
       setObserverStaffId(staffId)
       setAvailable(true)
-      let refreshing = false
-      const refresh = () => { if (cancelled || refreshing || document.visibilityState === 'hidden') return
-        refreshing = true; void inbox.refresh().finally(() => { refreshing = false }) }
-      const interval = setInterval(refresh, 3000)
-      window.addEventListener('online', refresh); document.addEventListener('visibilitychange', refresh)
+      let refreshing = false, lastRefreshAt = 0
+      // Stores without live table service poll every 60 s instead of every 3 s.
+      const refresh = (force = false) => { if (cancelled || refreshing || document.visibilityState === 'hidden') return
+        if (!force && Date.now() - lastRefreshAt < inbox.pollIntervalMs()) return
+        refreshing = true; lastRefreshAt = Date.now(); void inbox.refresh().finally(() => { refreshing = false }) }
+      const forced = () => refresh(true)
+      const interval = setInterval(() => refresh(), 3000)
+      window.addEventListener('online', forced); document.addEventListener('visibilitychange', forced)
       const hint = () => refresh(); const subscriptions = ['table_realtime_update','order_realtime_update']
       for (const event of subscriptions) onEvent(event, hint)
-      cleanup = () => { clearInterval(interval); window.removeEventListener('online',refresh); document.removeEventListener('visibilitychange',refresh)
+      cleanup = () => { clearInterval(interval); window.removeEventListener('online',forced); document.removeEventListener('visibilitychange',forced)
         for (const event of subscriptions) offEvent(event,hint); inbox.stop(); if (ref.current === inbox) ref.current = null }
-      refresh()
+      refresh(true)
     })().catch(() => { if (!cancelled) setState(current => ({ ...current, stale: true })) })
     return () => { cancelled = true; cleanup() }
   }, [enabled, staff?.staffId, staff?.databaseStaffId, staff?.organizationId, staff?.branchId, staff?.terminalId, activeShift?.id, activeShift?.status, session?.sessionId, actor?.staffId, loginKey, mainCredential])
@@ -101,6 +106,7 @@ export function useWaiterServiceInbox(enabled: boolean) {
     resolve:(id:string,action:MainServiceResolutionAction,recipient:string|null=null,reason='')=>canDecide?ref.current?.resolve(id,action,recipient,reason):undefined,
     rejections: enabled ? unreadServiceRejections(state, observerStaffId) : [],
     overviewRequests: serviceRequestOverview(state, observerStaffId),
+    actionable: enabled && hasActionableServiceWork(state, observerStaffId),
     acknowledgeRejection: (id: string) => enabled ? ref.current?.acknowledgeRejection(id) : undefined,
     choose: (id: string, decision: 'accepted' | 'rejected') => canDecide ? ref.current?.choose(id,decision) : undefined, retry: () => ref.current?.refresh(),
     assign:(id:string,recipient:string)=>canDecide?ref.current?.assign(id,recipient):undefined,canAssign:canDecide }

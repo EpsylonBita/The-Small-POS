@@ -172,6 +172,19 @@ changes, so the first build after a dependency bump is still cold; only
 later runs with matching dependencies reuse the cache. Actual time savings
 have not yet been measured from a warm-cache run.
 
+## Reused CI Evidence (2026-10-13)
+
+`scripts/release-ci-evidence.mjs --target desktop` lets the release skip checks that CI already ran on the same code. It gives one answer per check:
+
+| Release step skipped | Saves | Requires |
+| --- | --- | --- |
+| "Verify POS Tauri contracts and runtime" | ~20 min | the Test Suite's "Run POS Tauri contract and runtime checks" step passed, and no file in the `desktop` classifier gate changed since. |
+| "Verify native table payment and recovery" | ~30 min of Windows test compilation | the pos-tauri Tests' unfiltered `cargo test --lib` passed, and no file in the `desktop_rust` gate changed since. |
+
+A pull-request run counts only for a merged head that already contained master. Any doubt makes the release run the step itself.
+
+The NSIS build and the post-build installer checks always run.
+
 ## Pre-Release Checklist
 
 Before cutting a release, run:

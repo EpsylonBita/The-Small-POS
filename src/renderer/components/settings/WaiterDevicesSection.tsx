@@ -16,11 +16,12 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
-import { Smartphone, RefreshCw, Loader2, ShieldAlert, AlertTriangle, Users } from 'lucide-react'
+import { Smartphone, RefreshCw, Loader2, ShieldAlert, AlertTriangle, Users, ListChecks } from 'lucide-react'
 import { posApiGet, posApiPut } from '../../utils/api-helpers'
 import { POSGlassSwitch } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 import { formatDate } from '../../utils/format'
+import { SERVICE_OVERVIEW_OPEN_EVENT } from '../../../../../shared/pos/tables/WaiterServiceInbox'
 
 // The subset of enabled_features a main terminal manages from this screen.
 // Keys mirror the server vocabulary in admin-dashboard pos-terminal-features.
@@ -277,17 +278,32 @@ export const WaiterDevicesSection: React.FC = () => {
             </span>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => void loadDevices({ refresh: true })}
-          disabled={isLoading || isRefreshing}
-          className={liquidGlassModalButton('secondary', 'md')}
-        >
-          <span className="inline-flex items-center gap-2">
-            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-            {t('settings.waiterDevices.refresh', 'Refresh')}
-          </span>
-        </button>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {/* The full service request list lives here; the floating chip only
+              appears while a request needs someone (founder, 13/10/2026). */}
+          <button
+            type="button"
+            data-testid="waiter-devices-service-requests"
+            onClick={() => window.dispatchEvent(new CustomEvent(SERVICE_OVERVIEW_OPEN_EVENT))}
+            className={liquidGlassModalButton('secondary', 'md')}
+          >
+            <span className="inline-flex items-center gap-2">
+              <ListChecks className="h-4 w-4" />
+              {t('waiterService.requests')}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadDevices({ refresh: true })}
+            disabled={isLoading || isRefreshing}
+            className={liquidGlassModalButton('secondary', 'md')}
+          >
+            <span className="inline-flex items-center gap-2">
+              <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              {t('settings.waiterDevices.refresh', 'Refresh')}
+            </span>
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
