@@ -1845,8 +1845,10 @@
       "shiftRequired": "Veuillez d'abord commencer un service",
       "activeShiftExists": "Un service est déjà actif",
       "noActiveShift": "Aucun service actif trouvé",
-      "pendingZReportTitle": "La journée précédente attend encore son rapport Z",
-      "pendingZReportDetails": "Les services de la journée du {{date}} sont clôturés, mais la journée n'est pas encore clôturée localement. Vous pouvez terminer le rapport Z maintenant, ou commencer le service suivant et y revenir plus tard."
+      "pendingZReportTitle": "Tout le monde a fini son service — clôturez la journée (Z)",
+      "pendingZReportDetails": "Tous les services de la journée commencée le {{date}} sont clôturés. Faites le rapport Z maintenant pour la clôturer, ou reprenez le service pour continuer la même journée.",
+      "issuedZReportTitle": "Le rapport Z du {{date}} se termine",
+      "issuedZReportDetails": "Le rapport Z est émis et encore en cours d'envoi. Ouvrez-le pour le terminer, ou prenez votre service pour commencer la journée suivante."
     },
     "monitoring": {
       "title": "Suivi du service",
@@ -3667,7 +3669,7 @@
         "shiftInactive": "Aucun service n'est en cours. Démarrez un service avant de prendre des commandes.",
         "terminalNotAuthorized": "Ce terminal ne parvient pas à se connecter au système de votre établissement. Les ventes sont enregistrées sur cet appareil, mais rien n’est synchronisé tant qu’il n’est pas reconnecté.",
         "closeoutBlocked": "Un point doit être réglé avant de pouvoir clôturer la journée (Z).",
-        "closeoutOverdue": "Une journée précédente n’a pas encore été clôturée (Z).",
+        "closeoutOverdue": "La journée de caisse est ouverte depuis le {{date}} à {{time}}. Faites le Z à la fin de la journée.",
         "closeoutWaitingSync": "Des paiements ou mouvements de caisse ne sont pas encore parvenus au serveur, la journée ne peut donc pas être clôturée (Z).",
         "liveUpdatesDown": "Les mises à jour en direct sont déconnectées. Les commandes se synchronisent toujours, mais les autres appareils risquent de voir les changements avec du retard.",
         "syncStuck": {
@@ -3815,7 +3817,7 @@
       "impact": {
         "dayCloseBlockedUntilSent": "La clôture de la journée (Z) ne pourra pas se terminer tant qu’ils ne sont pas envoyés.",
         "dayCloseBlocked": "La clôture de la journée (Z) ne pourra pas se terminer tant que ce n’est pas réglé.",
-        "dayCloseOverdue": "Clôturez d’abord la journée précédente (Z).",
+        "dayCloseOverdue": "Rien n’est bloqué. Clôturez la journée (Z) quand elle se termine.",
         "receiptsMayNotPrint": "Les reçus risquent de ne pas s’imprimer.",
         "otherDevicesNotUpdated": "Les autres appareils et le système de gestion ne voient peut-être pas encore les dernières modifications.",
         "printingStopped": "Les reçus et les bons de cuisine ne sortent pas de l’imprimante. Les commandes restent enregistrées."
@@ -3895,7 +3897,7 @@
           "ready": "Prête",
           "open": "Journée ouverte",
           "blocked": "Bloquée",
-          "overdue": "Journée précédente ouverte",
+          "overdue": "Ouverte depuis plus de 24 h",
           "submitted": "Envoyée",
           "unavailable": "Indisponible",
           "notChecked": "Vérifiée à l’écran Z",
@@ -3905,7 +3907,7 @@
           "ready": "Rien n’empêche la clôture de la journée.",
           "open": "Reste à faire avant la clôture de la journée :",
           "blocked": "Réglez ces points avant la clôture de la journée :",
-          "overdue": "Une journée précédente est encore ouverte. Clôturez-la d’abord (Z).",
+          "overdue": "La journée de caisse est ouverte depuis plus de 24 heures. Faites le Z à la fin de la journée.",
           "submitted": "Le rapport Z a été envoyé et attend la confirmation du serveur.",
           "unavailable": "Impossible de vérifier si la journée peut être clôturée (Z).",
           "notChecked": "Cet écran ne voit pas toutes les vérifications de la clôture. L’écran Z vérifie tout avant de clôturer la journée.",
@@ -9398,9 +9400,9 @@
         "guidance": "Ouvrez le rapport Z pour voir chaque blocage et comment le régler."
       },
       "closeoutOverdue": {
-        "title": "Une journée précédente est encore ouverte",
-        "summary": "La journée du {{reportDate}} n’a pas été clôturée (Z).",
-        "guidance": "Clôturez d’abord cette journée : ouvrez le rapport Z."
+        "title": "La journée de caisse est ouverte depuis plus de 24 heures",
+        "summary": "Aucun rapport Z ne l'a encore clôturée.",
+        "guidance": "Faites le Z à la fin de la journée. D’ici là, rien n’est bloqué."
       },
       "printerUnavailable": {
         "title": "L’imprimante ne répond pas",

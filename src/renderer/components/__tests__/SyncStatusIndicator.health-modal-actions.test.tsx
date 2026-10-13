@@ -44,6 +44,8 @@ const { bridge, queueBridge, runParitySyncCycle, toast, features, endOfDay, shif
   endOfDay: {
     status: 'idle' as string,
     pendingReportDate: null as string | null,
+    dayStartAt: null as string | null,
+    zIssued: false,
   },
   shift: { isShiftActive: true },
 }))
@@ -77,8 +79,11 @@ vi.mock('../../hooks/useEndOfDayStatus', () => ({
       latestZReportId: null,
       latestZReportSyncState: null,
       canOpenPendingZReport: false,
+      dayStartAt: endOfDay.dayStartAt,
+      zIssued: endOfDay.zIssued,
     },
     isPendingLocalSubmit: endOfDay.status === 'pending_local_submit',
+    isZIssuedAwaitingFinalization: endOfDay.status === 'pending_local_submit' && endOfDay.zIssued,
   }),
 }))
 
@@ -210,6 +215,8 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     shift.isShiftActive = true
     endOfDay.status = 'idle'
     endOfDay.pendingReportDate = null
+    endOfDay.dayStartAt = null
+    endOfDay.zIssued = false
     bridge.sync.getStatus.mockResolvedValue(HEALTHY_SYNC_STATUS)
     bridge.sync.getFinancialStats.mockResolvedValue({})
     bridge.sync.getFailedFinancialItems.mockResolvedValue([])
@@ -326,19 +333,35 @@ describe('SyncStatusIndicator Health modal: day close, stuck rows and the one re
     expect(screen.queryByText('Something needs fixing before the day can close (Z).')).not.toBeInTheDocument()
   })
 
-  it('says an earlier day is still open, and that the Z is done on the main terminal for a waiter', async () => {
+  // Founder decision 13/10/2026: a POS day runs from its first check-in to its
+  // Z, so a Z offered right after the last checkout is not overdue. Health only
+  // warns (never blocks) once the open day started more than 24 hours ago.
+  const OPEN_TOO_LONG = /^The POS day has been open since .+\. Run the Z when the day ends\.$/
+
+  it('does not call a day overdue just because its Z is ready after the last checkout', async () => {
     endOfDay.status = 'pending_local_submit'
     endOfDay.pendingReportDate = '2026-01-12'
+    endOfDay.dayStartAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+    renderHealthModal()
+    await getDialog()
+    await waitFor(() => expect(bridge.diagnostics.getSystemHealth).toHaveBeenCalled())
+    expect(serviceTile('closeout')).not.toHaveTextContent('Open over 24 h')
+    expect(screen.queryByText(OPEN_TOO_LONG)).not.toBeInTheDocument()
+  })
+
+  it('warns when the POS day has been open for over 24 hours, and that the Z is done on the main terminal for a waiter', async () => {
+    endOfDay.status = 'idle'
+    endOfDay.dayStartAt = new Date(Date.now() - (24 * 60 + 1) * 60 * 1000).toISOString()
     const { unmount } = renderHealthModal()
-    expect(await screen.findByText("An earlier business day hasn't been closed (Z) yet.")).toBeInTheDocument()
-    expect(serviceTile('closeout')).toHaveTextContent('Earlier day open')
-    expect(screen.getByText('Close the earlier day (Z) first.')).toBeInTheDocument()
+    expect(await screen.findByText(OPEN_TOO_LONG)).toBeInTheDocument()
+    expect(serviceTile('closeout')).toHaveTextContent('Open over 24 h')
+    expect(screen.getByText('Nothing is blocked. Close the day (Z) when it ends.')).toBeInTheDocument()
     unmount()
 
     features.isMobileWaiter = true
     renderHealthModal()
     await waitFor(() => expect(serviceTile('closeout')).toHaveTextContent('On main terminal'))
-    expect(screen.queryByText("An earlier business day hasn't been closed (Z) yet.")).not.toBeInTheDocument()
+    expect(screen.queryByText(OPEN_TOO_LONG)).not.toBeInTheDocument()
   })
 
   it('names a stuck queue row with its count and age and recommends Sync now', async () => {

@@ -9,7 +9,7 @@
 //! from `local_settings` (category='system') so that successive Z-Reports
 //! never double-count orders or payments.
 
-use chrono::{DateTime, Local, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,7 +32,12 @@ fn get_period_start(conn: &Connection) -> String {
         .unwrap_or_else(|| business_day::EPOCH_RFC3339.to_string())
 }
 
-const PENDING_Z_REPORT_CONTEXT_KEY: &str = "pending_z_report_context";
+const PENDING_Z_REPORT_CONTEXT_KEY: &str = business_day::PENDING_Z_REPORT_CONTEXT_KEY;
+
+/// `report_json` field carrying the POS day start the report date comes from
+/// (founder rule R5, 13/10/2026). The admin derives its own date from
+/// `periodStart` (the last Z); this field lets it date the day the same way.
+const BUSINESS_DAY_START_REPORT_KEY: &str = "businessDayStartAt";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -197,6 +202,16 @@ pub fn invalidate_repair_reporting_projection(
     Ok(updated > 0)
 }
 
+/// The Z this terminal can close (founder rules 13/10/2026): offered as soon
+/// as every shift has checked out after some activity since the last Z (R2),
+/// dated by the POS day start (R5).
+///
+/// Until a Z submission issues it, `cutoff_at` is only the last checkout and
+/// the window still ends at the Z moment (R4): readiness, the preview and
+/// every gate read the live window. `frozen` is set once a submission froze
+/// the window at its own moment and generated the report; from then on the
+/// retry, the post-submission sync gate and the rollover all close exactly
+/// `cutoff_at`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingZReportContext {
@@ -204,6 +219,12 @@ struct PendingZReportContext {
     report_date: String,
     cutoff_at: String,
     period_start_at: String,
+    /// The POS day start the report date comes from (absent on contexts
+    /// stored before desktop 1.4.128).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    day_start_at: Option<String>,
+    #[serde(default)]
+    frozen: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +232,13 @@ struct EffectiveZReportWindow {
     report_date: String,
     period_start_at: String,
     cutoff_at: Option<String>,
+    /// The POS day start (R5), reported as `businessDayStartAt`.
+    day_start_at: Option<String>,
+    /// A pending Z owns its business date: the date picker cannot replace it.
+    pending: bool,
+    /// The window of a Z already issued (generated, queued, not finalized):
+    /// its cutoff is frozen and later check-ins belong to the next day.
+    frozen: bool,
     lower_bound_mode: LowerBoundMode,
 }
 
@@ -339,8 +367,14 @@ impl LowerBoundMode {
         }
     }
 
+    /// Compared as instants (`julianday`), like the rollover and the money
+    /// gates: a string comparison ordered `...:00.5Z` after `...:00.9+00:00`
+    /// and `2026-10-13 23:00:00` before `2026-10-13T03:45:00`.
     fn sql_predicate(self, expr: &str, parameter: &str) -> String {
-        format!("{expr} {} {parameter}", self.sql_operator())
+        format!(
+            "julianday({expr}) {} julianday({parameter})",
+            self.sql_operator()
+        )
     }
 }
 
@@ -362,12 +396,10 @@ fn report_date_for_business_window(period_start_at: &str, cutoff_at: &str) -> St
     business_day::report_date_for_business_window(period_start_at, cutoff_at)
 }
 
-fn active_window_report_date(period_start_at: &str, fallback_now: &str) -> String {
-    report_date_for_business_window(period_start_at, fallback_now)
-}
-
+/// The start of the Z window still open locally (the last Z): the window of
+/// an issued Z starts here too, never at its own cutoff.
 fn resolve_period_start_at(conn: &Connection, branch_id: &str, cutoff_at: Option<&str>) -> String {
-    business_day::resolve_period_start(conn, branch_id, cutoff_at)
+    business_day::resolve_window_period_start(conn, branch_id, cutoff_at)
 }
 
 fn sanitize_terminal_display_name(value: &str) -> Option<String> {
@@ -413,19 +445,142 @@ fn load_stored_pending_z_report_context(
     }
 }
 
-fn synthesize_pending_z_report_context_at(
+/// Any shift of this branch still checked in, of any role (founder rule R3).
+/// A failed read counts as one: a Z is never offered on an unknown staff state.
+fn any_active_shift(conn: &Connection, branch_id: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM staff_shifts
+            WHERE status = 'active'
+              AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
+         )",
+        params![branch_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
+/// A shift of this branch checked in after `cutoff_at`: the day went on after
+/// the checkout a pending Z was computed from.
+fn shift_checked_in_after(conn: &Connection, branch_id: &str, cutoff_at: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM staff_shifts
+            WHERE (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
+              AND julianday(check_in_time) > julianday(?2)
+         )",
+        params![branch_id, cutoff_at],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(true)
+}
+
+/// A local Z report already closes the window ending at `period_end`: a Z
+/// prepared for it was persisted (and queued) before the day was finalized.
+/// Only reports generated since the last Z can be that one. 1.4.127 deleted
+/// the local report after a failed rollover but left its queued submission,
+/// which still closes that window on the server once it is sent.
+fn local_z_report_closes_window(conn: &Connection, branch_id: &str, period_end: &str) -> bool {
+    let queued_submission = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM parity_sync_queue
+                WHERE table_name = 'z_reports'
+                  AND julianday(CASE WHEN json_valid(data) THEN COALESCE(
+                        json_extract(data, '$.report_data.period.end'),
+                        json_extract(data, '$.report_data.periodEnd'),
+                        json_extract(data, '$.report_data.period_end')) END) = julianday(?1)
+             )",
+            params![period_end],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if queued_submission {
+        return true;
+    }
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM z_reports
+            WHERE (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
+              AND (?2 IS NULL OR julianday(generated_at) >= julianday(?2))
+              AND julianday(CASE WHEN json_valid(report_json) THEN COALESCE(
+                    json_extract(report_json, '$.period.end'),
+                    json_extract(report_json, '$.periodEnd'),
+                    json_extract(report_json, '$.period_end')) END) = julianday(?3)
+         )",
+        params![branch_id, business_day::last_z_anchor_utc(conn), period_end],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// The POS day start and the report date of a window (founder rule R5).
+fn pos_day_report_date(
     conn: &Connection,
     branch_id: &str,
-    now: DateTime<Local>,
+    period_start_at: &str,
+    lower_bound_mode: LowerBoundMode,
+    cutoff_at: Option<&str>,
+    fallback_at: &str,
+) -> (Option<String>, String) {
+    let day_start_at = business_day::resolve_day_start_at(
+        conn,
+        branch_id,
+        period_start_at,
+        lower_bound_mode == LowerBoundMode::Inclusive,
+        cutoff_at,
+    );
+    let report_date = business_day::report_date_for_pos_day(
+        day_start_at.as_deref(),
+        period_start_at,
+        fallback_at,
+    );
+    (day_start_at, report_date)
+}
+
+fn build_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
+    cutoff_at: &str,
+) -> PendingZReportContext {
+    let period_start_at = resolve_period_start_at(conn, branch_id, Some(cutoff_at));
+    let (day_start_at, report_date) = pos_day_report_date(
+        conn,
+        branch_id,
+        &period_start_at,
+        resolve_lower_bound_mode(conn),
+        Some(cutoff_at),
+        cutoff_at,
+    );
+    PendingZReportContext {
+        branch_id: branch_id.to_string(),
+        report_date,
+        cutoff_at: cutoff_at.to_string(),
+        period_start_at,
+        day_start_at,
+        frozen: false,
+    }
+}
+
+/// The Z is offered as soon as every shift has checked out after activity
+/// since the last Z (founder rules R2/R3, 13/10/2026), never later because
+/// of a clock hour (R1). `cutoff_at` is the last checkout.
+fn synthesize_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
 ) -> Option<PendingZReportContext> {
+    if any_active_shift(conn, branch_id) {
+        return None;
+    }
+
     let latest_closed_at: Option<String> = conn
         .query_row(
             "SELECT COALESCE(check_out_time, check_in_time)
              FROM staff_shifts
              WHERE status = 'closed'
                AND (branch_id = ?1 OR branch_id IS NULL)
-               AND COALESCE(check_out_time, check_in_time) > ?2
-             ORDER BY COALESCE(check_out_time, check_in_time) DESC
+               AND julianday(COALESCE(check_out_time, check_in_time)) > julianday(?2)
+             ORDER BY julianday(COALESCE(check_out_time, check_in_time)) DESC
              LIMIT 1",
             params![branch_id, get_period_start(conn)],
             |row| row.get(0),
@@ -434,74 +589,73 @@ fn synthesize_pending_z_report_context_at(
         .ok()
         .flatten();
 
-    latest_closed_at.and_then(|cutoff_at| {
-        let period_start_at = resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str()));
-        let report_date = report_date_for_business_window(&period_start_at, &cutoff_at);
-        let current_business_day = business_day::current_business_day_report_date_at(conn, now);
-
-        // Only synthesize a pending context for shifts from a previous
-        // business day. Same-business-day shifts should not lock the terminal.
-        if report_date >= current_business_day {
-            return None;
-        }
-
-        Some(PendingZReportContext {
-            branch_id: branch_id.to_string(),
-            report_date,
-            period_start_at,
-            cutoff_at,
-        })
-    })
+    latest_closed_at.map(|cutoff_at| build_pending_z_report_context(conn, branch_id, &cutoff_at))
 }
 
-fn load_pending_z_report_context_at(
-    conn: &Connection,
-    branch_id: &str,
-    now: DateTime<Local>,
-) -> Option<PendingZReportContext> {
-    let current_business_day = business_day::current_business_day_report_date_at(conn, now);
-
-    if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
-        if business_day::stored_period_start(conn)
-            .as_deref()
-            .filter(|value| !business_day::is_epoch_timestamp(value))
-            .map(|value| value >= stored.cutoff_at.as_str())
-            .unwrap_or(false)
-        {
-            let _ = clear_pending_z_report_context(conn);
-            return None;
-        }
-
-        // A stored context for the current business day (or later) is not
-        // actionable yet — the business day is still in progress.
-        if stored.report_date >= current_business_day {
-            let _ = clear_pending_z_report_context(conn);
-            return None;
-        }
-
-        let normalized_period_start =
-            resolve_period_start_at(conn, branch_id, Some(stored.cutoff_at.as_str()));
-        let normalized_report_date =
-            report_date_for_business_window(&normalized_period_start, &stored.cutoff_at);
-        if stored.period_start_at != normalized_period_start
-            || stored.report_date != normalized_report_date
-        {
-            stored.period_start_at = normalized_period_start;
-            stored.report_date = normalized_report_date;
-            let _ = persist_pending_z_report_context(conn, &stored);
-        }
-
-        return Some(stored);
-    }
-
-    synthesize_pending_z_report_context_at(conn, branch_id, now)
+/// A stored context whose Z was already issued: frozen by a submission, or
+/// (contexts stored before 1.4.128) matched by a persisted local Z report.
+fn pending_context_is_frozen(conn: &Connection, context: &PendingZReportContext) -> bool {
+    context.frozen || local_z_report_closes_window(conn, &context.branch_id, &context.cutoff_at)
 }
 
 fn load_pending_z_report_context(
     conn: &Connection,
     branch_id: &str,
 ) -> Option<PendingZReportContext> {
-    load_pending_z_report_context_at(conn, branch_id, Local::now())
+    if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
+        // A later Z already closed this window.
+        if business_day::stored_period_start(conn)
+            .as_deref()
+            .filter(|value| !business_day::is_epoch_timestamp(value))
+            .map(|value| business_day::instant_at_or_after(value, &stored.cutoff_at))
+            .unwrap_or(false)
+        {
+            let _ = clear_pending_z_report_context(conn);
+            return None;
+        }
+
+        // An issued Z keeps its window, date and cutoff until the rollover
+        // finalizes it; a shift that checked in afterwards blocks the
+        // finalization (R3) and belongs to the next day.
+        if pending_context_is_frozen(conn, &stored) {
+            let mut changed = !stored.frozen;
+            stored.frozen = true;
+            // Older contexts stored the epoch before any Z: the window starts
+            // at the inferred earliest activity, as the issued report does.
+            if business_day::is_epoch_timestamp(&stored.period_start_at) {
+                stored.period_start_at =
+                    resolve_period_start_at(conn, branch_id, Some(stored.cutoff_at.as_str()));
+                changed = true;
+            }
+            if changed {
+                let _ = persist_pending_z_report_context(conn, &stored);
+            }
+            return Some(stored);
+        }
+
+        // Not issued yet: it exists only while every shift is checked out.
+        // A check-in after its cutoff reopened the day; the next checkout
+        // computes the Z again (`ensure_pending_z_report_context_for_branch`).
+        if any_active_shift(conn, branch_id)
+            || shift_checked_in_after(conn, branch_id, &stored.cutoff_at)
+        {
+            let _ = clear_pending_z_report_context(conn);
+            return synthesize_pending_z_report_context(conn, branch_id);
+        }
+
+        let normalized = build_pending_z_report_context(conn, branch_id, &stored.cutoff_at);
+        if stored.period_start_at != normalized.period_start_at
+            || stored.report_date != normalized.report_date
+            || stored.day_start_at != normalized.day_start_at
+        {
+            stored = normalized;
+            let _ = persist_pending_z_report_context(conn, &stored);
+        }
+
+        return Some(stored);
+    }
+
+    synthesize_pending_z_report_context(conn, branch_id)
 }
 
 fn persist_pending_z_report_context(
@@ -524,7 +678,9 @@ fn clear_pending_z_report_context(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(dead_code)]
+/// The last checkout of the branch (`shifts::close_shift`, no shift left
+/// active) offers the Z at once (R2). Every later last checkout moves the
+/// cutoff forward; only a Z already issued keeps its window.
 pub(crate) fn ensure_pending_z_report_context_for_branch(
     conn: &Connection,
     branch_id: &str,
@@ -535,21 +691,18 @@ pub(crate) fn ensure_pending_z_report_context_for_branch(
     }
 
     if let Some(existing) = load_stored_pending_z_report_context(conn, branch_id) {
-        return Ok(Some(serde_json::json!(existing)));
+        if pending_context_is_frozen(conn, &existing) {
+            return Ok(Some(serde_json::json!(existing)));
+        }
     }
 
-    let period_start_at = resolve_period_start_at(conn, branch_id, Some(cutoff_at));
-    let context = PendingZReportContext {
-        branch_id: branch_id.to_string(),
-        report_date: report_date_for_business_window(&period_start_at, cutoff_at),
-        cutoff_at: cutoff_at.to_string(),
-        period_start_at,
-    };
-
+    let context = build_pending_z_report_context(conn, branch_id, cutoff_at);
     persist_pending_z_report_context(conn, &context)?;
     Ok(Some(serde_json::json!(context)))
 }
 
+/// The window the next Z closes. An issued Z closes its frozen window; until
+/// then the window ends at the Z moment (R4), so it is live here.
 fn resolve_current_z_report_window(conn: &Connection, branch_id: &str) -> EffectiveZReportWindow {
     let lower_bound_mode = resolve_lower_bound_mode(conn);
 
@@ -557,38 +710,69 @@ fn resolve_current_z_report_window(conn: &Connection, branch_id: &str) -> Effect
         return EffectiveZReportWindow {
             report_date: context.report_date,
             period_start_at: context.period_start_at,
-            cutoff_at: Some(context.cutoff_at),
+            cutoff_at: context.frozen.then_some(context.cutoff_at),
+            day_start_at: context.day_start_at,
+            pending: true,
+            frozen: context.frozen,
             lower_bound_mode,
         };
     }
 
+    live_z_report_window(conn, branch_id, lower_bound_mode, &Utc::now().to_rfc3339())
+}
+
+fn live_z_report_window(
+    conn: &Connection,
+    branch_id: &str,
+    lower_bound_mode: LowerBoundMode,
+    fallback_now: &str,
+) -> EffectiveZReportWindow {
     let period_start_at = resolve_period_start_at(conn, branch_id, None);
-    let fallback_now = Utc::now().to_rfc3339();
+    let (day_start_at, report_date) = pos_day_report_date(
+        conn,
+        branch_id,
+        &period_start_at,
+        lower_bound_mode,
+        None,
+        fallback_now,
+    );
     EffectiveZReportWindow {
-        report_date: active_window_report_date(&period_start_at, &fallback_now),
+        report_date,
         period_start_at,
         cutoff_at: None,
+        day_start_at,
+        pending: false,
+        frozen: false,
         lower_bound_mode,
     }
 }
 
+/// The window a Z submission closes at `now` (R4): an issued Z keeps its
+/// frozen cutoff, so a retry closes exactly what was generated and queued;
+/// otherwise the window ends at this Z moment.
+fn closing_z_report_window_at(
+    conn: &Connection,
+    branch_id: &str,
+    now_rfc3339: &str,
+) -> EffectiveZReportWindow {
+    let mut window = resolve_current_z_report_window(conn, branch_id);
+    if window.cutoff_at.is_none() {
+        window.cutoff_at = Some(now_rfc3339.to_string());
+    }
+    window
+}
+
+/// The window a preview, the readiness or a gate reads. The requested `date`
+/// never re-dates it (13/10/2026, Android parity): the live and the pending Z
+/// are always dated by their POS day start. The date picker only selects a
+/// stored historical Z to view or reprint
+/// (`load_existing_local_z_report_response`).
 fn resolve_effective_z_report_window(
     conn: &Connection,
     branch_id: &str,
-    payload: &Value,
+    _payload: &Value,
 ) -> EffectiveZReportWindow {
-    let mut window = resolve_current_z_report_window(conn, branch_id);
-
-    // A frozen closeout context always owns its business date. Otherwise the
-    // date picker may select a historical report for preview, while the
-    // period bounds continue to describe the current live window.
-    if window.cutoff_at.is_none() {
-        if let Some(requested_date) = str_field(payload, "date") {
-            window.report_date = requested_date;
-        }
-    }
-
-    window
+    resolve_current_z_report_window(conn, branch_id)
 }
 
 fn canonicalize_report_json_report_date(report_json: &mut Value, report_date: &str) {
@@ -661,7 +845,13 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
             continue;
         };
         let fallback_end = period_end.as_deref().unwrap_or(now.as_str());
-        let normalized_report_date = report_date_for_business_window(&period_start, fallback_end);
+        // A report generated since 1.4.128 carries its POS day start (R5) and
+        // keeps that date; an older one is dated by its period start.
+        let normalized_report_date = business_day::report_date_for_pos_day(
+            str_field(&report_json, BUSINESS_DAY_START_REPORT_KEY).as_deref(),
+            &period_start,
+            fallback_end,
+        );
 
         if normalized_report_date == stored_report_date {
             continue;
@@ -802,6 +992,69 @@ const MONEY_PARITY_TABLES_SQL: &str = "('payments', 'order_payments', 'payment_a
      'staff_order_cash_returns', 'driver_earnings', 'driver_earning', 'shift_expenses', \
      'staff_payments')";
 
+/// Which orders the day rollover at `cutoff_param` (an SQL parameter holding
+/// the Z cutoff) deletes, together with their payments, adjustments and
+/// driver earnings: settled by the cutoff, as one instant comparison
+/// (`julianday`, the same as the report window), never a live table tab nor
+/// a repair settlement.
+///
+/// An order of the closed window that took money AFTER the cutoff is kept,
+/// whole (founder decision 13/10/2026): staff may start the next day while an
+/// issued Z still waits for its rollover, and a refund, payment or driver
+/// earning recorded then is the next day's money. Deleting the order would
+/// delete it with the closed day's rows.
+fn rollover_order_predicate(conn: &Connection, cutoff_param: &str) -> Result<String, String> {
+    let table_present = |table: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("inspect {table} for the rollover selector: {e}"))
+    };
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    let mut later_money = Vec::new();
+    if table_present("order_payments")? {
+        later_money.push(format!(
+            "EXISTS (SELECT 1 FROM order_payments op_later
+                     WHERE op_later.order_id = o.id
+                       AND julianday(op_later.created_at) > julianday({cutoff_param}))"
+        ));
+    }
+    if table_present("payment_adjustments")? {
+        let via_payment = if table_present("order_payments")? {
+            "OR pa_later.payment_id IN (SELECT op_owner.id FROM order_payments op_owner
+                                        WHERE op_owner.order_id = o.id)"
+        } else {
+            ""
+        };
+        later_money.push(format!(
+            "EXISTS (SELECT 1 FROM payment_adjustments pa_later
+                     WHERE (pa_later.order_id = o.id {via_payment})
+                       AND julianday(pa_later.created_at) > julianday({cutoff_param}))"
+        ));
+    }
+    if table_present("driver_earnings")? {
+        later_money.push(format!(
+            "EXISTS (SELECT 1 FROM driver_earnings de_later
+                     WHERE de_later.order_id = o.id
+                       AND julianday(de_later.created_at) > julianday({cutoff_param}))"
+        ));
+    }
+    let keep_later_money = if later_money.is_empty() {
+        String::new()
+    } else {
+        format!("AND NOT ({})", later_money.join(" OR "))
+    };
+    Ok(format!(
+        "julianday({financial_expr}) <= julianday({cutoff_param})
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND NOT {open_table_tab}
+           {keep_later_money}"
+    ))
+}
+
 /// One unsent money row whose local record the Z at `cutoff_at` closes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UnsyncedMoneyRow {
@@ -842,8 +1095,7 @@ pub(crate) fn load_unsynced_money_for_cutoff(
     if !table_present("parity_sync_queue")? || !table_present("orders")? {
         return Ok(Vec::new());
     }
-    let financial_expr = business_day::order_financial_timestamp_expr("o");
-    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    let rollover_orders = rollover_order_predicate(conn, "?1")?;
     let columns = "live.id, live.table_name, live.record_id, live.operation, live.status, \
                    live.error_message";
     let mut branches = Vec::new();
@@ -890,7 +1142,7 @@ pub(crate) fn load_unsynced_money_for_cutoff(
              FROM live
              JOIN shift_expenses se ON se.id = live.record_id
              WHERE live.table_name = 'shift_expenses'
-               AND datetime(se.created_at) <= datetime(?1)"
+               AND julianday(se.created_at) <= julianday(?1)"
         ));
     }
     if table_present("staff_payments")? {
@@ -899,7 +1151,7 @@ pub(crate) fn load_unsynced_money_for_cutoff(
              FROM live
              JOIN staff_payments sp ON sp.id = live.record_id
              WHERE live.table_name = 'staff_payments'
-               AND datetime(sp.created_at) <= datetime(?1)"
+               AND julianday(sp.created_at) <= julianday(?1)"
         ));
     }
     if branches.is_empty() {
@@ -909,9 +1161,7 @@ pub(crate) fn load_unsynced_money_for_cutoff(
         "WITH window_orders AS (
              SELECT o.id AS id, NULLIF(TRIM(COALESCE(o.order_number, '')), '') AS order_number
              FROM orders o
-             WHERE datetime({financial_expr}) <= datetime(?1)
-               AND COALESCE(o.order_context, '') <> 'repair_settlement'
-               AND NOT {open_table_tab}
+             WHERE {rollover_orders}
          ),
          live AS (
              SELECT q.id, q.table_name, q.record_id, q.operation, q.status, q.error_message,
@@ -957,14 +1207,36 @@ pub(crate) fn unsynced_money_in_closing_window(
     load_unsynced_money_for_cutoff(conn, &cutoff_at)
 }
 
+/// The shifts that hold a Z back (`?1` branch, `?2` the issued cutoff or
+/// NULL). `?1 = ''` is the house wildcard (business_day.rs, shifts.rs): an
+/// unresolved branch must mean ALL rows, not only rows with a NULL branch; the
+/// branch-blind rollover sweep can reach rows a stricter gate would miss. A
+/// check-in time that cannot be read blocks (fail closed).
+const ACTIVE_CLOSEOUT_SHIFT_PREDICATE: &str = "status = 'active'
+               AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
+               AND (?2 IS NULL
+                    OR julianday(check_in_time) IS NULL
+                    OR julianday(check_in_time) <= julianday(?2))";
+
+/// Every shift still checked in blocks STARTING a Z, whatever its role and
+/// whenever it started (founder rule R3, 13/10/2026). At Tomikro (13/10/2026)
+/// a shift that checked in after a cutoff frozen at the last checkout was
+/// exempt, so the Z closed the day while the 03:45 cashier stayed active, and
+/// that shift and its drawer survived the Z. A shift is never closed for the
+/// cashier: that would lose the counted close and the next opening float.
+///
+/// Finishing a Z already ISSUED (`issued_cutoff`: generated and queued at that
+/// frozen moment, its local rollover still to run) is different: a shift that
+/// checked in strictly after that cutoff belongs to the next day, which the
+/// staff were allowed to start, and does not hold the issued Z back. Only a
+/// shift that was in already by the cutoff does.
 fn load_active_staff_closeout_blockers(
     conn: &Connection,
     branch_id: &str,
-    cutoff_at: Option<&str>,
+    issued_cutoff: Option<&str>,
 ) -> Result<Vec<Value>, String> {
-    let cutoff_param = cutoff_at.map(str::to_string);
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT
                  id,
                  staff_id,
@@ -973,17 +1245,15 @@ fn load_active_staff_closeout_blockers(
                  terminal_id,
                  check_in_time
              FROM staff_shifts
-             -- Same `?1 = ''` wildcard as the submission gate in
+             -- The same predicate as the submission gate in
              -- prepare_z_report_submission: these two must agree, or the
              -- readiness panel shows a clean day that the submit then rejects.
-             WHERE status = 'active'
-               AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
-               AND (?2 IS NULL OR check_in_time <= ?2)
+             WHERE {ACTIVE_CLOSEOUT_SHIFT_PREDICATE}
              ORDER BY COALESCE(check_in_time, created_at, updated_at) ASC, id ASC",
-        )
+        ))
         .map_err(|e| format!("prepare active closeout staff blockers: {e}"))?;
     let rows = stmt
-        .query_map(params![branch_id, cutoff_param], |row| {
+        .query_map(params![branch_id, issued_cutoff], |row| {
             Ok(serde_json::json!({
                 "shiftId": row.get::<_, String>(0)?,
                 "staffId": row.get::<_, String>(1)?,
@@ -1145,8 +1415,11 @@ pub(crate) fn get_closeout_readiness_snapshot(
     let (window, active_staff_blockers, payment_blockers, gift_close, last_z_report) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
-        let active_staff_blockers =
-            load_active_staff_closeout_blockers(&conn, &branch_id, window.cutoff_at.as_deref())?;
+        let active_staff_blockers = load_active_staff_closeout_blockers(
+            &conn,
+            &branch_id,
+            window.cutoff_at.as_deref().filter(|_| window.frozen),
+        )?;
         let payment_blockers =
             load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)?;
         let gift_close = load_gift_close_report_for_effective_window(&conn, &branch_id, &window)?;
@@ -1226,6 +1499,7 @@ pub(crate) fn get_closeout_readiness_snapshot(
             "reportDate": window.report_date,
             "periodStartAt": window.period_start_at,
             "cutoffAt": window.cutoff_at,
+            "dayStartAt": window.day_start_at,
             "lowerBoundMode": lower_bound_mode,
         },
         "activeStaffBlockers": {
@@ -1559,7 +1833,7 @@ fn load_gift_close_report_for_window(
 ) -> Result<GiftCloseReport, String> {
     let anchor = "COALESCE(cds.opened_at, ss.check_in_time, o.checked_in_at)";
     let scope_sql = format!(
-        "{} AND (?2 IS NULL OR {anchor} <= ?2)
+        "{} AND (?2 IS NULL OR julianday({anchor}) <= julianday(?2))
          AND (?3 = '' OR lower(o.branch_id) = lower(?3) OR lower(cds.branch_id) = lower(?3))",
         lower_bound_mode.sql_predicate(anchor, "?1")
     );
@@ -2035,7 +2309,7 @@ fn load_existing_local_z_report_response(
     // A business date is not a report identity: a store may close more than
     // once on the same date. Never let the historical date lookup replace a
     // live/frozen window with an earlier report from that date.
-    if current_window.cutoff_at.is_some() || current_window.report_date == report_date {
+    if current_window.pending || current_window.report_date == report_date {
         return Ok(None);
     }
 
@@ -2486,7 +2760,7 @@ fn report_window_currency(
     let sql = format!(
         "WITH scoped_orders AS (
            SELECT o.id,o.currency FROM orders o WHERE {financial_start}
-             AND (?2 IS NULL OR {financial}<=?2)
+             AND (?2 IS NULL OR julianday({financial}) <= julianday(?2))
              AND (?3='' OR o.branch_id=?3 OR o.branch_id IS NULL)
              AND COALESCE(o.is_ghost,0)=0 AND COALESCE(o.is_test,0)=0
              AND COALESCE(o.order_context,'')<>'repair_settlement'
@@ -2497,11 +2771,11 @@ fn report_window_currency(
          UNION ALL SELECT p.currency FROM payment_adjustments a JOIN scoped_orders o ON o.id=a.order_id
            LEFT JOIN order_payments p ON p.id=a.payment_id
          UNION ALL SELECT currency FROM shift_expenses WHERE {expense_start}
-           AND (?2 IS NULL OR created_at<=?2) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
+           AND (?2 IS NULL OR julianday(created_at) <= julianday(?2)) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
          UNION ALL SELECT currency FROM cash_drawer_sessions WHERE {drawer_start}
-           AND (?2 IS NULL OR opened_at<=?2) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
+           AND (?2 IS NULL OR julianday(opened_at) <= julianday(?2)) AND (?3='' OR branch_id=?3 OR branch_id IS NULL)
          UNION ALL SELECT sp.currency FROM staff_payments sp LEFT JOIN staff_shifts ss ON ss.id=sp.cashier_shift_id
-           WHERE {payout_start} AND (?2 IS NULL OR sp.created_at<=?2)
+           WHERE {payout_start} AND (?2 IS NULL OR julianday(sp.created_at) <= julianday(?2))
              AND (?3='' OR ss.branch_id=?3 OR ss.branch_id IS NULL)"
     );
     let mut statement = conn
@@ -2749,8 +3023,8 @@ fn load_staff_payment_items(
                      LIMIT 1), sp.currency
              FROM staff_payments sp
              WHERE sp.paid_to_staff_id = ?1
-               AND (?2 IS NULL OR sp.created_at >= ?2)
-               AND (?3 IS NULL OR sp.created_at <= ?3)
+               AND (?2 IS NULL OR julianday(sp.created_at) >= julianday(?2))
+               AND (?3 IS NULL OR julianday(sp.created_at) <= julianday(?3))
              ORDER BY sp.created_at ASC",
         )
         .map_err(|e| format!("prepare received staff payments: {e}"))?;
@@ -2848,7 +3122,7 @@ fn load_drawer_rows_for_period(
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE {opened_at_predicate}
-               AND (?2 IS NULL OR cds.opened_at <= ?2)
+               AND (?2 IS NULL OR julianday(cds.opened_at) <= julianday(?2))
                AND (?3 = '' OR cds.branch_id = ?3 OR cds.branch_id IS NULL)
               ORDER BY cds.opened_at ASC"
         ))
@@ -3000,7 +3274,7 @@ fn load_sales_by_type_for_period(
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE {financial_predicate}
-           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
@@ -3140,8 +3414,8 @@ fn load_non_driver_order_totals(
             FROM orders o
             LEFT JOIN order_payments op ON op.order_id = o.id AND NOT {set_aside}
             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-              AND {financial_expr} >= ?2
-              AND (?3 IS NULL OR {financial_expr} <= ?3)
+              AND julianday({financial_expr}) >= julianday(?2)
+              AND (?3 IS NULL OR julianday({financial_expr}) <= julianday(?3))
               AND COALESCE(o.is_ghost, 0) = 0
               AND COALESCE(o.is_test, 0) = 0
               AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -3176,8 +3450,8 @@ fn load_non_driver_order_totals(
          FROM orders o
          LEFT JOIN order_payments op ON op.order_id = o.id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-           AND {financial_expr} >= ?2
-           AND (?3 IS NULL OR {financial_expr} <= ?3)
+           AND julianday({financial_expr}) >= julianday(?2)
+           AND (?3 IS NULL OR julianday({financial_expr}) <= julianday(?3))
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -3330,8 +3604,8 @@ fn load_non_driver_order_details(
             FROM orders o2
             LEFT JOIN order_payments op ON op.order_id = o2.id AND NOT {set_aside}
             WHERE COALESCE(op.staff_shift_id, o2.staff_shift_id) = ?1
-              AND {financial_expr} >= ?2
-              AND (?3 IS NULL OR {financial_expr} <= ?3)
+              AND julianday({financial_expr}) >= julianday(?2)
+              AND (?3 IS NULL OR julianday({financial_expr}) <= julianday(?3))
               AND COALESCE(o2.is_ghost, 0) = 0
               {}
               AND NOT EXISTS (
@@ -3518,7 +3792,7 @@ fn load_day_order_details(
                    ) AS staff_shift_id
             FROM orders o
             WHERE {financial_predicate}
-              AND (?2 IS NULL OR {financial_expr} <= ?2)
+              AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
               AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
               AND COALESCE(o.is_ghost, 0) = 0
               AND COALESCE(o.is_test, 0) = 0
@@ -3583,7 +3857,7 @@ fn load_driver_unsettled_counts_for_period(
              FROM driver_earnings de
              LEFT JOIN orders o ON o.id = de.order_id
              WHERE {created_at_predicate}
-               AND (?2 IS NULL OR de.created_at <= ?2)
+               AND (?2 IS NULL OR julianday(de.created_at) <= julianday(?2))
                AND COALESCE(de.settled, 0) = 0
                AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
                AND (o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))
@@ -3760,7 +4034,7 @@ fn build_staff_report(
            AND NOT (COALESCE(op.payment_origin,'') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id,'')) = '')
            AND COALESCE(o.is_ghost,0) = 0 AND COALESCE(o.is_test,0) = 0
            AND COALESCE(o.order_context,'') <> 'repair_settlement'
-           AND {financial_expr} >= ?2 AND (?3 IS NULL OR {financial_expr} <= ?3)", financial_expr = business_day::order_financial_timestamp_expr("o")),
+           AND julianday({financial_expr}) >= julianday(?2) AND (?3 IS NULL OR julianday({financial_expr}) <= julianday(?3))", financial_expr = business_day::order_financial_timestamp_expr("o")),
         params![shift.id,shift.check_in_time.as_deref().unwrap_or(business_day::EPOCH_RFC3339),shift.check_out_time.as_deref()], |row| row.get(0),
     ).map_err(|e| format!("load staff TWINT payments: {e}"))?;
     orders_value["twintAmount"] = serde_json::json!(Cents::new(twint_cents).to_f64_dp2());
@@ -3930,8 +4204,8 @@ fn load_server_repair_projection(
             "SELECT COUNT(*)
                FROM staff_shifts
               WHERE branch_id = ?1
-                AND check_in_time >= ?2
-                AND check_in_time <= ?3
+                AND julianday(check_in_time) >= julianday(?2)
+                AND julianday(check_in_time) <= julianday(?3)
                 AND (
                   COALESCE(repair_projection_version, 0) > 0
                   OR ABS(COALESCE(repair_tender_sales, 0)) > 0.000001
@@ -3961,8 +4235,8 @@ fn load_server_repair_projection(
                 COALESCE(SUM(repair_card_sales), 0)
                FROM staff_shifts
               WHERE branch_id = ?1
-                AND check_in_time >= ?2
-                AND check_in_time <= ?3
+                AND julianday(check_in_time) >= julianday(?2)
+                AND julianday(check_in_time) <= julianday(?3)
                 AND COALESCE(repair_projection_version, 0) > 0",
             params![branch_id, period_start, period_end],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -5214,8 +5488,6 @@ fn get_end_of_day_status_at(
     )?;
     let active_period_start_at =
         resolve_period_start_at(&conn, &branch_id, Some(now_rfc3339.as_str()));
-    let active_report_date =
-        business_day::current_business_day_report_date_at(&conn, now.with_timezone(&Local));
 
     let latest_z_report = conn
         .query_row(
@@ -5236,14 +5508,19 @@ fn get_end_of_day_status_at(
         .optional()
         .map_err(|e| format!("query latest z-report status: {e}"))?;
 
-    if let Some(context) =
-        load_pending_z_report_context_at(&conn, &branch_id, now.with_timezone(&Local))
-    {
+    // No clock decides this (founder rule R1, 13/10/2026): the Z is pending
+    // from the last checkout of a day with activity (R2) until the Z runs,
+    // and never while a shift is checked in (R3).
+    if let Some(context) = load_pending_z_report_context(&conn, &branch_id) {
         return Ok(serde_json::json!({
             "status": "pending_local_submit",
             "pendingReportDate": context.report_date,
             "cutoffAt": context.cutoff_at,
             "periodStartAt": context.period_start_at,
+            "dayStartAt": context.day_start_at,
+            // An issued Z (generated and queued) still awaiting its local
+            // finalization, as opposed to a day simply ready to close.
+            "zIssued": context.frozen,
             "activeReportDate": Value::Null,
             "activePeriodStartAt": Value::Null,
             "latestZReportId": latest_z_report.as_ref().map(|row| row.0.clone()),
@@ -5252,13 +5529,24 @@ fn get_end_of_day_status_at(
         }));
     }
 
+    // The open POS day's start (R5) rides on every status: the renderer warns
+    // when a day has stayed open for more than a day (never blocking).
+    let live_window = live_z_report_window(
+        &conn,
+        &branch_id,
+        resolve_lower_bound_mode(&conn),
+        &now_rfc3339,
+    );
+
     if let Some((latest_id, latest_sync_state, latest_report_date)) = latest_z_report {
         if latest_sync_state != "applied" {
             return Ok(serde_json::json!({
                 "status": "submitted_pending_admin",
+                "zIssued": false,
                 "pendingReportDate": latest_report_date,
                 "cutoffAt": Value::Null,
                 "periodStartAt": Value::Null,
+                "dayStartAt": live_window.day_start_at,
                 "activeReportDate": Value::Null,
                 "activePeriodStartAt": Value::Null,
                 "latestZReportId": latest_id,
@@ -5270,11 +5558,14 @@ fn get_end_of_day_status_at(
 
     Ok(serde_json::json!({
         "status": "idle",
+        "zIssued": false,
         "pendingReportDate": Value::Null,
         "cutoffAt": Value::Null,
         "periodStartAt": Value::Null,
-        "activeReportDate": active_report_date,
+        // The live window's date: the POS day start (R5), never the clock.
+        "activeReportDate": live_window.report_date,
         "activePeriodStartAt": active_period_start_at,
+        "dayStartAt": live_window.day_start_at,
         "latestZReportId": Value::Null,
         "latestZReportSyncState": Value::Null,
         "canOpenPendingZReport": false,
@@ -5314,7 +5605,7 @@ fn load_carried_over_from_closed_days(
                                       CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
          FROM orders o
          WHERE {financial_predicate}
-           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -5367,7 +5658,7 @@ fn load_unclassified_platform_sources(
                                       CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
          FROM orders o
          WHERE {financial_predicate}
-           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -5441,7 +5732,7 @@ fn load_reconciliation_explanations(
              ), 0) END AS amount_cents
            FROM orders o
            WHERE {financial_predicate}
-             AND (?2 IS NULL OR {financial_expr} <= ?2)
+             AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
              AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
              AND COALESCE(o.is_ghost, 0) = 0
              AND COALESCE(o.is_test, 0) = 0
@@ -5580,6 +5871,18 @@ fn build_z_report_for_date(
     payload: &Value,
     include_active_shifts: bool,
 ) -> Result<BuiltDateZReport, String> {
+    build_z_report_for_window(db, payload, include_active_shifts, None)
+}
+
+/// `closing_window` is the window a Z submission froze at its own moment
+/// (`prepare_z_report_submission`): generation and the rollover must close
+/// the very same bounds, so the submission never lets this re-resolve them.
+fn build_z_report_for_window(
+    db: &DbState,
+    payload: &Value,
+    include_active_shifts: bool,
+    closing_window: Option<&EffectiveZReportWindow>,
+) -> Result<BuiltDateZReport, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let branch_id = str_field(payload, "branchId")
@@ -5591,7 +5894,11 @@ fn build_z_report_for_date(
         branch_id.as_str(),
         &now,
     )?;
-    let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
+    let window = match closing_window {
+        Some(window) => window.clone(),
+        None => resolve_effective_z_report_window(&conn, &branch_id, payload),
+    };
+    let day_start_at = window.day_start_at.clone();
     let date = window.report_date.clone();
     let period_start = window.period_start_at.clone();
     let cutoff_at = window.cutoff_at.clone();
@@ -5652,7 +5959,7 @@ fn build_z_report_for_date(
              WHERE {shift_start_predicate}
                AND (branch_id = ?2 OR branch_id IS NULL)
                AND {shift_status_filter}
-               AND (?3 IS NULL OR COALESCE(check_out_time, check_in_time) <= ?3)
+               AND (?3 IS NULL OR julianday(COALESCE(check_out_time, check_in_time)) <= julianday(?3))
              ORDER BY check_in_time ASC"
         ))
         .map_err(|e| format!("prepare shift query: {e}"))?;
@@ -5707,7 +6014,7 @@ fn build_z_report_for_date(
                 COALESCE(SUM(COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER))), 0) as tips_cents
          FROM orders o
          WHERE {financial_predicate}
-           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -5780,7 +6087,7 @@ fn build_z_report_for_date(
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
          WHERE {payment_scope_predicate}
-           AND (?2 IS NULL OR {payment_scope_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({payment_scope_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
@@ -5903,7 +6210,7 @@ fn build_z_report_for_date(
                                           CAST(ROUND(o.total_amount * 100) AS INTEGER), 0)), 0)
              FROM orders o
              WHERE {platform_scope_predicate}
-               AND (?2 IS NULL OR {platform_scope_expr} <= ?2)
+               AND (?2 IS NULL OR julianday({platform_scope_expr}) <= julianday(?2))
                AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
@@ -5948,7 +6255,7 @@ fn build_z_report_for_date(
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE {platform_scope_predicate}
-               AND (?2 IS NULL OR {platform_scope_expr} <= ?2)
+               AND (?2 IS NULL OR julianday({platform_scope_expr}) <= julianday(?2))
                AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
                AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND op.method IN ('cash', 'card')
@@ -6011,7 +6318,7 @@ fn build_z_report_for_date(
          FROM payment_adjustments pa
          JOIN orders o ON o.id = pa.order_id
          WHERE {adjustment_scope_predicate}
-           AND (?2 IS NULL OR {adjustment_scope_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({adjustment_scope_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -6052,7 +6359,7 @@ fn build_z_report_for_date(
                 "SELECT COALESCE(SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))), 0)
                  FROM shift_expenses
                  WHERE {}
-                   AND (?2 IS NULL OR created_at <= ?2)
+                   AND (?2 IS NULL OR julianday(created_at) <= julianday(?2))
                    AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)
                    AND (expense_type IS NULL OR expense_type != 'staff_payment')",
                 lower_bound_mode.sql_predicate("created_at", "?1")
@@ -6072,7 +6379,7 @@ fn build_z_report_for_date(
              FROM shift_expenses se
              LEFT JOIN staff_shifts ss ON ss.id = se.staff_shift_id
              WHERE {}
-               AND (?2 IS NULL OR se.created_at <= ?2)
+               AND (?2 IS NULL OR julianday(se.created_at) <= julianday(?2))
                AND (?3 = '' OR se.branch_id = ?3 OR se.branch_id IS NULL)
                AND (se.expense_type IS NULL OR se.expense_type != 'staff_payment')
              ORDER BY se.created_at ASC",
@@ -6117,7 +6424,7 @@ fn build_z_report_for_date(
                     COALESCE(SUM(COALESCE(total_staff_payments_cents, CAST(ROUND(total_staff_payments * 100) AS INTEGER))), 0)
              FROM cash_drawer_sessions
              WHERE {}
-               AND (?2 IS NULL OR opened_at <= ?2)
+               AND (?2 IS NULL OR julianday(opened_at) <= julianday(?2))
                AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)",
                 lower_bound_mode.sql_predicate("opened_at", "?1")
             ),
@@ -6179,7 +6486,7 @@ fn build_z_report_for_date(
                 COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))), 0)
          FROM orders o
          WHERE {order_type_scope_predicate}
-           AND (?2 IS NULL OR {order_type_scope_expr} <= ?2)
+           AND (?2 IS NULL OR julianday({order_type_scope_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -6239,7 +6546,7 @@ fn build_z_report_for_date(
                  FROM staff_payments sp
                  LEFT JOIN staff_shifts ss ON ss.id = sp.cashier_shift_id
                  WHERE {}
-                   AND (?2 IS NULL OR sp.created_at <= ?2)
+                   AND (?2 IS NULL OR julianday(sp.created_at) <= julianday(?2))
                    AND (?3 = '' OR ss.branch_id = ?3 OR ss.branch_id IS NULL)",
                 lower_bound_mode.sql_predicate("sp.created_at", "?1")
             ),
@@ -6253,7 +6560,7 @@ fn build_z_report_for_date(
                 "SELECT COUNT(*)
              FROM shift_expenses
              WHERE {}
-               AND (?2 IS NULL OR created_at <= ?2)
+               AND (?2 IS NULL OR julianday(created_at) <= julianday(?2))
                AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)
                AND status = 'pending'
                AND (expense_type IS NULL OR expense_type != 'staff_payment')",
@@ -6688,6 +6995,12 @@ fn build_z_report_for_date(
         }
     }
     canonicalize_report_json_period(&mut report_json, period_start.as_str(), period_end.as_str());
+    if let Some(obj) = report_json.as_object_mut() {
+        obj.insert(
+            BUSINESS_DAY_START_REPORT_KEY.to_string(),
+            day_start_at.map_or(Value::Null, Value::String),
+        );
+    }
 
     Ok(BuiltDateZReport {
         shift_id_for_db: shifts.first().map(|s| s.id.clone()),
@@ -6730,8 +7043,20 @@ pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value,
     Ok(preview_response_from_built_date_z_report(&built, true))
 }
 
+/// Persist the Z of the current window. The submission generates through
+/// `generate_z_report_for_window` with the window it froze; this resolving
+/// entry point serves tests and the gift-close print fixtures.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let built = build_z_report_for_date(db, payload, false)?;
+    generate_z_report_for_window(db, payload, None)
+}
+
+fn generate_z_report_for_window(
+    db: &DbState,
+    payload: &Value,
+    closing_window: Option<&EffectiveZReportWindow>,
+) -> Result<Value, String> {
+    let built = build_z_report_for_window(db, payload, false, closing_window)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
         return Ok(preview_response_from_built_date_z_report(&built, true));
@@ -7008,47 +7333,56 @@ pub(crate) fn prepare_z_report_submission(
     db: &DbState,
     payload: &Value,
 ) -> Result<PreparedZReportSubmission, String> {
+    prepare_z_report_submission_at(db, payload, Utc::now())
+}
+
+/// Founder rules (13/10/2026): the Z refuses while ANY shift is checked in
+/// (R3), and "executing the Z clears everything" (R4): the window ends at the
+/// moment of the Z, and the generated report, the post-submission sync gate
+/// and the rollover share that one cutoff. A retry of a Z already issued
+/// (generated and queued, the day not yet finalized) closes the same frozen
+/// window again, so the queued report and the rollover never disagree.
+pub(crate) fn prepare_z_report_submission_at(
+    db: &DbState,
+    payload: &Value,
+    now: DateTime<Utc>,
+) -> Result<PreparedZReportSubmission, String> {
     let branch_id = str_field(payload, "branchId")
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+    let now_rfc3339 = now.to_rfc3339();
+
+    // --- Pre-condition: every shift is checked out, then freeze the window ---
+    // One lock scope: no check-in can slip between the gate and the cutoff.
     let window = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let _ = order_ownership::repair_historical_pickup_financial_attribution(
             &conn,
             branch_id.as_str(),
-            &Utc::now().to_rfc3339(),
+            &now_rfc3339,
         )?;
-        // Submission always closes the current live/frozen window. A date
-        // picker is useful for historical preview, but must never choose the
-        // report identity or rollover bounds for a commit.
-        resolve_current_z_report_window(&conn, &branch_id)
-    };
-    let cutoff_param = window.cutoff_at.as_deref();
 
-    // --- Pre-condition: all staff must be checked out ---
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // Submission always closes the current window. A date picker is
+        // useful for historical preview, but must never choose the report
+        // identity or rollover bounds for a commit.
+        let window = closing_z_report_window_at(&conn, &branch_id, &now_rfc3339);
+
+        // R3: no check-in time exemption when starting a Z (Tomikro
+        // 13/10/2026: the 03:45 cashier was exempt from a Z frozen at 03:44,
+        // and survived it). A Z already issued is only held by a shift that
+        // was in by its frozen cutoff; the next day's shifts do not hold it.
+        let issued_cutoff = window.cutoff_at.as_deref().filter(|_| window.frozen);
         let mut stmt = conn
-            .prepare(
-                // `?1 = ''` is the house wildcard (business_day.rs:345/352/370/413,
-                // shifts.rs:3506): an unresolved branch must mean ALL rows, not
-                // "only rows with a NULL branch". branch_id here falls back to
-                // storage::get_credential("branch_id").unwrap_or_default(), so on a
-                // terminal whose keyring credential is missing or whose branch cache
-                // drifted it is the empty string — and without the wildcard this gate
-                // silently matched nothing and reported "no staff checked in" while
-                // the step-9 sweep below, which has no branch predicate at all, went
-                // on to touch exactly the rows the gate could not see.
+            .prepare(&format!(
                 "SELECT id, COALESCE(staff_name, staff_id) as name
                  FROM staff_shifts
-                 WHERE status = 'active'
-                   AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
-                   AND (?2 IS NULL OR check_in_time <= ?2)",
-            )
+                 WHERE {ACTIVE_CLOSEOUT_SHIFT_PREDICATE}
+                 ORDER BY COALESCE(check_in_time, created_at, updated_at) ASC, id ASC"
+            ))
             .map_err(|e| format!("prepare active-shift check: {e}"))?;
 
         let active_names: Vec<String> = stmt
-            .query_map(params![branch_id, cutoff_param], |row| {
+            .query_map(params![branch_id, issued_cutoff], |row| {
                 row.get::<_, String>(1)
             })
             .map_err(|e| format!("query active shifts: {e}"))?
@@ -7062,7 +7396,9 @@ pub(crate) fn prepare_z_report_submission(
                 active_names.join(", ")
             ));
         }
-    }
+
+        window
+    };
 
     // --- Pre-condition: all orders must have settled payments ---
     {
@@ -7094,7 +7430,7 @@ pub(crate) fn prepare_z_report_submission(
     let generated = if has_shift_id && !has_branch_date {
         generate_z_report(db, payload)?
     } else {
-        generate_z_report_for_date(db, &window_payload)?
+        generate_z_report_for_window(db, &window_payload, Some(&window))?
     };
 
     let z_report_id = extract_z_report_id(&generated);
@@ -7103,7 +7439,24 @@ pub(crate) fn prepare_z_report_submission(
     let rollover_timestamp = window
         .cutoff_at
         .clone()
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
+        .ok_or("Missing Z-report cutoff for the local day rollover")?;
+
+    // The Z is issued: freeze its window. A retry, the post-submission sync
+    // gate (`unsynced_money_in_closing_window`) and the rollover read it.
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                branch_id: branch_id.clone(),
+                report_date: window.report_date.clone(),
+                cutoff_at: rollover_timestamp.clone(),
+                period_start_at: window.period_start_at.clone(),
+                day_start_at: window.day_start_at.clone(),
+                frozen: true,
+            },
+        )?;
+    }
 
     info!(
         timestamp = %rollover_timestamp,
@@ -7222,20 +7575,18 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         }
     }
 
-    let financial_expr = business_day::order_financial_timestamp_expr("o");
     // Gap review P0-03: an unpaid order's financial timestamp falls back to its
     // created_at, so a bare cutoff filter selected still-open table tabs for
     // deletion — destroying a live order (and orphaning its table session) at
     // day close. The closeout gate deliberately lets the day close with a tab
     // open; the tab belongs to the business day it is eventually settled on.
     // The strict variant keeps cancelled/refunded/settled tabs deletable.
-    let open_table_tab = business_day::open_unsettled_table_tab_expr("o");
+    // `rollover_order_predicate` is also the unsent-money gate's selector.
     let target_order_ids_sql = format!(
         "SELECT o.id
          FROM orders o
-         WHERE datetime({financial_expr}) <= datetime(?1)
-           AND COALESCE(o.order_context, '') <> 'repair_settlement'
-           AND NOT {open_table_tab}"
+         WHERE {}",
+        rollover_order_predicate(conn, "?1")?
     );
 
     let target_order_ids: Vec<String> = conn
@@ -7346,7 +7697,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         "sync_queue",
         "DELETE FROM sync_queue
          WHERE status = 'synced'
-           AND datetime(created_at) <= datetime(?1)",
+           AND julianday(created_at) <= julianday(?1)",
         Some(cutoff_at),
     )?;
     cleared.insert("sync_queue".into(), serde_json::json!(c));
@@ -7356,7 +7707,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "shift_expenses",
         "DELETE FROM shift_expenses
-         WHERE datetime(created_at) <= datetime(?1)
+         WHERE julianday(created_at) <= julianday(?1)
            AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_expense_ids)",
         Some(cutoff_at),
     )?;
@@ -7367,7 +7718,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "staff_payments",
         "DELETE FROM staff_payments
-         WHERE datetime(created_at) <= datetime(?1)
+         WHERE julianday(created_at) <= julianday(?1)
            AND id NOT IN (SELECT id FROM temp_rollover_protected_staff_payment_ids)",
         Some(cutoff_at),
     )?;
@@ -7396,7 +7747,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "cash_drawer_sessions",
         "DELETE FROM cash_drawer_sessions
-         WHERE datetime(COALESCE(closed_at, opened_at, created_at)) <= datetime(?1)
+         WHERE julianday(COALESCE(closed_at, opened_at, created_at)) <= julianday(?1)
            AND staff_shift_id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)",
         Some(cutoff_at),
     )?;
@@ -7427,7 +7778,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         let mut stmt = conn
             .prepare(
                 "SELECT id FROM staff_shifts
-                  WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)
+                  WHERE julianday(COALESCE(check_out_time, check_in_time, created_at)) <= julianday(?1)
                     AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)
                     AND (check_out_time IS NULL OR status = 'active')",
             )
@@ -7479,7 +7830,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "staff_shifts",
         "DELETE FROM staff_shifts
-         WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)
+         WHERE julianday(COALESCE(check_out_time, check_in_time, created_at)) <= julianday(?1)
            AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)",
         Some(cutoff_at),
     )?;
@@ -7653,7 +8004,7 @@ fn clear_closed_day_print_jobs(
         "INSERT INTO temp_z_report_print_job_ids (id)
          SELECT job.id
          FROM print_jobs job
-         WHERE datetime(job.created_at) <= datetime(?1)
+         WHERE julianday(job.created_at) <= julianday(?1)
            AND job.status IN ('pending', 'printed', 'dispatched', 'failed', 'cancelled')
            AND job.id NOT IN (SELECT id FROM temp_z_report_print_job_ids)
            AND job.id NOT IN (SELECT id FROM temp_z_report_print_evidence_ids)
@@ -7751,7 +8102,7 @@ fn clear_closed_day_print_jobs(
                                    THEN 1 ELSE 0 END), 0),
                  COALESCE(SUM(CASE WHEN id IN (SELECT id FROM temp_z_report_print_evidence_ids)
                                    THEN 1 ELSE 0 END), 0)
-             FROM print_jobs WHERE datetime(created_at) <= datetime(?1)",
+             FROM print_jobs WHERE julianday(created_at) <= julianday(?1)",
             params![cutoff_at],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -8183,7 +8534,7 @@ mod tests {
     }
     use super::*;
     use crate::db;
-    use chrono::{LocalResult, TimeZone};
+    use chrono::{Local, LocalResult, TimeZone};
     use rusqlite::Connection;
 
     #[derive(Default)]
@@ -9249,6 +9600,8 @@ mod tests {
             .unwrap()["twint"]["total"],
             30.0
         );
+        // A Z issued at 23:00 (its window frozen there) closes before the
+        // 01:00 TWINT payment.
         persist_pending_z_report_context(
             &conn,
             &PendingZReportContext {
@@ -9256,6 +9609,8 @@ mod tests {
                 report_date: "2026-02-16".into(),
                 cutoff_at: "2026-02-16T23:00:00Z".into(),
                 period_start_at: business_day::EPOCH_RFC3339.into(),
+                day_start_at: None,
+                frozen: true,
             },
         )
         .unwrap();
@@ -12377,14 +12732,15 @@ mod tests {
         assert_eq!(status["canOpenPendingZReport"], true);
     }
 
-    #[test]
-    fn test_get_end_of_day_status_idle_for_current_business_day_before_seven_am() {
-        let db = test_db();
-        let conn = db.conn.lock().unwrap();
-        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
-        let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
-
-        // W4e Step 0: dual-populate (200/235/235/0/10 → 20000/23500/23500/0/1000).
+    /// A shift row for the day-lifecycle tests (founder rules 13/10/2026).
+    fn insert_day_shift(
+        conn: &Connection,
+        id: &str,
+        staff_name: &str,
+        role_type: &str,
+        check_in: &str,
+        check_out: Option<&str>,
+    ) {
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
@@ -12395,77 +12751,147 @@ mod tests {
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'shift-current-business-day', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
-                ?1, ?2, 'closed', 2,
-                'pending', ?2, ?2
+                ?1, ?1, ?2, 'branch-1', 'term-1', ?3,
+                100.0, 10000, ?5, ?6, ?5, ?6, 0.0, 0,
+                ?4, ?7, CASE WHEN ?7 IS NULL THEN 'active' ELSE 'closed' END, 2,
+                'pending', ?4, COALESCE(?7, ?4)
              )",
-            params![check_in, check_out],
+            params![
+                id,
+                staff_name,
+                role_type,
+                check_in,
+                check_out.map(|_| 100.0_f64),
+                check_out.map(|_| 10000_i64),
+                check_out,
+            ],
         )
-        .expect("insert closed shift");
-        conn.execute(
-            "INSERT INTO orders (id, branch_id, order_number, order_type, status, total_amount, total_amount_cents, created_at, updated_at)
-             VALUES ('ord-current-business-day', 'branch-1', 1002, 'dine_in', 'completed', 10.0, 1000, ?1, ?1)",
-            params![check_out],
-        )
-        .expect("insert order");
-        drop(conn);
-
-        let status = get_end_of_day_status_at(
-            &db,
-            &serde_json::json!({
-                "branchId": "branch-1",
-            }),
-            local_datetime(2026, 2, 17, 0, 30, 0).with_timezone(&Utc),
-        )
-        .expect("status should load");
-
-        assert_eq!(
-            status["status"], "idle",
-            "the previous calendar day is still the active business day before 07:00"
-        );
-        assert_eq!(status["activeReportDate"], "2026-02-16");
+        .expect("insert day shift");
     }
 
+    fn status_at(db: &DbState, now: DateTime<Local>) -> Value {
+        get_end_of_day_status_at(
+            db,
+            &serde_json::json!({ "branchId": "branch-1" }),
+            now.with_timezone(&Utc),
+        )
+        .expect("status should load")
+    }
+
+    /// R1 + R2 (13/10/2026): the Z is offered the moment the last shift
+    /// checks out, at any hour; 06:31 is no longer "before 07:00". R5: it is
+    /// dated by the day start (opened 13/10 17:00, closed 14/10 06:30).
     #[test]
-    fn test_get_end_of_day_status_marks_previous_business_day_pending_at_boundary() {
+    fn test_get_end_of_day_status_pending_right_after_last_checkout_dated_by_day_start() {
         let db = test_db();
-        let conn = db.conn.lock().unwrap();
-        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
-        let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
+        let check_in = utc_rfc3339_from_local(2026, 10, 13, 17, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 10, 14, 6, 30, 0);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                &utc_rfc3339_from_local(2026, 10, 13, 6, 0, 0),
+            )
+            .unwrap();
+            insert_day_shift(
+                &conn,
+                "night-cashier",
+                "Night",
+                "cashier",
+                &check_in,
+                Some(&check_out),
+            );
+        }
 
-        // W4e Step 0: dual-populate (200/235/235/0 → 20000/23500/23500/0).
-        conn.execute(
-            "INSERT INTO staff_shifts (
-                id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, opening_cash_amount_cents,
-                closing_cash_amount, closing_cash_amount_cents,
-                expected_cash_amount, expected_cash_amount_cents,
-                cash_variance, cash_variance_cents,
-                check_in_time, check_out_time, status, calculation_version,
-                sync_status, created_at, updated_at
-             ) VALUES (
-                'shift-overnight', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
-                ?1, ?2, 'closed', 2,
-                'pending', ?2, ?2
-             )",
-            params![check_in, check_out],
-        )
-        .expect("insert overnight shift");
-        drop(conn);
+        for (hour, minute) in [(6, 31), (6, 59), (7, 0), (12, 0), (23, 59)] {
+            let status = status_at(&db, local_datetime(2026, 10, 14, hour, minute, 0));
+            assert_eq!(
+                status["status"], "pending_local_submit",
+                "the Z is offered at {hour:02}:{minute:02}, not after a clock boundary"
+            );
+            assert_eq!(status["pendingReportDate"], "2026-10-13");
+            assert_eq!(status["cutoffAt"], check_out);
+            assert_eq!(status["dayStartAt"], check_in);
+            assert_eq!(status["canOpenPendingZReport"], true);
+        }
+    }
 
-        let status = get_end_of_day_status_at(
-            &db,
-            &serde_json::json!({
-                "branchId": "branch-1",
-            }),
-            local_datetime(2026, 2, 17, 7, 0, 0).with_timezone(&Utc),
-        )
-        .expect("status should load");
+    /// R5: the date is the day start's, even when the last Z ran on the
+    /// previous evening's date (Z at 23:30 on 12/10, opening 13/10 17:00).
+    #[test]
+    fn test_pending_z_report_date_is_the_day_start_not_the_last_z_date() {
+        let db = test_db();
+        let check_in = utc_rfc3339_from_local(2026, 10, 13, 17, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 10, 14, 6, 30, 0);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                &utc_rfc3339_from_local(2026, 10, 12, 23, 30, 0),
+            )
+            .unwrap();
+            insert_day_shift(
+                &conn,
+                "evening",
+                "Evening",
+                "cashier",
+                &check_in,
+                Some(&check_out),
+            );
+        }
 
+        let status = status_at(&db, local_datetime(2026, 10, 14, 6, 31, 0));
         assert_eq!(status["status"], "pending_local_submit");
-        assert_eq!(status["pendingReportDate"], "2026-02-16");
+        assert_eq!(status["pendingReportDate"], "2026-10-13");
+    }
+
+    /// R3: while any shift of any role is checked in, no Z is pending; the
+    /// live window is still dated by its day start. The driver's checkout
+    /// then offers the Z at once.
+    #[test]
+    fn test_get_end_of_day_status_not_pending_while_any_shift_is_active() {
+        let db = test_db();
+        let cashier_in = utc_rfc3339_from_local(2026, 10, 13, 17, 0, 0);
+        let cashier_out = utc_rfc3339_from_local(2026, 10, 14, 6, 0, 0);
+        let driver_in = utc_rfc3339_from_local(2026, 10, 13, 18, 0, 0);
+        let driver_out = utc_rfc3339_from_local(2026, 10, 14, 6, 20, 0);
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_day_shift(
+                &conn,
+                "cashier",
+                "Cashier",
+                "cashier",
+                &cashier_in,
+                Some(&cashier_out),
+            );
+            insert_day_shift(&conn, "driver", "Driver", "driver", &driver_in, None);
+        }
+
+        let status = status_at(&db, local_datetime(2026, 10, 14, 6, 10, 0));
+        assert_eq!(status["status"], "idle", "an active driver holds the Z");
+        assert_eq!(status["activeReportDate"], "2026-10-13");
+        // Item 7: the open day's start rides on the status for the Health
+        // "open too long" warning.
+        assert_eq!(status["dayStartAt"], cashier_in);
+        assert_eq!(status["zIssued"], false);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE staff_shifts SET status = 'closed', check_out_time = ?1 WHERE id = 'driver'",
+                params![driver_out],
+            )
+            .unwrap();
+        }
+        let status = status_at(&db, local_datetime(2026, 10, 14, 6, 21, 0));
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["cutoffAt"], driver_out);
+        assert_eq!(status["pendingReportDate"], "2026-10-13");
     }
 
     #[test]
@@ -12500,72 +12926,120 @@ mod tests {
         )
         .expect("status should load");
 
+        // Dated by the day start (the 15:00 check-in), not by the clock.
         assert_eq!(status["status"], "idle");
         assert_eq!(status["activeReportDate"], "2026-02-16");
         assert_eq!(status["activePeriodStartAt"], check_in);
     }
 
+    /// R2/R3: a check-in after the stored cutoff reopened the day, so the
+    /// stored pending Z is dropped; the next last checkout computes it again
+    /// with the cutoff moved forward.
     #[test]
-    fn test_load_pending_z_report_context_suppresses_current_business_day_before_boundary() {
+    fn test_check_in_after_cutoff_drops_stored_pending_z_and_next_checkout_recomputes() {
+        let db = test_db();
+        let first_in = utc_rfc3339_from_local(2026, 10, 13, 9, 0, 0);
+        let first_out = utc_rfc3339_from_local(2026, 10, 13, 15, 0, 0);
+        let second_in = utc_rfc3339_from_local(2026, 10, 13, 15, 10, 0);
+        let second_out = utc_rfc3339_from_local(2026, 10, 13, 23, 0, 0);
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_day_shift(
+                &conn,
+                "morning",
+                "Morning",
+                "cashier",
+                &first_in,
+                Some(&first_out),
+            );
+            ensure_pending_z_report_context_for_branch(&conn, "branch-1", &first_out)
+                .expect("last checkout offers the Z");
+            let stored = load_stored_pending_z_report_context(&conn, "branch-1")
+                .expect("pending context stored at the last checkout");
+            assert_eq!(stored.cutoff_at, first_out);
+            assert_eq!(stored.report_date, "2026-10-13");
+            assert!(!stored.frozen);
+
+            insert_day_shift(&conn, "evening", "Evening", "cashier", &second_in, None);
+        }
+
+        let status = status_at(&db, local_datetime(2026, 10, 13, 15, 11, 0));
+        assert_eq!(
+            status["status"], "idle",
+            "the evening shift reopened the day"
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            assert!(
+                db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none(),
+                "the stale pending Z is dropped"
+            );
+            conn.execute(
+                "UPDATE staff_shifts SET status = 'closed', check_out_time = ?1 WHERE id = 'evening'",
+                params![second_out],
+            )
+            .unwrap();
+            ensure_pending_z_report_context_for_branch(&conn, "branch-1", &second_out)
+                .expect("the next last checkout offers the Z again");
+            let stored = load_stored_pending_z_report_context(&conn, "branch-1")
+                .expect("pending context stored again");
+            assert_eq!(stored.cutoff_at, second_out, "the cutoff moved forward");
+            assert_eq!(stored.day_start_at.as_deref(), Some(first_in.as_str()));
+        }
+
+        let status = status_at(&db, local_datetime(2026, 10, 13, 23, 1, 0));
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["cutoffAt"], second_out);
+        assert_eq!(status["pendingReportDate"], "2026-10-13");
+    }
+
+    /// A stored pending Z whose checkout is still the last one stays
+    /// actionable; no clock suppresses it (R1).
+    #[test]
+    fn test_load_pending_z_report_context_is_never_suppressed_by_the_clock() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
-
+        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
+        insert_day_shift(
+            &conn,
+            "overnight",
+            "John",
+            "cashier",
+            &check_in,
+            Some(&check_out),
+        );
+        db::set_setting(&conn, "system", "business_day_start_hour", "7").unwrap();
         persist_pending_z_report_context(
             &conn,
             &PendingZReportContext {
                 branch_id: "branch-1".to_string(),
                 report_date: "2026-02-16".to_string(),
-                cutoff_at: utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0),
-                period_start_at: utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0),
+                cutoff_at: check_out.clone(),
+                period_start_at: check_in.clone(),
+                day_start_at: None,
+                frozen: false,
             },
         )
         .expect("persist pending context");
 
-        let suppressed = load_pending_z_report_context_at(
-            &conn,
-            "branch-1",
-            local_datetime(2026, 2, 17, 0, 30, 0),
-        );
-        assert!(
-            suppressed.is_none(),
-            "current business day should stay open before 07:00"
-        );
-        assert!(
-            db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none(),
-            "suppressed same-business-day pending context should be cleared"
-        );
-
-        persist_pending_z_report_context(
-            &conn,
-            &PendingZReportContext {
-                branch_id: "branch-1".to_string(),
-                report_date: "2026-02-16".to_string(),
-                cutoff_at: utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0),
-                period_start_at: utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0),
-            },
-        )
-        .expect("persist pending context again");
-
-        let actionable = load_pending_z_report_context_at(
-            &conn,
-            "branch-1",
-            local_datetime(2026, 2, 17, 7, 1, 0),
-        );
-        assert!(
-            actionable.is_some(),
-            "pending context should become actionable after 07:00"
-        );
+        let loaded = load_pending_z_report_context(&conn, "branch-1")
+            .expect("the pending Z stays actionable");
+        assert_eq!(loaded.cutoff_at, check_out);
+        assert_eq!(loaded.report_date, "2026-02-16");
+        assert_eq!(loaded.day_start_at.as_deref(), Some(check_in.as_str()));
+        assert!(db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_some());
     }
 
     #[test]
-    fn test_active_window_report_date_uses_period_start_local_date() {
+    fn test_pos_day_report_date_falls_back_to_period_start_local_date() {
         let period_start = utc_rfc3339_from_local(2026, 4, 2, 0, 44, 47);
         let fallback_now = utc_rfc3339_from_local(2026, 4, 2, 1, 38, 24);
 
         assert_eq!(
-            active_window_report_date(&period_start, &fallback_now),
+            business_day::report_date_for_pos_day(None, &period_start, &fallback_now),
             "2026-04-02",
-            "active report date must follow the local date implied by periodStart"
+            "with no day start the report date follows the local date implied by periodStart"
         );
     }
 
@@ -12607,6 +13081,12 @@ mod tests {
             "2026-04-01T23:38:24.403Z",
         );
         canonicalize_report_json_report_date(&mut report_json, "2026-03-31");
+        // A report generated before 1.4.128 carries no POS day start; it is
+        // dated by its period start.
+        report_json
+            .as_object_mut()
+            .expect("report_json object")
+            .remove(BUSINESS_DAY_START_REPORT_KEY);
 
         conn.execute(
             "UPDATE z_reports
@@ -12731,51 +13211,38 @@ mod tests {
         );
     }
 
+    /// R1: the synced `business_day_start` / `business_day_start_hour`
+    /// settings no longer hold or date the Z.
     #[test]
-    fn test_get_end_of_day_status_respects_configured_business_day_boundary() {
+    fn test_get_end_of_day_status_ignores_configured_business_day_start() {
         let db = test_db();
-        let conn = db.conn.lock().unwrap();
-        db::set_setting(&conn, "system", "business_day_start", "06:00")
-            .expect("store business day start");
-
         let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
         let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
-        // W4e Step 0: dual-populate (200/235/235/0 → 20000/23500/23500/0).
-        conn.execute(
-            "INSERT INTO staff_shifts (
-                id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                opening_cash_amount, opening_cash_amount_cents,
-                closing_cash_amount, closing_cash_amount_cents,
-                expected_cash_amount, expected_cash_amount_cents,
-                cash_variance, cash_variance_cents,
-                check_in_time, check_out_time, status, calculation_version,
-                sync_status, created_at, updated_at
-             ) VALUES (
-                'shift-configured-boundary', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
-                200.0, 20000, 235.0, 23500, 235.0, 23500, 0.0, 0,
-                ?1, ?2, 'closed', 2,
-                'pending', ?2, ?2
-             )",
-            params![check_in, check_out],
-        )
-        .expect("insert closed shift");
-        drop(conn);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "system", "business_day_start", "06:00").unwrap();
+            db::set_setting(&conn, "system", "business_day_start_hour", "9").unwrap();
+            insert_day_shift(
+                &conn,
+                "configured",
+                "John",
+                "cashier",
+                &check_in,
+                Some(&check_out),
+            );
+        }
 
-        let status = get_end_of_day_status_at(
-            &db,
-            &serde_json::json!({
-                "branchId": "branch-1",
-            }),
-            local_datetime(2026, 2, 17, 6, 30, 0).with_timezone(&Utc),
-        )
-        .expect("status should load");
-
-        assert_eq!(status["status"], "pending_local_submit");
-        assert_eq!(status["pendingReportDate"], "2026-02-16");
+        for (hour, minute) in [(5, 59), (6, 30), (8, 59), (9, 0)] {
+            let status = status_at(&db, local_datetime(2026, 2, 17, hour, minute, 0));
+            assert_eq!(status["status"], "pending_local_submit");
+            assert_eq!(status["pendingReportDate"], "2026-02-16");
+        }
     }
 
+    /// A Z issued at 18:00 (its window frozen there) reports exactly that
+    /// window; the 19:00 order belongs to the next day.
     #[test]
-    fn test_generate_z_report_for_date_uses_frozen_cutoff_to_exclude_late_orders() {
+    fn test_generate_z_report_for_date_honors_an_issued_frozen_window() {
         let db = test_db();
         seed_closed_shift(&db);
         seed_late_day_order(&db, "2026-02-16T19:00:00Z");
@@ -12796,6 +13263,8 @@ mod tests {
                     report_date: "2026-02-16".to_string(),
                     cutoff_at: "2026-02-16T18:00:00Z".to_string(),
                     period_start_at: "1970-01-01T00:00:00Z".to_string(),
+                    day_start_at: None,
+                    frozen: true,
                 },
             )
             .expect("persist frozen context");
@@ -12826,12 +13295,77 @@ mod tests {
         assert_eq!(report["reportJson"]["periodEnd"], "2026-02-16T18:00:00Z");
     }
 
+    /// R4 (13/10/2026): "executing the Z clears everything". The pending Z
+    /// computed at the 18:00 checkout does not freeze the day there: the Z
+    /// at 02:00 reports the 19:00 order too, and the rollover leaves nothing
+    /// of the closed day (shift, drawer, order) behind.
     #[test]
-    fn test_submit_z_report_ignores_next_day_active_shift_after_cutoff() {
+    fn test_submit_z_report_window_ends_at_the_z_moment() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_late_day_order(&db, "2026-02-16T19:00:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            // Keep the late receipt's branch consistent with its original
+            // cashier shift, so custody stays valid after that checkout.
+            conn.execute(
+                "UPDATE orders SET branch_id = 'branch-1' WHERE id = 'ord-late'",
+                [],
+            )
+            .expect("scope late order to its cashier branch");
+        }
+        let z_moment = DateTime::parse_from_rfc3339("2026-02-17T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let status = status_at(&db, z_moment.with_timezone(&Local));
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["cutoffAt"], "2026-02-16T18:00:00Z");
+
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+        let prepared =
+            prepare_z_report_submission_at(&db, &payload, z_moment).expect("prepare the Z");
+        assert_eq!(prepared.rollover_timestamp, z_moment.to_rfc3339());
+        assert_eq!(prepared.report_date, "2026-02-16");
+        let report = &prepared.generated["report"];
+        assert_eq!(report["totalOrders"], 4, "the 19:00 order is in the day");
+        assert_eq!(report["reportJson"]["periodEnd"], z_moment.to_rfc3339());
+        assert_eq!(
+            report["reportJson"][BUSINESS_DAY_START_REPORT_KEY],
+            "2026-02-16T09:00:00Z"
+        );
+
+        let result = finalize_prepared_z_report_submission(&db, &prepared).expect("finalize the Z");
+        assert_eq!(result["localDayClosed"], true);
+        assert_eq!(result["lastZReportTimestamp"], z_moment.to_rfc3339());
+
+        let conn = db.conn.lock().unwrap();
+        for table in [
+            "orders",
+            "order_payments",
+            "staff_shifts",
+            "cash_drawer_sessions",
+        ] {
+            let remaining: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                remaining, 0,
+                "{table} of the closed day must not survive the Z"
+            );
+        }
+    }
+
+    /// R3: a shift that checked in after the pending Z's last-checkout cutoff
+    /// reopened the day: starting the Z is refused naming it, nothing is
+    /// rolled over, and the shift is never closed for the cashier.
+    #[test]
+    fn test_submit_z_report_blocks_on_an_active_shift_after_the_cutoff() {
         let db = test_db();
         seed_closed_shift(&db);
         seed_next_day_active_shift(&db, "2026-02-17T08:00:00Z");
-
         {
             let conn = db.conn.lock().unwrap();
             persist_pending_z_report_context(
@@ -12841,42 +13375,590 @@ mod tests {
                     report_date: "2026-02-16".to_string(),
                     cutoff_at: "2026-02-16T18:00:00Z".to_string(),
                     period_start_at: "1970-01-01T00:00:00Z".to_string(),
+                    day_start_at: None,
+                    frozen: false,
                 },
             )
-            .expect("persist frozen context");
+            .expect("persist pending context");
         }
 
-        let result = submit_z_report(
-            &db,
-            &serde_json::json!({
-                "branchId": "branch-1",
-            }),
-        )
-        .expect("submit should succeed with next-day active shift");
+        let error = submit_z_report(&db, &serde_json::json!({ "branchId": "branch-1" }))
+            .expect_err("an active shift blocks starting the Z");
+        assert!(
+            error.contains("1 staff still checked in: Next Day"),
+            "the blocker names the shift: {error}"
+        );
 
-        assert_eq!(result["localDayClosed"], true);
-        assert_eq!(result["lastZReportTimestamp"], "2026-02-16T18:00:00Z");
+        let readiness =
+            get_closeout_readiness_snapshot(&db, &serde_json::json!({ "branchId": "branch-1" }))
+                .expect("readiness");
+        assert_eq!(readiness["activeStaffBlockers"]["count"], 1);
+        assert_eq!(
+            readiness["activeStaffBlockers"]["details"][0]["shiftId"],
+            "shift-next-day-active"
+        );
+        let status = get_end_of_day_status(&db, &serde_json::json!({ "branchId": "branch-1" }))
+            .expect("status");
+        assert_eq!(status["status"], "idle", "the check-in reopened the day");
 
         let conn = db.conn.lock().unwrap();
-        let remaining_active_shifts: i64 = conn
+        assert!(db::get_setting(&conn, "system", "last_z_report_timestamp").is_none());
+        let active: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM staff_shifts WHERE status = 'active'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(remaining_active_shifts, 1, "next-day shift must remain");
-        drop(conn);
+        assert_eq!(active, 1, "the shift is never closed for the cashier");
+        let orders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orders, 3, "nothing is rolled over");
+    }
 
-        let status = get_end_of_day_status(
+    /// Item 1(i) (founder decision 13/10/2026): finishing a Z already ISSUED
+    /// is not held by the next day's shifts. The issued window still owns
+    /// only the closed day, and that shift survives the rollover untouched.
+    #[test]
+    fn test_issued_z_finalizes_while_a_next_day_shift_is_active() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_next_day_active_shift(&db, "2026-02-17T08:00:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            persist_pending_z_report_context(
+                &conn,
+                &PendingZReportContext {
+                    branch_id: "branch-1".to_string(),
+                    report_date: "2026-02-16".to_string(),
+                    cutoff_at: "2026-02-16T18:00:00Z".to_string(),
+                    period_start_at: "2026-02-16T09:00:00Z".to_string(),
+                    day_start_at: None,
+                    frozen: true,
+                },
+            )
+            .expect("persist the issued context");
+        }
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+
+        let status = get_end_of_day_status(&db, &payload).expect("status");
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["zIssued"], true);
+        let readiness = get_closeout_readiness_snapshot(&db, &payload).expect("readiness");
+        assert_eq!(
+            readiness["activeStaffBlockers"]["count"], 0,
+            "the next day's shift does not hold the issued Z"
+        );
+
+        let result = submit_z_report(&db, &payload).expect("the issued Z finalizes");
+        assert_eq!(result["localDayClosed"], true);
+        assert_eq!(result["lastZReportTimestamp"], "2026-02-16T18:00:00Z");
+
+        let conn = db.conn.lock().unwrap();
+        let survivors: Vec<(String, String)> = conn
+            .prepare("SELECT id, status FROM staff_shifts ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            survivors,
+            vec![("shift-next-day-active".to_string(), "active".to_string())]
+        );
+    }
+
+    /// Upgrade path: a context stored by 1.4.127 has no `frozen` flag. When a
+    /// local Z already closes its window (prepared, not finalized), it is the
+    /// issued Z: a later check-in does not drop it, it is marked frozen, and
+    /// it finalizes at its own cutoff while that later shift carries on.
+    #[test]
+    fn test_legacy_context_with_a_persisted_local_z_stays_issued() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        let legacy = PendingZReportContext {
+            branch_id: "branch-1".to_string(),
+            report_date: "2026-02-16".to_string(),
+            cutoff_at: "2026-02-16T18:00:00Z".to_string(),
+            period_start_at: "2026-02-16T09:00:00Z".to_string(),
+            day_start_at: None,
+            frozen: true,
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            persist_pending_z_report_context(&conn, &legacy).unwrap();
+        }
+        generate_z_report_for_date(&db, &serde_json::json!({ "branchId": "branch-1" }))
+            .expect("the Z of the legacy window is persisted");
+        {
+            let conn = db.conn.lock().unwrap();
+            // What 1.4.127 stored: no flag (serde default false).
+            db::set_setting(
+                &conn,
+                "system",
+                PENDING_Z_REPORT_CONTEXT_KEY,
+                r#"{"branchId":"branch-1","reportDate":"2026-02-16","cutoffAt":"2026-02-16T18:00:00Z","periodStartAt":"2026-02-16T09:00:00Z"}"#,
+            )
+            .unwrap();
+            insert_day_shift(
+                &conn,
+                "later",
+                "Later",
+                "cashier",
+                "2026-02-17T08:00:00Z",
+                None,
+            );
+
+            let loaded = load_pending_z_report_context(&conn, "branch-1")
+                .expect("the issued legacy Z is kept");
+            assert!(loaded.frozen);
+            assert_eq!(loaded.cutoff_at, "2026-02-16T18:00:00Z");
+            assert!(
+                load_stored_pending_z_report_context(&conn, "branch-1")
+                    .expect("stored")
+                    .frozen
+            );
+        }
+        let result = submit_z_report(&db, &serde_json::json!({ "branchId": "branch-1" }))
+            .expect("the issued legacy Z finalizes at its own cutoff");
+        assert_eq!(result["lastZReportTimestamp"], "2026-02-16T18:00:00Z");
+        let conn = db.conn.lock().unwrap();
+        let later_active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = 'later' AND status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(later_active, 1, "the next day's shift is untouched");
+    }
+
+    /// Item 5: 1.4.127 deleted the local report after a failed rollover but
+    /// left its queued submission. That submission still closes the window
+    /// on the server, so the window stays issued (no second, overlapping Z
+    /// recomputed to now).
+    #[test]
+    fn test_legacy_context_with_only_a_queued_submission_stays_issued() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                PENDING_Z_REPORT_CONTEXT_KEY,
+                r#"{"branchId":"branch-1","reportDate":"2026-02-16","cutoffAt":"2026-02-16T18:00:00Z","periodStartAt":"2026-02-16T09:00:00Z"}"#,
+            )
+            .unwrap();
+            let queued = serde_json::json!({
+                "terminal_id": "term-1",
+                "branch_id": "branch-1",
+                "report_date": "2026-02-16",
+                "report_data": {
+                    "periodStart": "2026-02-16T09:00:00Z",
+                    "periodEnd": "2026-02-16T18:00:00Z",
+                    "period": { "start": "2026-02-16T09:00:00Z", "end": "2026-02-16T18:00:00Z" },
+                },
+            });
+            conn.execute(
+                "INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data,
+                                                organization_id, status)
+                 VALUES ('legacy-z-row', 'z_reports', 'discarded-z', 'INSERT', ?1, 'org-1', 'failed')",
+                params![queued.to_string()],
+            )
+            .unwrap();
+            let z_reports: i64 = conn
+                .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(z_reports, 0, "the local report row is gone");
+
+            let loaded = load_pending_z_report_context(&conn, "branch-1")
+                .expect("the queued submission keeps the window issued");
+            assert!(loaded.frozen);
+            assert_eq!(loaded.cutoff_at, "2026-02-16T18:00:00Z");
+        }
+        let prepared = prepare_z_report_submission_at(
             &db,
-            &serde_json::json!({
-                "branchId": "branch-1",
-            }),
+            &serde_json::json!({ "branchId": "branch-1" }),
+            utc("2026-02-17T10:00:00Z"),
         )
-        .expect("status should load");
-        assert_eq!(status["status"], "submitted_pending_admin");
-        assert_eq!(status["canOpenPendingZReport"], false);
+        .expect("retry the issued legacy Z");
+        assert_eq!(prepared.rollover_timestamp, "2026-02-16T18:00:00Z");
+    }
+
+    /// Item 4: the report window, the money gates and the rollover compare one
+    /// cutoff as instants. An order paid and a shift checked in 0.5 s after the
+    /// Z moment, in the same second, are outside the report AND survive the
+    /// rollover; `datetime()` truncation used to delete the order (and abandon
+    /// the shift) while the report's string comparison left them out.
+    #[test]
+    fn test_rows_in_the_same_second_after_the_cutoff_are_neither_reported_nor_deleted() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        let z_moment = utc("2026-02-17T02:00:00.200Z");
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+        let prepared =
+            prepare_z_report_submission_at(&db, &payload, z_moment).expect("prepare the Z");
+        let cutoff = prepared.rollover_timestamp.clone();
+        assert_eq!(cutoff, z_moment.to_rfc3339());
+
+        let after = "2026-02-17T02:00:00.700Z";
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                                     status, order_type, payment_status, branch_id,
+                                     sync_status, created_at, updated_at)
+                 VALUES ('ord-same-second', '#9', '[]', 9.0, 900, 'completed', 'pickup',
+                         'paid', 'branch-1', 'synced', ?1, ?1)",
+                params![after],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                                             currency, created_at, updated_at)
+                 VALUES ('pay-same-second', 'ord-same-second', 'cash', 9.0, 900, 'completed',
+                         'EUR', ?1, ?1)",
+                params![after],
+            )
+            .unwrap();
+            insert_day_shift(&conn, "same-second", "Same Second", "cashier", after, None);
+            assert!(
+                load_unsynced_money_for_cutoff(&conn, &cutoff)
+                    .unwrap()
+                    .is_empty(),
+                "nothing after the cutoff is in the closing window"
+            );
+        }
+
+        let preview = build_z_report_for_date(&db, &payload, true).expect("preview");
+        assert_eq!(
+            preview.total_orders, 3,
+            "the report window ends at the cutoff instant"
+        );
+        assert!(preview.report_json["staffReports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|staff| staff["staffShiftId"] != "same-second"));
+
+        finalize_prepared_z_report_submission(&db, &prepared).expect("finalize");
+        let conn = db.conn.lock().unwrap();
+        let kept: (i64, i64, String) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM orders WHERE id = 'ord-same-second'),
+                    (SELECT COUNT(*) FROM order_payments WHERE id = 'pay-same-second'),
+                    (SELECT status FROM staff_shifts WHERE id = 'same-second')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (1, 1, "active".to_string()));
+        let closed_day_orders: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders WHERE id IN ('ord-1', 'ord-2', 'ord-3')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(closed_day_orders, 0, "the closed day is cleared");
+    }
+
+    /// The business-date repair keeps a report dated by its POS day start
+    /// (R5): it never rewrites it to the date of its period start.
+    #[test]
+    fn test_repair_retryable_z_report_business_dates_keeps_the_pos_day_date() {
+        let db = test_db();
+        let last_z = utc_rfc3339_from_local(2026, 10, 12, 23, 30, 0);
+        let check_in = utc_rfc3339_from_local(2026, 10, 13, 17, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 10, 14, 6, 30, 0);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "system", "last_z_report_timestamp", &last_z).unwrap();
+            insert_day_shift(
+                &conn,
+                "evening",
+                "Evening",
+                "cashier",
+                &check_in,
+                Some(&check_out),
+            );
+        }
+        let z_moment = local_datetime(2026, 10, 14, 6, 40, 0).with_timezone(&Utc);
+        let prepared = prepare_z_report_submission_at(
+            &db,
+            &serde_json::json!({ "branchId": "branch-1" }),
+            z_moment,
+        )
+        .expect("prepare");
+        assert_eq!(prepared.report_date, "2026-10-13");
+        let z_report_id = prepared.z_report_id.clone().expect("persisted");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE z_reports SET sync_state = 'failed' WHERE id = ?1",
+                params![z_report_id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed'
+                 WHERE table_name = 'z_reports' AND record_id = ?1",
+                params![z_report_id],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(repair_retryable_z_report_business_dates(&db).unwrap(), 0);
+        let conn = db.conn.lock().unwrap();
+        let (report_date, queued): (String, String) = conn
+            .query_row(
+                "SELECT zr.report_date, q.data FROM z_reports zr
+                 JOIN parity_sync_queue q ON q.table_name = 'z_reports' AND q.record_id = zr.id
+                 WHERE zr.id = ?1",
+                params![z_report_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(report_date, "2026-10-13");
+        let queued: Value = serde_json::from_str(&queued).unwrap();
+        assert_eq!(queued["report_date"], "2026-10-13");
+        assert_eq!(
+            queued["report_data"][BUSINESS_DAY_START_REPORT_KEY],
+            check_in.as_str()
+        );
+    }
+
+    fn insert_day_drawer(
+        conn: &Connection,
+        shift_id: &str,
+        opening: f64,
+        opened_at: &str,
+        closed_at: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                reconciled, opened_at, closed_at, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?2, 'branch-1', 'term-1',
+                ?3, ?4, ?3, ?4, ?3, ?4, 0.0, 0,
+                ?5, ?6, ?7, ?6, COALESCE(?7, ?6)
+             )",
+            params![
+                format!("drawer-{shift_id}"),
+                shift_id,
+                opening,
+                Cents::round_half_even(opening).as_i64(),
+                i64::from(closed_at.is_some()),
+                opened_at,
+                closed_at,
+            ],
+        )
+        .expect("insert day drawer");
+    }
+
+    /// The Tomikro day of 12-13/10/2026 (terminal-d80762ac, Greece UTC+3):
+    /// previous Z 12/10 04:04Z; the night cashier checked out 03:30Z, then two
+    /// short shifts 03:40:32→03:40:53Z and 03:43:17→03:44:10Z.
+    fn seed_tomikro_13_10_day(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            "2026-10-12T04:04:00Z",
+        )
+        .unwrap();
+        for (id, name, check_in, check_out) in [
+            (
+                "night",
+                "Night Cashier",
+                "2026-10-12T14:00:00Z",
+                "2026-10-13T03:30:00Z",
+            ),
+            (
+                "short-1",
+                "Cashier A",
+                "2026-10-13T03:40:32Z",
+                "2026-10-13T03:40:53Z",
+            ),
+            (
+                "short-2",
+                "Cashier B",
+                "2026-10-13T03:43:17Z",
+                "2026-10-13T03:44:10Z",
+            ),
+        ] {
+            insert_day_shift(&conn, id, name, "cashier", check_in, Some(check_out));
+            insert_day_drawer(&conn, id, 100.0, check_in, Some(check_out));
+        }
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status,
+                                 order_type, payment_status, staff_shift_id, branch_id,
+                                 sync_status, created_at, updated_at)
+             VALUES ('tomikro-night-order', '#1', '[]', 12.5, 1250, 'completed', 'pickup', 'paid',
+                     'night', 'branch-1', 'synced', '2026-10-12T20:00:00Z', '2026-10-12T20:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                                         staff_shift_id, currency, created_at, updated_at)
+             VALUES ('tomikro-night-payment', 'tomikro-night-order', 'cash', 12.5, 1250,
+                     'completed', 'night', 'EUR', '2026-10-12T20:00:00Z', '2026-10-12T20:00:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Incident replay (Tomikro, desktop 1.4.127, 13/10/2026). Before: at
+    /// 06:45 local no Z was pending (the clock said 07:00), the sidebar Z
+    /// opened the check-in, a cashier checked in at 03:45:32Z, and the Z at
+    /// 04:05Z closed a window frozen at 03:44:10Z while that shift and its
+    /// drawer survived. Now: the Z is offered right after the 03:44:10Z
+    /// checkout, dated 12/10 (the day started with the night cashier), and at
+    /// 03:45Z it closes the whole day: no shift, drawer or order survives.
+    #[test]
+    fn test_tomikro_13_10_incident_z_is_offered_after_last_checkout_and_clears_the_day() {
+        let db = test_db();
+        seed_tomikro_13_10_day(&db);
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+
+        let status =
+            get_end_of_day_status_at(&db, &payload, utc("2026-10-13T03:45:00Z")).expect("status");
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["pendingReportDate"], "2026-10-12");
+        assert_eq!(status["cutoffAt"], "2026-10-13T03:44:10Z");
+
+        let prepared = prepare_z_report_submission_at(&db, &payload, utc("2026-10-13T03:45:00Z"))
+            .expect("the Z is possible at 03:45Z");
+        assert_eq!(prepared.report_date, "2026-10-12");
+        assert_eq!(
+            prepared.rollover_timestamp,
+            utc("2026-10-13T03:45:00Z").to_rfc3339()
+        );
+        let z_report_id = prepared.z_report_id.clone().expect("Z persisted");
+        let result = finalize_prepared_z_report_submission(&db, &prepared).expect("finalize");
+        assert_eq!(result["localDayClosed"], true);
+
+        let conn = db.conn.lock().unwrap();
+        for (table, predicate) in [
+            ("staff_shifts", "1 = 1"),
+            ("staff_shifts", "status = 'active'"),
+            ("cash_drawer_sessions", "1 = 1"),
+            ("orders", "1 = 1"),
+        ] {
+            let remaining: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 0, "{table} ({predicate}) must not survive the Z");
+        }
+        let (report_date, report_json, queued): (String, String, String) = conn
+            .query_row(
+                "SELECT zr.report_date, zr.report_json, q.data FROM z_reports zr
+                 JOIN parity_sync_queue q ON q.table_name = 'z_reports' AND q.record_id = zr.id
+                 WHERE zr.id = ?1",
+                params![z_report_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(report_date, "2026-10-12");
+        let report_json: Value = serde_json::from_str(&report_json).unwrap();
+        assert_eq!(report_json["date"], "2026-10-12");
+        assert_eq!(
+            report_json[BUSINESS_DAY_START_REPORT_KEY],
+            "2026-10-12T14:00:00Z"
+        );
+        assert_eq!(report_json["periodStart"], "2026-10-12T04:04:00Z");
+        let queued: Value = serde_json::from_str(&queued).unwrap();
+        assert_eq!(
+            queued["report_date"], "2026-10-12",
+            "the server submission keeps the date"
+        );
+        assert!(db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none());
+    }
+
+    /// Incident, second half: a cashier checked in at 03:45:32Z (opening
+    /// 133.95) before the Z. No Z is pending while that shift is active, and
+    /// a Z attempt at 04:05Z is refused naming it; the shift and its drawer
+    /// are left exactly as they are.
+    #[test]
+    fn test_tomikro_13_10_check_in_before_the_z_blocks_it_naming_the_shift() {
+        let db = test_db();
+        seed_tomikro_13_10_day(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_day_shift(
+                &conn,
+                "morning",
+                "Morning Cashier",
+                "cashier",
+                "2026-10-13T03:45:32Z",
+                None,
+            );
+            insert_day_drawer(&conn, "morning", 133.95, "2026-10-13T03:45:32Z", None);
+        }
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+
+        let status =
+            get_end_of_day_status_at(&db, &payload, utc("2026-10-13T04:00:00Z")).expect("status");
+        assert_eq!(status["status"], "idle", "no Z while a shift is checked in");
+
+        let error = prepare_z_report_submission_at(&db, &payload, utc("2026-10-13T04:05:00Z"))
+            .err()
+            .expect("the Z is refused");
+        assert!(
+            error.contains("1 staff still checked in: Morning Cashier"),
+            "{error}"
+        );
+        let readiness = get_closeout_readiness_snapshot(&db, &payload).expect("readiness");
+        assert_eq!(readiness["activeStaffBlockers"]["count"], 1);
+        assert_eq!(
+            readiness["activeStaffBlockers"]["details"][0]["shiftId"],
+            "morning"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (status, check_out): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, check_out_time FROM staff_shifts WHERE id = 'morning'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+        assert!(
+            check_out.is_none(),
+            "the shift is never closed for the cashier"
+        );
+        let drawer_closed: Option<String> = conn
+            .query_row(
+                "SELECT closed_at FROM cash_drawer_sessions WHERE staff_shift_id = 'morning'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(drawer_closed.is_none());
+        assert_eq!(
+            db::get_setting(&conn, "system", "last_z_report_timestamp").as_deref(),
+            Some("2026-10-12T04:04:00Z")
+        );
     }
 
     #[test]
@@ -12902,6 +13984,8 @@ mod tests {
                     report_date: "2026-02-16".to_string(),
                     cutoff_at: "2026-02-16T18:00:00Z".to_string(),
                     period_start_at: "1970-01-01T00:00:00Z".to_string(),
+                    day_start_at: None,
+                    frozen: true,
                 },
             )
             .unwrap();

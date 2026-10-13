@@ -12,7 +12,7 @@ import PageLoadMotion from './ui/PageLoadMotion';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { CashierGateContext, useOperationalShift, useCashierOperationsLocked } from '../contexts/cashier-gate-context';
-import { CashierOperationalBoundary } from './GlobalCashierGate';
+import { CashierOperationalBoundary, useCashierRecoveryActions } from './GlobalCashierGate';
 import { useModules, useModuleAccess, getModuleAccessStatic } from '../contexts/module-context';
 import { isViewAccessDenied } from '../utils/module-view-access';
 import { DeferredModal } from './ui/DeferredModal';
@@ -204,7 +204,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     && activeShift?.id
     ? [secureRepairSessionId, staff.staffId, staff.branchId, staff.terminalId, activeShift.id].join(':')
     : null;
-  const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(staff?.branchId || null);
+  const { endOfDayStatus, isPendingLocalSubmit, isZIssuedAwaitingFinalization } = useEndOfDayStatus(staff?.branchId || null);
 
   const [showExpenses, setShowExpenses] = React.useState(false);
 
@@ -452,6 +452,18 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
     shiftManagerRef.current?.openCheckin();
   };
 
+  // Founder rule R6 (13/10/2026): the sidebar Z always opens a Z modal. While
+  // the cashier day is locked this layout's modal is fenced and hidden, so the
+  // gate's recovery Z modal opens instead; its readiness names the blockers.
+  const cashierRecovery = useCashierRecoveryActions();
+  const handleOpenZReport = () => {
+    if (cashierLocked && cashierRecovery) {
+      cashierRecovery.completeZ();
+      return;
+    }
+    setShowZReport(true);
+  };
+
   // View component mapping - maps module IDs to their view components
   // Optional pages and vertical views load within the content Suspense boundary.
   const VIEW_COMPONENTS: Record<string, React.ComponentType> = {
@@ -592,7 +604,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
           onLogout={handleLogout}
           onEndShift={handleEndShift}
           onStartShift={handleStartShift}
-          onOpenZReport={() => setShowZReport(true)}
+          onOpenZReport={handleOpenZReport}
           isZReportOpen={showZReport}
           hasPendingLocalSubmit={isPendingLocalSubmit}
           onOpenSettings={() => {
@@ -667,12 +679,19 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({
                     <div className="h-8 w-8 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center font-bold">Z</div>
                     <div className="flex-1">
                       <h3 className="text-lg font-semibold">
-                        {t('shift.messages.pendingZReportTitle')}
+                        {/* An issued Z is already frozen: checking in starts the next day,
+                            it does not continue the closed one (13/10/2026). */}
+                        {isZIssuedAwaitingFinalization
+                          ? t('shift.messages.issuedZReportTitle', { date: pendingReportDate || '' })
+                          : t('shift.messages.pendingZReportTitle')}
                       </h3>
                       <p className="mt-1 text-sm opacity-80">
-                        {t('shift.messages.pendingZReportDetails', {
-                          date: pendingReportDate || '',
-                        })}
+                        {t(
+                          isZIssuedAwaitingFinalization
+                            ? 'shift.messages.issuedZReportDetails'
+                            : 'shift.messages.pendingZReportDetails',
+                          { date: pendingReportDate || '' },
+                        )}
                       </p>
                     </div>
                   </div>

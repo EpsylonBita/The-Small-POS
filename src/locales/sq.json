@@ -1838,8 +1838,10 @@
       "confirmStart": "Do të fillosh një turn të ri?",
       "confirmEnd": "Do ta mbyllësh turnin aktual?",
       "confirmEndWithDifference": "Ka një diferencë në kesh prej €{{amount}}. Do ta mbyllësh turnin gjithsesi?",
-      "pendingZReportTitle": "Për ditën e mëparshme duhet ende Raporti Z",
-      "pendingZReportDetails": "Për ditën e punës {{date}} turnet u mbyllën, por dita ende s'është mbyllur në këtë pajisje. Mund ta përfundosh Raportin Z tani, ose të fillosh turnin tjetër dhe t'i kthehesh më vonë.",
+      "pendingZReportTitle": "Të gjithë e mbyllën turnin — mbyll ditën (Z)",
+      "pendingZReportDetails": "Të gjitha turnet e ditës që nisi më {{date}} janë mbyllur. Bëj tani Raportin Z për ta mbyllur, ose fillo sërish turnin për të vazhduar të njëjtën ditë.",
+      "issuedZReportTitle": "Raporti Z i {{date}} po përfundon",
+      "issuedZReportDetails": "Raporti Z u lëshua dhe po dërgohet ende. Hape për ta përfunduar, ose fillo turnin për të nisur ditën tjetër.",
       "enterOpeningCash": "Shkruaj shumën e keshit në hapje",
       "enterClosingCash": "Shkruaj shumën e keshit në mbyllje",
       "invalidAmount": "Shumë e pasaktë",
@@ -3711,7 +3713,7 @@
         "shiftInactive": "S'ka asnjë turn aktiv. Nis turnin para se të marrësh porosi.",
         "terminalNotAuthorized": "Ky terminal nuk po arrin të hyjë në sistemin e dyqanit. Shitjet ruhen në këtë pajisje, por asgjë nuk sinkronizohet derisa të lidhet sërish.",
         "closeoutBlocked": "Duhet rregulluar diçka para se të mbyllet dita (Z).",
-        "closeoutOverdue": "Një ditë pune e mëparshme nuk është mbyllur ende (Z).",
+        "closeoutOverdue": "Dita e arkës është e hapur që nga {{date}} ora {{time}}. Bëj raportin Z kur të mbarojë dita.",
         "closeoutWaitingSync": "Disa pagesa ose lëvizje arke nuk kanë arritur ende në server, ndaj dita nuk mund të mbyllet (Z).",
         "liveUpdatesDown": "Përditësimet live janë shkëputur. Porositë sinkronizohen gjithsesi, por pajisjet e tjera mund t'i shohin ndryshimet me vonesë.",
         "syncStuck": {
@@ -3859,7 +3861,7 @@
       "impact": {
         "dayCloseBlockedUntilSent": "Mbyllja e ditës (Z) nuk do të përfundojë derisa të dërgohen.",
         "dayCloseBlocked": "Mbyllja e ditës (Z) nuk do të përfundojë derisa të rregullohet kjo.",
-        "dayCloseOverdue": "Mbyll fillimisht ditën e mëparshme (Z).",
+        "dayCloseOverdue": "Asgjë nuk bllokohet. Mbyll ditën (Z) kur të mbarojë.",
         "receiptsMayNotPrint": "Kuponat mund të mos printohen.",
         "otherDevicesNotUpdated": "Pajisjet e tjera dhe sistemi i menaxhimit mund të mos i shohin ende ndryshimet e fundit.",
         "printingStopped": "Kuponat dhe fletët e kuzhinës nuk po dalin nga printeri. Porositë ruhen gjithsesi."
@@ -3939,7 +3941,7 @@
           "ready": "Gati",
           "open": "Dita e hapur",
           "blocked": "Bllokuar",
-          "overdue": "Ditë e kaluar e hapur",
+          "overdue": "E hapur mbi 24 orë",
           "submitted": "Dërguar",
           "unavailable": "Jo në dispozicion",
           "notChecked": "Kontrollohet te ekrani i raportit Z",
@@ -3949,7 +3951,7 @@
           "ready": "Asgjë nuk e pengon mbylljen e ditës.",
           "open": "Mbeten këto para se të mbyllet dita:",
           "blocked": "Rregulloji këto para se të mbyllet dita:",
-          "overdue": "Një ditë pune e mëparshme është ende e hapur. Mbylle fillimisht atë (Z).",
+          "overdue": "Dita e arkës është e hapur prej më shumë se 24 orësh. Bëj raportin Z kur të mbarojë dita.",
           "submitted": "Raporti Z u dërgua dhe pret konfirmimin nga serveri.",
           "unavailable": "S'u kontrollua dot nëse dita mund të mbyllet (Z).",
           "notChecked": "Ky ekran nuk i sheh të gjitha kontrollet e mbylljes së ditës. Ekrani i raportit Z i kontrollon të gjitha para se ta mbyllë ditën.",
@@ -9398,9 +9400,9 @@
         "guidance": "Hap raportin Z për të parë çdo pengesë dhe si rregullohet."
       },
       "closeoutOverdue": {
-        "title": "Një ditë e mëparshme është ende e hapur",
-        "summary": "Dita e punës {{reportDate}} nuk është mbyllur (Z).",
-        "guidance": "Mbyll fillimisht atë ditë: hap raportin Z."
+        "title": "Dita e arkës është e hapur prej më shumë se 24 orësh",
+        "summary": "Asnjë raport Z nuk e ka mbyllur ende.",
+        "guidance": "Bëj raportin Z kur të mbarojë dita. Deri atëherë asgjë nuk bllokohet."
       },
       "printerUnavailable": {
         "title": "Printeri nuk përgjigjet",

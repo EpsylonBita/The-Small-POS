@@ -1845,8 +1845,10 @@
       "shiftRequired": "Inizia prima un turno",
       "activeShiftExists": "Esiste già un turno attivo",
       "noActiveShift": "Nessun turno attivo trovato",
-      "pendingZReportTitle": "Per il giorno precedente manca ancora il report Z",
-      "pendingZReportDetails": "Per la giornata lavorativa del {{date}} i turni sono stati chiusi, ma manca ancora la chiusura in locale. Puoi completare il report Z adesso oppure iniziare il turno successivo e tornarci dopo."
+      "pendingZReportTitle": "Tutti hanno chiuso il turno — chiudi la giornata (Z)",
+      "pendingZReportDetails": "Tutti i turni della giornata iniziata il {{date}} sono chiusi. Fai ora il report Z per chiuderla, oppure inizia di nuovo un turno per continuare la stessa giornata.",
+      "issuedZReportTitle": "Il report Z del {{date}} si sta completando",
+      "issuedZReportDetails": "Il report Z è stato emesso e viene ancora inviato. Aprilo per completarlo, oppure inizia un turno per cominciare la giornata successiva."
     },
     "monitoring": {
       "title": "Monitoraggio turno",
@@ -3667,7 +3669,7 @@
         "shiftInactive": "Non è attivo alcun turno del personale. Avvia un turno prima di prendere ordini.",
         "terminalNotAuthorized": "Questo terminale non riesce ad accedere al sistema del negozio. Le vendite restano salvate su questo dispositivo, ma nulla viene sincronizzato finché non viene riconnesso.",
         "closeoutBlocked": "C’è qualcosa da sistemare prima di poter chiudere la giornata (Z).",
-        "closeoutOverdue": "Una giornata precedente non è ancora stata chiusa (Z).",
+        "closeoutOverdue": "La giornata di cassa è aperta dal {{date}} alle {{time}}. Fai lo Z quando la giornata finisce.",
         "closeoutWaitingSync": "Alcuni pagamenti o movimenti di cassa non sono ancora arrivati al server, quindi la giornata non può essere chiusa (Z).",
         "liveUpdatesDown": "Gli aggiornamenti in tempo reale sono disconnessi. Gli ordini continuano a sincronizzarsi, ma gli altri dispositivi potrebbero vedere le modifiche in ritardo.",
         "syncStuck": {
@@ -3815,7 +3817,7 @@
       "impact": {
         "dayCloseBlockedUntilSent": "La chiusura giornata (Z) non potrà completarsi finché l’invio non sarà completato.",
         "dayCloseBlocked": "La chiusura giornata (Z) non potrà completarsi finché il problema non sarà risolto.",
-        "dayCloseOverdue": "Chiudi prima la giornata precedente (Z).",
+        "dayCloseOverdue": "Non c’è nessun blocco. Chiudi la giornata (Z) quando finisce.",
         "receiptsMayNotPrint": "Gli scontrini potrebbero non essere stampati.",
         "otherDevicesNotUpdated": "Gli altri dispositivi e il sistema di gestione potrebbero non vedere ancora le ultime modifiche.",
         "printingStopped": "Scontrini e comande di cucina non escono dalla stampante. Gli ordini restano salvati."
@@ -3895,7 +3897,7 @@
           "ready": "Pronta",
           "open": "Giornata aperta",
           "blocked": "Bloccata",
-          "overdue": "Giornata precedente aperta",
+          "overdue": "Aperta da più di 24 ore",
           "submitted": "Inviata",
           "unavailable": "Non disponibile",
           "notChecked": "Verificata nella schermata Z",
@@ -3905,7 +3907,7 @@
           "ready": "Nulla impedisce la chiusura della giornata.",
           "open": "Da completare prima della chiusura della giornata:",
           "blocked": "Sistema questi punti prima della chiusura della giornata:",
-          "overdue": "Una giornata precedente è ancora aperta. Chiudila prima (Z).",
+          "overdue": "La giornata di cassa è aperta da più di 24 ore. Fai lo Z quando la giornata finisce.",
           "submitted": "Il report Z è stato inviato ed è in attesa di conferma dal server.",
           "unavailable": "Non è stato possibile verificare se la giornata può essere chiusa (Z).",
           "notChecked": "Questa schermata non vede tutti i controlli della chiusura. La schermata Z controlla tutto prima di chiudere la giornata.",
@@ -9398,9 +9400,9 @@
         "guidance": "Apri il report Z per vedere ogni blocco e come risolverlo."
       },
       "closeoutOverdue": {
-        "title": "Una giornata precedente è ancora aperta",
-        "summary": "La giornata del {{reportDate}} non è stata chiusa (Z).",
-        "guidance": "Chiudi prima quella giornata: apri il report Z."
+        "title": "La giornata di cassa è aperta da più di 24 ore",
+        "summary": "Nessun report Z l'ha ancora chiusa.",
+        "guidance": "Fai lo Z quando la giornata finisce. Fino ad allora non c’è nessun blocco."
       },
       "printerUnavailable": {
         "title": "La stampante non risponde",

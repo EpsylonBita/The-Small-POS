@@ -19258,7 +19258,7 @@ fn backfill_active_shift_business_day_context(db: &DbState) -> Result<usize, Str
     let now = Utc::now().to_rfc3339();
     let mut stmt = conn
         .prepare(
-            "SELECT id, COALESCE(branch_id, '')
+            "SELECT id, COALESCE(branch_id, ''), check_in_time
              FROM staff_shifts
              WHERE status = 'active'
                AND (
@@ -19270,18 +19270,36 @@ fn backfill_active_shift_business_day_context(db: &DbState) -> Result<usize, Str
 
     let rows = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })
         .map_err(|e| format!("query active shift business-day repair selector: {e}"))?;
 
-    let shifts: Vec<(String, String)> = rows.filter_map(Result::ok).collect();
+    let shifts: Vec<(String, String, Option<String>)> = rows.filter_map(Result::ok).collect();
     drop(stmt);
 
     let mut repaired = 0usize;
-    for (shift_id, branch_id) in shifts {
-        let period_start_at =
-            business_day::resolve_period_start(&conn, &branch_id, Some(now.as_str()));
-        let report_date = business_day::report_date_for_business_window(&period_start_at, &now);
+    for (shift_id, branch_id, check_in_time) in shifts {
+        // Dated like a fresh check-in (founder rule R5, 13/10/2026): the open
+        // POS day this shift belongs to, by its first check-in after that
+        // day's start, never by the last Z's own date.
+        let at = check_in_time
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| now.clone());
+        let period_start_at = business_day::resolve_period_start(&conn, &branch_id, Some(&at));
+        let day_start_at = business_day::first_check_in_after(
+            &conn,
+            &branch_id,
+            &period_start_at,
+            business_day::open_period_lower_bound_inclusive(&conn, &branch_id),
+            Some(&at),
+        )
+        .unwrap_or_else(|| at.clone());
+        let report_date =
+            business_day::report_date_for_pos_day(Some(&day_start_at), &period_start_at, &at);
 
         conn.execute(
             "UPDATE staff_shifts

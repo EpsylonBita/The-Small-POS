@@ -1,13 +1,9 @@
-use chrono::{DateTime, Days, Local, Timelike};
+use chrono::{DateTime, Local};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db;
 
 pub(crate) const EPOCH_RFC3339: &str = "1970-01-01T00:00:00Z";
-pub(crate) const DEFAULT_BUSINESS_DAY_START_HOUR: u32 = 7;
-const DEFAULT_BUSINESS_DAY_START_MINUTES: u32 = DEFAULT_BUSINESS_DAY_START_HOUR * 60;
-const BUSINESS_DAY_START_HOUR_KEY: &str = "business_day_start_hour";
-const BUSINESS_DAY_START_KEY: &str = "business_day_start";
 
 pub(crate) fn is_epoch_timestamp(value: &str) -> bool {
     let trimmed = value.trim();
@@ -126,43 +122,24 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<chrono::FixedOffset>> {
     DateTime::parse_from_rfc3339(value).ok()
 }
 
-fn parse_business_day_start_minutes_value(value: &str) -> Option<u32> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((hour, minute)) = trimmed.split_once(':') {
-        let hour = hour.trim().parse::<u32>().ok()?;
-        let minute = minute.trim().parse::<u32>().ok()?;
-        if hour < 24 && minute < 60 {
-            return Some(hour * 60 + minute);
-        }
-        return None;
-    }
-
-    let hour = trimmed.parse::<u32>().ok()?;
-    if hour < 24 {
-        Some(hour * 60)
-    } else {
-        None
-    }
-}
-
-pub(crate) fn resolve_business_day_start_minutes(conn: &Connection) -> u32 {
-    db::get_setting(conn, "system", BUSINESS_DAY_START_HOUR_KEY)
-        .and_then(|value| parse_business_day_start_minutes_value(&value))
-        .or_else(|| {
-            db::get_setting(conn, "system", BUSINESS_DAY_START_KEY)
-                .and_then(|value| parse_business_day_start_minutes_value(&value))
-        })
-        .unwrap_or(DEFAULT_BUSINESS_DAY_START_MINUTES)
-}
-
+// Founder rule R1 (13/10/2026): the business day is the POS lifecycle — it
+// starts with the first check-in after the last Z and ends with the Z — and
+// never a clock hour. The 07:00 `DEFAULT_BUSINESS_DAY_START_HOUR` and the
+// synced `business_day_start_hour` / `business_day_start` settings used to
+// decide when a pending Z appeared and which date it carried: at Tomikro
+// (13/10/2026) the Z only became available after 07:00, so the Z button at
+// 06:40 opened the check-in instead and a fresh shift survived the Z. Those
+// settings may still arrive through the terminal-settings sync whitelist
+// (`terminal_helpers::is_syncable_system_setting`); nothing reads them for
+// the day any more. The clock helper below only remains, test-only, to pin
+// the `+00:00` suffix trap.
+#[cfg(test)]
 fn business_day_report_date_at_minutes(
     now: DateTime<Local>,
     business_day_start_minutes: u32,
 ) -> String {
+    use chrono::{Days, Timelike};
+
     let local_minutes = now.hour() * 60 + now.minute();
     let report_date = if local_minutes < business_day_start_minutes {
         now.date_naive()
@@ -173,13 +150,6 @@ fn business_day_report_date_at_minutes(
     };
 
     report_date.format("%Y-%m-%d").to_string()
-}
-
-pub(crate) fn current_business_day_report_date_at(
-    conn: &Connection,
-    now: DateTime<Local>,
-) -> String {
-    business_day_report_date_at_minutes(now, resolve_business_day_start_minutes(conn))
 }
 
 /// The instant the CURRENT business day began, as a UTC RFC3339 string with a
@@ -241,6 +211,109 @@ pub(crate) fn report_date_for_business_window(period_start_at: &str, fallback_at
     local_report_date_from_timestamp(fallback_at)
 }
 
+/// The first shift check-in after `period_start_at` (inclusive when the period
+/// start is inferred), bounded by `cutoff_at`. A shift is dated by this alone:
+/// an order synced in after the last Z does not open the day for the staff
+/// (Android parity; a 23:45 order after a 23:30 Z must not date the 09:00
+/// opening by the previous evening).
+pub(crate) fn first_check_in_after(
+    conn: &Connection,
+    branch_id: &str,
+    period_start_at: &str,
+    inclusive: bool,
+    cutoff_at: Option<&str>,
+) -> Option<String> {
+    let lower = (!is_epoch_timestamp(period_start_at)).then_some(period_start_at);
+    conn.query_row(
+        "SELECT check_in_time
+         FROM staff_shifts
+         WHERE (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
+           AND julianday(check_in_time) IS NOT NULL
+           AND (?2 IS NULL
+                OR julianday(check_in_time) > julianday(?2)
+                OR (?3 AND julianday(check_in_time) = julianday(?2)))
+           AND (?4 IS NULL OR julianday(check_in_time) <= julianday(?4))
+         ORDER BY julianday(check_in_time) ASC
+         LIMIT 1",
+        params![branch_id, lower, inclusive, cutoff_at],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// The instant the open POS day started on this terminal (founder rule R5,
+/// 13/10/2026): the first shift check-in after the last Z; without one, the
+/// earliest financial activity (an order or a completed payment) after it;
+/// `None` while nothing has happened since the last Z.
+///
+/// `period_start_at` is the last Z (or, before any Z, the inferred earliest
+/// activity, with `inclusive` set); `cutoff_at` bounds the search to a frozen
+/// window. Timestamps are compared as instants (`julianday`), so `Z`,
+/// `+00:00` and fractional-second spellings of one moment agree.
+pub(crate) fn resolve_day_start_at(
+    conn: &Connection,
+    branch_id: &str,
+    period_start_at: &str,
+    inclusive: bool,
+    cutoff_at: Option<&str>,
+) -> Option<String> {
+    let first_check_in =
+        first_check_in_after(conn, branch_id, period_start_at, inclusive, cutoff_at);
+    if first_check_in.is_some() {
+        return first_check_in;
+    }
+
+    let lower = (!is_epoch_timestamp(period_start_at)).then_some(period_start_at);
+    conn.query_row(
+        "SELECT ts
+         FROM (
+            SELECT o.created_at AS ts
+            FROM orders o
+            WHERE (?1 = '' OR o.branch_id = ?1 OR o.branch_id IS NULL)
+              AND COALESCE(o.is_ghost, 0) = 0
+
+            UNION ALL
+
+            SELECT op.created_at AS ts
+            FROM order_payments op
+            JOIN orders o ON o.id = op.order_id
+            WHERE (?1 = '' OR o.branch_id = ?1 OR o.branch_id IS NULL)
+              AND op.status = 'completed'
+              AND COALESCE(o.is_ghost, 0) = 0
+         )
+         WHERE julianday(ts) IS NOT NULL
+           AND (?2 IS NULL
+                OR julianday(ts) > julianday(?2)
+                OR (?3 AND julianday(ts) = julianday(?2)))
+           AND (?4 IS NULL OR julianday(ts) <= julianday(?4))
+         ORDER BY julianday(ts) ASC
+         LIMIT 1",
+        params![branch_id, lower, inclusive, cutoff_at],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// The report date of a POS day (founder rule R5, 13/10/2026): the local date
+/// of its day start ([`resolve_day_start_at`]); before anything happened, the
+/// local date of the period start (else of `fallback_at`). A day that opens
+/// 13/10 at 17:00 and closes 14/10 at 06:30 is the 13/10 day whenever its Z
+/// runs, and a clock hour never moves it.
+pub(crate) fn report_date_for_pos_day(
+    day_start_at: Option<&str>,
+    period_start_at: &str,
+    fallback_at: &str,
+) -> String {
+    match day_start_at.filter(|value| !is_epoch_timestamp(value)) {
+        Some(day_start_at) => local_report_date_from_timestamp(day_start_at),
+        None => report_date_for_business_window(period_start_at, fallback_at),
+    }
+}
+
 pub(crate) fn timestamp_within_bounds(
     timestamp: &str,
     start_at: &str,
@@ -300,7 +373,7 @@ pub(crate) fn paid_order_swept_by_last_z_expr(order_alias: &str, anchor_param: &
     format!(
         "({anchor_param} IS NOT NULL
           AND LOWER(TRIM(COALESCE({order_alias}.payment_status, ''))) = 'paid'
-          AND datetime({order_alias}.created_at) < datetime({anchor_param})
+          AND julianday({order_alias}.created_at) < julianday({anchor_param})
           AND NOT EXISTS (
               SELECT 1 FROM order_payments op_swept
               WHERE op_swept.order_id = {order_alias}.id
@@ -445,7 +518,37 @@ fn infer_branch_period_start(
     .flatten()
 }
 
-pub(crate) fn resolve_period_start(
+/// The start of the open POS day that contains `at` (now when `None`).
+///
+/// Normally the last Z. While a Z is issued but not yet finalized here (its
+/// post-submission sync failed and staff carried on, founder decision
+/// 13/10/2026), the next day already started at that Z's frozen cutoff: a
+/// check-in after it is dated, made the day start (cashier first, efood day
+/// start) and windowed from that cutoff, not from the closed day's start.
+/// An instant at or before the issued cutoff still belongs to the closed day.
+pub(crate) fn resolve_period_start(conn: &Connection, branch_id: &str, at: Option<&str>) -> String {
+    if let Some(issued_cutoff) = issued_z_cutoff(conn, branch_id) {
+        let in_closed_day = at
+            .map(|at| instant_at_or_after(&issued_cutoff, at))
+            .unwrap_or(false);
+        if !in_closed_day {
+            return issued_cutoff;
+        }
+    }
+    resolve_window_period_start(conn, branch_id, at)
+}
+
+/// Whether the open period's lower bound includes its own start instant:
+/// only an inferred start (no Z ever, none issued) does.
+pub(crate) fn open_period_lower_bound_inclusive(conn: &Connection, branch_id: &str) -> bool {
+    last_z_anchor_utc(conn).is_none() && issued_z_cutoff(conn, branch_id).is_none()
+}
+
+/// The start of the Z window that is still open locally: the last Z, or before
+/// any Z the earliest activity (bounded by `cutoff_at`). Unlike
+/// [`resolve_period_start`] it never moves to an issued Z's cutoff: the window
+/// of that issued Z itself starts here.
+pub(crate) fn resolve_window_period_start(
     conn: &Connection,
     branch_id: &str,
     cutoff_at: Option<&str>,
@@ -456,6 +559,47 @@ pub(crate) fn resolve_period_start(
 
     infer_branch_period_start(conn, branch_id, cutoff_at)
         .unwrap_or_else(|| EPOCH_RFC3339.to_string())
+}
+
+/// The setting holding the pending Z context (`zreport::PendingZReportContext`).
+pub(crate) const PENDING_Z_REPORT_CONTEXT_KEY: &str = "pending_z_report_context";
+
+/// The cutoff of a Z issued on this branch whose local day rollover has not
+/// run yet (`frozen` pending context newer than the last Z), else `None`.
+pub(crate) fn issued_z_cutoff(conn: &Connection, branch_id: &str) -> Option<String> {
+    let raw = db::get_setting(conn, "system", PENDING_Z_REPORT_CONTEXT_KEY)?;
+    let context: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if context.get("frozen").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let context_branch = context
+        .get("branchId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !branch_id.is_empty() && context_branch != branch_id {
+        return None;
+    }
+    let cutoff = context
+        .get("cutoffAt")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())?
+        .to_string();
+    if last_z_anchor_utc(conn)
+        .map(|last_z| instant_at_or_after(&last_z, &cutoff))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(cutoff)
+}
+
+/// `later` is at or after `earlier` as instants (RFC 3339 spellings of one
+/// moment agree); unparseable values fall back to the string order.
+pub(crate) fn instant_at_or_after(later: &str, earlier: &str) -> bool {
+    match (parse_rfc3339(later), parse_rfc3339(earlier)) {
+        (Some(later), Some(earlier)) => later >= earlier,
+        _ => later >= earlier,
+    }
 }
 
 pub(crate) fn find_cashier_owner_for_timestamp(
@@ -483,23 +627,8 @@ pub(crate) fn find_cashier_owner_for_timestamp(
 mod tests {
     use super::*;
     use crate::db;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
     use rusqlite::Connection;
-
-    fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        conn.execute_batch(
-            "CREATE TABLE local_settings (
-                setting_category TEXT NOT NULL,
-                setting_key TEXT NOT NULL,
-                setting_value TEXT,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (setting_category, setting_key)
-            );",
-        )
-        .expect("create local_settings");
-        conn
-    }
 
     fn local_datetime(
         year: i32,
@@ -515,50 +644,141 @@ mod tests {
             .expect("valid local datetime")
     }
 
+    fn day_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        conn
+    }
+
+    fn utc_from_local(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> String {
+        local_datetime(year, month, day, hour, minute, 0)
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    fn insert_shift(conn: &Connection, id: &str, check_in: &str, check_out: Option<&str>) {
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (?1, ?1, ?1, 'branch-day', 'term-day', 'cashier', 10.0, 1000,
+                       ?2, ?3, CASE WHEN ?3 IS NULL THEN 'active' ELSE 'closed' END, 2,
+                       'pending', ?2, ?2)",
+            params![id, check_in, check_out],
+        )
+        .expect("insert shift");
+    }
+
+    /// R5: the POS day is dated by its first check-in after the last Z, not
+    /// by the last Z itself and not by a clock hour. A Z at 23:30 on 12/10
+    /// followed by an opening at 17:00 on 13/10 and a close at 06:30 on 14/10
+    /// is the 13/10 day.
     #[test]
-    fn parse_business_day_start_values_accept_numeric_and_hhmm() {
-        assert_eq!(parse_business_day_start_minutes_value("7"), Some(7 * 60));
-        assert_eq!(parse_business_day_start_minutes_value("07"), Some(7 * 60));
+    fn report_date_is_the_local_date_of_the_first_check_in_after_the_last_z() {
+        let conn = day_conn();
+        let last_z = utc_from_local(2026, 10, 12, 23, 30);
+        let earlier_day = utc_from_local(2026, 10, 12, 15, 0);
+        let opening = utc_from_local(2026, 10, 13, 17, 0);
+        let closing = utc_from_local(2026, 10, 14, 6, 30);
+        insert_shift(&conn, "closed-day", &earlier_day, Some(&last_z));
+        insert_shift(&conn, "night", &opening, Some(&closing));
+
+        let day_start = resolve_day_start_at(&conn, "branch-day", &last_z, false, None);
+        assert_eq!(day_start.as_deref(), Some(opening.as_str()));
         assert_eq!(
-            parse_business_day_start_minutes_value("07:00"),
-            Some(7 * 60)
+            report_date_for_pos_day(day_start.as_deref(), &last_z, &closing),
+            "2026-10-13"
+        );
+        assert_eq!(
+            report_date_for_business_window(&last_z, &closing),
+            "2026-10-12",
+            "the last Z's own date is what the old rule would have used"
         );
     }
 
+    /// R5 fallbacks: without a check-in, the earliest order or payment after
+    /// the last Z dates the day; with nothing at all, the period start does.
     #[test]
-    fn resolve_business_day_start_minutes_falls_back_to_seven_am() {
-        let conn = test_conn();
-        assert_eq!(
-            resolve_business_day_start_minutes(&conn),
-            DEFAULT_BUSINESS_DAY_START_MINUTES
-        );
-
-        db::set_setting(&conn, "system", BUSINESS_DAY_START_HOUR_KEY, "invalid")
-            .expect("store invalid hour");
-        db::set_setting(&conn, "system", BUSINESS_DAY_START_KEY, "25:99")
-            .expect("store invalid start");
+    fn report_date_falls_back_to_financial_activity_then_the_period_start() {
+        let conn = day_conn();
+        let last_z = utc_from_local(2026, 10, 12, 23, 30);
+        let now = utc_from_local(2026, 10, 14, 1, 0);
 
         assert_eq!(
-            resolve_business_day_start_minutes(&conn),
-            DEFAULT_BUSINESS_DAY_START_MINUTES
+            resolve_day_start_at(&conn, "branch-day", &last_z, false, None),
+            None
         );
+        assert_eq!(report_date_for_pos_day(None, &last_z, &now), "2026-10-12");
+
+        let order_at = utc_from_local(2026, 10, 13, 12, 5);
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, status, order_type,
+                                 branch_id, created_at, updated_at)
+             VALUES ('ord-day', '#1', '[]', 5.0, 'completed', 'pickup', 'branch-day', ?1, ?1)",
+            params![order_at],
+        )
+        .expect("insert order");
+        let day_start = resolve_day_start_at(&conn, "branch-day", &last_z, false, None);
+        assert_eq!(day_start.as_deref(), Some(order_at.as_str()));
         assert_eq!(
-            resolve_business_day_start_minutes(&conn) / 60,
-            DEFAULT_BUSINESS_DAY_START_HOUR
+            report_date_for_pos_day(day_start.as_deref(), &last_z, &now),
+            "2026-10-13"
         );
     }
 
+    /// The comparison is between instants: a check-in spelled with `Z`
+    /// after a last Z spelled with `+00:00` and fractional seconds counts,
+    /// one at the exact Z moment does not (it belongs to the closed day).
     #[test]
-    fn current_business_day_report_date_uses_fallback_boundary() {
-        let conn = test_conn();
+    fn day_start_compares_instants_not_strings() {
+        let conn = day_conn();
+        insert_shift(
+            &conn,
+            "at-z",
+            "2026-10-13T04:04:00Z",
+            Some("2026-10-13T04:10:00Z"),
+        );
+        insert_shift(&conn, "after-z", "2026-10-13T04:04:01Z", None);
 
         assert_eq!(
-            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 0, 30, 0)),
-            "2026-02-16"
+            resolve_day_start_at(
+                &conn,
+                "branch-day",
+                "2026-10-13T04:04:00.000000000+00:00",
+                false,
+                None
+            )
+            .as_deref(),
+            Some("2026-10-13T04:04:01Z")
         );
         assert_eq!(
-            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 7, 0, 0)),
-            "2026-02-17"
+            resolve_day_start_at(&conn, "branch-day", "2026-10-13T04:04:00Z", true, None)
+                .as_deref(),
+            Some("2026-10-13T04:04:00Z"),
+            "without a prior Z the inferred period start is inclusive"
+        );
+    }
+
+    /// R1: the old synced clock settings are inert; nothing here reads them.
+    #[test]
+    fn synced_business_day_start_settings_never_move_the_report_date() {
+        let conn = day_conn();
+        let last_z = utc_from_local(2026, 10, 13, 6, 0);
+        let opening = utc_from_local(2026, 10, 13, 17, 0);
+        insert_shift(&conn, "evening", &opening, None);
+        for (key, value) in [
+            ("business_day_start_hour", "7"),
+            ("business_day_start", "06:00"),
+        ] {
+            db::set_setting(&conn, "system", key, value).expect("store legacy clock setting");
+        }
+
+        let day_start = resolve_day_start_at(&conn, "branch-day", &last_z, false, None);
+        assert_eq!(
+            report_date_for_pos_day(day_start.as_deref(), &last_z, &opening),
+            "2026-10-13"
         );
     }
 
@@ -594,21 +814,5 @@ mod tests {
                 "before the boundary the day is yesterday's (now {h:02}:{m:02})"
             );
         }
-    }
-
-    #[test]
-    fn current_business_day_report_date_uses_configured_boundary() {
-        let conn = test_conn();
-        db::set_setting(&conn, "system", BUSINESS_DAY_START_KEY, "06:00")
-            .expect("store business day start");
-
-        assert_eq!(
-            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 5, 59, 0)),
-            "2026-02-16"
-        );
-        assert_eq!(
-            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 6, 0, 0)),
-            "2026-02-17"
-        );
     }
 }

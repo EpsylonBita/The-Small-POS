@@ -21,6 +21,15 @@ type CashierRecoveryActions = {
 const RecoveryActionsContext = createContext<CashierRecoveryActions | null>(null);
 
 /**
+ * The locked cashier day's recovery actions, or null outside the gate. While the
+ * day is locked, the layout's own Z modal is fenced and hidden; `completeZ` opens
+ * the gate's recovery Z modal instead (founder rule R6, 13/10/2026).
+ */
+export function useCashierRecoveryActions(): Pick<CashierRecoveryActions, 'completeZ'> | null {
+  return useContext(RecoveryActionsContext);
+}
+
+/**
  * The only surfaces a locked cashier day leaves interactive: recovery dialogs
  * (shift, Z, health/support, sync recovery), shell navigation and the window frame.
  * A portal that must stay usable while locked marks its root `data-cashier-recovery`.

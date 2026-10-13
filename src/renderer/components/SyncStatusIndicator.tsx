@@ -33,7 +33,9 @@ import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
-import { formatDate, formatDateTime, formatNumber } from '../utils/format';
+import { useSystemClock } from '../hooks/useSystemClock';
+import { formatDate, formatDateTime, formatNumber, formatTime } from '../utils/format';
+import { isPosDayOpenTooLong } from '../utils/pos-day-open';
 import { cn } from '../utils/cn';
 import { liquidGlassModalTone } from '../styles/designSystem';
 import { useBackgroundAccessibilityIsolation } from './ui/pos-glass-components';
@@ -776,9 +778,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const healthDialogRef = useRef<HTMLDivElement | null>(null);
 
   const { isMobileWaiter, parentTerminalId } = useFeatures();
-  const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(
+  const { endOfDayStatus, isZIssuedAwaitingFinalization } = useEndOfDayStatus(
     staff?.branchId || null,
   );
+  // Minute ticks: the "open too long" warning appears without waiting for
+  // another status change.
+  const clockNow = useSystemClock();
 
   useEffect(() => {
     setShowDetailPanel(showDetails);
@@ -1596,6 +1601,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   // Day close (Z). The renderer only sees the checkout payment blockers; open
   // shifts, drawers and the fiscal queue are checked in Rust (zreport.rs), so
   // this is a partial check that can say "blocked" but never "ready".
+  const posDayOpenTooLong = isPosDayOpenTooLong(endOfDayStatus.dayStartAt, clockNow.getTime());
   const closeoutSummary = useMemo(() => {
     const blocking = (systemHealth?.checkoutPaymentBlockers?.details ?? []).filter(
       (blocker) => blocker.severity !== 'warning',
@@ -1621,14 +1627,22 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       checked: systemHealth !== null,
       complete: false,
       blockers,
-      overdue: endOfDayStatus.status === 'pending_local_submit',
+      // The POS day runs from its first check-in to its Z (13/10/2026), so a
+      // pending Z right after the last checkout is the normal day close. Only
+      // a day open for more than 24 hours is overdue: a reminder that never
+      // blocks anything (Android mirrors the same threshold).
+      overdue: posDayOpenTooLong,
       submitted: endOfDayStatus.status === 'submitted_pending_admin',
-      reportDate: endOfDayStatus.pendingReportDate ?? null,
+      reportDate:
+        endOfDayStatus.pendingReportDate ??
+        (posDayOpenTooLong ? endOfDayStatus.activeReportDate ?? null : null),
     });
   }, [
+    endOfDayStatus.activeReportDate,
     endOfDayStatus.pendingReportDate,
     endOfDayStatus.status,
     isMobileWaiter,
+    posDayOpenTooLong,
     systemHealth,
   ]);
 
@@ -1754,6 +1768,19 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     }
   }, [repeatedFailureProblem, simpleHealthSummary.problem]);
 
+  // `{{date}} {{time}}` of the open POS day's start, for the "open too long"
+  // sentence (closeoutOverdue).
+  const posDayStartParams = useMemo(
+    () => ({
+      date: endOfDayStatus.dayStartAt
+        ? formatDate(endOfDayStatus.dayStartAt, { day: 'numeric', month: 'numeric', year: 'numeric' })
+        : '—',
+      time: endOfDayStatus.dayStartAt
+        ? formatTime(endOfDayStatus.dayStartAt, { hour: '2-digit', minute: '2-digit' })
+        : '',
+    }),
+    [endOfDayStatus.dayStartAt, i18n?.language],
+  );
   const localizedHealthSummary = useMemo(() => {
     const stateKeys = healthStateKeys(simpleHealthSummary.state);
     const problemParams = simpleHealthSummary.problemDetail.params;
@@ -1770,13 +1797,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             count: problemParams.count ?? 0,
             duration: t(duration.key, { count: duration.count }),
           })
-        : t(healthProblemKey(simpleHealthSummary.problemDetail)),
+        : t(healthProblemKey(simpleHealthSummary.problemDetail), posDayStartParams),
       impacts: simpleHealthSummary.impacts.map((impact) => t(healthImpactKey(impact))),
       recommendedActions: simpleHealthSummary.recommendedActions.map((action) =>
         t(healthRecommendationKey(action)),
       ),
     };
-  }, [isShiftActive, simpleHealthSummary, t]);
+  }, [isShiftActive, posDayStartParams, simpleHealthSummary, t]);
   const syncBlockerDetails = systemHealth?.syncBlockerDetails ?? [];
   // The checkout-blocker card renders the classifier's own sentence. Hand it
   // the operator's language, or a Greek till reads its money in English.
@@ -1925,7 +1952,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         isTelemetryStale,
         hasBlockedQueue,
         hasScheduledRetry: hasScheduledRetryableQueueFailure,
-        pendingReportDate: isPendingLocalSubmit
+        // Only a Z already issued and still awaiting its submission or local
+        // finalization; a day merely ready to close is not a support case.
+        pendingReportDate: isZIssuedAwaitingFinalization
           ? endOfDayStatus.pendingReportDate
           : null,
       }),
@@ -1938,7 +1967,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       isTelemetryStale,
       hasBlockedQueue,
       hasScheduledRetryableQueueFailure,
-      isPendingLocalSubmit,
+      isZIssuedAwaitingFinalization,
       endOfDayStatus.pendingReportDate,
     ],
   );

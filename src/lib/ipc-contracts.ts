@@ -493,6 +493,10 @@ export interface EndOfDayStatusResponse {
   latestZReportId?: string | null;
   latestZReportSyncState?: string | null;
   canOpenPendingZReport?: boolean;
+  /** The open POS day's first check-in after the last Z (founder rule R5). */
+  dayStartAt?: string | null;
+  /** A Z already issued (generated, queued) still awaiting its local finalization. */
+  zIssued?: boolean;
 }
 
 export interface ZReportSubmitResponse extends PaymentIntegrityErrorPayload {

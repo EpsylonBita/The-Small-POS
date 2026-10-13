@@ -1845,8 +1845,10 @@
       "shiftRequired": "Bitte starten Sie zuerst eine Schicht",
       "activeShiftExists": "Es gibt bereits eine aktive Schicht",
       "noActiveShift": "Keine aktive Schicht gefunden",
-      "pendingZReportTitle": "Für den Vortag fehlt noch der Z-Report",
-      "pendingZReportDetails": "Für den Geschäftstag {{date}} sind alle ausgestempelt, aber der Tag ist lokal noch nicht abgeschlossen. Sie können den Z-Report jetzt abschließen oder die nächste Schicht starten und später darauf zurückkommen."
+      "pendingZReportTitle": "Alle sind ausgestempelt – schließen Sie den Tag ab (Z)",
+      "pendingZReportDetails": "Alle Schichten des Tages, der am {{date}} begonnen hat, sind geschlossen. Erstellen Sie jetzt den Z-Report, um ihn abzuschließen, oder stempeln Sie wieder ein, um denselben Tag fortzusetzen.",
+      "issuedZReportTitle": "Der Z-Report vom {{date}} wird abgeschlossen",
+      "issuedZReportDetails": "Der Z-Report ist erstellt und wird noch gesendet. Öffnen Sie ihn, um ihn abzuschließen, oder stempeln Sie ein, um den nächsten Tag zu beginnen."
     },
     "monitoring": {
       "title": "Schichtüberwachung",
@@ -3667,7 +3669,7 @@
         "shiftInactive": "Es ist keine Schicht aktiv. Starten Sie eine Schicht, bevor Sie Bestellungen aufnehmen.",
         "terminalNotAuthorized": "Dieses Terminal kann sich nicht beim System Ihres Geschäfts anmelden. Verkäufe werden auf diesem Gerät gespeichert, aber bis zur erneuten Verbindung wird nichts synchronisiert.",
         "closeoutBlocked": "Vor dem Tagesabschluss (Z) muss noch etwas behoben werden.",
-        "closeoutOverdue": "Ein früherer Geschäftstag wurde noch nicht abgeschlossen (Z).",
+        "closeoutOverdue": "Der Kassentag ist seit {{date}} {{time}} geöffnet. Erstellen Sie den Z-Bericht, wenn der Tag endet.",
         "closeoutWaitingSync": "Zahlungen oder Kassenvorgänge haben den Server noch nicht erreicht, daher ist der Tagesabschluss (Z) nicht möglich.",
         "liveUpdatesDown": "Die Live-Aktualisierungen sind getrennt. Bestellungen werden weiter synchronisiert, andere Geräte sehen Änderungen aber eventuell verspätet.",
         "syncStuck": {
@@ -3815,7 +3817,7 @@
       "impact": {
         "dayCloseBlockedUntilSent": "Der Tagesabschluss (Z) ist erst möglich, wenn sie gesendet sind.",
         "dayCloseBlocked": "Der Tagesabschluss (Z) ist erst möglich, wenn das behoben ist.",
-        "dayCloseOverdue": "Schließen Sie zuerst den früheren Tag ab (Z).",
+        "dayCloseOverdue": "Nichts ist gesperrt. Schließen Sie den Tag (Z) ab, wenn er endet.",
         "receiptsMayNotPrint": "Belege werden eventuell nicht gedruckt.",
         "otherDevicesNotUpdated": "Andere Geräte und das Verwaltungssystem sehen die neuesten Änderungen eventuell noch nicht.",
         "printingStopped": "Belege und Küchenbons kommen nicht aus dem Drucker. Bestellungen bleiben gespeichert."
@@ -3895,7 +3897,7 @@
           "ready": "Bereit",
           "open": "Tag offen",
           "blocked": "Blockiert",
-          "overdue": "Früherer Tag offen",
+          "overdue": "Seit über 24 h offen",
           "submitted": "Gesendet",
           "unavailable": "Nicht verfügbar",
           "notChecked": "Wird im Z-Bildschirm geprüft",
@@ -3905,7 +3907,7 @@
           "ready": "Dem Tagesabschluss steht nichts im Weg.",
           "open": "Vor dem Tagesabschluss noch offen:",
           "blocked": "Beheben Sie diese Punkte vor dem Tagesabschluss:",
-          "overdue": "Ein früherer Geschäftstag ist noch offen. Schließen Sie ihn zuerst ab (Z).",
+          "overdue": "Der Kassentag ist seit über 24 Stunden geöffnet. Erstellen Sie den Z-Bericht, wenn der Tag endet.",
           "submitted": "Der Z-Bericht wurde gesendet und wartet auf die Bestätigung durch den Server.",
           "unavailable": "Ob der Tagesabschluss (Z) möglich ist, konnte nicht geprüft werden.",
           "notChecked": "Dieser Bildschirm sieht nicht alle Prüfungen für den Tagesabschluss. Der Z-Bildschirm prüft alles, bevor er den Tag abschließt.",
@@ -9398,9 +9400,9 @@
         "guidance": "Öffnen Sie den Z-Bericht, um jedes Hindernis und seine Lösung zu sehen."
       },
       "closeoutOverdue": {
-        "title": "Ein früherer Tag ist noch offen",
-        "summary": "Der Geschäftstag vom {{reportDate}} wurde nicht abgeschlossen (Z).",
-        "guidance": "Schließen Sie zuerst diesen Tag ab: Öffnen Sie den Z-Bericht."
+        "title": "Der Kassentag ist seit über 24 Stunden geöffnet",
+        "summary": "Noch kein Z-Bericht hat ihn abgeschlossen.",
+        "guidance": "Erstellen Sie den Z-Bericht, wenn der Tag endet. Bis dahin ist nichts gesperrt."
       },
       "printerUnavailable": {
         "title": "Drucker antwortet nicht",

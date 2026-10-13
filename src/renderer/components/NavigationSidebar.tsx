@@ -547,12 +547,11 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
 
 
+  // Founder rule R6 (13/10/2026): Z always opens the Z window, whose readiness
+  // names what still blocks the close, never the check-in. At Tomikro the Z at
+  // 06:40 opened the check-in instead, and the shift started there survived the Z.
   const handleOpenZ = () => {
-    if (!isOperationalShiftActive && !hasPendingLocalSubmit) {
-      onStartShift && onStartShift();
-      return;
-    }
-    onOpenZReport && onOpenZReport();
+    onOpenZReport?.();
   };
 
   const handleOpenSettings = () => {

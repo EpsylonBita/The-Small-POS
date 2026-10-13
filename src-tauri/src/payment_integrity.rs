@@ -1271,8 +1271,8 @@ pub fn load_branch_window_payment_blockers(
     // blocking finding can legitimately sit next to `unexplainedDifference` 0.
     let sql = format!(
         "{} FROM orders o
-         WHERE {order_financial_expr} {operator} ?1
-           AND (?2 IS NULL OR {order_financial_expr} <= ?2)
+         WHERE julianday({order_financial_expr}) {operator} julianday(?1)
+           AND (?2 IS NULL OR julianday({order_financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -1330,8 +1330,8 @@ pub fn load_cancelled_order_claims_payment_findings(
                 COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
                 LOWER(TRIM(COALESCE(o.payment_status, '')))
          FROM orders o
-         WHERE {order_financial_expr} {operator} ?1
-           AND (?2 IS NULL OR {order_financial_expr} <= ?2)
+         WHERE julianday({order_financial_expr}) {operator} julianday(?1)
+           AND (?2 IS NULL OR julianday({order_financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0

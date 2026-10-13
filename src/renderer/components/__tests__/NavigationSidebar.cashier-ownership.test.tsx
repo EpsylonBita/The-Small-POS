@@ -43,4 +43,22 @@ describe('real sidebar cashier-day admission', () => {
     expect(onOpenZReport).toHaveBeenCalledOnce();
     expect(onStartShift).not.toHaveBeenCalled();
   });
+
+  // Founder rule R6 (13/10/2026, Tomikro): with nobody on shift and no pending Z,
+  // the Z button opened the check-in, and the shift started there survived the Z.
+  it.each([
+    { locked: true, pending: false },
+    { locked: true, pending: true },
+    { locked: false, pending: false },
+  ])('opens the Z, never the check-in (locked=$locked, pending=$pending)', ({ locked, pending }) => {
+    const onStartShift = vi.fn();
+    const onOpenZReport = vi.fn();
+    render(<CashierGateContext.Provider value={locked}>
+      <NavigationSidebar currentView="dashboard" onViewChange={() => {}} onLogout={() => {}}
+        onStartShift={onStartShift} onOpenZReport={onOpenZReport} hasPendingLocalSubmit={pending} />
+    </CashierGateContext.Provider>);
+    fireEvent.click(screen.getByRole('button', { name: 'navigation.zReport' }));
+    expect(onOpenZReport).toHaveBeenCalledOnce();
+    expect(onStartShift).not.toHaveBeenCalled();
+  });
 });

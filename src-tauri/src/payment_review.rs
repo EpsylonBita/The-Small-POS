@@ -728,7 +728,7 @@ pub(crate) fn load_unresolved_set_aside_payments(
              LEFT JOIN orders o ON o.id = op.order_id
              WHERE op.status = ?1
                AND (?2 = '' OR o.id IS NULL OR o.branch_id = ?2 OR o.branch_id IS NULL)
-               AND (?3 IS NULL OR datetime(op.created_at) <= datetime(?3))
+               AND (?3 IS NULL OR julianday(op.created_at) <= julianday(?3))
              ORDER BY op.created_at ASC, op.id ASC",
         )
         .map_err(|e| format!("prepare set-aside payment list: {e}"))?;
@@ -816,7 +816,7 @@ pub(crate) fn count_unresolved_set_aside_payments_for_cleanup(
          WHERE op.status = ?1
            AND (
                 op.order_id IN (SELECT id FROM temp_z_report_order_ids)
-                OR datetime(op.created_at) <= datetime(?2)
+                OR julianday(op.created_at) <= julianday(?2)
            )",
         params![DUPLICATE_REVIEW_PAYMENT_STATUS, cutoff_at],
         |row| row.get(0),

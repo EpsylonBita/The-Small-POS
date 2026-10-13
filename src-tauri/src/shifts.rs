@@ -63,7 +63,20 @@ pub(crate) fn resolve_shift_business_day_context(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
         .unwrap_or_else(|| {
-            business_day::report_date_for_business_window(&period_start_at, fallback_at)
+            // R5 (13/10/2026): the POS day's first check-in dates it.
+            let day_start_at = business_day::first_check_in_after(
+                conn,
+                branch_id,
+                &period_start_at,
+                business_day::open_period_lower_bound_inclusive(conn, branch_id),
+                Some(fallback_at),
+            )
+            .unwrap_or_else(|| fallback_at.to_string());
+            business_day::report_date_for_pos_day(
+                Some(&day_start_at),
+                &period_start_at,
+                fallback_at,
+            )
         });
 
     ShiftBusinessDayContext {
@@ -390,8 +403,27 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             } else {
                 check_in_eligibility.business_day_start_at.clone()
             };
+        // The shift belongs to the open POS day, dated by its first check-in
+        // after the last Z (this one when it starts the day), as the Z dates
+        // it (founder rule R5, 13/10/2026; Android parity). Dating it by the
+        // last Z filed a morning opening under the previous evening's date
+        // whenever that Z ran before midnight. Only a check-in starts the
+        // staff's day: an order synced in after a 23:30 Z must not date the
+        // 09:00 opening by the previous evening.
+        let day_start_at = business_day::first_check_in_after(
+            &conn,
+            &branch_id,
+            &period_start_at,
+            business_day::open_period_lower_bound_inclusive(&conn, &branch_id),
+            Some(&now),
+        )
+        .unwrap_or_else(|| now.clone());
         let shift_business_day = ShiftBusinessDayContext {
-            report_date: business_day::report_date_for_business_window(&period_start_at, &now),
+            report_date: business_day::report_date_for_pos_day(
+                Some(&day_start_at),
+                &period_start_at,
+                &now,
+            ),
             period_start_at,
         };
 
@@ -7311,16 +7343,77 @@ mod tests {
         .expect("close shift should succeed");
         assert_eq!(result["success"], true);
 
-        let conn = db.conn.lock().unwrap();
-        let stored = db::get_setting(&conn, "system", "pending_z_report_context")
-            .expect("pending z-report context should be stored");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&stored).expect("pending z-report context should be valid json");
+        let stored_context = || {
+            let conn = db.conn.lock().unwrap();
+            let stored = db::get_setting(&conn, "system", "pending_z_report_context")
+                .expect("pending z-report context should be stored");
+            serde_json::from_str::<serde_json::Value>(&stored)
+                .expect("pending z-report context should be valid json")
+        };
+        let parsed = stored_context();
 
         assert_eq!(parsed["branchId"], "branch-ctx");
         assert_eq!(parsed["periodStartAt"], "2026-03-12T08:00:00Z");
-        assert!(parsed["reportDate"].as_str().is_some());
-        assert!(parsed["cutoffAt"].as_str().is_some());
+        // R5 (13/10/2026): dated by the day start, the first check-in.
+        assert_eq!(parsed["dayStartAt"], "2026-03-12T08:00:00Z");
+        assert_eq!(
+            parsed["reportDate"],
+            crate::business_day::local_report_date_from_timestamp("2026-03-12T08:00:00Z")
+        );
+        assert_eq!(parsed["frozen"], false);
+        let first_cutoff = parsed["cutoffAt"]
+            .as_str()
+            .expect("cutoff is the last checkout")
+            .to_string();
+
+        // R2: the next last checkout of the same day moves the cutoff forward
+        // (the stored context used to be returned unchanged).
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, opening_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-pending-z-2', 'cashier-ctx-2', 'cashier', 'branch-ctx', 'term-ctx',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), 100.0, 10000, 'active', 2, 'pending',
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-pending-z-2', 'cashier-pending-z-2', 'cashier-ctx-2', 'branch-ctx', 'term-ctx',
+                    100.0, 10000, strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+        let second = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-pending-z-2",
+                "closingCash": 100.0,
+            }),
+        )
+        .expect("close second shift should succeed");
+        assert_eq!(second["success"], true);
+
+        let moved = stored_context();
+        let moved_cutoff = moved["cutoffAt"].as_str().expect("moved cutoff");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(moved_cutoff).unwrap()
+                > chrono::DateTime::parse_from_rfc3339(&first_cutoff).unwrap(),
+            "the cutoff follows the latest checkout: {first_cutoff} -> {moved_cutoff}"
+        );
+        assert_eq!(moved["dayStartAt"], "2026-03-12T08:00:00Z");
     }
 
     #[test]
@@ -7464,6 +7557,320 @@ mod tests {
             .expect("check-in eligibility should resolve after cashier opens");
         assert_eq!(eligibility["requiresCashierFirst"], false);
         assert_eq!(eligibility["hasCashierForBusinessDay"], true);
+    }
+
+    /// R5 (13/10/2026): a shift is dated by its POS day start, never by the
+    /// last Z. A Z three days ago followed by today's first check-in dates
+    /// both that cashier and a later waiter today (it used to file them under
+    /// the last Z's date).
+    #[test]
+    fn test_shift_report_date_follows_pos_day_start_not_last_z() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
+        let last_z = (Utc::now() - chrono::Duration::days(3)).to_rfc3339();
+        set_business_day_start(&db, &last_z);
+
+        for (staff_id, role) in [("cashier-r5", "cashier"), ("waiter-r5", "waiter")] {
+            open_shift(
+                &db,
+                &serde_json::json!({
+                    "staffId": staff_id,
+                    "staffName": staff_id,
+                    "branchId": "branch-1",
+                    "terminalId": "term-1",
+                    "roleType": role,
+                    "openingCash": if role == "cashier" { 100.0 } else { 0.0 },
+                }),
+            )
+            .expect("shift should open");
+        }
+
+        let conn = db.conn.lock().unwrap();
+        let cashier_check_in: String = conn
+            .query_row(
+                "SELECT check_in_time FROM staff_shifts WHERE staff_id = 'cashier-r5'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let expected = business_day::local_report_date_from_timestamp(&cashier_check_in);
+        assert_ne!(
+            expected,
+            business_day::local_report_date_from_timestamp(&last_z)
+        );
+        for staff_id in ["cashier-r5", "waiter-r5"] {
+            let report_date: String = conn
+                .query_row(
+                    "SELECT report_date FROM staff_shifts WHERE staff_id = ?1",
+                    params![staff_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                report_date, expected,
+                "{staff_id} is dated by the day start"
+            );
+        }
+    }
+
+    /// Item 3 (13/10/2026): only a check-in dates a shift. An order that
+    /// synced in after the last Z must not date the next opening by that
+    /// earlier day (Android parity).
+    #[test]
+    fn test_shift_report_date_ignores_an_order_synced_after_the_last_z() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
+        let last_z = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        let synced_order_at =
+            (Utc::now() - chrono::Duration::days(2) + chrono::Duration::minutes(15)).to_rfc3339();
+        set_business_day_start(&db, &last_z);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, status, order_type,
+                                     payment_status, branch_id, sync_status, created_at, updated_at)
+                 VALUES ('ord-synced-late', '#1', '[]', 5.0, 'completed', 'pickup', 'paid',
+                         'branch-1', 'synced', ?1, ?1)",
+                params![synced_order_at],
+            )
+            .unwrap();
+        }
+
+        open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-morning",
+                "staffName": "Morning",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 100.0,
+            }),
+        )
+        .expect("shift should open");
+
+        let conn = db.conn.lock().unwrap();
+        let (report_date, check_in): (String, String) = conn
+            .query_row(
+                "SELECT report_date, check_in_time FROM staff_shifts
+                 WHERE staff_id = 'cashier-morning'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            report_date,
+            business_day::local_report_date_from_timestamp(&check_in)
+        );
+        assert_ne!(
+            report_date,
+            business_day::local_report_date_from_timestamp(&synced_order_at),
+            "the synced order does not open the staff's day"
+        );
+    }
+
+    /// Item 1 (founder decision 13/10/2026), the whole scenario. A Z is issued
+    /// and frozen at T1, its post-submission sync fails (offline), and the
+    /// staff start the next day, which is allowed. Then:
+    /// (ii) the next day starts at T1: cashier first, `is_day_start`, the
+    ///      shift's period start and date come from T1, not the closed day;
+    /// (i)  the issued Z still finalizes while that cashier is checked in;
+    /// (iii) a refund recorded after T1 on an order of the closed window is
+    ///      not deleted by the rollover: the order is kept whole.
+    #[test]
+    fn test_next_day_after_an_issued_z_starts_at_its_cutoff_and_the_z_still_finalizes() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
+        let base = Utc::now() - chrono::Duration::days(2);
+        let at = |hours: i64| (base + chrono::Duration::hours(hours)).to_rfc3339();
+        set_business_day_start(&db, &at(0));
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                    check_in_time, check_out_time, opening_cash_amount, opening_cash_amount_cents,
+                    closing_cash_amount, closing_cash_amount_cents,
+                    status, calculation_version, sync_status, created_at, updated_at, currency
+                 ) VALUES ('closed-day', 'cashier-closed', 'Closed Day', 'branch-1', 'term-1',
+                           'cashier', ?1, ?2, 100.0, 10000, 130.0, 13000, 'closed', 2, 'synced',
+                           ?1, ?2, 'EUR')",
+                params![at(1), at(9)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opening_amount_cents, closing_amount, closing_amount_cents,
+                    opened_at, closed_at, reconciled, created_at, updated_at, currency
+                 ) VALUES ('drawer-closed-day', 'closed-day', 'cashier-closed', 'branch-1', 'term-1',
+                           100.0, 10000, 130.0, 13000, ?1, ?2, 1, ?1, ?2, 'EUR')",
+                params![at(1), at(9)],
+            )
+            .unwrap();
+            for (order_id, payment_id) in [
+                ("ord-closed-1", "pay-closed-1"),
+                ("ord-closed-2", "pay-closed-2"),
+            ] {
+                conn.execute(
+                    "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                                         status, order_type, payment_status, staff_shift_id,
+                                         branch_id, sync_status, created_at, updated_at, currency)
+                     VALUES (?1, ?1, '[]', 15.0, 1500, 'completed', 'pickup', 'paid', 'closed-day',
+                             'branch-1', 'synced', ?2, ?2, 'EUR')",
+                    params![order_id, at(2)],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                                                 staff_shift_id, currency, created_at, updated_at)
+                     VALUES (?1, ?2, 'cash', 15.0, 1500, 'completed', 'closed-day', 'EUR', ?3, ?3)",
+                    params![payment_id, order_id, at(2)],
+                )
+                .unwrap();
+            }
+        }
+
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+        let issued_at = base + chrono::Duration::hours(10);
+        let issued = crate::zreport::prepare_z_report_submission_at(&db, &payload, issued_at)
+            .expect("issue the Z");
+        let cutoff = issued.rollover_timestamp.clone();
+        assert_eq!(cutoff, issued_at.to_rfc3339());
+        // The post-submission sync fails here: the day is not finalized.
+
+        let status = crate::zreport::get_end_of_day_status(&db, &payload).expect("status");
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["zIssued"], true);
+
+        // (ii) The next day starts at the issued cutoff: cashier first...
+        let kitchen_first = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "kitchen-next",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "kitchen",
+                "openingCash": 0.0,
+            }),
+        );
+        assert!(
+            kitchen_first
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("must be a cashier")),
+            "the next day needs its cashier first: {kitchen_first:?}"
+        );
+        let eligibility = get_check_in_eligibility(&db, "branch-1", "term-1").unwrap();
+        assert_eq!(eligibility["businessDayStartAt"], cutoff.as_str());
+        assert_eq!(eligibility["requiresCashierFirst"], true);
+
+        open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-next",
+                "staffName": "Next Cashier",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 50.0,
+            }),
+        )
+        .expect("the next day's cashier checks in");
+        {
+            let conn = db.conn.lock().unwrap();
+            let (period_start_at, is_day_start, report_date, check_in): (
+                String,
+                bool,
+                String,
+                String,
+            ) = conn
+                .query_row(
+                    "SELECT period_start_at, is_day_start, report_date, check_in_time
+                     FROM staff_shifts WHERE staff_id = 'cashier-next'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(period_start_at, cutoff, "not the closed day's period start");
+            assert!(
+                is_day_start,
+                "the first cashier after the issued Z starts the day"
+            );
+            assert_eq!(
+                report_date,
+                business_day::local_report_date_from_timestamp(&check_in)
+            );
+
+            // (iii) A refund recorded now, after the cutoff, on a closed-day order.
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                                                  amount, amount_cents, reason, sync_state,
+                                                  created_at, updated_at)
+                 VALUES ('refund-after-cutoff', 'pay-closed-1', 'ord-closed-1', 'refund',
+                         5.0, 500, 'next-day refund', 'applied', ?1, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        // (i) Finishing the issued Z is not held by the next day's cashier.
+        let retry = crate::zreport::prepare_z_report_submission_at(&db, &payload, Utc::now())
+            .expect("retry the issued Z while the next day runs");
+        assert_eq!(retry.rollover_timestamp, cutoff, "the same frozen window");
+        assert_eq!(retry.z_report_id, issued.z_report_id, "the same report");
+        crate::zreport::finalize_prepared_z_report_submission(&db, &retry).expect("finalize");
+
+        let conn = db.conn.lock().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM staff_shifts WHERE staff_id = 'cashier-next' AND status = 'active'"),
+            1,
+            "the next day's shift is untouched"
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM cash_drawer_sessions cds
+                 JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
+                 WHERE ss.staff_id = 'cashier-next'"
+            ),
+            1,
+            "and so is its drawer"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM staff_shifts WHERE id = 'closed-day'"),
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM cash_drawer_sessions WHERE id = 'drawer-closed-day'"),
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM orders WHERE id = 'ord-closed-2'"),
+            0,
+            "the closed day is cleared"
+        );
+        assert_eq!(
+            count(
+                "SELECT (SELECT COUNT(*) FROM orders WHERE id = 'ord-closed-1')
+                      + (SELECT COUNT(*) FROM order_payments WHERE id = 'pay-closed-1')
+                      + (SELECT COUNT(*) FROM payment_adjustments WHERE id = 'refund-after-cutoff')"
+            ),
+            3,
+            "the refund recorded after the cutoff and its order are kept for the next Z"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "system", "last_z_report_timestamp").as_deref(),
+            Some(cutoff.as_str())
+        );
+        assert_eq!(
+            business_day::resolve_period_start(&conn, "branch-1", None),
+            cutoff,
+            "after the rollover the open day still starts at the issued cutoff"
+        );
     }
 
     #[test]

@@ -13,7 +13,19 @@ const IDLE_END_OF_DAY_STATUS: EndOfDayStatusResponse = {
   latestZReportId: null,
   latestZReportSyncState: null,
   canOpenPendingZReport: false,
+  dayStartAt: null,
+  zIssued: false,
 };
+
+/**
+ * A Z already issued (generated and queued) whose local day close has not run
+ * yet, e.g. because its post-submission sync failed. Health raises its support
+ * warning only for this; a day whose Z is simply ready after the last checkout
+ * is the normal day close (founder rules 13/10/2026).
+ */
+export function isZIssuedAwaitingFinalization(status: EndOfDayStatusResponse): boolean {
+  return status.status === 'pending_local_submit' && status.zIssued === true;
+}
 
 export function useEndOfDayStatus(branchId?: string | null) {
   const bridge = getBridge();
@@ -67,6 +79,7 @@ export function useEndOfDayStatus(branchId?: string | null) {
     loadingEndOfDayStatus,
     refreshEndOfDayStatus,
     isPendingLocalSubmit: endOfDayStatus.status === 'pending_local_submit',
+    isZIssuedAwaitingFinalization: isZIssuedAwaitingFinalization(endOfDayStatus),
     isSubmittedPendingAdmin: endOfDayStatus.status === 'submitted_pending_admin',
   };
 }

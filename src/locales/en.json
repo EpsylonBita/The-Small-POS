@@ -1838,8 +1838,10 @@
       "confirmStart": "Start a new shift?",
       "confirmEnd": "End current shift?",
       "confirmEndWithDifference": "There is a cash difference of €{{amount}}. End shift anyway?",
-      "pendingZReportTitle": "Previous day still needs a Z Report",
-      "pendingZReportDetails": "The business day for {{date}} was checked out but not closed locally yet. You can finish the Z Report now or start the next shift and come back to it.",
+      "pendingZReportTitle": "Everyone has checked out — close the day (Z)",
+      "pendingZReportDetails": "All shifts of the day that started on {{date}} are closed. Run the Z now to close it, or check in again to continue the same day.",
+      "issuedZReportTitle": "The Z of {{date}} is finishing",
+      "issuedZReportDetails": "The Z has been issued and is still being sent. Open it to finish, or check in to start the next day.",
       "enterOpeningCash": "Enter opening cash amount",
       "enterClosingCash": "Enter closing cash amount",
       "invalidAmount": "Invalid amount",
@@ -3711,7 +3713,7 @@
         "shiftInactive": "No staff shift is active. Start a shift before taking orders.",
         "terminalNotAuthorized": "This terminal can't sign in to your store's system. Sales are saved on this device, but nothing syncs until it is connected again.",
         "closeoutBlocked": "Something needs fixing before the day can close (Z).",
-        "closeoutOverdue": "An earlier business day hasn't been closed (Z) yet.",
+        "closeoutOverdue": "The POS day has been open since {{date}} {{time}}. Run the Z when the day ends.",
         "closeoutWaitingSync": "Payments or cash records haven't reached the server yet, so the day can't close (Z).",
         "liveUpdatesDown": "Live updates are disconnected. Orders still sync, but other devices may see changes late.",
         "syncStuck": {
@@ -3859,7 +3861,7 @@
       "impact": {
         "dayCloseBlockedUntilSent": "The day close (Z) can't finish until they are sent.",
         "dayCloseBlocked": "The day close (Z) can't finish until this is fixed.",
-        "dayCloseOverdue": "Close the earlier day (Z) first.",
+        "dayCloseOverdue": "Nothing is blocked. Close the day (Z) when it ends.",
         "receiptsMayNotPrint": "Receipts may not print.",
         "otherDevicesNotUpdated": "Other devices and the management system may not see the latest changes yet.",
         "printingStopped": "Receipts and kitchen tickets aren't coming out of the printer. Orders are still saved."
@@ -3939,7 +3941,7 @@
           "ready": "Ready",
           "open": "Day open",
           "blocked": "Blocked",
-          "overdue": "Earlier day open",
+          "overdue": "Open over 24 h",
           "submitted": "Sent",
           "unavailable": "Unavailable",
           "notChecked": "Checked on the Z screen",
@@ -3949,7 +3951,7 @@
           "ready": "Nothing is stopping the day close.",
           "open": "Left before the day can close:",
           "blocked": "Fix these before the day can close:",
-          "overdue": "An earlier business day is still open. Close it (Z) first.",
+          "overdue": "The POS day has been open for more than 24 hours. Run the Z when the day ends.",
           "submitted": "The Z was sent and is waiting for the server to confirm it.",
           "unavailable": "Couldn't check whether the day can close (Z).",
           "notChecked": "This screen can't see every day close check. The Z screen checks everything before it closes the day.",
@@ -9398,9 +9400,9 @@
         "guidance": "Open the Z to see each blocker and how to fix it."
       },
       "closeoutOverdue": {
-        "title": "An earlier day is still open",
-        "summary": "The business day of {{reportDate}} hasn't been closed (Z).",
-        "guidance": "Close that day first: open the Z."
+        "title": "The POS day has been open for over 24 hours",
+        "summary": "No Z has closed it yet.",
+        "guidance": "Run the Z when the day ends. Nothing is blocked until then."
       },
       "printerUnavailable": {
         "title": "Printer not responding",
