@@ -5408,6 +5408,19 @@ fn emit_monetary_dead_letters(
     });
 }
 
+/// A shift the server refused over its person's open shift, or a check-in
+/// made offline it refused on replay: the renderer tells the cashier
+/// (`useAppEvents`). The row stays failed for review in Sync.
+const SHIFT_CONFLICT_EVENT: &str = "recovery:shift-conflict";
+
+fn emit_shift_conflicts(app: &impl TerminalEventSink, notices: &[sync_queue::ShiftConflictNotice]) {
+    for notice in notices {
+        if let Ok(payload) = serde_json::to_value(notice) {
+            app.emit_json(SHIFT_CONFLICT_EVENT, payload);
+        }
+    }
+}
+
 fn safe_parity_summary(
     result: &sync_queue::SyncResult,
     queue_status: sync_queue::QueueStatus,
@@ -5607,6 +5620,7 @@ async fn force_parity_sync_once(
         Err(_) => return ParitySyncExecutionOutcome::Failed("PARITY_SYNC_FAILED"),
     };
     emit_monetary_dead_letters(app, &result.monetary_dead_letters);
+    emit_shift_conflicts(app, &result.shift_conflicts);
     classify_finished_parity_pass(db, sync_state, app, source, scope, &result)
 }
 
@@ -5851,6 +5865,7 @@ impl<'a> RendererParityExecutionContext<'a> {
         .await;
         result.telemetry.scope = sync_queue::SyncTelemetryScope::default();
         emit_monetary_dead_letters(app, &result.monetary_dead_letters);
+        emit_shift_conflicts(app, &result.shift_conflicts);
         let summary = safe_exact_item_parity_summary(&result);
         match classify_safe_parity_summary(self.db, self.sync_state, app, source, summary) {
             ParitySyncExecutionOutcome::Complete(_) => Ok(result),
@@ -5904,6 +5919,7 @@ impl<'a> RendererParityExecutionContext<'a> {
         .await;
         result.telemetry.scope = sync_queue::SyncTelemetryScope::default();
         emit_monetary_dead_letters(app, &result.monetary_dead_letters);
+        emit_shift_conflicts(app, &result.shift_conflicts);
         let queue_status = read_renderer_parity_queue_status(self.db)?;
         let summary = safe_parity_summary(&result, queue_status);
         match classify_safe_parity_summary(self.db, self.sync_state, app, source, summary) {
@@ -16625,11 +16641,12 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                 for (shift_id, err_msg) in &shift_outcome.failed_shift_ids {
                     if is_shift_conflict_error(err_msg) {
                         let _ = app.emit(
-                            "recovery:shift-conflict",
-                            serde_json::json!({
-                                "shiftId": shift_id,
-                                "errorMessage": err_msg,
-                            }),
+                            SHIFT_CONFLICT_EVENT,
+                            sync_queue::ShiftConflictNotice {
+                                shift_id: shift_id.clone(),
+                                code: sync_queue::SHIFT_CONFLICT.to_string(),
+                                reason: None,
+                            },
                         );
                     }
                 }
@@ -16795,7 +16812,7 @@ fn mark_failed_shift_items(
 }
 
 fn is_shift_conflict_error(error: &str) -> bool {
-    error.contains("unresolved active shift") || error.contains("already has another active shift")
+    sync_queue::is_shift_conflict_message(error)
 }
 
 fn claim_pending_sync_items(conn: &Connection, limit: usize) -> Result<Vec<SyncItem>, String> {
@@ -24965,6 +24982,48 @@ mod tests {
         ] {
             assert!(!exposed.contains(forbidden));
         }
+    }
+
+    /// `recovery:shift-conflict` had no listener and only the legacy queue
+    /// emitted it; a refused offline check-in in the parity queue reached
+    /// nobody. Each notice of a pass is now emitted, with machine codes only.
+    #[test]
+    fn shift_conflict_notices_reach_the_recovery_event() {
+        struct Sink(std::sync::Mutex<Vec<(String, Value)>>);
+        impl TerminalEventSink for Sink {
+            fn emit_json(&self, event: &str, payload: Value) {
+                self.0.lock().unwrap().push((event.to_string(), payload));
+            }
+        }
+        let sink = Sink(std::sync::Mutex::new(Vec::new()));
+        emit_shift_conflicts(
+            &sink,
+            &[
+                sync_queue::ShiftConflictNotice {
+                    shift_id: "shift-offline".to_string(),
+                    code: sync_queue::OFFLINE_CHECK_IN_CONFLICT.to_string(),
+                    reason: Some("waiter_terminal".to_string()),
+                },
+                sync_queue::ShiftConflictNotice {
+                    shift_id: "shift-elsewhere".to_string(),
+                    code: sync_queue::SHIFT_CONFLICT.to_string(),
+                    reason: None,
+                },
+            ],
+        );
+        assert_eq!(
+            sink.0.into_inner().unwrap(),
+            vec![
+                (
+                    "recovery:shift-conflict".to_string(),
+                    serde_json::json!({ "shiftId": "shift-offline", "code": "OFFLINE_CHECK_IN_CONFLICT", "reason": "waiter_terminal" })
+                ),
+                (
+                    "recovery:shift-conflict".to_string(),
+                    serde_json::json!({ "shiftId": "shift-elsewhere", "code": "SHIFT_CONFLICT" })
+                ),
+            ]
+        );
     }
 
     fn seed_active_cashier(db: &DbState, branch_id: &str, terminal_id: &str) {

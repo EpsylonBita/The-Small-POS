@@ -5,11 +5,12 @@
  */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+// The parity runner executes the esbuild bundle from .cache/parity-tests with
+// the project root as cwd, so paths resolve from process.cwd(), never from this file's URL.
+const ROOT = process.cwd()
 const LOCALES = ['en', 'el', 'de', 'fr', 'it', 'sq']
 
 function usedKeys(): string[] {

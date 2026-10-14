@@ -8867,6 +8867,11 @@ pub async fn order_approve(
         &approved_status,
         room_charge_confirmation.is_some(),
     )?;
+    if !confirmed_remotely {
+        // A full queue refuses the approval before anything changes here,
+        // never after (offline-week audit #3: the update row was dropped).
+        crate::sync_queue::ensure_enqueue_capacity(&conn, 1)?;
+    }
     conn.execute(
         "UPDATE orders
          SET status = ?6,
@@ -8892,7 +8897,7 @@ pub async fn order_approve(
         "estimatedTime": estimated_time
     });
     if !confirmed_remotely {
-        let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+        enqueue_order_sync_payload(&conn, &order_id, &payload)?;
     }
     drop(conn);
 
@@ -8972,6 +8977,11 @@ fn decline_order_locally_with_box_confirmation(
         )?;
     }
     let previous_status = ensure_order_status_transition_allowed(&conn, &order_id, "cancelled")?;
+    if !confirmed_box {
+        // A full queue refuses the decline before anything changes here
+        // (offline-week audit #3: the update row used to be dropped).
+        crate::sync_queue::ensure_enqueue_capacity(&conn, 1)?;
+    }
     if previous_status != "cancelled" {
         ensure_no_money_taken_before_cancel(&conn, &order_id)?;
         order_ownership::reverse_order_drawer_attribution(&conn, &order_id, now)?;
@@ -8988,7 +8998,7 @@ fn decline_order_locally_with_box_confirmation(
     .map_err(|e| format!("decline order: {e}"))?;
 
     if !confirmed_box {
-        let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+        enqueue_order_sync_payload(&conn, &order_id, &payload)?;
     }
     Ok((order_id, remote_order_id, payload))
 }
@@ -9896,6 +9906,13 @@ pub(crate) fn assign_driver_locally(
         .as_deref()
         .ok_or_else(|| "Driver must have an active shift before assignment".to_string())?;
 
+    // The assignment queues the driver earning, the receipt that now names
+    // the driver for its tip, and the order update. A full queue refuses it
+    // before the order moves to the driver or the earning is written
+    // (offline-week audit #3: the update row used to be dropped, and a
+    // refused earning or receipt row left the assignment half applied).
+    crate::sync_queue::ensure_enqueue_capacity(conn, 3)?;
+
     let assignment = order_ownership::assign_order_to_driver_shift(
         conn,
         &order_id,
@@ -9953,7 +9970,7 @@ pub(crate) fn assign_driver_locally(
         "driverName": driver_name,
         "deliveryNotes": notes,
     });
-    let _ = enqueue_order_sync_payload(conn, &order_id, &order_sync_payload);
+    enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
     Ok((order_id, driver_name, assigned_status))
 }
 
@@ -10246,6 +10263,10 @@ pub(crate) fn notify_platform_ready_locally(
         _ => {}
     }
     ensure_order_status_transition_allowed(&conn, &order_id, "ready")?;
+    // Ready, and for a platform-fleet order its settlement row and the
+    // delivered update: a full queue refuses it before anything changes
+    // here (offline-week audit #3: the update rows used to be dropped).
+    crate::sync_queue::ensure_enqueue_capacity(&conn, 3)?;
     conn.execute(
         "UPDATE orders SET status = 'ready', sync_status = 'pending', updated_at = ?1 WHERE id = ?2",
         rusqlite::params![now, order_id],
@@ -10255,7 +10276,7 @@ pub(crate) fn notify_platform_ready_locally(
         "orderId": order_id,
         "status": "ready"
     });
-    let _ = enqueue_order_sync_payload(&conn, &order_id, &sync_payload);
+    enqueue_order_sync_payload(&conn, &order_id, &sync_payload)?;
     // Platform-fleet orders (efood riders): READY is the store's last touch —
     // the platform never sends pickup/delivery events (their own written
     // answer, 29/08), so the order would sit in the grid forever. The founder
@@ -10302,11 +10323,11 @@ pub(crate) fn notify_platform_ready_locally(
             rusqlite::params![now, order_id],
         )
         .map_err(|e| format!("complete platform-fleet order: {e}"))?;
-        let _ = enqueue_order_sync_payload(
+        enqueue_order_sync_payload(
             &conn,
             &order_id,
             &serde_json::json!({ "orderId": order_id, "status": "delivered" }),
-        );
+        )?;
     }
     Ok(PlatformReadyLocal::Applied {
         remote_order_id,
@@ -10460,6 +10481,10 @@ pub async fn order_update_type(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
     payments::ensure_ecommerce_order_mutation_allowed(&conn, &order_id, None)?;
+    // The order update, and for a delivery turned pickup its earning's
+    // removal: a full queue refuses the change before anything changes here
+    // (offline-week audit #3: both rows used to be dropped silently).
+    crate::sync_queue::ensure_enqueue_capacity(&conn, 2)?;
     let mut emitted_status: Option<String> = None;
     if order_type == "pickup" {
         // Keyring-first; plaintext `local_settings` is backward-compat fallback.
@@ -10503,7 +10528,7 @@ pub async fn order_update_type(
                     "order_id": order_id,
                     "deleted_at": now,
                 });
-                let _ = crate::sync_queue::enqueue_payload_item(
+                crate::sync_queue::enqueue_payload_item(
                     &conn,
                     "driver_earnings",
                     &removed_earning.id,
@@ -10513,7 +10538,7 @@ pub async fn order_update_type(
                     Some("financial"),
                     Some("manual"),
                     Some(1),
-                );
+                )?;
             }
         }
 
@@ -10538,7 +10563,7 @@ pub async fn order_update_type(
         "driverId": serde_json::Value::Null,
         "driverName": serde_json::Value::Null
     });
-    let _ = enqueue_order_sync_payload(&conn, &order_id, &payload);
+    enqueue_order_sync_payload(&conn, &order_id, &payload)?;
     drop(conn);
     if let Some(ref status) = emitted_status {
         let _ = app.emit(
@@ -19085,5 +19110,82 @@ pub(crate) mod driver_restore_tests {
         assert_eq!(shift, "cashier-shift");
         server.sync(&conn);
         assert!(queued(&conn).is_empty(), "{:?}", queued(&conn));
+    }
+
+    /// Offline-week audit #3 (13/10/2026): at a full queue the assignment's
+    /// order-update row was dropped silently (`let _ = enqueue…`), and the
+    /// refused earning row returned an error only after the order had moved
+    /// to the driver and its earning was written, so the till kept an
+    /// assignment the server would never hear of. It now refuses up front,
+    /// with the typed answer, and changes nothing.
+    #[test]
+    fn driver_assignment_at_queue_cap_is_atomic() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let conn = test_conn();
+        paid_delivery_order(&conn);
+        let mut fill = conn
+            .prepare(
+                "INSERT INTO parity_sync_queue
+                    (id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, retry_delay_ms, priority, module_type,
+                     conflict_strategy, version, status)
+                 VALUES (?1, 'orders', ?1, 'INSERT', '{}', ?2, '2026-10-07T17:00:00Z',
+                         0, 1000, 0, 'orders', 'server-wins', 1, 'pending')",
+            )
+            .unwrap();
+        for index in 0..crate::sync_queue::MAX_QUEUE_SIZE {
+            fill.execute(params![format!("offline-{index}"), ORG])
+                .unwrap();
+        }
+        drop(fill);
+
+        let error = assign_driver_locally(&conn, ORDER, "driver-1", None, "2026-10-07T18:10:00Z")
+            .expect_err("a full queue refuses the assignment");
+        assert!(
+            error.starts_with(crate::sync_queue::SYNC_QUEUE_FULL),
+            "typed refusal: {error}"
+        );
+
+        let order: (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT driver_id, staff_shift_id, status FROM orders WHERE id=?1",
+                [ORDER],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            order,
+            (None, "cashier-shift".to_string(), "pending".to_string()),
+            "the order stays with the cashier"
+        );
+        let earnings: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM driver_earnings WHERE order_id=?1",
+                [ORDER],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(earnings, 0, "no earning the server would never hear of");
+        let queued_for_order: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue
+                 WHERE record_id = ?1 OR table_name = 'driver_earnings'",
+                [ORDER],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued_for_order, 0);
+        let replayable: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            replayable,
+            crate::sync_queue::MAX_QUEUE_SIZE,
+            "nothing already queued was dropped to make room"
+        );
     }
 }

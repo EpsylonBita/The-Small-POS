@@ -278,7 +278,9 @@ pub async fn staff_auth_verify_check_in_pin(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
-    auth::verify_staff_check_in_pin(arg0, &db)
+    // The server decides; this till checks the PIN only when it cannot be
+    // reached (auth::verify_staff_check_in_pin).
+    auth::verify_staff_check_in_pin(arg0, &db).await
 }
 
 /// staff-auth:refresh-directory — fetch the staff directory (with

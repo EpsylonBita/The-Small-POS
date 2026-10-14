@@ -31,7 +31,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Tests are bundled by esbuild into `node_modules/.cache/parity-tests/`
+// Tests are bundled by esbuild into `.cache/parity-tests/`
 // and then executed via `node --test`, with `cwd` set to the project
 // root (see `scripts/run-parity-tests.mjs`). We resolve source paths
 // from `process.cwd()` instead of `__dirname` because the bundled

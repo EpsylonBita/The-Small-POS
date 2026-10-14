@@ -31,6 +31,7 @@ import { offlineSetCouponActive, offlineUpsertCoupon } from '../services/offline
 import { getOfflineActionState } from '../services/offline-page-capabilities';
 import { ScanDevicePanel } from '../components/scanner/ScanDevicePanel';
 import { renderModalPortal } from '../utils/render-modal-portal';
+import { CentsMoneyInput } from '../components/ui/CentsMoneyInput';
 
 interface Coupon {
   id: string;
@@ -794,27 +795,35 @@ const CouponsPage: React.FC = () => {
               <div className="grid grid-cols-2 gap-3">
                 <label className="text-sm">
                   <span className="block mb-1">{t('coupons.discountValue', 'Discount Value')} *</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={form.discount_value}
-                    onChange={(e) => setForm((prev) => ({ ...prev, discount_value: e.target.value }))}
-                    disabled={saveAction.disabled}
-                    className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
-                  />
+                  {form.discount_type === 'fixed' ? (
+                    <CentsMoneyInput
+                      aria-label={t('coupons.discountValue', 'Discount Value')}
+                      value={form.discount_value}
+                      onValueChange={(value) => setForm((prev) => ({ ...prev, discount_value: value }))}
+                      disabled={saveAction.disabled}
+                      className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    />
+                  ) : (
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={form.discount_value}
+                      onChange={(e) => setForm((prev) => ({ ...prev, discount_value: e.target.value }))}
+                      disabled={saveAction.disabled}
+                      className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
+                    />
+                  )}
                 </label>
                 <label className="text-sm">
                   <span className="block mb-1">{t('coupons.minOrder', 'Min Order')}</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
+                  <CentsMoneyInput
+                    aria-label={t('coupons.minOrder', 'Min Order')}
                     value={form.min_order_amount}
-                    onChange={(e) => setForm((prev) => ({ ...prev, min_order_amount: e.target.value }))}
+                    onValueChange={(value) => setForm((prev) => ({ ...prev, min_order_amount: value }))}
                     disabled={saveAction.disabled}
                     className={`w-full px-3 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
-                    placeholder="0"
+                    placeholder="0,00"
                   />
                 </label>
               </div>

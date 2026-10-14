@@ -27,7 +27,8 @@ import type {
   StaffShift,
 } from '../../types';
 import { formatCurrency, formatDateTime } from '../../utils/format';
-import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { parseMoneyInputValue } from '../../utils/moneyInput';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import { translateRoleName } from '../../utils/role-labels';
 import { loadFiscalOrderReportingEntitlement } from '../../utils/fiscal-integration-entitlement';
 import {
@@ -957,7 +958,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     setActiveTab('staffPayments');
     setPaymentDraft({
       paidToStaffId: payment.paid_to_staff_id || '',
-      amount: Number(payment.amount || 0).toFixed(2).replace('.', ','),
+      amount: Number(payment.amount || 0).toFixed(2),
       paymentType: payment.payment_type,
       notes: payment.notes || '',
     });
@@ -1617,11 +1618,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   {t('modals.expense.amountLabel', 'Amount')}
                 </label>
                 <div className="relative">
-                  <input
-                    type="text"
-                    inputMode="decimal"
+                  <CentsMoneyInput
+                    aria-label={t('modals.expense.amountLabel', 'Amount')}
                     value={expenseDraft.amount}
-                    onChange={(event) => setExpenseDraft((current) => ({ ...current, amount: formatMoneyInputWithCents(event.target.value) }))}
+                    onValueChange={(amount) => setExpenseDraft((current) => ({ ...current, amount }))}
                     placeholder="0,00"
                     disabled={!canRecord}
                     className={`${drawerInputClass} !pl-10 text-lg font-bold`}
@@ -1828,11 +1828,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 {t('modals.expense.amountLabel', 'Amount')}
               </label>
               <div className="relative">
-                <input
-                  type="text"
-                  inputMode="decimal"
+                <CentsMoneyInput
+                  aria-label={t('modals.expense.amountLabel', 'Amount')}
                   value={paymentDraft.amount}
-                  onChange={(event) => setPaymentDraft((current) => ({ ...current, amount: formatMoneyInputWithCents(event.target.value) }))}
+                  onValueChange={(amount) => setPaymentDraft((current) => ({ ...current, amount }))}
                   placeholder="0,00"
                   disabled={!canRecord}
                   className={`${drawerInputClass} !pl-10 text-lg font-bold`}

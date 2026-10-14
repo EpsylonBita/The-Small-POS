@@ -64,6 +64,7 @@ import { formatCompactOrderNumberForDisplay, getVisibleOrderNumber } from '../..
 import { shiftBelongsToCurrentBusinessDay } from '../../utils/business-day-shift';
 import { translateRoleName } from '../../utils/role-labels';
 import { renderModalPortal } from '../../utils/render-modal-portal';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import {
   beginBatchItemSelection,
   clearMissingBatchItemSelection,
@@ -3039,20 +3040,16 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
             >
               <div className="grid grid-cols-3 gap-3">
                 <FormField label={tr('labels.amount', 'Amount')}>
-                  <input
+                  <CentsMoneyInput
                     value={paymentAmount}
-                    onChange={(event) => setPaymentAmount(event.target.value)}
-                    onBlur={() => setPaymentAmount(formatMoneyInput(paymentAmount))}
-                    inputMode="decimal"
+                    onValueChange={setPaymentAmount}
                     className={glassInputClass}
                   />
                 </FormField>
                 <FormField label={tr('labels.tip', 'Tip')}>
-                  <input
+                  <CentsMoneyInput
                     value={tipAmount}
-                    onChange={(event) => setTipAmount(event.target.value)}
-                    onBlur={() => setTipAmount(formatMoneyInput(tipAmount))}
-                    inputMode="decimal"
+                    onValueChange={setTipAmount}
                     className={glassInputClass}
                   />
                 </FormField>
@@ -3102,11 +3099,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               <div className="grid grid-cols-3 gap-3">
                 <MetricTile label={tr('labels.amount', 'Amount')} value={money(batchSelectedTotal)} tone="due" />
                 <FormField label={tr('labels.tip', 'Tip')}>
-                  <input
+                  <CentsMoneyInput
                     value={tipAmount}
-                    onChange={(event) => setTipAmount(event.target.value)}
-                    onBlur={() => setTipAmount(formatMoneyInput(tipAmount))}
-                    inputMode="decimal"
+                    onValueChange={setTipAmount}
                     className={glassInputClass}
                   />
                 </FormField>
@@ -3222,13 +3217,21 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                 </button>
               </div>
               <FormField label={discountMode === 'percentage' ? tr('labels.percent', 'Percent') : tr('labels.amount', 'Amount')}>
-                <input
-                  value={discountValue}
-                  onChange={(event) => setDiscountValue(event.target.value)}
-                  onBlur={() => setDiscountValue(formatMoneyInput(discountValue))}
-                  inputMode="decimal"
-                  className={glassInputClass}
-                />
+                {discountMode === 'fixed' ? (
+                  <CentsMoneyInput
+                    value={discountValue}
+                    onValueChange={setDiscountValue}
+                    className={glassInputClass}
+                  />
+                ) : (
+                  <input
+                    value={discountValue}
+                    onChange={(event) => setDiscountValue(event.target.value)}
+                    onBlur={() => setDiscountValue(formatMoneyInput(discountValue))}
+                    inputMode="decimal"
+                    className={glassInputClass}
+                  />
+                )}
               </FormField>
               <ActionButton onClick={applyBatchItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
                 <Check className="h-4 w-4" />
@@ -3334,11 +3337,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
               {itemActionMode === 'price' ? (
                 <div className="space-y-4">
                   <FormField label={tr('labels.unitPrice', 'Unit Price')}>
-                    <input
+                    <CentsMoneyInput
                       value={itemPriceValue}
-                      onChange={(event) => setItemPriceValue(event.target.value)}
-                      onBlur={() => setItemPriceValue(formatMoneyInput(itemPriceValue))}
-                      inputMode="decimal"
+                      onValueChange={setItemPriceValue}
                       className={glassInputClass}
                     />
                   </FormField>
@@ -3376,11 +3377,19 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                     </button>
                   </div>
                   <FormField label={discountMode === 'percentage' ? tr('labels.percent', 'Percent') : tr('labels.amount', 'Amount')}>
-                    <input
-                      value={discountValue}
-                      onChange={(event) => setDiscountValue(event.target.value)}
-                      className={glassInputClass}
-                    />
+                    {discountMode === 'fixed' ? (
+                      <CentsMoneyInput
+                        value={discountValue}
+                        onValueChange={setDiscountValue}
+                        className={glassInputClass}
+                      />
+                    ) : (
+                      <input
+                        value={discountValue}
+                        onChange={(event) => setDiscountValue(event.target.value)}
+                        className={glassInputClass}
+                      />
+                    )}
                   </FormField>
                   <ActionButton onClick={applySelectedItemDiscount} disabled={isSaving || isSavedSession} tone="cash" className="w-full">
                     <Check className="h-4 w-4" />

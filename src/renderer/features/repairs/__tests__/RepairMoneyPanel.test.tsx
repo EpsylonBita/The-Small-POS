@@ -215,7 +215,7 @@ describe('RepairMoneyPanel', () => {
     renderPanel({ moneyService, onAuthoritativeRefresh })
     await screen.findByText('€60.00')
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), {
       target: { value: '60.00' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
@@ -243,7 +243,7 @@ describe('RepairMoneyPanel', () => {
     fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), {
       target: { value: PAYMENT_ID },
     })
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund amount' }), {
       target: { value: '10.00' },
     })
     expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
@@ -266,7 +266,7 @@ describe('RepairMoneyPanel', () => {
     renderPanel()
     await screen.findByText('€60.00')
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), {
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), {
       target: { value: '60.00' },
     })
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider reference' }), {
@@ -348,7 +348,7 @@ describe('RepairMoneyPanel', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
     expect(screen.getByRole('button', { name: 'Issue fiscal document' })).toBeDisabled()
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '60.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '60.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
   })
 
@@ -370,7 +370,7 @@ describe('RepairMoneyPanel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Issue fiscal document' })).toBeDisabled()
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '60.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '60.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeEnabled()
   })
 
@@ -464,7 +464,7 @@ describe('RepairMoneyPanel', () => {
     await screen.findByText('€0.00')
     await screen.findByText('myDATA is optional. Repair payments can be recorded without the plugin.')
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '20.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
 
@@ -479,7 +479,7 @@ describe('RepairMoneyPanel', () => {
     renderPanel({ moneyService, repairDepositSupported: false })
     await screen.findByText('€60.00')
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '20.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
 
@@ -499,13 +499,13 @@ describe('RepairMoneyPanel', () => {
     await screen.findByText('€60.00')
     await screen.findByText('A fiscal provider is required for fiscal actions.')
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '20.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
     await waitFor(() => expect(service.recordPayment).toHaveBeenCalled())
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund amount' }), { target: { value: '10.00' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
     expect(screen.getByRole('button', { name: 'Refund payment' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Refund payment' }))
@@ -539,7 +539,7 @@ describe('RepairMoneyPanel', () => {
     await screen.findByText('€60.00')
     await screen.findByText('A fiscal provider is required for fiscal actions.')
 
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '20.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Collect payment' }))
 
@@ -553,9 +553,9 @@ describe('RepairMoneyPanel', () => {
       moneyService.getFiscalReadiness.mockResolvedValue(readyOperationalReadiness)
       renderPanel({ moneyService })
       await screen.findByText('myDATA is optional. Repair payments can be recorded without the plugin.')
-      fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '20.00' } })
+      fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '20.00' } })
       fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
-      fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+      fireEvent.change(screen.getByRole('textbox', { name: 'Refund amount' }), { target: { value: '10.00' } })
       fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
       expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
       expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
@@ -571,9 +571,9 @@ describe('RepairMoneyPanel', () => {
     moneyService.getSettlement.mockResolvedValue(fiscalProjection('unknown'))
     renderPanel({ moneyService })
     await screen.findByText('€60.00')
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '60.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '60.00' } })
     fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund amount' }), { target: { value: '10.00' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
@@ -599,10 +599,10 @@ describe('RepairMoneyPanel', () => {
     })
     renderPanel({ moneyService })
     await screen.findByText('myDATA is optional. Repair payments can be recorded without the plugin.')
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Payment amount' }), { target: { value: '40.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Payment amount' }), { target: { value: '40.00' } })
     expect(screen.getByRole('button', { name: 'Collect payment' })).toBeDisabled()
     fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: supplementPaymentId } })
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Refund amount' }), { target: { value: '10.00' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Refund amount' }), { target: { value: '10.00' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Refund reason' }), { target: { value: 'Customer request' } })
     expect(screen.getByRole('button', { name: 'Refund payment' })).toBeDisabled()
     fireEvent.change(screen.getByRole('combobox', { name: 'Payment to refund' }), { target: { value: PAYMENT_ID } })

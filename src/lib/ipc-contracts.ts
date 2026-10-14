@@ -517,6 +517,70 @@ export interface ZReportSubmitResponse extends PaymentIntegrityErrorPayload {
   error?: string;
 }
 
+/**
+ * One stored `z_reports` row, exactly as native `map_z_report_row` returns it
+ * (`zreport_list` / `zreport_get`). The money columns are the Z's own figures;
+ * `reportJson` is the frozen snapshot as JSON TEXT. Every Z export reads this
+ * row, never the live preview (founder, 14/10/2026).
+ */
+export interface StoredZReportRow {
+  id: string;
+  shiftId: string;
+  branchId: string;
+  terminalId: string;
+  /** Business date, `YYYY-MM-DD`. */
+  reportDate: string;
+  generatedAt: string;
+  grossSales: number;
+  netSales: number;
+  totalOrders: number;
+  cashSales: number;
+  cardSales: number;
+  refundsTotal: number;
+  voidsTotal: number;
+  discountsTotal: number;
+  tipsTotal: number;
+  expensesTotal: number;
+  cashVariance: number;
+  openingCash: number;
+  closingCash: number;
+  expectedCash: number;
+  /** JSON text. */
+  paymentsBreakdown: string;
+  /** The frozen Z snapshot, JSON text. */
+  reportJson: string;
+  /** The snapshot's currency; null when it recorded none. */
+  currency: string | null;
+  syncState: ZReportSyncState;
+  syncLastError?: string | null;
+  syncRetryCount?: number;
+  syncNextRetryAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * `zreport_list` filter. Without both dates native lists the last 30 days
+ * (at most 50 rows); with both, that business-date range. Newest first.
+ */
+export interface ZReportListParams {
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface ZReportListResponse {
+  success: boolean;
+  reports: StoredZReportRow[];
+  count: number;
+  error?: string;
+}
+
+export interface ZReportGetResponse {
+  success: boolean;
+  report: StoredZReportRow;
+  error?: string;
+}
+
 // -- Shift financial opening (gift_opening_v1) ---------------------------------
 // The three native financial opening commands take the positional
 // `{ arg0: payload }` envelope. Native owns the opening key, the original

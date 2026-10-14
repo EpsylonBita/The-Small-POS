@@ -1,9 +1,11 @@
 //! PIN-based local authentication with bcrypt.
 //!
 //! Provides admin and staff login, session management, lockout tracking,
-//! and permission checking. PIN hashes are stored in the SQLite
-//! `local_settings` table (category "staff", keys "admin_pin_hash" /
-//! "staff_pin_hash"). Sessions are kept in-memory; the `staff_sessions`
+//! and permission checking. The terminal login PIN hashes are stored in the
+//! SQLite `local_settings` table (category "staff", keys "admin_pin_hash" /
+//! "staff_pin_hash"). The staff directory's per-person PIN hashes live only in
+//! the OS credential store (`staff_pin_vault.rs`); the SQLite directory cache
+//! keeps everything else. Sessions are kept in-memory; the `staff_sessions`
 //! table is used only for audit/persistence across restarts.
 
 use chrono::{DateTime, Duration, Utc};
@@ -13,8 +15,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
-use crate::{api, business_day, db, storage};
+use crate::staff_pin_vault::{self, DirectoryPinEntry, OfflinePinCheck};
+use crate::{api, business_day, db, offline_check_in, storage};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -140,8 +144,6 @@ struct StaffAuthCacheEntry {
     can_login_pos: Option<bool>,
     #[serde(default, alias = "hasPin")]
     has_pin: Option<bool>,
-    #[serde(default, alias = "pinHash")]
-    pin_hash: Option<String>,
     #[serde(default, alias = "isActive")]
     is_active: Option<bool>,
     /// Present when this staff has an open shift on any terminal in the
@@ -413,15 +415,224 @@ fn load_staff_auth_cache(
     branch_id: &str,
 ) -> Result<StaffAuthDirectoryCache, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let Some(raw) = db::get_setting(
-        &conn,
-        STAFF_AUTH_CACHE_CATEGORY,
-        &staff_auth_cache_key(branch_id),
-    ) else {
+    let setting_key = staff_auth_cache_key(branch_id);
+    let Some(raw) = db::get_setting(&conn, STAFF_AUTH_CACHE_CATEGORY, &setting_key) else {
         return Err("missing staff auth cache".to_string());
     };
+    let raw = adopt_legacy_pin_hashes(&conn, &setting_key, raw);
 
     parse_staff_auth_cache(&raw)
+}
+
+/// The directory's own branch for a cache row: its payload's, else its key's.
+fn staff_auth_cache_row_branch(payload: &Value, setting_key: &str) -> String {
+    value_string_alias(payload, &["branch_id", "branchId"])
+        .or_else(|| {
+            setting_key
+                .strip_prefix("branch_")
+                .map(str::trim)
+                .filter(|branch| !branch.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn directory_role_names(value: &Value) -> Vec<String> {
+    let mut names: Vec<String> = value
+        .get("roles")
+        .and_then(Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(|role| value_string_alias(role, &["name", "role_name", "roleName"]))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.extend(value_string_alias(value, &["roleName", "role_name"]));
+    names
+}
+
+/// A directory entry (server `/api/pos/staff-directory` or a legacy cache
+/// row) as the PIN vault reads it.
+fn directory_pin_entry(value: &Value) -> Option<DirectoryPinEntry> {
+    let id = value_string_alias(value, &["id"])?;
+    let sent = ["pinHash", "pin_hash"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str));
+    Some(DirectoryPinEntry {
+        id,
+        hash: sent
+            .map(str::trim)
+            .filter(|hash| !hash.is_empty())
+            .map(str::to_string),
+        pin_removed: value_bool_alias(value, &["has_pin", "hasPin"]) == Some(false)
+            || sent.is_some_and(|hash| hash.trim().is_empty()),
+        active: value_bool_alias(value, &["is_active", "isActive"]) == Some(true),
+        can_login_pos: value_bool_alias(value, &["can_login_pos", "canLoginPos", "canLoginPOS"])
+            == Some(true),
+        roles: directory_role_names(value),
+    })
+}
+
+fn directory_pin_entries(staff_entries: &Value) -> Vec<DirectoryPinEntry> {
+    staff_entries
+        .as_array()
+        .map(|entries| entries.iter().filter_map(directory_pin_entry).collect())
+        .unwrap_or_default()
+}
+
+/// Drop an entry's PIN hash, keeping the fact that it has one.
+fn strip_entry_pin_hash(entry_obj: &mut Map<String, Value>) {
+    let had_hash = ["pinHash", "pin_hash"].iter().any(|key| {
+        entry_obj
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|hash| !hash.trim().is_empty())
+    });
+    if had_hash && !entry_obj.contains_key("hasPin") && !entry_obj.contains_key("has_pin") {
+        entry_obj.insert("hasPin".to_string(), Value::Bool(true));
+    }
+    let mut entry = Value::Object(std::mem::take(entry_obj));
+    staff_pin_vault::redact_pin_hashes(&mut entry);
+    if let Value::Object(stripped) = entry {
+        *entry_obj = stripped;
+    }
+}
+
+/// This till's branch, as [`resolve_current_branch_id`] reads it, with the
+/// database connection already held.
+fn current_terminal_branch(conn: &rusqlite::Connection) -> Option<String> {
+    let from_settings = || db::get_setting(conn, "terminal", "branch_id");
+    #[cfg(test)]
+    let branch = if db::get_setting(conn, "terminal", "__ignore_keyring").as_deref() == Some("1") {
+        from_settings()
+    } else {
+        storage::get_credential("branch_id").or_else(from_settings)
+    };
+    #[cfg(not(test))]
+    let branch = storage::get_credential("branch_id").or_else(from_settings);
+    branch
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty())
+}
+
+/// A directory row written before the PIN hashes moved to the OS credential
+/// store (or by an older renderer): its hashes go to the vault when the row is
+/// this till's branch (or the till has none yet), and the row is rewritten
+/// without them. A row of another branch only loses its hashes. Answers the
+/// row as it now stands.
+fn adopt_legacy_pin_hashes(conn: &rusqlite::Connection, setting_key: &str, raw: String) -> String {
+    if !staff_pin_vault::text_may_hold_pin_hash(&raw) {
+        return raw;
+    }
+    let Ok(mut payload) = serde_json::from_str::<Value>(&raw) else {
+        return raw;
+    };
+    let row_branch = staff_auth_cache_row_branch(&payload, setting_key);
+    let current_branch = current_terminal_branch(conn);
+    if !row_branch.is_empty()
+        && current_branch
+            .as_deref()
+            .is_none_or(|current| current == row_branch)
+    {
+        let entries = payload
+            .get("staff")
+            .map(directory_pin_entries)
+            .unwrap_or_default();
+        if let Err(error) = staff_pin_vault::save_directory(&row_branch, &entries, Utc::now()) {
+            warn!(%error, "Legacy staff PIN hashes could not be moved to the credential store");
+        }
+    }
+    if let Some(entries) = payload.get_mut("staff").and_then(Value::as_array_mut) {
+        for entry in entries {
+            if let Some(entry_obj) = entry.as_object_mut() {
+                strip_entry_pin_hash(entry_obj);
+            }
+        }
+    }
+    staff_pin_vault::redact_pin_hashes(&mut payload);
+    let stripped = payload.to_string();
+    if let Err(error) = db::set_setting(conn, STAFF_AUTH_CACHE_CATEGORY, setting_key, &stripped) {
+        warn!(%error, "Staff directory row could not be rewritten without its PIN hashes");
+    }
+    stripped
+}
+
+/// What [`migrate_plaintext_staff_pin_hashes`] changed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PinHashMigrationReport {
+    /// Staff directory rows whose hashes moved to the credential store.
+    pub directory_rows: usize,
+    /// Other `local_settings` rows (cached admin responses) wiped of hashes.
+    pub settings_rows: usize,
+    /// Branch data cache rows (the staff schedule) wiped of hashes.
+    pub branch_cache_rows: usize,
+}
+
+impl PinHashMigrationReport {
+    pub(crate) fn changed(&self) -> bool {
+        self.directory_rows + self.settings_rows + self.branch_cache_rows > 0
+    }
+}
+
+/// Startup: move every staff PIN hash out of SQLite. Directory rows go to the
+/// credential store ([`adopt_legacy_pin_hashes`]); the cached copies of the
+/// staff directory and schedule responses are wiped of theirs (the next
+/// directory refresh brings the hashes back, to the credential store).
+pub(crate) fn migrate_plaintext_staff_pin_hashes(
+    db: &db::DbState,
+) -> Result<PinHashMigrationReport, String> {
+    const HOLDS_HASH: &str = "(instr({col}, 'pin_hash') > 0 OR instr({col}, 'pinHash') > 0)";
+    let mut report = PinHashMigrationReport::default();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let rows: Vec<(String, String, String)> = {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT setting_category, setting_key, setting_value FROM local_settings WHERE {}",
+                HOLDS_HASH.replace("{col}", "setting_value")
+            ))
+            .map_err(|e| format!("find staff PIN hashes in settings: {e}"))?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| format!("find staff PIN hashes in settings: {e}"))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| format!("find staff PIN hashes in settings: {e}"))?
+    };
+    for (category, key, value) in rows {
+        if category == STAFF_AUTH_CACHE_CATEGORY {
+            if adopt_legacy_pin_hashes(&conn, &key, value.clone()) != value {
+                report.directory_rows += 1;
+            }
+        } else if let Some(stripped) = staff_pin_vault::redact_pin_hashes_in_text(&value) {
+            db::set_setting(&conn, &category, &key, &stripped)?;
+            report.settings_rows += 1;
+        }
+    }
+
+    // A database without the branch data cache has nothing to wipe there.
+    let branch_rows: Vec<(i64, String)> = conn
+        .prepare(&format!(
+            "SELECT rowid, payload_json FROM branch_ops_cache WHERE {}",
+            HOLDS_HASH.replace("{col}", "payload_json")
+        ))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or_default();
+    for (rowid, payload) in branch_rows {
+        if let Some(stripped) = staff_pin_vault::redact_pin_hashes_in_text(&payload) {
+            conn.execute(
+                "UPDATE branch_ops_cache SET payload_json = ?1 WHERE rowid = ?2",
+                rusqlite::params![stripped, rowid],
+            )
+            .map_err(|e| format!("wipe staff PIN hashes from branch cache: {e}"))?;
+            report.branch_cache_rows += 1;
+        }
+    }
+    Ok(report)
 }
 
 fn value_string_alias(value: &Value, keys: &[&str]) -> Option<String> {
@@ -484,7 +695,6 @@ fn parse_staff_auth_entry(value: &Value) -> Option<StaffAuthCacheEntry> {
         id,
         can_login_pos: value_bool_alias(value, &["can_login_pos", "canLoginPos", "canLoginPOS"]),
         has_pin: value_bool_alias(value, &["has_pin", "hasPin"]),
-        pin_hash: value_string_alias(value, &["pin_hash", "pinHash"]),
         is_active: value_bool_alias(value, &["is_active", "isActive"]),
         current_shift,
         permissions,
@@ -516,8 +726,8 @@ fn canonicalize_staff_auth_entry(entry_obj: &mut Map<String, Value>) {
     if let Some(value) = value_bool_alias(&entry_value, &["has_pin", "hasPin"]) {
         entry_obj.insert("hasPin".to_string(), Value::Bool(value));
     }
-    if let Some(value) = value_string_alias(&entry_value, &["pin_hash", "pinHash"]) {
-        entry_obj.insert("pinHash".to_string(), Value::String(value));
+    // The hash itself goes to the credential store, never into this row.
+    if value_string_alias(&entry_value, &["pin_hash", "pinHash"]).is_some() {
         entry_obj
             .entry("hasPin".to_string())
             .or_insert(Value::Bool(true));
@@ -533,9 +743,9 @@ fn canonicalize_staff_auth_entry(entry_obj: &mut Map<String, Value>) {
 
     entry_obj.remove("can_login_pos");
     entry_obj.remove("has_pin");
-    entry_obj.remove("pin_hash");
     entry_obj.remove("is_active");
     entry_obj.remove("current_shift");
+    strip_entry_pin_hash(entry_obj);
 }
 
 fn redact_staff_auth_hashes(staff_entries: &Value) -> Value {
@@ -554,57 +764,31 @@ fn redact_staff_auth_hashes(staff_entries: &Value) -> Value {
 
 /// Persist a staff auth directory payload (as returned by
 /// `/api/pos/staff-directory`) into `local_settings.staff_auth_cache`,
-/// keyed by branch. The structure is wrapped so the reader's schema-drift
-/// tolerance (version + synced_at envelope) is preserved.
+/// keyed by branch, and its PIN hashes into the OS credential store
+/// (`staff_pin_vault.rs`). The SQLite row never holds a hash. The structure
+/// is wrapped so the reader's schema-drift tolerance (version + synced_at
+/// envelope) is preserved.
 fn persist_staff_auth_cache(
     db: &db::DbState,
     branch_id: &str,
     staff_entries: &Value,
 ) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let existing_staff = db::get_setting(
-        &conn,
-        STAFF_AUTH_CACHE_CATEGORY,
-        &staff_auth_cache_key(branch_id),
-    )
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|cache| cache.get("staff").and_then(Value::as_array).cloned())
-    .unwrap_or_default();
+    // A person listed without a hash keeps the one the vault holds, unless
+    // the directory says the PIN is gone.
+    if let Err(error) = staff_pin_vault::save_directory(
+        branch_id,
+        &directory_pin_entries(staff_entries),
+        Utc::now(),
+    ) {
+        warn!(%error, "Staff PIN hashes could not be saved; offline check-in is unavailable");
+    }
 
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut merged_staff = staff_entries.as_array().cloned().unwrap_or_default();
     for entry in &mut merged_staff {
         let Some(entry_obj) = entry.as_object_mut() else {
             continue;
         };
-        let Some(staff_id) = entry_obj
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        let incoming_hash =
-            value_string_alias(&Value::Object(entry_obj.clone()), &["pin_hash", "pinHash"]);
-        let incoming_has_pin =
-            value_bool_alias(&Value::Object(entry_obj.clone()), &["has_pin", "hasPin"]);
-        if incoming_hash.is_none() && incoming_has_pin != Some(false) {
-            let existing_hash = existing_staff
-                .iter()
-                .find(|existing| {
-                    existing.get("id").and_then(Value::as_str).map(str::trim)
-                        == Some(staff_id.as_str())
-                })
-                .and_then(|existing| value_string_alias(existing, &["pin_hash", "pinHash"]));
-
-            if let Some(hash) = existing_hash {
-                entry_obj.insert("pinHash".to_string(), Value::String(hash));
-                entry_obj
-                    .entry("hasPin".to_string())
-                    .or_insert(Value::Bool(true));
-            }
-        }
         canonicalize_staff_auth_entry(entry_obj);
     }
 
@@ -845,10 +1029,12 @@ pub fn take_manager_approval(auth: &AuthState, approval: MoneyApproval) -> Optio
 }
 
 /// The staff who may give `approval` with their own PIN, with their PIN
-/// hashes: active, allowed to log in to the POS, with a PIN, and holding one
-/// of its store permissions. Default-deny, as the check-in.
+/// hashes from the credential store: active, allowed to log in to the POS,
+/// with a PIN, and holding one of its store permissions. Default-deny, as the
+/// check-in.
 fn approval_candidates(
     cache: StaffAuthDirectoryCache,
+    branch_id: &str,
     approval: MoneyApproval,
 ) -> Vec<(String, String)> {
     let required = approval.catalogue_permissions();
@@ -864,8 +1050,9 @@ fn approval_candidates(
                 .any(|name| required.contains(&name.as_str()))
         })
         .filter_map(|entry| {
-            let hash = entry.pin_hash.as_deref()?.trim().to_string();
-            (!hash.is_empty()).then(|| (entry.id.trim().to_string(), hash))
+            let staff_id = entry.id.trim().to_string();
+            let hash = staff_pin_vault::hash_for(branch_id, &staff_id)?;
+            Some((staff_id, hash))
         })
         .collect()
 }
@@ -877,20 +1064,18 @@ pub(crate) fn manager_approval_available(
     branch_id: &str,
     approval: MoneyApproval,
 ) -> bool {
-    let Some(raw) = db::get_setting(
-        conn,
-        STAFF_AUTH_CACHE_CATEGORY,
-        &staff_auth_cache_key(branch_id),
-    ) else {
+    let setting_key = staff_auth_cache_key(branch_id);
+    let Some(raw) = db::get_setting(conn, STAFF_AUTH_CACHE_CATEGORY, &setting_key) else {
         return false;
     };
+    let raw = adopt_legacy_pin_hashes(conn, &setting_key, raw);
     let Ok(cache) = parse_staff_auth_cache(&raw) else {
         return false;
     };
     if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id.trim() {
         return false;
     }
-    !approval_candidates(cache, approval).is_empty()
+    !approval_candidates(cache, branch_id.trim(), approval).is_empty()
 }
 
 fn record_privileged_grant_at(
@@ -1062,11 +1247,9 @@ fn verify_manager_pin_with_lockout(
             *lockout = persisted_lockout;
             return Err(e);
         }
-        let cache = db::get_setting(
-            &conn,
-            STAFF_AUTH_CACHE_CATEGORY,
-            &staff_auth_cache_key(&branch_id),
-        );
+        let setting_key = staff_auth_cache_key(&branch_id);
+        let cache = db::get_setting(&conn, STAFF_AUTH_CACHE_CATEGORY, &setting_key)
+            .map(|raw| adopt_legacy_pin_hashes(&conn, &setting_key, raw));
         conn.execute_batch("COMMIT").map_err(|e| {
             let _ = conn.execute_batch("ROLLBACK");
             format!("commit manager approval lockout check: {e}")
@@ -1085,7 +1268,7 @@ fn verify_manager_pin_with_lockout(
                 "Staff data unavailable offline. Please sync staff while online.".to_string(),
             );
         }
-        approval_candidates(cache, approval)
+        approval_candidates(cache, &branch_id, approval)
     };
 
     // bcrypt without the database lock (see `login`).
@@ -1442,18 +1625,59 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
     }
 }
 
-/// Verify a selected staff member's POS PIN against the cached branch-scoped
-/// auth directory. This is used for shift check-in and must not mutate the
-/// global app-login auth session.
-pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Result<Value, String> {
+/// The server's staff check-in: it checks the PIN, the person's POS rights,
+/// the branch and the person's open shift elsewhere (Android:
+/// `verifyStaffPinForCheckIn`).
+const STAFF_CHECK_IN_PATH: &str = "/api/pos/staff-auth/check-in";
+/// A check-in waits at most this long for the server before the till checks
+/// the PIN itself.
+const STAFF_CHECK_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const STAFF_CHECK_IN_SESSION_HOURS: u32 = 8;
+
+fn parse_check_in_request(arg0: Option<Value>) -> Result<StaffCheckInVerifyRequest, String> {
     let payload = arg0.ok_or("Missing staff check-in payload")?;
-    let request: StaffCheckInVerifyRequest = serde_json::from_value(payload)
-        .map_err(|_| "Invalid staff check-in payload".to_string())?;
+    serde_json::from_value(payload).map_err(|_| "Invalid staff check-in payload".to_string())
+}
 
-    let staff_id = request.staff_id.trim();
-    let branch_id = request.branch_id.trim();
-    let pin = request.pin.trim();
+/// Verify a selected staff member's POS PIN for a shift check-in (founder
+/// decision 13/10/2026, desktop parity with Android PR #356). The server
+/// decides whenever it answers; only on a transport failure (no answer, 502,
+/// 503 or 504) does this till check the PIN against the hash it holds, with
+/// the wrong-PIN lockout and the offline role rule. This never mutates the
+/// global app-login auth session.
+pub async fn verify_staff_check_in_pin(
+    arg0: Option<Value>,
+    db: &db::DbState,
+) -> Result<Value, String> {
+    verify_staff_check_in_pin_with(arg0, db, |body| async move {
+        let (admin_url, api_key) = crate::resolve_admin_endpoint(Some(db)).await?;
+        api::fetch_from_admin_detailed_with_timeout(
+            &admin_url,
+            &api_key,
+            STAFF_CHECK_IN_PATH,
+            "POST",
+            Some(body),
+            STAFF_CHECK_IN_TIMEOUT,
+        )
+        .await
+    })
+    .await
+}
 
+/// [`verify_staff_check_in_pin`] with the server request supplied (tests).
+pub(crate) async fn verify_staff_check_in_pin_with<F, Fut>(
+    arg0: Option<Value>,
+    db: &db::DbState,
+    ask_server: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, api::AdminFetchError>>,
+{
+    let request = parse_check_in_request(arg0)?;
+    let staff_id = request.staff_id.trim().to_string();
+    let branch_id = request.branch_id.trim().to_string();
+    let pin = Zeroizing::new(request.pin.trim().to_string());
     if staff_id.is_empty() || branch_id.is_empty() || pin.is_empty() {
         return Ok(check_in_verify_failure(
             "staff_auth_unavailable",
@@ -1461,21 +1685,147 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
         ));
     }
 
+    let answer = ask_server(serde_json::json!({
+        "staffId": staff_id,
+        "pin": pin.as_str(),
+        "sessionHours": STAFF_CHECK_IN_SESSION_HOURS,
+    }))
+    .await;
+    match answer {
+        Ok(body) => Ok(server_check_in_answer(&body, &staff_id, &branch_id)),
+        Err(error) if offline_check_in::is_transport_failure(&error) => {
+            warn!(
+                staff_id = %staff_id,
+                "Staff check-in: the server could not be reached; this till checks the PIN"
+            );
+            Ok(verify_check_in_pin_on_till(
+                &staff_id,
+                &branch_id,
+                &pin,
+                db,
+                Utc::now(),
+            ))
+        }
+        Err(error) => Ok(server_check_in_refusal(&error)),
+    }
+}
+
+fn with_source(mut failure: Value, source: &str) -> Value {
+    failure["source"] = Value::String(source.to_string());
+    failure
+}
+
+/// A 2xx answer of the server's check-in: it accepted this person's PIN, or
+/// (an answer this till cannot read as an acceptance) it did not.
+fn server_check_in_answer(body: &Value, staff_id: &str, branch_id: &str) -> Value {
+    let accepted = body.get("success").and_then(Value::as_bool) == Some(true)
+        && body
+            .get("staff_id")
+            .and_then(Value::as_str)
+            .is_some_and(|answered| answered.trim().eq_ignore_ascii_case(staff_id));
+    if !accepted {
+        let error = body
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or("The server did not accept this check-in.");
+        return with_source(check_in_verify_failure("server_refused", error), "server");
+    }
+    offline_check_in::record_server_check_in(staff_id);
+    serde_json::json!({
+        "success": true,
+        "staffId": staff_id,
+        "branchId": branch_id,
+        "source": "server",
+    })
+}
+
+/// A refusal the server answered (or a check-in this till could not even
+/// send): it stands, and the till never checks the PIN itself.
+fn server_check_in_refusal(error: &api::AdminFetchError) -> Value {
+    let Some(status) = error.status() else {
+        // Not sent: this till's connection settings are incomplete. Not a
+        // transport failure, so the till does not check the PIN itself.
+        return check_in_verify_failure(
+            "check_in_unavailable",
+            "Staff check-in could not reach the server: this till's connection settings are incomplete.",
+        );
+    };
+    let server_error = error
+        .app_error_field("error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string());
+    let failure = match status {
+        401 => check_in_verify_failure("invalid_pin", "Invalid PIN"),
+        403 if server_error.contains("PIN is not set") => check_in_verify_failure(
+            "pin_not_configured",
+            "No POS PIN is configured for this staff member.",
+        ),
+        403 if server_error.contains("cannot log in") => check_in_verify_failure(
+            "pos_login_disabled",
+            "This staff member is not allowed to log in on POS.",
+        ),
+        404 => check_in_verify_failure("staff_not_found", &server_error),
+        409 => match error
+            .app_error_field("currentShift")
+            .and_then(parse_staff_auth_current_shift)
+        {
+            Some(current) => check_in_busy_elsewhere_failure(&current),
+            None => check_in_verify_failure("server_refused", &server_error),
+        },
+        423 => check_in_verify_failure("pin_locked", &server_error),
+        429 => check_in_verify_failure("rate_limited", &server_error),
+        _ => check_in_verify_failure("server_refused", &server_error),
+    };
+    with_source(failure, "server")
+}
+
+/// Check a check-in PIN on this till: the server cannot be reached. The
+/// directory cache gives the person and their open shift elsewhere; the PIN
+/// hash, the POS rights and the roles come from the OS credential store,
+/// with the five-wrong-PINs lockout. Only a cashier, manager or driver checks
+/// in this way, and never on a waiter phone. A success leaves the grant the
+/// shift opening reads (`offline_check_in.rs`).
+fn verify_check_in_pin_on_till(
+    staff_id: &str,
+    branch_id: &str,
+    pin: &str,
+    db: &db::DbState,
+    now: DateTime<Utc>,
+) -> Value {
+    let offline =
+        |code: &str, error: &str| with_source(check_in_verify_failure(code, error), "offline");
+
+    let waiter = db
+        .conn
+        .lock()
+        .map(|conn| offline_check_in::waiter_terminal(&conn))
+        .unwrap_or(true);
+    if waiter {
+        return offline(
+            "offline_waiter_terminal",
+            "A waiter phone checks staff in through the server. Try again once the connection is back.",
+        );
+    }
+
     let cache = match load_staff_auth_cache(db, branch_id) {
         Ok(cache) => cache,
         Err(_) => {
-            return Ok(check_in_verify_failure(
+            return offline(
                 "staff_auth_unavailable",
                 "Staff auth data unavailable offline. Please sync staff while online.",
-            ))
+            )
         }
     };
 
     if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id {
-        return Ok(check_in_verify_failure(
+        return offline(
             "staff_auth_unavailable",
             "Staff auth data unavailable offline. Please sync staff while online.",
-        ));
+        );
     }
 
     // UUID comparison is case-sensitive by spec (RFC 4122 §3): canonical
@@ -1486,10 +1836,10 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
     let maybe_staff = cache.staff.iter().find(|entry| entry.id.trim() == staff_id);
 
     let Some(staff) = maybe_staff else {
-        return Ok(check_in_verify_failure(
+        return offline(
             "staff_not_available_offline",
             "Selected staff member is not available in the local POS staff cache.",
-        ));
+        );
     };
 
     // Wave 9 H6: default-deny for missing / `None` fields.
@@ -1506,10 +1856,10 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
     let is_active = staff.is_active.unwrap_or(false);
     let can_login_pos = staff.can_login_pos.unwrap_or(false);
     if !is_active || !can_login_pos {
-        return Ok(check_in_verify_failure(
+        return offline(
             "pos_login_disabled",
             "This staff member is not allowed to log in on POS.",
-        ));
+        );
     }
 
     // Wave 9 H6 continued: `has_pin != Some(true)` means "PIN not
@@ -1517,23 +1867,11 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
     // default-deny rationale — an older cache without this field must
     // not permit login through a stale hash lookup.
     if staff.has_pin != Some(true) {
-        return Ok(check_in_verify_failure(
+        return offline(
             "pin_not_configured",
             "No POS PIN is configured for this staff member.",
-        ));
+        );
     }
-
-    let Some(hash) = staff
-        .pin_hash
-        .as_deref()
-        .map(str::trim)
-        .filter(|hash| !hash.is_empty())
-    else {
-        return Ok(check_in_verify_failure(
-            "pin_not_configured",
-            "No POS PIN is configured for this staff member.",
-        ));
-    };
 
     // Busy-elsewhere check: if this staff has an open shift on any
     // terminal OTHER than the one running this check, refuse the check-in
@@ -1559,21 +1897,75 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
         if !busy_terminal.is_empty()
             && (current_terminal.is_empty() || current_terminal != busy_terminal)
         {
-            return Ok(check_in_busy_elsewhere_failure(current_shift));
+            return with_source(check_in_busy_elsewhere_failure(current_shift), "offline");
         }
     }
 
-    let pin_ok =
-        bcrypt::verify(pin, hash).map_err(|e| format!("Failed to verify staff PIN: {e}"))?;
-    if !pin_ok {
-        return Ok(check_in_verify_failure("invalid_pin", "Invalid PIN"));
+    match staff_pin_vault::verify_offline(branch_id, staff_id, pin, now) {
+        OfflinePinCheck::Accepted { roles } => {
+            if !roles
+                .iter()
+                .any(|role| staff_pin_vault::is_offline_check_in_role(role))
+            {
+                return offline(
+                    "offline_role_not_allowed",
+                    "Without a connection, only a cashier, manager or driver can check in on this till.",
+                );
+            }
+            offline_check_in::record_offline_check_in(staff_id, roles, now);
+            warn!(
+                staff_id = %staff_id,
+                "Staff PIN checked on this till: the shift opens with the offline_check_in marker"
+            );
+            serde_json::json!({
+                "success": true,
+                "staffId": staff_id,
+                "branchId": branch_id,
+                "source": "offline",
+                "offlineCheckIn": true,
+            })
+        }
+        OfflinePinCheck::Unavailable => offline(
+            "staff_not_available_offline",
+            "This till holds no PIN for this person, so they can't check in without a connection.",
+        ),
+        OfflinePinCheck::NotAllowed => offline(
+            "pos_login_disabled",
+            "This staff member is not allowed to log in on POS.",
+        ),
+        OfflinePinCheck::Locked { until } => {
+            let mut failure = offline(
+                "offline_pin_locked",
+                "Too many wrong PINs. Try again in 15 minutes, or once the connection is back.",
+            );
+            failure["lockedUntil"] = Value::String(until.to_rfc3339());
+            failure
+        }
+        OfflinePinCheck::Mismatch { locked_until } => {
+            let mut failure = offline("invalid_pin", "Invalid PIN");
+            if let Some(until) = locked_until {
+                failure["lockedUntil"] = Value::String(until.to_rfc3339());
+            }
+            failure
+        }
     }
+}
 
-    Ok(serde_json::json!({
-        "success": true,
-        "staffId": staff_id,
-        "branchId": branch_id,
-    }))
+/// The on-till check of [`verify_staff_check_in_pin`] alone (tests).
+#[cfg(test)]
+fn verify_staff_check_in_pin_offline(
+    arg0: Option<Value>,
+    db: &db::DbState,
+    now: DateTime<Utc>,
+) -> Result<Value, String> {
+    let request = parse_check_in_request(arg0)?;
+    Ok(verify_check_in_pin_on_till(
+        request.staff_id.trim(),
+        request.branch_id.trim(),
+        request.pin.trim(),
+        db,
+        now,
+    ))
 }
 
 /// Handle auth:logout — invalidate the current session.
@@ -2182,8 +2574,497 @@ mod tests {
         assert_eq!(lockout_attempts(&db_state), 1);
     }
 
+    // --- Staff check-in: the server first, this till only without it -------
+    //
+    // Founder decision 13/10/2026 (desktop parity with Android PR #356): the
+    // server decides whenever it answers; the till checks the PIN against the
+    // hash it holds in the OS credential store only on a transport failure,
+    // with a five-wrong-PINs lockout and the cashier/manager/driver rule.
+
+    fn staff_entry(id: &str, pin: &str, roles: &[&str]) -> Value {
+        serde_json::json!({
+            "id": id,
+            "canLoginPos": true,
+            "isActive": true,
+            "hasPin": true,
+            "pinHash": bcrypt::hash(pin, 4).expect("hash test pin"),
+            "roles": roles.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn check_in_request(staff_id: &str, pin: &str) -> Option<Value> {
+        Some(serde_json::json!({ "staffId": staff_id, "branchId": "branch-1", "pin": pin }))
+    }
+
+    fn no_answer() -> api::AdminFetchError {
+        api::AdminFetchError::transport("Cannot reach admin dashboard at https://admin.test")
+    }
+
+    fn reason(result: &Value) -> (&str, &str) {
+        (
+            result
+                .get("reasonCode")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            result.get("source").and_then(Value::as_str).unwrap_or(""),
+        )
+    }
+
+    fn raw_directory_row(db_state: &db::DbState, branch_id: &str) -> String {
+        let conn = db_state.conn.lock().expect("db lock");
+        db::get_setting(
+            &conn,
+            STAFF_AUTH_CACHE_CATEGORY,
+            &staff_auth_cache_key(branch_id),
+        )
+        .expect("directory row")
+    }
+
+    #[tokio::test]
+    async fn check_in_asks_the_server_first_and_its_refusal_stands() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        // The till holds this person's right PIN: the server's answer still stands.
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([staff_entry("staff-answer", "4321", &["cashier"])]),
+        );
+        let cases = [
+            (
+                401,
+                r#"{"success":false,"error":"Invalid PIN"}"#,
+                "invalid_pin",
+            ),
+            (
+                403,
+                r#"{"success":false,"error":"Staff member cannot log in to POS"}"#,
+                "pos_login_disabled",
+            ),
+            (
+                403,
+                r#"{"success":false,"error":"POS PIN is not set for this staff member"}"#,
+                "pin_not_configured",
+            ),
+            (
+                403,
+                r#"{"success":false,"error":"Staff member is not assigned to this branch"}"#,
+                "server_refused",
+            ),
+            (
+                404,
+                r#"{"success":false,"error":"Staff member not found"}"#,
+                "staff_not_found",
+            ),
+            (
+                409,
+                r#"{"success":false,"error":"No active cashier shift on the main terminal.","code":"NO_ACTIVE_BRANCH_CASHIER"}"#,
+                "server_refused",
+            ),
+            (
+                423,
+                r#"{"success":false,"error":"Staff PIN is temporarily locked"}"#,
+                "pin_locked",
+            ),
+            (
+                429,
+                r#"{"success":false,"error":"Too many requests"}"#,
+                "rate_limited",
+            ),
+            (
+                500,
+                r#"{"success":false,"error":"PIN verification failed"}"#,
+                "server_refused",
+            ),
+        ];
+        for (status, body, code) in cases {
+            let mut sent = None;
+            let result = verify_staff_check_in_pin_with(
+                check_in_request("staff-answer", "4321"),
+                &db_state,
+                |request| {
+                    sent = Some(request);
+                    async move {
+                        Err(api::AdminFetchError::from_http_response_for_test(
+                            status, body,
+                        ))
+                    }
+                },
+            )
+            .await
+            .expect("structured answer");
+            assert_eq!(result["success"], false, "{status}: {result}");
+            assert_eq!(reason(&result), (code, "server"), "{status}: {result}");
+            assert_eq!(
+                sent,
+                Some(
+                    serde_json::json!({ "staffId": "staff-answer", "pin": "4321", "sessionHours": 8 })
+                )
+            );
+            assert_eq!(
+                offline_check_in::admission_for("staff-answer", Utc::now()),
+                offline_check_in::CheckInAdmission::Ordinary,
+                "a refusal never admits an offline opening"
+            );
+        }
+
+        // Checked in elsewhere: the server's open shift names the terminal.
+        let result = verify_staff_check_in_pin_with(
+            check_in_request("staff-answer", "4321"),
+            &db_state,
+            |_| async {
+                Err(api::AdminFetchError::from_http_response_for_test(
+                    409,
+                    r#"{"success":false,"error":"Staff member is already checked in on another terminal","currentShift":{"shiftId":"shift-9","terminalId":"terminal-9","terminalName":"Bar","role":"cashier","checkedInAt":"2026-10-14T07:00:00Z"}}"#,
+                ))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason(&result), ("staff_busy_elsewhere", "server"));
+        assert_eq!(result["busyTerminalName"], "Bar");
+        assert_eq!(result["busyShiftId"], "shift-9");
+    }
+
+    #[tokio::test]
+    async fn the_server_accepting_the_pin_checks_in_without_the_till_check() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        // No directory at all on this till: the server decides.
+        let db_state = test_db_state();
+        offline_check_in::record_offline_check_in(
+            "staff-online",
+            vec!["cashier".into()],
+            Utc::now(),
+        );
+
+        let result = verify_staff_check_in_pin_with(
+            check_in_request("staff-online", "4321"),
+            &db_state,
+            |_| async {
+                Ok(serde_json::json!({ "success": true, "session_id": "s-1", "staff_id": "staff-online" }))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["source"], "server");
+        assert!(result.get("offlineCheckIn").is_none());
+        // A server check replaces an earlier offline one: an ordinary opening.
+        assert_eq!(
+            offline_check_in::admission_for("staff-online", Utc::now()),
+            offline_check_in::CheckInAdmission::Ordinary
+        );
+
+        // A 2xx this till cannot read as the person's acceptance is a refusal.
+        let result = verify_staff_check_in_pin_with(
+            check_in_request("staff-online", "4321"),
+            &db_state,
+            |_| async { Ok(serde_json::json!({ "success": true, "staff_id": "someone-else" })) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason(&result), ("server_refused", "server"));
+    }
+
+    #[tokio::test]
+    async fn without_an_answer_the_till_checks_the_pin_and_admits_an_offline_opening() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([staff_entry("staff-no-answer", "4321", &["Cashier"])]),
+        );
+        let transport_failures = [
+            no_answer(),
+            api::AdminFetchError::from_http_response_for_test(502, "<html>Bad gateway</html>"),
+            api::AdminFetchError::from_http_response_for_test(503, ""),
+            api::AdminFetchError::from_http_response_for_test(504, "Gateway timeout"),
+        ];
+        for failure in transport_failures {
+            let result = verify_staff_check_in_pin_with(
+                check_in_request("staff-no-answer", "4321"),
+                &db_state,
+                |_| {
+                    let failure = failure.clone();
+                    async move { Err(failure) }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["success"], true, "{failure}: {result}");
+            assert_eq!(result["source"], "offline");
+            assert_eq!(result["offlineCheckIn"], true);
+        }
+        assert_eq!(
+            offline_check_in::admission_for("staff-no-answer", Utc::now()),
+            offline_check_in::CheckInAdmission::Offline {
+                roles: vec!["cashier".to_string()]
+            }
+        );
+        offline_check_in::complete("staff-no-answer");
+    }
+
+    #[tokio::test]
+    async fn five_wrong_pins_lock_that_persons_offline_check_in_for_fifteen_minutes() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                staff_entry("staff-locked", "4321", &["cashier"]),
+                staff_entry("staff-other", "1111", &["manager"]),
+            ]),
+        );
+        let offline_try = |staff: &'static str, pin: &'static str| {
+            verify_staff_check_in_pin_with(check_in_request(staff, pin), &db_state, |_| async {
+                Err(no_answer())
+            })
+        };
+
+        for attempt in 1..staff_pin_vault::OFFLINE_PIN_MAX_FAILURES {
+            let result = offline_try("staff-locked", "0000").await.unwrap();
+            assert_eq!(
+                reason(&result),
+                ("invalid_pin", "offline"),
+                "attempt {attempt}"
+            );
+            assert!(result.get("lockedUntil").is_none());
+        }
+        let fifth = offline_try("staff-locked", "0000").await.unwrap();
+        assert_eq!(reason(&fifth), ("invalid_pin", "offline"));
+        assert!(fifth["lockedUntil"].is_string());
+
+        // The right PIN does not open the lock, and the lock is kept with the
+        // hashes in the credential store (what a restart keeps), not in memory.
+        let locked = offline_try("staff-locked", "4321").await.unwrap();
+        assert_eq!(reason(&locked), ("offline_pin_locked", "offline"));
+        let vault = staff_pin_vault::load().unwrap().expect("vault");
+        assert!(vault.failures["staff-locked"].locked_until.is_some());
+
+        // Only that person is locked, and only offline: the server decides online.
+        let other = offline_try("staff-other", "1111").await.unwrap();
+        assert_eq!(other["success"], true, "{other}");
+        let online = verify_staff_check_in_pin_with(
+            check_in_request("staff-locked", "4321"),
+            &db_state,
+            |_| async { Ok(serde_json::json!({ "success": true, "staff_id": "staff-locked" })) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(online["success"], true);
+        offline_check_in::complete("staff-other");
+    }
+
+    #[tokio::test]
+    async fn offline_check_in_is_for_cashiers_managers_and_drivers_only() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                staff_entry("staff-kitchen", "1111", &["kitchen", "server"]),
+                staff_entry("staff-driver", "2222", &["driver"]),
+                staff_entry("staff-manager", "3333", &["manager"]),
+            ]),
+        );
+        let offline_try = |staff: &'static str, pin: &'static str| {
+            verify_staff_check_in_pin_with(check_in_request(staff, pin), &db_state, |_| async {
+                Err(no_answer())
+            })
+        };
+
+        let kitchen = offline_try("staff-kitchen", "1111").await.unwrap();
+        assert_eq!(reason(&kitchen), ("offline_role_not_allowed", "offline"));
+        assert_eq!(
+            offline_check_in::admission_for("staff-kitchen", Utc::now()),
+            offline_check_in::CheckInAdmission::Ordinary
+        );
+        for (staff, pin) in [("staff-driver", "2222"), ("staff-manager", "3333")] {
+            let result = offline_try(staff, pin).await.unwrap();
+            assert_eq!(result["success"], true, "{staff}: {result}");
+            offline_check_in::complete(staff);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_waiter_phone_never_checks_staff_in_without_the_server() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([staff_entry("staff-waiter-phone", "4321", &["cashier"])]),
+        );
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "terminal_type", "mobile_waiter").unwrap();
+        }
+        let result = verify_staff_check_in_pin_with(
+            check_in_request("staff-waiter-phone", "4321"),
+            &db_state,
+            |_| async { Err(no_answer()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason(&result), ("offline_waiter_terminal", "offline"));
+    }
+
+    #[test]
+    fn the_staff_directory_keeps_pin_hashes_out_of_sqlite() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        persist_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            &serde_json::json!([staff_entry("staff-1", "4321", &["cashier"])]),
+        )
+        .expect("persist");
+        let raw = raw_directory_row(&db_state, "branch-1");
+        assert!(
+            !raw.contains("pinHash") && !raw.contains("pin_hash"),
+            "{raw}"
+        );
+        assert!(raw.contains(r#""hasPin":true"#), "{raw}");
+        assert!(staff_pin_vault::hash_for("branch-1", "staff-1").is_some());
+
+        // A refresh that omits the hash keeps the one the credential store holds.
+        persist_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            &serde_json::json!([{
+                "id": "staff-1", "canLoginPos": true, "isActive": true, "hasPin": true,
+                "roles": [{ "name": "cashier" }]
+            }]),
+        )
+        .expect("refresh");
+        let result = verify_staff_check_in_pin_offline(
+            check_in_request("staff-1", "4321"),
+            &db_state,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        offline_check_in::complete("staff-1");
+
+        // A refresh that says the PIN is gone drops it.
+        persist_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            &serde_json::json!([{
+                "id": "staff-1", "canLoginPos": true, "isActive": true, "hasPin": false,
+                "pinHash": null, "roles": [{ "name": "cashier" }]
+            }]),
+        )
+        .expect("refresh");
+        assert!(staff_pin_vault::hash_for("branch-1", "staff-1").is_none());
+    }
+
+    #[test]
+    fn legacy_pin_hashes_move_to_the_credential_store_and_every_sqlite_copy_is_wiped() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        // As an older build stored them: in the directory row, in the cached
+        // staff-directory response and in the branch data cache.
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([{
+                "id": "staff-1", "can_login_pos": true, "is_active": true,
+                "pin_hash": bcrypt::hash("4321", 4).unwrap(), "roles": [{ "name": "cashier" }]
+            }]),
+        );
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "local",
+                "admin_api_get::/api/pos/staff-directory?branchId=branch-1",
+                r#"{"path":"/api/pos/staff-directory","data":{"staff":[{"id":"staff-1","pinHash":"$2b$04$abc","hasPin":true}]}}"#,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO branch_ops_cache (branch_id, cache_key, scope_key, version, synced_at, payload_json)
+                 VALUES ('branch-1', 'staff_schedule', 'today', NULL, '2026-10-14T07:00:00Z',
+                         '{\"staff\":[{\"id\":\"staff-1\",\"pin_hash\":\"$2b$04$abc\",\"has_pin\":true}]}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let report = migrate_plaintext_staff_pin_hashes(&db_state).expect("migrate");
+        assert_eq!(
+            report,
+            PinHashMigrationReport {
+                directory_rows: 1,
+                settings_rows: 1,
+                branch_cache_rows: 1
+            }
+        );
+        {
+            let conn = db_state.conn.lock().unwrap();
+            let left: i64 = conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM local_settings
+                              WHERE instr(setting_value, 'pin_hash') > 0 OR instr(setting_value, 'pinHash') > 0)
+                          + (SELECT COUNT(*) FROM branch_ops_cache
+                              WHERE instr(payload_json, 'pin_hash') > 0 OR instr(payload_json, 'pinHash') > 0)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0, "no SQLite copy of a PIN hash is left");
+        }
+        // The hash itself now lives in the credential store, and the row says
+        // the person has a PIN.
+        assert!(raw_directory_row(&db_state, "branch-1").contains(r#""hasPin":true"#));
+        let result = verify_staff_check_in_pin_offline(
+            check_in_request("staff-1", "4321"),
+            &db_state,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        offline_check_in::complete("staff-1");
+
+        assert!(!migrate_plaintext_staff_pin_hashes(&db_state)
+            .unwrap()
+            .changed());
+    }
+
+    #[test]
+    fn a_legacy_row_of_another_branch_loses_its_hashes_without_replacing_this_tills() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "branch_id", "branch-1").unwrap();
+        }
+        persist_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            &serde_json::json!([staff_entry("staff-1", "4321", &["cashier"])]),
+        )
+        .unwrap();
+        set_staff_auth_cache(
+            &db_state,
+            "branch-old",
+            serde_json::json!([staff_entry("staff-old", "9999", &["cashier"])]),
+        );
+
+        migrate_plaintext_staff_pin_hashes(&db_state).unwrap();
+        assert!(!raw_directory_row(&db_state, "branch-old").contains("pinHash"));
+        let vault = staff_pin_vault::load().unwrap().expect("vault");
+        assert_eq!(vault.branch_id, "branch-1");
+        assert!(vault.staff.contains_key("staff-1"));
+        assert!(!vault.staff.contains_key("staff-old"));
+    }
+
     #[test]
     fn verify_staff_check_in_pin_accepts_valid_cached_staff_pin() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let hash = bcrypt::hash("4321", 4).expect("hash test pin");
         set_staff_auth_cache(
@@ -2191,34 +3072,38 @@ mod tests {
             "branch-1",
             serde_json::json!([
                 {
-                    "id": "staff-1",
+                    "id": "staff-valid-1",
                     "can_login_pos": true,
                     "has_pin": true,
                     "pin_hash": hash,
-                    "is_active": true
+                    "is_active": true,
+                    "role_name": "cashier"
                 }
             ]),
         );
 
-        let result = verify_staff_check_in_pin(
+        let result = verify_staff_check_in_pin_offline(
             Some(serde_json::json!({
-                "staffId": "staff-1",
+                "staffId": "staff-valid-1",
                 "branchId": "branch-1",
                 "pin": "4321"
             })),
             &db_state,
+            Utc::now(),
         )
         .expect("verification should succeed");
 
         assert_eq!(result.get("success").and_then(Value::as_bool), Some(true));
         assert_eq!(
             result.get("staffId").and_then(Value::as_str),
-            Some("staff-1")
+            Some("staff-valid-1")
         );
+        offline_check_in::complete("staff-valid-1");
     }
 
     #[test]
     fn verify_staff_check_in_pin_accepts_camel_case_staff_directory_cache() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let hash = bcrypt::hash("4321", 4).expect("hash test pin");
         set_staff_auth_cache(
@@ -2226,22 +3111,24 @@ mod tests {
             "branch-1",
             serde_json::json!([
                 {
-                    "id": "staff-1",
+                    "id": "staff-camel-1",
                     "canLoginPos": true,
                     "hasPin": true,
                     "pinHash": hash,
-                    "isActive": true
+                    "isActive": true,
+                    "roleName": "manager"
                 }
             ]),
         );
 
-        let result = verify_staff_check_in_pin(
+        let result = verify_staff_check_in_pin_offline(
             Some(serde_json::json!({
-                "staffId": "staff-1",
+                "staffId": "staff-camel-1",
                 "branchId": "branch-1",
                 "pin": "4321"
             })),
             &db_state,
+            Utc::now(),
         )
         .expect("verification should succeed");
 
@@ -2250,78 +3137,7 @@ mod tests {
             Some(true),
             "result={result:?}"
         );
-    }
-
-    #[test]
-    fn staff_auth_directory_refresh_preserves_existing_pin_hash_when_omitted() {
-        let db_state = test_db_state();
-        let hash = bcrypt::hash("4321", 4).expect("hash test pin");
-        set_staff_auth_cache(
-            &db_state,
-            "branch-1",
-            serde_json::json!([
-                {
-                    "id": "staff-1",
-                    "can_login_pos": true,
-                    "has_pin": true,
-                    "pin_hash": hash,
-                    "is_active": true
-                }
-            ]),
-        );
-
-        persist_staff_auth_cache(
-            &db_state,
-            "branch-1",
-            &serde_json::json!([
-                {
-                    "id": "staff-1",
-                    "canLoginPos": true,
-                    "hasPin": true,
-                    "isActive": true
-                }
-            ]),
-        )
-        .expect("refresh should preserve hash");
-
-        let raw_cache = {
-            let conn = db_state.conn.lock().expect("db lock");
-            db::get_setting(
-                &conn,
-                STAFF_AUTH_CACHE_CATEGORY,
-                &staff_auth_cache_key("branch-1"),
-            )
-            .expect("raw cache")
-        };
-        assert!(raw_cache.contains("pinHash"), "raw_cache={raw_cache}");
-        let loaded_cache =
-            load_staff_auth_cache(&db_state, "branch-1").expect("cache should deserialize");
-        assert_eq!(
-            loaded_cache.branch_id, "branch-1",
-            "loaded cache branch mismatch"
-        );
-        assert_eq!(loaded_cache.staff.len(), 1, "loaded cache staff count");
-        assert_eq!(
-            loaded_cache.staff[0].pin_hash.as_deref(),
-            Some(hash.as_str()),
-            "loaded cache pin hash"
-        );
-
-        let result = verify_staff_check_in_pin(
-            Some(serde_json::json!({
-                "staffId": "staff-1",
-                "branchId": "branch-1",
-                "pin": "4321"
-            })),
-            &db_state,
-        )
-        .expect("verification should succeed");
-
-        assert_eq!(
-            result.get("success").and_then(Value::as_bool),
-            Some(true),
-            "result={result:?}"
-        );
+        offline_check_in::complete("staff-camel-1");
     }
 
     #[test]
@@ -2352,6 +3168,7 @@ mod tests {
 
     #[test]
     fn verify_staff_check_in_pin_rejects_wrong_pin() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let hash = bcrypt::hash("4321", 4).expect("hash test pin");
         // Wave 9 H6: fixture now sets both `is_active` and `can_login_pos`
@@ -2369,18 +3186,20 @@ mod tests {
                     "is_active": true,
                     "can_login_pos": true,
                     "has_pin": true,
-                    "pin_hash": hash
+                    "pin_hash": hash,
+                    "role_name": "cashier"
                 }
             ]),
         );
 
-        let result = verify_staff_check_in_pin(
+        let result = verify_staff_check_in_pin_offline(
             Some(serde_json::json!({
                 "staffId": "staff-1",
                 "branchId": "branch-1",
                 "pin": "9999"
             })),
             &db_state,
+            Utc::now(),
         )
         .expect("verification should return structured failure");
 
@@ -2393,6 +3212,7 @@ mod tests {
 
     #[test]
     fn verify_staff_check_in_pin_rejects_missing_pin_configuration() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         // Wave 9 H6: see the pin-wrong test above for the rationale on
         // seeding `is_active` explicitly.
@@ -2410,13 +3230,14 @@ mod tests {
             ]),
         );
 
-        let result = verify_staff_check_in_pin(
+        let result = verify_staff_check_in_pin_offline(
             Some(serde_json::json!({
                 "staffId": "staff-1",
                 "branchId": "branch-1",
                 "pin": "4321"
             })),
             &db_state,
+            Utc::now(),
         )
         .expect("verification should return structured failure");
 
@@ -2429,6 +3250,7 @@ mod tests {
 
     #[test]
     fn verify_staff_check_in_pin_rejects_pos_disabled_staff() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
         let hash = bcrypt::hash("4321", 4).expect("hash test pin");
         set_staff_auth_cache(
@@ -2444,13 +3266,14 @@ mod tests {
             ]),
         );
 
-        let result = verify_staff_check_in_pin(
+        let result = verify_staff_check_in_pin_offline(
             Some(serde_json::json!({
                 "staffId": "staff-1",
                 "branchId": "branch-1",
                 "pin": "4321"
             })),
             &db_state,
+            Utc::now(),
         )
         .expect("verification should return structured failure");
 
@@ -2463,15 +3286,17 @@ mod tests {
 
     #[test]
     fn verify_staff_check_in_pin_rejects_when_cache_is_missing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
 
-        let result = verify_staff_check_in_pin(
+        let result = verify_staff_check_in_pin_offline(
             Some(serde_json::json!({
                 "staffId": "staff-1",
                 "branchId": "branch-1",
                 "pin": "4321"
             })),
             &db_state,
+            Utc::now(),
         )
         .expect("verification should return structured failure");
 

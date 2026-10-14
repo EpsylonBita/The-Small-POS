@@ -1,0 +1,32 @@
+{
+  "modals": {
+    "staffShift": {
+      "offlineCheckIn": {
+        "checkedInTitle": "Hyrje në turn pa lidhje",
+        "checkedInMessage": "Serveri e kontrollon këtë hyrje në turn sapo të kthehet lidhja.",
+        "roleNotAllowed": "Pa lidhje, në këtë arkë mund të hyjë në turn vetëm një arkëtar, menaxher ose shofer.",
+        "giftCardsNeedServer": "Me kartat dhuratë, hapja e sirtarit do serverin. Hyr në turn sapo të kthehet lidhja.",
+        "noPinOnTill": "Kjo arkë nuk e ka PIN-in e këtij personi, ndaj pa lidhje nuk mund të hyjë në turn.",
+        "locked": "Shumë PIN të gabuar. Provo sërish pas 15 minutash ose sapo të kthehet lidhja.",
+        "waiterPhone": "Në telefonin e kamarierit, hyrja në turn kalon nga serveri. Provo sërish sapo të kthehet lidhja."
+      },
+      "pinLocked": "Ky PIN është i bllokuar për momentin. Provo sërish më vonë.",
+      "staffNotFound": "Ky anëtar i stafit nuk u gjet në këtë dyqan.",
+      "rateLimited": "Shumë përpjekje për hyrje në turn. Prit pak dhe provo sërish.",
+      "checkInUnavailable": "Kjo arkë nuk mund ta pyesë serverin: cilësimet e lidhjes së saj janë të paplota.",
+      "syncConflict": {
+        "offlineTitle": "Serveri refuzoi një hyrje në turn të bërë pa lidhje",
+        "reason": {
+          "waiter_terminal": "telefoni i kamarierit nuk mund ta fusë stafin në turn pa lidhje.",
+          "staff_not_found": "personi nuk i përket këtij dyqani.",
+          "active_shift_elsewhere": "personi ka hyrë në turn në një arkë tjetër.",
+          "unresolved_shift": "një turn i mëparshëm i këtij personi në këtë arkë është ende i hapur.",
+          "unknown": "nuk mund të konfirmohej."
+        },
+        "shiftTitle": "Serveri refuzoi një turn",
+        "shiftBody": "anëtari i stafit ka tashmë një turn tjetër të hapur. Mbylle ose ndreqe, pastaj provo sërish te Sinkronizimi.",
+        "review": "Turni mbetet në këtë arkë për kontroll te Sinkronizimi."
+      }
+    }
+  }
+}

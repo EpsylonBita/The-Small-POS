@@ -809,6 +809,10 @@ pub async fn loyalty_earn_points(
     let tx_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let description = format!("Earned {} points for order", points_earned);
+    // A full queue refuses the award before the ledger or the balance
+    // changes (offline-week audit #3: its sync row used to be dropped, so
+    // the server never heard of points the till had already credited).
+    sync_queue::ensure_enqueue_capacity(&conn, 1)?;
     ensure_local_loyalty_customer_row(&conn, &org_id, &canonical_customer_id, &now)?;
 
     // Insert loyalty transaction
@@ -895,7 +899,7 @@ pub async fn loyalty_earn_points(
         "description": description,
         "created_at": now,
     });
-    let _ = sync_queue::enqueue_payload_item(
+    sync_queue::enqueue_payload_item(
         &conn,
         "loyalty_transactions",
         &tx_id,
@@ -905,7 +909,8 @@ pub async fn loyalty_earn_points(
         Some("loyalty"),
         Some("manual"),
         Some(1),
-    );
+    )
+    .map_err(|e| format!("loyalty_earn_points enqueue: {e}"))?;
 
     info!(
         customer_id = %canonical_customer_id,
@@ -1108,7 +1113,9 @@ pub async fn loyalty_redeem_points(
             "discount_value": discount_value,
             "created_at": now,
         });
-        let _ = sync_queue::enqueue_payload_item(
+        // In the redemption's transaction: a refused row (a full queue)
+        // rolls the ledger row and the debit back with it.
+        sync_queue::enqueue_payload_item(
             &conn,
             "loyalty_transactions",
             &tx_id,
@@ -1118,7 +1125,8 @@ pub async fn loyalty_redeem_points(
             Some("loyalty"),
             Some("manual"),
             Some(1),
-        );
+        )
+        .map_err(|e| format!("loyalty_redeem_points enqueue: {e}"))?;
         Ok(())
     })();
     if let Err(error) = redeemed {

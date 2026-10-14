@@ -397,10 +397,20 @@ fn terminal_identity_rollback_binding(
 fn validate_generic_setting_update(category: &str, key: &str) -> Result<(), String> {
     if crate::is_sensitive_setting_path(category, key) {
         Err("PROTECTED_TERMINAL_SETTING".to_string())
+    } else if category
+        .trim()
+        .eq_ignore_ascii_case(STAFF_DIRECTORY_CACHE_CATEGORY)
+    {
+        // The staff directory cache is written only by the native directory
+        // refresh: the check-in and the manager's own-PIN approval trust it,
+        // and its PIN hashes live in the OS credential store.
+        Err("STAFF_DIRECTORY_NATIVE_ONLY".to_string())
     } else {
         Ok(())
     }
 }
+
+const STAFF_DIRECTORY_CACHE_CATEGORY: &str = "staff_auth_cache";
 
 fn normalize_dotted_settings_updates(
     payload: &Value,
@@ -2778,6 +2788,9 @@ pub async fn settings_get(
 
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         if let Some(v) = db::get_setting(&conn, &cat, &k) {
+            // A staff PIN hash never reaches the renderer (a row written
+            // before the hashes moved to the OS credential store).
+            let v = crate::staff_pin_vault::redact_pin_hashes_in_text(&v).unwrap_or(v);
             return Ok(serde_json::Value::String(v));
         }
         drop(conn);
@@ -4849,6 +4862,36 @@ mod dto_tests {
             crate::db::get_setting(&connection, "staff_auth_cache", "branch-test").as_deref(),
             Some("staff-directory")
         );
+    }
+
+    /// The staff directory cache is the data the check-in and the manager's
+    /// own-PIN approval trust: the renderer may read it (without PIN hashes)
+    /// but never write it, so it cannot plant a person, a right or a hash.
+    #[test]
+    fn the_renderer_cannot_write_the_staff_directory_cache() {
+        for category in ["staff_auth_cache", " Staff_Auth_Cache "] {
+            assert_eq!(
+                super::validate_generic_setting_update(category, "branch_branch-1").unwrap_err(),
+                "STAFF_DIRECTORY_NATIVE_ONLY"
+            );
+        }
+        let database = crate::tests::harness::TestDb::open();
+        let error = super::apply_generic_settings_and_credentials_checked(
+            &database.state,
+            &[(
+                "staff_auth_cache".to_string(),
+                "branch_branch-1".to_string(),
+                r#"{"staff":[{"id":"planted","pinHash":"$2b$04$planted","canLoginPos":true}]}"#
+                    .to_string(),
+            )],
+        )
+        .unwrap_err();
+        assert_eq!(error, "STAFF_DIRECTORY_NATIVE_ONLY");
+        let connection = database.state.conn.lock().expect("db");
+        assert!(
+            crate::db::get_setting(&connection, "staff_auth_cache", "branch_branch-1").is_none()
+        );
+        assert!(super::validate_generic_setting_update("printer", "paper_width").is_ok());
     }
 
     #[test]

@@ -36,6 +36,7 @@ import {
 import type { Room, RoomStatus, RoomFilters } from '../../../services/RoomsService';
 import { getRoomEffectiveStatus } from '../../../services/RoomsService';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
+import { CentsMoneyInput } from '../../../components/ui/CentsMoneyInput';
 import { getBridge, offEvent, onEvent } from '../../../../lib';
 import {
   getCachedTerminalCredentials,
@@ -766,7 +767,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
             <InputField
               icon={<DollarSign className="w-4 h-4" />}
               label={t('roomsView.paymentAmount', { defaultValue: 'Payment Amount' })}
-              type="number"
+              money
               value={checkoutPaymentData.amount}
               onChange={(value) => setCheckoutPaymentData(prev => prev ? { ...prev, amount: value } : prev)}
               isDark={isDark}
@@ -864,7 +865,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               <InputField
                 icon={<DollarSign className="w-4 h-4" />}
                 label={t('roomsView.amount', { defaultValue: 'Amount' })}
-                type="number"
+                money
                 value={folioChargeData.amount}
                 onChange={(value) => setFolioChargeData(prev => prev ? { ...prev, amount: value } : prev)}
                 isDark={isDark}
@@ -1126,24 +1127,33 @@ const InputField: React.FC<{
   onChange: (v: string) => void;
   isDark: boolean;
   type?: string;
+  /** Money field: digit entry in cents, the value kept as a plain decimal string. */
+  money?: boolean;
   required?: boolean;
-}> = ({ icon, label, value, onChange, isDark, type = 'text', required }) => (
-  <div>
-    <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-      {label} {required && <span className="text-red-500">*</span>}
-    </label>
-    <div className="relative">
-      <span className={`absolute left-3 top-1/2 -translate-y-1/2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-        {icon}
-      </span>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={`w-full pl-9 pr-3 py-2.5 rounded-xl text-sm ${
-          isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
-        } border focus:ring-2 focus:ring-yellow-400`}
-      />
+}> = ({ icon, label, value, onChange, isDark, type = 'text', money = false, required }) => {
+  const fieldClassName = `w-full pl-9 pr-3 py-2.5 rounded-xl text-sm ${
+    isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
+  } border focus:ring-2 focus:ring-yellow-400`;
+  return (
+    <div>
+      <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+        {label} {required && <span className="text-red-500">*</span>}
+      </label>
+      <div className="relative">
+        <span className={`absolute left-3 top-1/2 -translate-y-1/2 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+          {icon}
+        </span>
+        {money ? (
+          <CentsMoneyInput aria-label={label} value={value} onValueChange={onChange} className={fieldClassName} />
+        ) : (
+          <input
+            type={type}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className={fieldClassName}
+          />
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};

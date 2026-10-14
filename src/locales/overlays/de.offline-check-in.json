@@ -1,0 +1,32 @@
+{
+  "modals": {
+    "staffShift": {
+      "offlineCheckIn": {
+        "checkedInTitle": "Ohne Verbindung eingestempelt",
+        "checkedInMessage": "Der Server prüft dieses Einstempeln, sobald die Verbindung zurück ist.",
+        "roleNotAllowed": "Ohne Verbindung können an dieser Kasse nur Kassierer, Manager oder Fahrer einstempeln.",
+        "giftCardsNeedServer": "Mit Geschenkkarten braucht das Öffnen der Kasse den Server. Stempeln Sie ein, sobald die Verbindung zurück ist.",
+        "noPinOnTill": "Diese Kasse hat die PIN dieser Person nicht gespeichert, deshalb kann sie ohne Verbindung nicht einstempeln.",
+        "locked": "Zu viele falsche PINs. Versuchen Sie es in 15 Minuten erneut oder sobald die Verbindung zurück ist.",
+        "waiterPhone": "Auf einem Kellner-Handy läuft das Einstempeln über den Server. Versuchen Sie es erneut, sobald die Verbindung zurück ist."
+      },
+      "pinLocked": "Diese PIN ist vorübergehend gesperrt. Versuchen Sie es später erneut.",
+      "staffNotFound": "Dieser Mitarbeiter wurde in diesem Geschäft nicht gefunden.",
+      "rateLimited": "Zu viele Einstempelversuche. Warten Sie kurz und versuchen Sie es erneut.",
+      "checkInUnavailable": "Diese Kasse kann den Server nicht fragen: Ihre Verbindungseinstellungen sind unvollständig.",
+      "syncConflict": {
+        "offlineTitle": "Der Server hat ein Einstempeln ohne Verbindung abgelehnt",
+        "reason": {
+          "waiter_terminal": "Ein Kellner-Handy kann Mitarbeiter nicht ohne Verbindung einstempeln.",
+          "staff_not_found": "Die Person gehört nicht zu diesem Geschäft.",
+          "active_shift_elsewhere": "Die Person ist an einer anderen Kasse eingestempelt.",
+          "unresolved_shift": "Eine frühere Schicht dieser Person an dieser Kasse ist noch offen.",
+          "unknown": "Es konnte nicht bestätigt werden."
+        },
+        "shiftTitle": "Der Server hat eine Schicht abgelehnt",
+        "shiftBody": "Der Mitarbeiter hat bereits eine andere offene Schicht. Schließen oder reparieren Sie sie und versuchen Sie es dann in der Synchronisation erneut.",
+        "review": "Die Schicht bleibt zur Prüfung in der Synchronisation an dieser Kasse."
+      }
+    }
+  }
+}

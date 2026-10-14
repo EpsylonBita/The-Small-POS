@@ -20,7 +20,8 @@ import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { formatTime, formatCurrency as formatMoney } from '../../utils/format';
 import { normalizeShiftRole, type StaffShiftRole } from '../../utils/shift-role';
-import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { parseMoneyInputValue } from '../../utils/moneyInput';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import { calculateDriverReturn } from '../../utils/driver-checkout';
 import { toLocalDateString } from '../../utils/date';
 import { posApiGet } from '../../utils/api-helpers';
@@ -46,6 +47,14 @@ import {
 } from '../../utils/staffShiftCheckoutPrint';
 import { emitCompatEvent, getBridge } from '../../../lib';
 import { GiftCardsApiService } from '../../services/GiftCardsApiService';
+import {
+  cachedGiftCardsStore,
+  checkedOnTill,
+  describeOfflineOpeningRefusal,
+  isOfflineCheckInRole,
+  offlineGiftCardsMessage,
+  offlineRoleNotAllowedMessage,
+} from '../../services/offlineCheckIn';
 import { getCachedTerminalCredentials } from '../../services/terminal-credentials';
 import { financialOpening, openingMatchesScope, parseOpeningCents, type FinancialOpeningScope } from '../../lib/financial-opening';
 import type {
@@ -142,16 +151,15 @@ interface StaffMember {
   roles: StaffRole[]; // All roles for this staff member
   can_login_pos: boolean;
   is_active: boolean;
+  // PIN hashes never reach the renderer: the native check-in holds them in
+  // the OS credential store (staff_pin_vault.rs).
   has_pin?: boolean;
-  pin_hash?: string | null;
   hourly_rate?: number;
 }
 
 interface StaffAuthCachePayload {
-  version: number;
-  branch_id: string;
-  synced_at: string;
-  staff: StaffMember[];
+  branch_id?: string;
+  staff?: unknown[];
 }
 
 interface PosIntegrationPayload {
@@ -163,8 +171,9 @@ interface PosIntegrationPayload {
   is_active?: boolean;
 }
 
+// Written only by the native directory refresh (`staffAuth.refreshDirectory`);
+// the renderer reads it for the instant staff list.
 const STAFF_AUTH_CACHE_CATEGORY = 'staff_auth_cache';
-const STAFF_AUTH_CACHE_VERSION = 1;
 const ERGANI_PLUGIN_ID = 'ergani_digital_schedule';
 
 type CheckInStep = 'select-staff' | 'enter-pin' | 'select-role' | 'enter-cash';
@@ -322,8 +331,6 @@ function hasOwnKey(value: unknown, key: string): boolean {
 
 function includesStaffAuthMetadata(members: unknown[]): boolean {
   return members.some((member) =>
-    hasOwnKey(member, 'pin_hash') ||
-    hasOwnKey(member, 'pinHash') ||
     hasOwnKey(member, 'has_pin') ||
     hasOwnKey(member, 'hasPin') ||
     hasOwnKey(member, 'can_login_pos') ||
@@ -394,12 +401,6 @@ function mapScheduledStaffToMember(member: any): StaffMember {
         : typeof member?.hasPin === 'boolean'
           ? member.hasPin
           : undefined,
-    pin_hash:
-      typeof member?.pin_hash === 'string'
-        ? member.pin_hash
-        : typeof member?.pinHash === 'string'
-          ? member.pinHash
-          : null,
     hourly_rate: member?.hourly_rate,
   };
 }
@@ -518,6 +519,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const financialTouched = useRef(false);
   const financialCompleted = useRef(false);
   const financialClear = useRef<Promise<boolean>>(Promise.resolve(true));
+  // The person whose PIN this till checked itself because the server could not
+  // be reached (native `source: 'offline'`): only a cashier, manager or driver
+  // opens, and a gift-card store's drawer opening needs the server.
+  const offlineCheckInStaffId = useRef<string | null>(null);
   const checkInGeneration = useRef(0);
   const checkInMounted = useRef(true);
   const getCheckInIdentity = () => {
@@ -598,8 +603,25 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           setFinancialEntry({ status: 'ready', scope, currency: frozen.currency, original });
           return;
         }
+        // A gift-card store's cashier opening is the hosted original opening:
+        // without the server it is refused, never an ordinary opening
+        // (Android parity: requiresOriginalFinancialOpening).
+        const giftCardsStore = await cachedGiftCardsStore(bridge);
+        if (!valid()) return;
+        const refuseWithoutServer = () => {
+          setFinancialEntry({ status: 'blocked' });
+          setError(offlineGiftCardsMessage(t));
+        };
+        if (giftCardsStore && offlineCheckInStaffId.current === selectedStaff.id) {
+          refuseWithoutServer();
+          return;
+        }
         const capability = await new GiftCardsApiService(bridge).getStatus();
         if (!valid()) return;
+        if (!capability.ok && giftCardsStore) {
+          refuseWithoutServer();
+          return;
+        }
         const optedIn = capability.ok && capability.data.enabled && capability.data.moduleEnabled &&
           capability.data.terminalEnabled && capability.data.configured && !capability.data.unavailable;
         if (!optedIn) {
@@ -1552,6 +1574,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setContentDirection(1);
       setCheckInStep('select-staff');
       setSelectedStaff(null);
+      offlineCheckInStaffId.current = null;
       setEnteredPin('');
       setStaffQrCode('');
       setResolvingStaffQr(false);
@@ -1729,27 +1752,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setStaffActiveShifts(map);
   };
 
-  const persistStaffAuthCache = async (branchId: string, staffList: StaffMember[]) => {
-    const payload: StaffAuthCachePayload = {
-      version: STAFF_AUTH_CACHE_VERSION,
-      branch_id: branchId,
-      synced_at: new Date().toISOString(),
-      staff: staffList.map((member) => ({
-        ...member,
-        roles: member.roles ?? [],
-        has_pin: typeof member.has_pin === 'boolean' ? member.has_pin : !!member.pin_hash,
-        pin_hash: member.pin_hash ?? null,
-      })),
-    };
-
-    await bridge.settings.updateLocal({
-      category: STAFF_AUTH_CACHE_CATEGORY,
-      settings: {
-        [buildStaffAuthCacheKey(branchId)]: JSON.stringify(payload),
-      },
-    });
-  };
-
   const loadCachedStaffAuth = async (branchId: string): Promise<StaffMember[]> => {
     const rawValue = await bridge.settings.get({
       category: STAFF_AUTH_CACHE_CATEGORY,
@@ -1762,7 +1764,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
 
     try {
-      const parsed = JSON.parse(rawValue) as Partial<StaffAuthCachePayload> & { staff?: unknown[] };
+      const parsed = JSON.parse(rawValue) as StaffAuthCachePayload;
       const cachedBranchId = typeof parsed.branch_id === 'string' ? parsed.branch_id.trim() : '';
       if (cachedBranchId && cachedBranchId !== branchId.trim()) {
         return [];
@@ -1850,9 +1852,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // immediately from local SQLite (sub-100ms), then the network fetch
       // below refreshes with fresh data. This is the warm-path that makes
       // the modal feel instant — the network call still runs but doesn't
-      // block the initial render. Cache is populated by
-      // `persistStaffAuthCache` after every successful network fetch, so
-      // any returning user has a hot cache.
+      // block the initial render. The native directory refresh
+      // (`staffAuth.refreshDirectory`, below) populates the cache after every
+      // successful fetch, so any returning user has a hot cache.
       try {
         cachedStaff = await loadCachedStaffAuth(branchId);
         if (!isCurrent()) return;
@@ -1930,18 +1932,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             ...member,
             can_login_pos: cachedMember.can_login_pos,
             has_pin: typeof cachedMember.has_pin === 'boolean' ? cachedMember.has_pin : member.has_pin,
-            pin_hash: cachedMember.pin_hash ?? member.pin_hash,
           };
         })
         .filter((staff) => !!staff.id);
 
-      if (authMetadataAvailable) {
-        try {
-          await persistStaffAuthCache(branchId, normalizedStaffList);
-        } catch (cacheError) {
-          console.warn('[StaffShiftModal] Failed to persist staff auth cache:', cacheError);
-        }
-      } else {
+      if (!authMetadataAvailable) {
         console.warn('[StaffShiftModal] Admin staff-schedule response is missing POS auth metadata; preserving existing local auth cache');
       }
       if (!isCurrent()) return;
@@ -2379,6 +2374,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setGiftApproval(null);
     clearFinancialAuthorization();
     setSelectedStaff(staffMember);
+    offlineCheckInStaffId.current = null;
     setEnteredPin('');
     setError('');
     setCheckInEligibility(null);
@@ -2488,6 +2484,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       | {
           reasonCode?: unknown;
           error?: unknown;
+          source?: unknown;
           busyTerminalName?: unknown;
           busyRole?: unknown;
           busyCheckedInAt?: unknown;
@@ -2495,9 +2492,36 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       | undefined,
   ): string => {
     const reasonCode = typeof result?.reasonCode === 'string' ? result.reasonCode : '';
+    const checkedHere = checkedOnTill(result);
     switch (reasonCode) {
       case 'invalid_pin':
         return t('modals.staffShift.invalidPIN');
+      case 'offline_pin_locked':
+        return t(
+          'modals.staffShift.offlineCheckIn.locked',
+          'Too many wrong PINs. Try again in 15 minutes, or once the connection is back.',
+        );
+      case 'offline_role_not_allowed':
+        return offlineRoleNotAllowedMessage(t);
+      case 'offline_waiter_terminal':
+        return t(
+          'modals.staffShift.offlineCheckIn.waiterPhone',
+          'A waiter phone checks staff in through the server. Try again once the connection is back.',
+        );
+      case 'pin_locked':
+        return t('modals.staffShift.pinLocked', 'This PIN is locked for now. Try again later.');
+      case 'staff_not_found':
+        return t('modals.staffShift.staffNotFound', 'This staff member was not found in this store.');
+      case 'rate_limited':
+        return t(
+          'modals.staffShift.rateLimited',
+          'Too many check-in attempts. Wait a moment and try again.',
+        );
+      case 'check_in_unavailable':
+        return t(
+          'modals.staffShift.checkInUnavailable',
+          "This till cannot ask the server: its connection settings are incomplete.",
+        );
       case 'pin_not_configured':
         return t(
           'modals.staffShift.pinNotConfigured',
@@ -2510,6 +2534,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         );
       case 'staff_auth_unavailable':
       case 'staff_not_available_offline':
+        // The server could not be reached and this till holds no PIN for
+        // this person (Android: offlineCheckIn.noPinOnTill).
+        if (checkedHere && reasonCode === 'staff_not_available_offline') {
+          return t(
+            'modals.staffShift.offlineCheckIn.noPinOnTill',
+            "This till holds no PIN for this person, so they can't check in without a connection.",
+          );
+        }
         return t(
           'modals.staffShift.staffAuthUnavailable',
           'Staff auth data is not available offline yet. Open the staff list while online first.',
@@ -2732,7 +2764,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         return;
       }
 
-      if (staffAuthMetadataStatus === 'missing' && !selectedStaff.pin_hash) {
+      if (staffAuthMetadataStatus === 'missing' && selectedStaff.has_pin !== true) {
         const legacyProbe = await verifyLegacyAdminStaffPinOnline(
           selectedStaff.id,
           enteredPin.trim(),
@@ -2776,6 +2808,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         });
 
         if (authSucceeded) {
+          offlineCheckInStaffId.current = checkedOnTill(normalizedAuth) ? selectedStaff.id : null;
           const staffRole = selectedStaff.role_name;
           await finishPinVerification(branchId, terminalId, staffRole, current);
           return; // done
@@ -2817,6 +2850,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const role = normalizeShiftRole(roleName);
     if (!role) {
       setError(t('modals.staffShift.unsupportedShiftRole', { defaultValue: 'This role cannot open a POS shift. Ask your manager to assign a supported POS role.' }));
+      return;
+    }
+    if (offlineCheckInStaffId.current === selectedStaff?.id && !isOfflineCheckInRole(role)) {
+      setError(offlineRoleNotAllowedMessage(t));
       return;
     }
     if (cashierFirstGateActive && role !== 'cashier') {
@@ -3128,6 +3165,18 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (result.success) {
         const shiftId = result?.shiftId || result?.data?.shiftId || result?.data?.id;
         emitCompatEvent('shift-updated', { shiftId, status: 'active' });
+        if ((result as { offlineCheckIn?: unknown }).offlineCheckIn === true) {
+          // The queued open carries the offline_check_in marker the server
+          // re-checks once the connection is back.
+          offlineCheckInStaffId.current = null;
+          toast(
+            `${t('modals.staffShift.offlineCheckIn.checkedInTitle', 'Checked in without a connection')}. ${t(
+              'modals.staffShift.offlineCheckIn.checkedInMessage',
+              'The server checks this check-in once the connection is back.',
+            )}`,
+            { duration: 8000, icon: '\u2139\ufe0f' },
+          );
+        }
         // Z-17/08 forensics: when the typed opening float breaks the
         // terminal's close→open carry (drawer closed on one number, opened
         // on another with nothing in between), confront the cashier NOW —
@@ -3193,13 +3242,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           onClose();
         }, 300);
       } else {
-        setError(result.error || t('modals.staffShift.openShiftFailed'));
+        const refusal = result.error || t('modals.staffShift.openShiftFailed');
+        setError(describeOfflineOpeningRefusal(refusal, t) ?? refusal);
       }
     } catch (err) {
       const message = extractErrorMessage(err, t('modals.staffShift.openShiftFailed'));
       setError(message === 'UNSUPPORTED_SHIFT_ROLE'
         ? t('modals.staffShift.unsupportedShiftRole', { defaultValue: 'This role cannot open a POS shift. Ask your manager to assign a supported POS role.' })
-        : message);
+        : describeOfflineOpeningRefusal(message, t) ?? message);
     } finally {
       setLoading(false);
     }
@@ -4502,12 +4552,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     name: satelliteCheckout.staff.name,
                   })}
                 </label>
-                <input
-                  type="text"
-                  inputMode="decimal"
+                <CentsMoneyInput
+                  aria-label={t('modals.staffShift.satelliteCheckout.countedLabel', {
+                    defaultValue: 'Cash received from {{name}}',
+                    name: satelliteCheckout.staff.name,
+                  })}
                   disabled={satellitePending || satelliteSubmitting}
                   value={satelliteCountedCash}
-                  onChange={event => setSatelliteCountedCash(event.target.value)}
+                  onValueChange={setSatelliteCountedCash}
                   placeholder={formatSatelliteMoney(figures.expected_cash_amount)}
                   className="mt-2 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-lg font-bold text-slate-900 dark:border-white/15 dark:bg-black/30 dark:text-white"
                   data-testid="satellite-counted-cash"
@@ -4685,12 +4737,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <option value="other">{getExpenseTypeLabel('other')}</option>
           </select>
 
-          <input
-            type="text"
-            inputMode="decimal"
+          <CentsMoneyInput
+            aria-label={t('modals.staffShift.amountLabel', 'Amount')}
             value={expenseAmount}
-            onChange={(e) => setExpenseAmount(formatMoneyInputWithCents(e.target.value))}
-            onFocus={(e) => e.target.select()}
+            onValueChange={setExpenseAmount}
             placeholder="0,00"
             className="liquid-glass-modal-input text-lg font-bold"
           />
@@ -4913,12 +4963,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     </span>
                   )}
                 </label>
-                <input
-                  type="text"
-                  inputMode="decimal"
+                <CentsMoneyInput
+                  aria-label={t('modals.staffShift.amountLabel', 'Amount')}
                   value={paymentAmount}
-                  onChange={(e) => setPaymentAmount(formatMoneyInputWithCents(e.target.value))}
-                  onFocus={(e) => e.target.select()}
+                  onValueChange={setPaymentAmount}
                   placeholder={expectedPayment ? formatCurrency(expectedPayment) : '0,00'}
                   className="liquid-glass-modal-input w-full text-lg font-bold"
                 />
@@ -5121,13 +5169,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               </dl>
               <label className="mt-5 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                 {giftText(giftCloseText('countLabel', 'Counted cash in drawer'))}
-                <input
-                  type="text"
-                  inputMode="decimal"
+                <CentsMoneyInput
                   data-testid="gift-close-count"
                   value={closingCash}
                   disabled={giftBusy || approval !== null}
-                  onChange={(e) => setClosingCash(formatMoneyInputWithCents(e.target.value))}
+                  onValueChange={setClosingCash}
                   className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                 />
               </label>
@@ -5263,12 +5309,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <label className="block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
                     {t('modals.staffShift.closingCashLabel')}
                   </label>
-                  <input
-                    type="text"
-                    inputMode="decimal"
+                  <CentsMoneyInput
+                    aria-label={t('modals.staffShift.closingCashLabel')}
                     value={closingCash}
-                    onChange={(e) => setClosingCash(formatMoneyInputWithCents(e.target.value))}
-                    onFocus={(e) => e.target.select()}
+                    onValueChange={setClosingCash}
                     placeholder="0,00"
                     className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                     autoFocus
@@ -5760,12 +5804,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     defaultValue: 'Cash Actually Handed Over',
                   })}
                 </label>
-                <input
-                  type="text"
-                  inputMode="decimal"
+                <CentsMoneyInput
+                  aria-label={t('modals.staffShift.cashActuallyHandedOver', { defaultValue: 'Cash Actually Handed Over' })}
                   value={driverActualCash}
-                  onChange={(e) => setDriverActualCash(formatMoneyInputWithCents(e.target.value))}
-                  onFocus={(e) => e.target.select()}
+                  onValueChange={setDriverActualCash}
                   placeholder="0,00"
                   className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                   autoFocus
@@ -5941,12 +5983,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     defaultValue: 'Cash Actually Handed Over',
                   })}
                 </label>
-                <input
-                  type="text"
-                  inputMode="decimal"
+                <CentsMoneyInput
+                  aria-label={t('modals.staffShift.cashActuallyHandedOver', { defaultValue: 'Cash Actually Handed Over' })}
                   value={closingCash}
-                  onChange={(e) => setClosingCash(formatMoneyInputWithCents(e.target.value))}
-                  onFocus={(e) => e.target.select()}
+                  onValueChange={setClosingCash}
                   placeholder="0,00"
                   className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                   autoFocus
@@ -6855,21 +6895,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     strokeWidth={3}
                   />}
 
-                  <input
-                    type="text"
-                    inputMode="decimal"
+                  <CentsMoneyInput
+                    aria-label={cashTitle}
                     value={cashValue}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      const val = /^[\d.,]*$/.test(raw) && (raw.match(/[.,]/g)?.length ?? 0) <= 1
-                        ? formatMoneyInputWithCents(raw) : raw;
+                    onValueChange={(val) => {
                       if (isStartingCashRole) {
                         setDriverStartingAmount(val);
                       } else {
                         setOpeningCash(val);
                       }
                     }}
-                    onFocus={(e) => e.target.select()}
                     placeholder="0,00"
                     className="liquid-glass-modal-input flex-1 text-3xl font-black text-center"
                     readOnly={!!originalOpening || financialBusy.current || (isStartingCashRole && !activeCashierExists)}
@@ -7719,12 +7754,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <option value="other">{getExpenseTypeLabel('other')}</option>
                       </select>
 
-                      <input
-                        type="text"
-                        inputMode="decimal"
+                      <CentsMoneyInput
+                        aria-label={t('modals.staffShift.amountLabel', 'Amount')}
                         value={expenseAmount}
-                        onChange={(e) => setExpenseAmount(formatMoneyInputWithCents(e.target.value))}
-                        onFocus={(e) => e.target.select()}
+                        onValueChange={setExpenseAmount}
                         placeholder="0,00"
                         className="liquid-glass-modal-input text-sm"
                       />
@@ -8601,14 +8634,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         </label>
                         <div className="relative">
                           <Banknote className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                          <input
-                            type="text"
-                            inputMode="decimal"
+                          <CentsMoneyInput
+                            aria-label={t('modals.staffShift.amountLabel', 'Amount')}
                             value={paymentAmount}
-                            onChange={(e) => {
-                              setPaymentAmount(formatMoneyInputWithCents(e.target.value));
-                            }}
-                            onFocus={(e) => e.target.select()}
+                            onValueChange={setPaymentAmount}
                             placeholder={expectedPayment ? formatCurrency(expectedPayment ?? 0) : '0,00'}
                             className="liquid-glass-modal-input w-full pl-9"
                           />
@@ -8774,14 +8803,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {t('modals.staffShift.cashierPaymentLabel')}
                     </label>
                     <div className="flex items-center gap-3">
-                      <input
-                        type="text"
-                        inputMode="decimal"
+                      <CentsMoneyInput
+                        aria-label={t('modals.staffShift.cashierPaymentLabel')}
                         value={staffPayment}
-                        onChange={(e) => {
-                          setStaffPayment(formatMoneyInputWithCents(e.target.value));
-                        }}
-                        onFocus={(e) => e.target.select()}
+                        onValueChange={setStaffPayment}
                         placeholder="0,00"
                         className="liquid-glass-modal-input flex-1 text-2xl font-bold text-center"
                       />
@@ -8796,14 +8821,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {t('modals.staffShift.closingCashLabel')}
                     </label>
                     <div className="flex items-center gap-3">
-                      <input
-                        type="text"
-                        inputMode="decimal"
+                      <CentsMoneyInput
+                        aria-label={t('modals.staffShift.closingCashLabel')}
                         value={closingCash}
-                        onChange={(e) => {
-                          setClosingCash(formatMoneyInputWithCents(e.target.value));
-                        }}
-                        onFocus={(e) => e.target.select()}
+                        onValueChange={setClosingCash}
                         placeholder="0,00"
                         className="liquid-glass-modal-input flex-1 text-2xl font-bold text-center"
                         autoFocus
@@ -8928,14 +8949,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <label className="block text-sm font-semibold text-slate-200 mb-2">
                           {t('modals.staffShift.actualCashReturned', 'Actual Cash Returned')}
                         </label>
-                        <input
-                          type="text"
-                          inputMode="decimal"
+                        <CentsMoneyInput
+                          aria-label={t('modals.staffShift.actualCashReturned', 'Actual Cash Returned')}
                           value={driverActualCash}
-                          onChange={(e) => {
-                            setDriverActualCash(formatMoneyInputWithCents(e.target.value));
-                          }}
-                          onFocus={(e) => e.target.select()}
+                          onValueChange={setDriverActualCash}
                           placeholder={formatCurrency(amountToReturn)}
                           className="liquid-glass-modal-input w-full text-2xl font-bold text-center"
                         />

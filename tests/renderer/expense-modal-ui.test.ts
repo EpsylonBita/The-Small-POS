@@ -193,7 +193,7 @@ test('ExpenseModal expense fields bind to independent draft keys', () => {
   // Amount, justification (reason) and receipt/reference must each keep their own value.
   assert.match(
     source,
-    /value=\{expenseDraft\.amount\}\s*onChange=\{\(event\) => setExpenseDraft\(\(current\) => \(\{ \.\.\.current, amount: formatMoneyInputWithCents\(event\.target\.value\) \}\)\)\}/,
+    /<CentsMoneyInput[^>]*?value=\{expenseDraft\.amount\}\s*onValueChange=\{\(amount\) => setExpenseDraft\(\(current\) => \(\{ \.\.\.current, amount \}\)\)\}/,
   );
   assert.match(
     source,

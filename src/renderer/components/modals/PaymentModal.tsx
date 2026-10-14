@@ -12,7 +12,8 @@ import {
   releaseOrdinaryOwnerBeforeSend,
   type OrdinaryCollectionOwner,
 } from '../../hooks/useOrderStore';
-import { formatMoneyInputFromNumber, formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { parseMoneyInputValue } from '../../utils/moneyInput';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import { formatCurrency } from '../../utils/format';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
@@ -715,7 +716,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   };
 
   const handleQuickCashSelect = (amount: number) => {
-    setCashReceived(formatMoneyInputFromNumber(amount));
+    setCashReceived(Number.isFinite(amount) ? String(roundMoney(Math.max(0, amount))) : '');
     cashInputRef.current?.focus();
   };
 
@@ -1184,12 +1185,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               <p className="text-sm liquid-glass-modal-text-muted mb-2">
                 {t('modals.payment.enterCashReceived', 'Cash Received')}
               </p>
-              <input
+              <CentsMoneyInput
                 ref={cashInputRef}
-                type="text"
-                inputMode="decimal"
+                aria-label={t('modals.payment.enterCashReceived', 'Cash Received')}
                 value={cashReceived}
-                onChange={(e) => setCashReceived(formatMoneyInputWithCents(e.target.value))}
+                onValueChange={setCashReceived}
                 placeholder="0,00"
                 autoFocus
                 className={`w-full rounded-xl border-2 p-4 text-center text-3xl font-bold outline-none transition-colors ${cashInputVisualClasses.cashInput}`}

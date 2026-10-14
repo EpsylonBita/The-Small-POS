@@ -70,9 +70,11 @@ async function openCorrection() {
   render(<SuppliersPage />);
   fireEvent.click(await screen.findByTestId('capture-queue-open'));
   fireEvent.click(await screen.findByText('Correct A'));
-  await screen.findByDisplayValue('25');
+  await screen.findByDisplayValue('25,00');
 }
-const typeAmount = (value: string) => fireEvent.change(screen.getByDisplayValue('25'), { target: { value } });
+// The amount is a digit-entry money field: typed digits are cents (123450 -> 1.234,50).
+const typeAmount = (value: string) =>
+  fireEvent.change(screen.getByRole('textbox', { name: (en as any).suppliers.amount }), { target: { value } });
 const save = () => fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
 
 describe('supplier payment entry', () => {
@@ -90,18 +92,27 @@ describe('supplier payment entry', () => {
   }
   beforeEach(() => mocks.post.mockReset());
 
-  it.each(['12abc', '1e3', '1.234', '12,3,4'])('rejects %s without a payment request', async value => {
+  it.each(['12abc', '1e3', '-5'])('refuses %s at the keyboard and keeps the amount shown', async value => {
     const input = await openPayment();
+    expect(input).toHaveValue('2.000,00');
     fireEvent.change(input, { target: { value } });
-    fireEvent.click(screen.getByRole('button', { name: labels.recordPayment, exact: true }));
+    expect(input).toHaveValue('2.000,00');
     expect(mocks.post).not.toHaveBeenCalled();
-    expect(input).toHaveValue(value);
   });
 
-  it.each(['1.234,50', '1,234.50'])('sends %s as 1234.50', async value => {
+  it('refuses an emptied payment amount without a payment request', async () => {
+    const input = await openPayment();
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: labels.recordPayment, exact: true }));
+    expect(mocks.post).not.toHaveBeenCalled();
+    expect(input).toHaveValue('');
+  });
+
+  it.each(['123450', '1.234,50', '1,234.50'])('reads %s as digits in cents and sends 1234.50', async value => {
     mocks.post.mockResolvedValue({ success: true, data: { success: true } });
     const input = await openPayment();
     fireEvent.change(input, { target: { value } });
+    expect(input).toHaveValue('1.234,50');
     fireEvent.click(screen.getByRole('button', { name: labels.recordPayment, exact: true }));
     await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('pos/supplier-invoices/payment-invoice/payments', expect.objectContaining({ amount: 1234.5 })));
   });
@@ -152,6 +163,7 @@ describe('reading a typed invoice amount', () => {
 
 describe('recorded invoice amount correction', () => {
   it.each([
+    ['123450', 1234.5],
     ['1.234,50', 1234.5],
     ['1,234.50', 1234.5],
   ])('sends %j as %s and only then says it was saved', async (typed, amount) => {
@@ -162,7 +174,8 @@ describe('recorded invoice amount correction', () => {
     await waitFor(() => expect(mocks.success).toHaveBeenCalledWith(review.saved));
   });
 
-  it.each(['1.234', 'abc', '0'])('refuses %j in words, sends nothing and keeps the form open', async typed => {
+  // Letters never reach the field (digit entry refuses them); a typed zero does.
+  it.each(['0', '000'])('refuses %j in words, sends nothing and keeps the form open', async typed => {
     await openCorrection();
     fireEvent.change(screen.getByPlaceholderText('Invoice number'), { target: { value: 'INV-2' } });
     typeAmount(typed);
@@ -196,7 +209,7 @@ describe('recorded invoice amount correction', () => {
   ])('names the paid-invoice amount lock in words (%s)', async (_shape, refusal) => {
     mocks.patch.mockResolvedValue(refusal);
     await openCorrection();
-    typeAmount('30');
+    typeAmount('3000');
     save();
 
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith('pos/supplier-invoices/A', { amount: 30 }));

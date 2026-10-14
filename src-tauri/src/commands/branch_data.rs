@@ -466,7 +466,10 @@ async fn fetch_branch_scoped_payload(
 ) -> Result<Value, String> {
     match crate::admin_fetch(Some(db), &path, "GET", None).await {
         Ok(response) => {
-            let payload = extract_payload(response);
+            let mut payload = extract_payload(response);
+            // The staff schedule carries PIN hashes: neither this cache nor
+            // the renderer keeps them (staff_pin_vault.rs).
+            crate::staff_pin_vault::redact_pin_hashes(&mut payload);
             let synced_at = {
                 let conn = db.conn.lock().map_err(|error| error.to_string())?;
                 cache_payload(&conn, branch_id, cache_key, scope_key, &payload)?
@@ -502,7 +505,8 @@ async fn fetch_branch_scoped_payload(
                 let conn = db.conn.lock().map_err(|error| error.to_string())?;
                 read_cache_entry(&conn, branch_id, cache_key, scope_key)?
             };
-            if let Some(entry) = cached {
+            if let Some(mut entry) = cached {
+                crate::staff_pin_vault::redact_pin_hashes(&mut entry.payload);
                 return Ok(local_first_success(
                     entry.payload,
                     "cache",

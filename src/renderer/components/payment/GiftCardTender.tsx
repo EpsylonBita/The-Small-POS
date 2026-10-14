@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { GiftCardCheckoutSplit } from '../../../lib/ipc-contracts';
 import { MODULE_IDS, useAcquiredModules } from '../../hooks/useAcquiredModules';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import {
   giftCardAdmissionKey,
   giftCardCheckoutService,
@@ -592,14 +593,11 @@ export function GiftCardTender({
                   defaultValue: 'Card {{masked}} · balance {{balance}}',
                 })}
               </p>
-              <input
-                type="text"
-                inputMode="decimal"
+              <CentsMoneyInput
                 aria-label={t('giftCardCheckout.amount', 'Amount to charge')}
-                autoComplete="off"
                 readOnly={fixedAmountCents !== null}
                 value={fixedAmountCents !== null ? (fixedAmountCents / 100).toFixed(2) : amountText}
-                onChange={(event) => setAmountText(event.target.value)}
+                onValueChange={setAmountText}
                 className="liquid-glass-modal-input"
               />
               <button

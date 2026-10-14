@@ -22,6 +22,7 @@ import {
   POSGlassInput,
 } from '../components/ui/pos-glass-components';
 import { formatCurrency } from '../utils/format';
+import { CentsMoneyInput } from '../components/ui/CentsMoneyInput';
 import { parseAmountToCents, type GiftCard } from '../services/GiftCardsApiService';
 import {
   attemptBelongsTo,
@@ -965,16 +966,15 @@ const GiftCardFundingPanel: React.FC<GiftCardFundingPanelProps> = ({
         </div>
 
         <div className="grid gap-2 sm:grid-cols-2">
-          <POSGlassInput
+          <CentsMoneyInput
+            className="liquid-glass-modal-input"
             value={amount}
-            onChange={(event) => {
-              setAmount(event.target.value);
+            onValueChange={(value) => {
+              setAmount(value);
               setGrantReview(null);
             }}
             placeholder={t('giftCards.funding.amount')}
             aria-label={t('giftCards.funding.amount')}
-            inputMode="decimal"
-            autoComplete="off"
             disabled={busy}
           />
           <POSGlassInput

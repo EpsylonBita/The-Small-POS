@@ -22,10 +22,19 @@ test('EditOrderRefundSettlementModal keeps refund allocation behavior with round
   assert.match(source, /onConfirm\(refunds\)/);
   assert.match(source, /handleFillRemaining\(payment\.id/);
   assert.match(source, /RefundAttributionFields/);
-  assert.match(source, /rounded-2xl border border-white\/10 bg-white\/5 p-4/);
-  assert.match(source, /rounded-2xl border border-white\/10 bg-white\/5 px-3 py-1\.5/);
-  assert.match(source, /w-full rounded-2xl border border-white\/20 bg-white\/10 py-2 pl-7 pr-3/);
-  assert.match(source, /w-full rounded-2xl border border-white\/20 bg-white\/10 px-3 py-2/);
+  // 26/07/2026 (1.4.40): the payment card, "Use Remaining" and both fields moved from
+  // dark-only white/10 utilities to the shared glass tokens, which carry the light and the
+  // dark theme. The amount is digit entry in cents behind the payment's own currency code.
+  assert.match(source, /className="liquid-glass-modal-inset space-y-3 rounded-2xl p-4"/);
+  assert.match(source, /className="liquid-glass-modal-button rounded-2xl px-3 py-1\.5 text-xs font-semibold"/);
+  assert.match(source, /<CentsMoneyInput[\s\S]*?className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3/);
+  assert.match(source, /\{payment\.currency \?\? '—'\}/);
+  assert.match(source, /<textarea[\s\S]*?className="liquid-glass-modal-input w-full rounded-2xl px-3 py-2/);
+  assert.doesNotMatch(
+    source,
+    /border-white\/10 bg-white\/5|border-white\/20 bg-white\/10|&euro;|€/,
+    'no dark-only chrome or hard-coded euro sign',
+  );
 });
 
 test('EditOrderRefundSettlementModal has no legacy hover, blue, or small-radius chrome', () => {

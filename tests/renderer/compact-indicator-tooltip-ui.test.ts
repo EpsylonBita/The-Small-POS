@@ -19,7 +19,13 @@ test('OrderSyncRouteIndicator condensed dot uses role/aria-label, no native titl
   assert.doesNotMatch(source, /group-hover:/);
 
   // The condensed status dot is a labeled graphic (role="img" + aria-label), not a hover tooltip.
-  assert.match(source, /role="img" aria-label=\{t\('sync\.routing\.viaParent'\)\}/);
+  // Since 03/10/2026 the label names the route actually in use (this runtime has no LAN
+  // receiver, so it never claims "via parent"), localized for direct cloud or unknown.
+  assert.match(source, /role="img" aria-label=\{routeLabel\}/);
+  assert.match(
+    source,
+    /const routeLabel = status\.routingMode === 'direct_cloud'\s*\?\s*t\('sync\.routing\.directCloud'\)\s*:\s*t\('sync\.dashboard\.notAvailable'\);/,
+  );
   // The visual routing dot itself is preserved.
   assert.match(source, /w-2 h-2 rounded-full/);
 });

@@ -31,6 +31,7 @@ import toast from "react-hot-toast";
 import { formatCurrency } from "../../utils/format";
 import { resolveAdjustmentAttribution } from "../../utils/staffAttribution";
 import { refundVoidErrorMessage } from "../../utils/refundVoidErrors";
+import { CentsMoneyInput } from "../ui/CentsMoneyInput";
 import { getBridge } from "../../../lib";
 import type {
   GiftReturnAction,
@@ -957,16 +958,13 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
           >
             {t("modals.refund.gift.amountLabel", { currency: original.currency })}
           </label>
-          <input
+          <CentsMoneyInput
             id={amountId}
             data-testid="gift-return-amount"
-            type="text"
-            inputMode="decimal"
-            autoComplete="off"
             value={amountText}
-            onChange={(e) => setAmountText(e.target.value)}
+            onValueChange={setAmountText}
             disabled={busy}
-            placeholder="0.00"
+            placeholder="0,00"
             className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-purple-500 transition-all text-sm liquid-glass-modal-text"
           />
           <p className="text-xs liquid-glass-modal-text-muted mt-1">
@@ -2055,16 +2053,13 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               })}
                             </label>
                             <div className="relative">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0.01"
-                                max={balance?.remaining ?? payment.amount}
+                              <CentsMoneyInput
+                                aria-label={t("modals.refund.refundAmount", {
+                                  defaultValue: "Refund Amount",
+                                })}
                                 value={refundAmount}
-                                onChange={(e) =>
-                                  setRefundAmount(e.target.value)
-                                }
-                                placeholder="0.00"
+                                onValueChange={setRefundAmount}
+                                placeholder="0,00"
                                 className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
                               />
                               <Banknote className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />

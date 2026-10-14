@@ -11,7 +11,13 @@ const glassCss = readFileSync(glassCssPath, 'utf8');
 
 test('Round 422: AddCustomerModal keeps the shared glass shell and semantic actions', () => {
   assert.match(source, /<LiquidGlassModal/);
-  assert.match(source, /title=\{getModalTitle\(\)\}/);
+  // The shared shell titles the form. The Caller ID workspace (05/08/2026) swaps in its own
+  // header with the same title plus labelled Minimize/Close controls, and names the dialog.
+  assert.match(source, /title=\{callerIdWorkspace \? undefined : getModalTitle\(\)\}/);
+  assert.match(source, /<h2 className="liquid-glass-modal-title">\{getModalTitle\(\)\}<\/h2>/);
+  assert.match(source, /ariaLabel=\{callerIdWorkspace \? getModalTitle\(\) : undefined\}/);
+  assert.match(source, /aria-label=\{t\('modals\.addCustomer\.minimize', 'Minimize'\)\}/);
+  assert.match(source, /aria-label=\{t\('common\.actions\.close', 'Close'\)\}/);
   assert.match(source, /<form onSubmit=\{handleSubmit\}/);
   assert.match(source, /className="liquid-glass-modal-button liquid-glass-modal-error flex-1 rounded-2xl"/);
   assert.match(

@@ -9,6 +9,11 @@ const source = readFileSync(
   'utf8',
 );
 
+const glassCss = readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'styles', 'glassmorphism.css'),
+  'utf8',
+);
+
 const locale = (language: string) =>
   JSON.parse(readFileSync(path.join(projectRoot, 'src', 'locales', `${language}.json`), 'utf8'));
 
@@ -17,8 +22,16 @@ test('PrintPreviewModal zoom controls are touch-first, labelled, and hover-free'
   assert.match(source, /const zoomInLabel = t\('modals\.printPreview\.zoomIn'/);
   assert.match(source, /aria-label=\{zoomOutLabel\}/);
   assert.match(source, /aria-label=\{zoomInLabel\}/);
-  assert.match(source, /inline-flex h-11 w-11 items-center justify-center rounded-2xl/);
-  assert.match(source, /active:scale-95/);
+  // 26/07/2026 (1.4.40): both 44 px zoom buttons use the shared theme-aware icon-button token,
+  // which owns the press feedback (active background + scale) for the light and the dark glass.
+  const zoomButtons =
+    source.match(/className="liquid-glass-modal-icon-button inline-flex h-11 w-11 items-center justify-center rounded-2xl"/g) ?? [];
+  assert.equal(zoomButtons.length, 2, 'zoom out and zoom in must both use the icon-button token');
+  assert.match(
+    glassCss,
+    /\.liquid-glass-modal-icon-button:active \{[^}]*background: var\(--modal-control-bg-active\);[^}]*transform: scale\(0\.96\);[^}]*\}/,
+  );
+  assert.doesNotMatch(glassCss, /\.liquid-glass-modal-icon-button:hover/);
 
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /dark:hover:/);

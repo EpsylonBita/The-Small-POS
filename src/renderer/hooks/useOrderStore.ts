@@ -14,6 +14,12 @@ import {
 } from '../../lib/payment-integrity';
 import type { PaymentIntegrityErrorPayload } from '../../lib/ipc-contracts';
 import { pollFiscalReceiptStatus } from '../services/fiscal-status';
+import i18n from '../../lib/i18n';
+import {
+  formatSyncQueueFullMessage,
+  syncQueueFullErrorCode,
+  type SyncQueueFullErrorCode,
+} from '../../lib/sync-queue-full';
 import { sortOrdersOldestFirst } from '../utils/order-sorting';
 import { debugLog } from '../utils/debugLog';
 import { getVisibleOrderNumber } from '../utils/orderNumberUtils';
@@ -664,8 +670,11 @@ interface UpdateOrderStatusDetailedResult {
    * `ORDER_PAYMENT_NOT_RECORDED`: the order is labelled paid but its payment
    * is not recorded on this till (founder rule 01/10/2026); the screen tells
    * the cashier to restore it from the server or record it first.
+   * `SYNC_QUEUE_FULL` / `SYNC_QUEUE_CONFLICTS_FULL`: the till's offline queue
+   * refused the change at its ceiling and nothing changed (13/10/2026);
+   * `errorMessage` says so in the operator's language.
    */
-  errorCode?: 'ORDER_HAS_PAYMENTS' | 'ORDER_PAYMENT_NOT_RECORDED';
+  errorCode?: 'ORDER_HAS_PAYMENTS' | 'ORDER_PAYMENT_NOT_RECORDED' | SyncQueueFullErrorCode;
 }
 
 /** The till's refusal to cancel an order money was taken on. */
@@ -1676,6 +1685,19 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           };
         }
 
+        // The offline queue is full (13/10/2026): nothing changed, and the
+        // cashier reads why in the store's language, never the native text.
+        const queueFullCode = syncQueueFullErrorCode(error);
+        if (queueFullCode) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            errorCode: queueFullCode,
+            errorMessage:
+              formatSyncQueueFullMessage(error, i18n.t.bind(i18n)) ?? rawErrorText(error),
+          };
+        }
+
         // Handle error
         const posError = errorHandler.handle(error);
         get()._setError(posError);
@@ -1834,6 +1856,20 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             outcomeUnknown: true,
             errorCode:
               unknown.checkoutInProgress === true ? CHECKOUT_IN_PROGRESS : CHECKOUT_OUTCOME_UNKNOWN,
+          };
+        }
+        // The offline queue is full (offline-week audit, 13/10/2026): the
+        // order was not saved and nothing already saved is lost. The screens
+        // show `error`, so it is the cashier's sentence in the store's
+        // language, never the native text.
+        const queueFullCode = syncQueueFullErrorCode(error);
+        if (queueFullCode) {
+          get()._setLoading(operation, false);
+          return {
+            success: false,
+            error: formatSyncQueueFullMessage(error, i18n.t.bind(i18n)) ?? rawErrorText(error),
+            savedForRetry: false,
+            errorCode: queueFullCode,
           };
         }
         // Handle error

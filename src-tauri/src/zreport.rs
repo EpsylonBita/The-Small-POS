@@ -2358,7 +2358,9 @@ fn ensure_z_report_sync_queue_row(
     .map_err(|e| format!("clear stale z-report legacy queue rows: {e}"))?;
 
     // Clear any lingering parity rows — the UPSERT semantic is "latest
-    // payload wins" so the new row replaces prior unsynced attempts.
+    // payload wins" so the new row replaces prior unsynced attempts. For a
+    // Z already stored that payload is its own row
+    // (`stored_z_report_sync_payload`), never a rebuild of its window.
     sync_queue::clear_unsynced_items(conn, "z_reports", z_report_id)
         .map_err(|e| format!("clear stale z-report parity queue rows: {e}"))?;
 
@@ -2379,6 +2381,87 @@ fn ensure_z_report_sync_queue_row(
     .map_err(|e| format!("enqueue z-report sync: {e}"))?;
 
     Ok(())
+}
+
+/// The submission of a persisted Z: its row's terminal, branch, date and
+/// `report_json` exactly as the till stored and printed it (founder rule
+/// 14/10/2026: the server keeps the Z's real data). Once a row exists, every
+/// (re)queue sends this, never a rebuild of its window.
+fn stored_z_report_sync_payload(conn: &Connection, z_report_id: &str) -> Result<String, String> {
+    let (terminal_id, branch_id, report_date, report_json): (String, String, String, String) = conn
+        .query_row(
+            "SELECT terminal_id, branch_id, report_date, report_json
+             FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| format!("load stored z-report {z_report_id} for its submission: {e}"))?;
+    let report_data = serde_json::from_str::<Value>(&report_json)
+        .map_err(|e| format!("parse stored z-report {z_report_id} report_json: {e}"))?;
+    Ok(serde_json::json!({
+        "terminal_id": terminal_id,
+        "branch_id": branch_id,
+        "report_date": report_date,
+        "report_data": report_data,
+    })
+    .to_string())
+}
+
+/// Where a stored Z and a rebuild of its window disagree now, by z_reports
+/// column (`total_orders`, then the money in half-even cents, stored -> now):
+/// a payment synced late or an order edited inside the window after the Z.
+/// Support evidence only; the stored Z stays what was printed and queued.
+fn z_report_window_drift(
+    conn: &Connection,
+    z_report_id: &str,
+    rebuilt: &BuiltDateZReport,
+) -> Result<Vec<String>, String> {
+    let rebuilt_money = [
+        ("gross_sales", rebuilt.gross_sales),
+        ("net_sales", rebuilt.net_sales),
+        ("cash_sales", rebuilt.cash_sales),
+        ("card_sales", rebuilt.card_sales),
+        ("refunds_total", rebuilt.refunds_total),
+        ("voids_total", rebuilt.voids_total),
+        ("discounts_total", rebuilt.discounts_total),
+        ("tips_total", rebuilt.tips_total),
+        ("expenses_total", rebuilt.expenses_total),
+        ("cash_variance", rebuilt.total_variance),
+        ("opening_cash", rebuilt.total_opening),
+        ("closing_cash", rebuilt.total_closing),
+        ("expected_cash", rebuilt.total_expected),
+    ];
+    let (stored_orders, stored_money): (i64, Vec<f64>) = conn
+        .query_row(
+            "SELECT total_orders, gross_sales, net_sales, cash_sales, card_sales,
+                    refunds_total, voids_total, discounts_total, tips_total,
+                    expenses_total, cash_variance, opening_cash, closing_cash, expected_cash
+             FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| {
+                let money = (1..=rebuilt_money.len())
+                    .map(|index| row.get::<_, f64>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((row.get(0)?, money))
+            },
+        )
+        .map_err(|e| format!("load stored z-report {z_report_id} totals: {e}"))?;
+
+    let mut drift = Vec::new();
+    if stored_orders != rebuilt.total_orders {
+        drift.push(format!(
+            "total_orders {stored_orders}->{}",
+            rebuilt.total_orders
+        ));
+    }
+    for ((column, now), stored) in rebuilt_money.into_iter().zip(stored_money) {
+        let stored = Cents::round_half_even(stored).as_i64();
+        let now = Cents::round_half_even(now).as_i64();
+        if stored != now {
+            drift.push(format!("{column}_cents {stored}->{now}"));
+        }
+    }
+    Ok(drift)
 }
 
 fn prune_duplicate_local_z_reports_for_window(
@@ -2817,7 +2900,12 @@ fn z_report_presentation_from_cache(
             .iter()
             .any(|m| m.get("module_id").and_then(Value::as_str) == Some(id))
     };
-    let mut flags = serde_json::json!({"deliveryModuleEnabled": has_module("delivery")});
+    // The printed Z leaves out dine-in without the tables module and delivery
+    // without the delivery module (founder, 13/10/2026). Money is never hidden.
+    let mut flags = serde_json::json!({
+        "deliveryModuleEnabled": has_module("delivery"),
+        "tablesModuleEnabled": has_module("tables"),
+    });
     if !has_module("plugin_integrations") {
         flags["twintPluginEnabled"] = serde_json::json!(false);
     } else if integrations.get("success").and_then(Value::as_bool) == Some(true) {
@@ -4251,6 +4339,57 @@ fn load_server_repair_projection(
     }))
 }
 
+/// The order columns a slip's printed VAT reads, in the order
+/// [`printed_order_vat_cents`] reads them: the inputs
+/// `print::build_order_receipt_doc` hands to `fiscal::receipt_vat` (the REAL
+/// total and tip, the computed VAT with its cents column first).
+const PRINTED_ORDER_VAT_COLUMNS: &str = "SELECT o.branch_id, COALESCE(o.total_amount, 0),
+        COALESCE(o.tip_amount, 0), o.tax_amount_cents, COALESCE(o.tax_amount, 0)";
+
+/// The Z's VAT, in cents: the sum of the VAT each order's slip prints
+/// (founder, 07/10/2026, as Android's `sales.taxTotal`). Every order goes
+/// through the receipt's own rule, `fiscal::receipt_vat`, so an order whose
+/// slip prints no VAT line adds nothing. Server-owned repair revenue has no
+/// local order and adds none, as on Android.
+fn printed_order_vat_cents(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<i64, String> {
+    let context = crate::fiscal::receipt_vat::PrintedVatContext::load(conn);
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("prepare printed VAT query: {e}"))?;
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })
+        .map_err(|e| format!("query printed VAT: {e}"))?;
+    let mut total_cents = 0_i64;
+    for row in rows {
+        let (branch_id, total_amount, tip_amount, tax_amount_cents, tax_amount) =
+            row.map_err(|e| format!("read printed VAT: {e}"))?;
+        let computed_vat_amount = tax_amount_cents
+            .map(|cents| Cents::new(cents).to_f64_dp2())
+            .unwrap_or(tax_amount);
+        total_cents += context
+            .order_vat_cents(
+                branch_id.as_deref(),
+                total_amount,
+                tip_amount,
+                Some(computed_vat_amount),
+            )
+            .unwrap_or(0);
+    }
+    Ok(total_cents)
+}
+
 /// Generate a Z-report for a closed shift.
 ///
 /// Aggregates orders, payments, adjustments, and expenses for the given shift,
@@ -4501,19 +4640,24 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // Gap review P0-03: exclude live never-settled table tabs from shift gross —
     // same rule as the date-based aggregates, or the single-shift Z reports
     // uncollected tab money as revenue.
-    let single_shift_open_tab = business_day::open_unsettled_table_tab_expr("orders");
+    let single_shift_open_tab = business_day::open_unsettled_table_tab_expr("o");
+    // The orders of this shift's `sales.totalSales`. The printed VAT below
+    // sums over these same rows.
+    let single_shift_orders_from = format!(
+        "FROM orders o
+         WHERE o.staff_shift_id = ?1
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND o.status NOT IN ('cancelled', 'canceled')
+           AND NOT {single_shift_open_tab}"
+    );
     let single_shift_order_agg_sql = format!(
         "SELECT COUNT(*) as cnt,
-                COALESCE(SUM(total_amount + COALESCE(discount_amount, 0)), 0) as gross,
-                COALESCE(SUM(discount_amount), 0) as discounts,
-                COALESCE(SUM(tip_amount), 0) as tips
-         FROM orders
-         WHERE staff_shift_id = ?1
-           AND COALESCE(is_ghost, 0) = 0
-           AND COALESCE(is_test, 0) = 0
-           AND COALESCE(order_context, '') <> 'repair_settlement'
-           AND status NOT IN ('cancelled', 'canceled')
-           AND NOT {single_shift_open_tab}"
+                COALESCE(SUM(o.total_amount + COALESCE(o.discount_amount, 0)), 0) as gross,
+                COALESCE(SUM(o.discount_amount), 0) as discounts,
+                COALESCE(SUM(o.tip_amount), 0) as tips
+         {single_shift_orders_from}"
     );
     let order_agg = conn
         .query_row(&single_shift_order_agg_sql, params![shift_id], |row| {
@@ -4527,6 +4671,11 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (ordinary_total_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
+    let tax_total_cents = printed_order_vat_cents(
+        &conn,
+        &format!("{PRINTED_ORDER_VAT_COLUMNS} {single_shift_orders_from}"),
+        params![shift_id],
+    )?;
     let total_orders = ordinary_total_orders + repair_orders_count;
     let gross_sales = ordinary_gross_sales + repair_tender_sales;
 
@@ -5046,6 +5195,19 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "totalOrders": total_orders,
             "totalSales": total_sales,
             "totalSales_cents": Cents::round_half_even(total_sales).as_i64(),
+            // The z_reports columns of this row, so the copy the server keeps
+            // carries what the printed Z prints (founder, 14/10/2026).
+            "grossSales": gross_sales,
+            "grossSales_cents": Cents::round_half_even(gross_sales).as_i64(),
+            "netSales": net_sales,
+            "netSales_cents": Cents::round_half_even(net_sales).as_i64(),
+            "refundsTotal": refunds_total,
+            "refundsTotal_cents": Cents::round_half_even(refunds_total).as_i64(),
+            "voidsTotal": voids_total,
+            "voidsTotal_cents": Cents::round_half_even(voids_total).as_i64(),
+            // The VAT this shift's slips print (`printed_order_vat_cents`).
+            "taxTotal": Cents::new(tax_total_cents).to_f64_dp2(),
+            "taxTotal_cents": tax_total_cents,
             "discountsTotal": discounts_total,
             "discountsTotal_cents": Cents::round_half_even(discounts_total).as_i64(),
             "cashSales": cash_sales,
@@ -6005,14 +6167,10 @@ fn build_z_report_for_window(
     // `business_day::z_report_reportable_order_expr`.
     let last_z_anchor = business_day::last_z_anchor_utc(&conn);
     let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
-    let order_agg_sql = format!(
-        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
-        "SELECT COUNT(*) as cnt,
-                COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))
-                             + COALESCE(o.discount_amount_cents, CAST(ROUND(o.discount_amount * 100) AS INTEGER), 0)), 0) as gross_cents,
-                COALESCE(SUM(COALESCE(o.discount_amount_cents, CAST(ROUND(o.discount_amount * 100) AS INTEGER))), 0) as discounts_cents,
-                COALESCE(SUM(COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER))), 0) as tips_cents
-         FROM orders o
+    // The orders of `sales.totalSales`. The printed VAT below sums over these
+    // same rows, so turnover and VAT never report two populations.
+    let reportable_orders_from = format!(
+        "FROM orders o
          WHERE {financial_predicate}
            AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
@@ -6021,6 +6179,15 @@ fn build_z_report_for_window(
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
            AND {reportable_order}"
+    );
+    let order_agg_sql = format!(
+        // W4b-iii: cents-with-real-fallback shim (removed in 4e).
+        "SELECT COUNT(*) as cnt,
+                COALESCE(SUM(COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER))
+                             + COALESCE(o.discount_amount_cents, CAST(ROUND(o.discount_amount * 100) AS INTEGER), 0)), 0) as gross_cents,
+                COALESCE(SUM(COALESCE(o.discount_amount_cents, CAST(ROUND(o.discount_amount * 100) AS INTEGER))), 0) as discounts_cents,
+                COALESCE(SUM(COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER))), 0) as tips_cents
+         {reportable_orders_from}"
     );
     let order_agg = conn
         .query_row(
@@ -6038,6 +6205,11 @@ fn build_z_report_for_window(
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (ordinary_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
+    let tax_total_cents = printed_order_vat_cents(
+        &conn,
+        &format!("{PRINTED_ORDER_VAT_COLUMNS} {reportable_orders_from}"),
+        params![period_start, cutoff_param, branch_id, last_z_anchor],
+    )?;
 
     // What the predicate above held back, so it is excluded from the totals
     // but never from the operator's sight (rendered as «μεταφορά από κλεισμένη
@@ -6905,6 +7077,19 @@ fn build_z_report_for_window(
             "totalOrders": total_orders,
             "totalSales": total_sales,
             "totalSales_cents": Cents::round_half_even(total_sales).as_i64(),
+            // The z_reports columns of this row, so the copy the server keeps
+            // carries what the printed Z prints (founder, 14/10/2026).
+            "grossSales": gross_sales,
+            "grossSales_cents": Cents::round_half_even(gross_sales).as_i64(),
+            "netSales": net_sales,
+            "netSales_cents": Cents::round_half_even(net_sales).as_i64(),
+            "refundsTotal": refunds_total,
+            "refundsTotal_cents": Cents::round_half_even(refunds_total).as_i64(),
+            "voidsTotal": voids_total,
+            "voidsTotal_cents": Cents::round_half_even(voids_total).as_i64(),
+            // The VAT the slips of these orders print (`printed_order_vat_cents`).
+            "taxTotal": Cents::new(tax_total_cents).to_f64_dp2(),
+            "taxTotal_cents": tax_total_cents,
             "discountsTotal": discounts_total,
             "discountsTotal_cents": Cents::round_half_even(discounts_total).as_i64(),
             "cashSales": cash_sales,
@@ -7070,13 +7255,6 @@ fn generate_z_report_for_window(
     let period_start =
         period_start.ok_or("Missing reportJson.periodStart for Z-report persistence")?;
     let period_end = period_end.ok_or("Missing reportJson.periodEnd for Z-report persistence")?;
-    let sync_payload = serde_json::json!({
-        "terminal_id": built.terminal_id,
-        "branch_id": built.branch_id,
-        "report_date": built.report_date,
-        "report_data": built.report_json,
-    })
-    .to_string();
 
     let matching_ids = load_matching_local_z_report_ids_for_window(
         &conn,
@@ -7088,8 +7266,31 @@ fn generate_z_report_for_window(
 
     if let Some(existing_id) = matching_ids.first() {
         let existing_id = existing_id.clone();
+        // A retry of an issued Z closes its frozen window again. The rebuild
+        // above only names that window and feeds the guards; the queue gets
+        // the stored Z exactly as it was printed (founder rule 14/10/2026),
+        // never the window as it reads now.
         ensure_gift_close_snapshot_current(&conn, &existing_id, &built.gift_close)?;
-        ensure_z_report_sync_queue_row(&conn, &existing_id, &sync_payload, &built.generated_at)?;
+        match z_report_window_drift(&conn, &existing_id, &built) {
+            Ok(drift) if !drift.is_empty() => warn!(
+                z_report_id = %existing_id,
+                drift = %drift.join(", "),
+                "Stored Z-report differs from its window now; queueing the stored report unchanged"
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(
+                z_report_id = %existing_id,
+                error = %error,
+                "Could not compare the stored Z-report with its window"
+            ),
+        }
+        let stored_sync_payload = stored_z_report_sync_payload(&conn, &existing_id)?;
+        ensure_z_report_sync_queue_row(
+            &conn,
+            &existing_id,
+            &stored_sync_payload,
+            &built.generated_at,
+        )?;
         let _ = prune_duplicate_local_z_reports_for_window(
             &conn,
             built.branch_id.as_str(),
@@ -7121,6 +7322,14 @@ fn generate_z_report_for_window(
     let z_report_id = Uuid::new_v4().to_string();
     let payments_json_str = built.payments_breakdown.to_string();
     let report_json_str = built.report_json.to_string();
+    // The new row and its submission carry the same report.
+    let sync_payload = serde_json::json!({
+        "terminal_id": built.terminal_id,
+        "branch_id": built.branch_id,
+        "report_date": built.report_date,
+        "report_data": built.report_json,
+    })
+    .to_string();
     let shift_id_for_db = built
         .shift_id_for_db
         .clone()
@@ -9629,6 +9838,12 @@ mod tests {
             z_report_presentation_from_cache(&modules, &integrations, "org", "branch", "term");
         assert_eq!(flags["twintPluginEnabled"], true);
         assert_eq!(flags["deliveryModuleEnabled"], false);
+        assert_eq!(flags["tablesModuleEnabled"], false);
+        let with_tables = serde_json::json!({"organizationId":"org","branchId":"branch","terminalId":"term","apiModules":[{"module_id":"tables"},{"module_id":"delivery"}]});
+        let table_flags =
+            z_report_presentation_from_cache(&with_tables, &Value::Null, "org", "branch", "term");
+        assert_eq!(table_flags["tablesModuleEnabled"], true);
+        assert_eq!(table_flags["deliveryModuleEnabled"], true);
         integrations["integrations"][0]["settings"]["target_terminal_id"] =
             serde_json::json!("other-term");
         assert_eq!(
@@ -10753,6 +10968,261 @@ mod tests {
         assert_eq!(report_json_str["drawers"].as_array().unwrap().len(), 1);
     }
 
+    /// A discount on order 2 and a void on order 3 of the seeded day, so
+    /// gross, net, refunds and voids all differ.
+    fn seed_discount_and_void(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders SET discount_amount = 5.0, discount_amount_cents = 500 WHERE id = 'ord-2'",
+            [],
+        )
+        .expect("discount order 2");
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-void-1', 'pay-3', 'ord-3', 'void', 4.25, 425, 'wrong card', 'pending', '2026-02-16T18:00:00Z', '2026-02-16T18:00:00Z')",
+            [],
+        )
+        .expect("insert void adjustment");
+    }
+
+    /// The copy the server keeps of a stored Z (`report_json`, and the
+    /// `report_data` queued for it) carries the gross, net, refunds and voids
+    /// of its z_reports row, which the printed Z reads, as decimals and as
+    /// half-even cents (founder, 14/10/2026).
+    fn assert_server_copy_carries_the_row_totals(db: &DbState, z_report_id: &str) -> Value {
+        let conn = db.conn.lock().unwrap();
+        let (columns, stored): ([(f64, i64); 4], String) = conn
+            .query_row(
+                "SELECT gross_sales, gross_sales_cents, net_sales, net_sales_cents,
+                        refunds_total, refunds_total_cents, voids_total, voids_total_cents,
+                        report_json
+                 FROM z_reports WHERE id = ?1",
+                params![z_report_id],
+                |row| {
+                    Ok((
+                        [
+                            (row.get(0)?, row.get(1)?),
+                            (row.get(2)?, row.get(3)?),
+                            (row.get(4)?, row.get(5)?),
+                            (row.get(6)?, row.get(7)?),
+                        ],
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .expect("stored z_reports row");
+        let queued: String = conn
+            .query_row(
+                "SELECT data FROM parity_sync_queue WHERE table_name = 'z_reports' AND record_id = ?1",
+                params![z_report_id],
+                |row| row.get(0),
+            )
+            .expect("queued z_report payload");
+        let report_json: Value = serde_json::from_str(&stored).expect("report_json parses");
+        let queued: Value = serde_json::from_str(&queued).expect("queued payload parses");
+        for (copy, sales) in [
+            ("report_json", &report_json["sales"]),
+            ("report_data", &queued["report_data"]["sales"]),
+        ] {
+            for (key, (column, column_cents)) in
+                ["grossSales", "netSales", "refundsTotal", "voidsTotal"]
+                    .into_iter()
+                    .zip(columns)
+            {
+                assert_eq!(sales[key].as_f64(), Some(column), "{copy}.sales.{key}");
+                assert_eq!(
+                    sales[format!("{key}_cents").as_str()].as_i64(),
+                    Some(column_cents),
+                    "{copy}.sales.{key}_cents"
+                );
+                assert_eq!(
+                    column_cents,
+                    Cents::round_half_even(column).as_i64(),
+                    "{key}"
+                );
+            }
+        }
+        report_json
+    }
+
+    #[test]
+    fn stored_day_z_server_copy_carries_gross_net_refunds_and_voids() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_second_closed_shift(&db);
+        seed_discount_and_void(&db);
+        let result = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+        )
+        .expect("multi-shift generate");
+        let z_report_id = result["zReportId"].as_str().expect("persisted Z id");
+        let report_json = assert_server_copy_carries_the_row_totals(&db, z_report_id);
+        let sales = &report_json["sales"];
+        // 220 of orders plus the 5 discount; net = 225 - 10 - 4.25 - 5.
+        assert_eq!(sales["grossSales_cents"], 22_500);
+        assert_eq!(sales["netSales_cents"], 20_575);
+        assert_eq!(sales["refundsTotal_cents"], 1_000);
+        assert_eq!(sales["voidsTotal_cents"], 425);
+        // Additive: the figures the Z already carried are unchanged.
+        assert_eq!(sales["totalSales_cents"], 22_000);
+        assert_eq!(sales["discountsTotal_cents"], 500);
+        assert_eq!(result["report"]["grossSales"], 225.0);
+        assert_eq!(result["report"]["netSales"], 205.75);
+    }
+
+    #[test]
+    fn stored_shift_z_server_copy_carries_gross_net_refunds_and_voids() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        seed_discount_and_void(&db);
+        let result = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
+            .expect("single-shift generate");
+        let z_report_id = result["zReportId"].as_str().expect("persisted Z id");
+        let report_json = assert_server_copy_carries_the_row_totals(&db, z_report_id);
+        let sales = &report_json["sales"];
+        // 100 of orders plus the 5 discount; net = 105 - 10 - 4.25 - 5.
+        assert_eq!(sales["grossSales_cents"], 10_500);
+        assert_eq!(sales["netSales_cents"], 8_575);
+        assert_eq!(sales["refundsTotal_cents"], 1_000);
+        assert_eq!(sales["voidsTotal_cents"], 425);
+        assert_eq!(sales["totalSales_cents"], 10_000);
+        assert_eq!(sales["discountsTotal_cents"], 500);
+    }
+
+    /// Both stored-Z builders freeze the store's modules in `presentation`,
+    /// including the tables flag the printed Z reads for dine-in (#359).
+    #[test]
+    fn both_z_builders_freeze_the_tables_module_flag() {
+        let dir = std::env::temp_dir().join(format!("z-presentation-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create module cache dir");
+        // The module cache lives beside the database file.
+        let mut db = test_db();
+        db.db_path = dir.join("pos.db");
+        {
+            // Every identity key read from settings, so the keyring is never asked.
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [
+                ("organization_id", "org-z"),
+                ("branch_id", "branch-1"),
+                ("terminal_id", "term-1"),
+                ("pos_api_key", "not-a-connection-string"),
+                ("api_key", "not-a-connection-string"),
+            ] {
+                db::set_setting(&conn, "terminal", key, value).unwrap();
+            }
+        }
+        crate::core_helpers::write_module_cache(
+            &db,
+            &serde_json::json!({
+                "organizationId": "org-z",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "apiModules": [{ "module_id": "tables" }],
+            }),
+        )
+        .expect("write module cache");
+        let shift_id = seed_closed_shift(&db);
+
+        let built = build_z_report_for_date(
+            &db,
+            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+            false,
+        )
+        .expect("day Z builds");
+        let shift_z = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
+            .expect("shift Z generates");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for presentation in [
+            &built.report_json["presentation"],
+            &shift_z["report"]["reportJson"]["presentation"],
+        ] {
+            assert_eq!(presentation["tablesModuleEnabled"], true, "{presentation}");
+            assert_eq!(
+                presentation["deliveryModuleEnabled"], false,
+                "{presentation}"
+            );
+        }
+    }
+
+    /// Founder (07/10/2026), as Android's `sales.taxTotal`: the Z's VAT is
+    /// the sum of the VAT each order's slip prints, over the orders of
+    /// `sales.totalSales`, in both stored-Z builders.
+    #[test]
+    fn z_tax_total_is_the_vat_the_slips_of_the_days_orders_print() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            // The owner's rate (Admin -> POS settings -> Taxes), included in
+            // the prices: without a fiscal plugin the slip prints its VAT.
+            db::set_setting(&conn, "tax", "default_tax_rate", "8.1").unwrap();
+            // A tip never carries VAT, and the stored VAT is not what such a
+            // slip prints.
+            conn.execute(
+                "UPDATE orders SET tip_amount = 2.0, tip_amount_cents = 200,
+                        tax_amount = 9.99, tax_amount_cents = 999
+                 WHERE id = 'ord-2'",
+                [],
+            )
+            .unwrap();
+            // A cancelled order is no sale: its slip's VAT is not the day's.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    status, order_type, payment_status, staff_shift_id, sync_status, created_at, updated_at)
+                 VALUES ('ord-cancelled', '#9', '[]', 18.0, 1800, 'cancelled', 'dine-in', 'paid',
+                    ?1, 'pending', '2026-02-16T18:00:00Z', '2026-02-16T18:00:00Z')",
+                params![shift_id],
+            )
+            .unwrap();
+        }
+        let slip_vat_cents = |order_id: &str| {
+            crate::print::build_order_receipt_doc(&db, order_id)
+                .expect("order slip")
+                .totals
+                .iter()
+                .find(|line| line.label == "Tax")
+                .map(|line| Cents::round_half_even(line.amount).as_i64())
+                .unwrap_or(0)
+        };
+        let day_slips_vat: i64 = ["ord-1", "ord-2", "ord-3"]
+            .into_iter()
+            .map(slip_vat_cents)
+            .sum();
+        // 25, 35 less the 2 tip, and 40, each at 8.1% included.
+        assert_eq!(day_slips_vat, 187 + 247 + 300);
+        assert!(slip_vat_cents("ord-cancelled") > 0);
+
+        let built = build_z_report_for_date(
+            &db,
+            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+            false,
+        )
+        .expect("day Z builds");
+        let shift_z = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
+            .expect("shift Z generates");
+        for sales in [
+            &built.report_json["sales"],
+            &shift_z["report"]["reportJson"]["sales"],
+        ] {
+            assert_eq!(sales["taxTotal_cents"], day_slips_vat, "{sales}");
+            assert_eq!(sales["taxTotal"], 7.34, "{sales}");
+        }
+
+        // A store whose slips print no VAT records none.
+        let untaxed = test_db();
+        seed_closed_shift(&untaxed);
+        let built = build_z_report_for_date(
+            &untaxed,
+            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+            false,
+        )
+        .expect("untaxed day Z builds");
+        assert_eq!(built.report_json["sales"]["taxTotal_cents"], 0);
+        assert_eq!(built.report_json["sales"]["taxTotal"], 0.0);
+    }
+
     #[test]
     fn cash_drawer_formula_z_report_period_staff_payments_are_branch_scoped() {
         let db = test_db();
@@ -11283,6 +11753,227 @@ mod tests {
             "should keep a single canonical local z-report row"
         );
         assert_eq!(queue_count, 1, "should keep a single z-report queue row");
+    }
+
+    /// Every column of a stored z_reports row, the `_cents` siblings included.
+    fn z_report_row_snapshot(db: &DbState, z_report_id: &str) -> Vec<rusqlite::types::Value> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT * FROM z_reports WHERE id = ?1")
+            .expect("prepare the z_reports snapshot");
+        let columns = stmt.column_count();
+        stmt.query_row(params![z_report_id], |row| {
+            (0..columns).map(|index| row.get(index)).collect()
+        })
+        .expect("stored z_reports row")
+    }
+
+    /// The one submission queued for a Z, with the stored row it must carry:
+    /// (queued payload, stored report_json, stored terminal/branch/date).
+    fn queued_and_stored_z_report(db: &DbState, z_report_id: &str) -> (Value, Value, Value) {
+        let conn = db.conn.lock().unwrap();
+        let queued = conn
+            .prepare(
+                "SELECT data FROM parity_sync_queue
+                 WHERE table_name = 'z_reports' AND record_id = ?1",
+            )
+            .unwrap()
+            .query_map(params![z_report_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(queued.len(), 1, "one queued submission for {z_report_id}");
+        let (terminal_id, branch_id, report_date, report_json): (String, String, String, String) =
+            conn.query_row(
+                "SELECT terminal_id, branch_id, report_date, report_json
+                 FROM z_reports WHERE id = ?1",
+                params![z_report_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        (
+            serde_json::from_str(&queued[0]).unwrap(),
+            serde_json::from_str(&report_json).unwrap(),
+            serde_json::json!({
+                "terminal_id": terminal_id,
+                "branch_id": branch_id,
+                "report_date": report_date,
+            }),
+        )
+    }
+
+    /// Another till's cash sale on the first seeded shift, inside the Z
+    /// window, reaching this till only after the Z was issued.
+    fn seed_late_synced_sale(db: &DbState) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, total_amount_cents, status, order_type,
+                payment_status, staff_shift_id,
+                discount_amount, discount_amount_cents,
+                tip_amount, tip_amount_cents,
+                sync_status, created_at, updated_at
+             ) VALUES ('ord-late', '#6', '[]', 30.0, 3000, 'completed', 'dine-in',
+                'paid', 'shift-zr-1', 0.0, 0, 0.0, 0, 'synced',
+                '2026-02-16T17:30:00Z', '2026-02-16T17:30:00Z')",
+            [],
+        )
+        .expect("insert the late-synced order");
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status, staff_shift_id, currency, created_at, updated_at)
+             VALUES ('pay-late', 'ord-late', 'cash', 30.0, 3000, 'completed', 'shift-zr-1', 'EUR',
+                     '2026-02-16T17:30:00Z', '2026-02-16T17:30:00Z')",
+            [],
+        )
+        .expect("insert the late-synced payment");
+    }
+
+    /// Founder rule 14/10/2026: the copy the server keeps of a Z is the Z the
+    /// till stored and printed. A retried submission (the Z issued and
+    /// queued, its day not finalized) reuses the stored row: a payment synced
+    /// late or an order edited inside the window since then changes a rebuild
+    /// of the window, never the stored row nor what is queued for it.
+    #[test]
+    fn retried_z_submission_queues_the_stored_z_not_the_rebuilt_window() {
+        for change in ["late_synced_payment", "order_edited_inside_window"] {
+            let _fake = crate::tests::fake_keyring::install_empty();
+            crate::storage::seed_terminal_credential_for_test("terminal_id", "term-1")
+                .expect("seed the terminal identity");
+            let db = test_db();
+            seed_closed_shift(&db);
+            seed_second_closed_shift(&db);
+            let payload = serde_json::json!({ "branchId": "branch-1" });
+
+            let first = prepare_z_report_submission(&db, &payload).expect("issue the Z");
+            let z_report_id = first.z_report_id.clone().expect("persisted Z");
+            assert!(first.created_new_z_report, "{change}");
+            let stored_row = z_report_row_snapshot(&db, &z_report_id);
+            let (first_queued, stored_report, stored_identity) =
+                queued_and_stored_z_report(&db, &z_report_id);
+            assert_eq!(first_queued["report_data"], stored_report, "{change}");
+            assert_eq!(stored_identity["terminal_id"], "term-1", "{change}");
+
+            match change {
+                "late_synced_payment" => seed_late_synced_sale(&db),
+                _ => {
+                    // Order 2 of the window corrected from 35 to 45, with its payment.
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE orders SET total_amount = 45.0, total_amount_cents = 4500
+                         WHERE id = 'ord-2'",
+                        [],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "UPDATE order_payments SET amount = 45.0, amount_cents = 4500
+                         WHERE id = 'pay-2'",
+                        [],
+                    )
+                    .unwrap();
+                }
+            }
+
+            // The window read now differs from the stored Z: the retry used
+            // to queue this rebuild in its place.
+            let window = {
+                let conn = db.conn.lock().unwrap();
+                resolve_current_z_report_window(&conn, "branch-1")
+            };
+            assert!(window.frozen, "{change}: the issued Z froze its window");
+            let rebuilt = build_z_report_for_window(&db, &payload, false, Some(&window))
+                .expect("rebuild the window");
+            assert_ne!(
+                rebuilt.report_json["sales"], stored_report["sales"],
+                "{change}"
+            );
+            let drift = {
+                let conn = db.conn.lock().unwrap();
+                z_report_window_drift(&conn, &z_report_id, &rebuilt).expect("compare")
+            };
+            for column in ["gross_sales_cents 22000->", "cash_sales_cents "] {
+                assert!(
+                    drift.iter().any(|field| field.starts_with(column)),
+                    "{change}: {column} in {drift:?}"
+                );
+            }
+
+            let retry = prepare_z_report_submission(&db, &payload).expect("retry the issued Z");
+            assert_eq!(
+                retry.z_report_id.as_deref(),
+                Some(z_report_id.as_str()),
+                "{change}"
+            );
+            assert!(!retry.created_new_z_report, "{change}");
+            assert_eq!(retry.generated["existing"], true, "{change}");
+            assert_eq!(
+                retry.generated["zReportId"],
+                z_report_id.as_str(),
+                "{change}"
+            );
+            let answered: Value = serde_json::from_str(
+                retry.generated["report"]["reportJson"]
+                    .as_str()
+                    .expect("the stored reportJson text"),
+            )
+            .unwrap();
+            assert_eq!(
+                answered, stored_report,
+                "{change}: the retry answers with the stored Z"
+            );
+            assert_eq!(
+                z_report_row_snapshot(&db, &z_report_id),
+                stored_row,
+                "{change}: the stored Z is untouched"
+            );
+
+            let (queued, stored_after, identity_after) =
+                queued_and_stored_z_report(&db, &z_report_id);
+            assert_eq!(stored_after, stored_report, "{change}");
+            assert_eq!(
+                queued["report_data"], stored_report,
+                "{change}: the stored Z is what the server gets"
+            );
+            for key in ["terminal_id", "branch_id", "report_date"] {
+                assert_eq!(queued[key], identity_after[key], "{change}: {key}");
+            }
+            assert_eq!(
+                queued, first_queued,
+                "{change}: the first attempt's submission"
+            );
+            let z_reports: i64 = {
+                let conn = db.conn.lock().unwrap();
+                conn.query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+                    .unwrap()
+            };
+            assert_eq!(z_reports, 1, "{change}");
+        }
+    }
+
+    /// The single-shift Z answers a retry with its stored row and queues
+    /// nothing new: its submission stays the stored Z (pins the same rule).
+    #[test]
+    fn retried_shift_z_keeps_the_stored_z_queued() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+        let payload = serde_json::json!({ "shiftId": shift_id });
+        let first = generate_z_report(&db, &payload).expect("shift Z");
+        let z_report_id = first["zReportId"]
+            .as_str()
+            .expect("persisted Z")
+            .to_string();
+        let stored_row = z_report_row_snapshot(&db, &z_report_id);
+        let (first_queued, stored_report, _) = queued_and_stored_z_report(&db, &z_report_id);
+        assert_eq!(first_queued["report_data"], stored_report);
+
+        seed_late_synced_sale(&db);
+        let retry = generate_z_report(&db, &payload).expect("retry the shift Z");
+        assert_eq!(retry["existing"], true);
+        assert_eq!(retry["zReportId"], z_report_id.as_str());
+        assert_eq!(z_report_row_snapshot(&db, &z_report_id), stored_row);
+        let (queued, stored_after, _) = queued_and_stored_z_report(&db, &z_report_id);
+        assert_eq!(stored_after, stored_report);
+        assert_eq!(queued, first_queued);
     }
 
     #[test]

@@ -172,11 +172,12 @@ pub fn build_fiscal_receipt_input(
     let _ = super::currency::warn_if_currency_unsupported(conn, branch_id);
     let sequence_number =
         super::sequence_counter::next_sequence(conn, branch_id, &business_day_iso)?;
+    let order_reference = fiscal_order_reference(conn, order_id)?;
 
     let payload = json!({
         "organizationId": header.organization_id,
         "branchId": branch_id,
-        "orderId": order_id,
+        "orderId": order_reference,
         "receiptNumber": header.receipt_number,
         "issuedAt": issued_at,
         "totals": {
@@ -197,6 +198,36 @@ pub fn build_fiscal_receipt_input(
     });
 
     Ok(payload)
+}
+
+/// The id the server knows this local order by, for its fiscal receipt:
+/// its server id once the order synced (`supabase_id`), else the client
+/// order id its create sends (`client_request_id`, or the local id for an
+/// order without one, `sync_queue::build_order_insert_body`), which the
+/// fiscal route resolves through `orders.client_order_id`.
+///
+/// Never the bare local `orders.id` of a synced order: the server re-keys
+/// desktop orders on ingest, so that id answered 409
+/// `fiscal_order_not_found` on every receipt (connectivity audit
+/// 13/10/2026). The queue replay calls this again at send time, so a
+/// receipt built before its order synced still goes out with the server id.
+pub(crate) fn fiscal_order_reference(conn: &Connection, order_id: &str) -> Result<String, String> {
+    let ids: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(COALESCE(supabase_id, '')), ''),
+                    NULLIF(TRIM(COALESCE(client_request_id, '')), '')
+             FROM orders
+             WHERE id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("read fiscal order reference for {order_id}: {e}"))?;
+    Ok(match ids {
+        Some((Some(server_id), _)) => server_id,
+        Some((None, Some(client_order_id))) => client_order_id,
+        _ => order_id.to_string(),
+    })
 }
 
 fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, String> {
@@ -700,6 +731,8 @@ mod audit_1_tests {
             "
             CREATE TABLE orders (
                 id TEXT PRIMARY KEY,
+                supabase_id TEXT,
+                client_request_id TEXT,
                 organization_id TEXT,
                 currency TEXT,
                 receipt_number TEXT,
@@ -797,6 +830,45 @@ mod audit_1_tests {
             params![category, key, value],
         )
         .expect("set local setting");
+    }
+
+    /// Connectivity audit 13/10/2026: the receipt sent the local `orders.id`,
+    /// which the server never knows for a desktop order (it re-keys them on
+    /// ingest and keeps the create's `client_order_id`), so every receipt
+    /// would answer 409 `fiscal_order_not_found` once fiscal is on. It now
+    /// names the order by its server id once synced, else by the client
+    /// order id its create sends.
+    #[test]
+    fn the_receipt_names_its_order_by_the_id_the_server_knows() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+
+        // An order without a client request id: its create sent the local
+        // id as `client_order_id`.
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["orderId"], "ord-1");
+
+        // Not synced yet: the client order id its create sends.
+        conn.execute(
+            "UPDATE orders SET client_request_id = 'checkout-req-1' WHERE id = 'ord-1'",
+            [],
+        )
+        .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["orderId"], "checkout-req-1");
+
+        // Synced: the server's own id.
+        conn.execute(
+            "UPDATE orders SET supabase_id = 'srv-order-1' WHERE id = 'ord-1'",
+            [],
+        )
+        .unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["orderId"], "srv-order-1");
+        assert_eq!(
+            fiscal_order_reference(&conn, "ord-1").unwrap(),
+            "srv-order-1"
+        );
     }
 
     #[test]

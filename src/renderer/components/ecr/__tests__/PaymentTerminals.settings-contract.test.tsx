@@ -80,6 +80,10 @@ describe('payment terminal settings contract', () => {
     await screen.findByText(serialDevice.name)
     expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled()
     expect(screen.getByText(/Bluetooth.*not available/i)).toBeVisible()
+    // Touch-first: the reason is the visible notice, announced as the button's
+    // description, never a hover-only native title tooltip.
+    expect(screen.getByRole('button', { name: 'Connect' })).toHaveAccessibleDescription(/Bluetooth.*not available/i)
+    expect(screen.getByRole('button', { name: 'Connect' })).not.toHaveAttribute('title')
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(mocks.connectDevice).not.toHaveBeenCalled()
   })

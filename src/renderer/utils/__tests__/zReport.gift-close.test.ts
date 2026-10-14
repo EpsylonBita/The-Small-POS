@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { zReportLabel } from '../../../../../shared/reports/z-report-labels';
+import type { StoredZReportRow } from '../../../lib/ipc-contracts';
 import type { ZReportData } from '../../types/reports';
-import { exportZReportToCSV } from '../reportExport';
+import { exportProvisionalZReportCsv, exportStoredZReportCsv } from '../reportExport';
 import {
-  GIFT_CLOSE_LABELS,
-  buildZReportGiftCloseCsvRows,
   classifyGiftCloseFinalizationError,
   resolvePersistedZReportId,
   resolveZReportGiftClose,
 } from '../zReport';
+import { captureDownloads, parseCsv } from './zReportExportKit';
 
 function giftOriginal(overrides: Record<string, unknown> = {}) {
   return {
@@ -137,7 +138,6 @@ describe('resolveZReportGiftClose', () => {
     const ordinary = report({ giftFinancialClose: undefined, cashDrawer: ORDINARY_CASH_DRAWER });
 
     expect(resolveZReportGiftClose(ordinary)).toMatchObject({ state: 'none', allowsFinal: true, drawer: null });
-    expect(buildZReportGiftCloseCsvRows(ordinary)).toEqual([]);
     expect(resolveZReportGiftClose(null)).toMatchObject({ state: 'none', allowsFinal: true });
   });
 
@@ -238,79 +238,67 @@ describe('classifyGiftCloseFinalizationError', () => {
   });
 });
 
-describe('gift close CSV rows', () => {
-  it('adds gift card cash once to the drawer reconciliation, outside sales, with currency and proof', () => {
-    const rows = buildZReportGiftCloseCsvRows(report());
-    const drawerRow = (metric: string) =>
-      rows.filter((row) => row.Section === 'Cash Drawer' && row.Metric === metric);
+/** The z_reports row of a stored gift close Z: its columns and its frozen snapshot as JSON text. */
+function storedRow(snapshot: ZReportData): StoredZReportRow {
+  return {
+    id: 'zr-stored-1',
+    terminalId: 'terminal-public-1',
+    reportDate: '2026-09-28',
+    generatedAt: '2026-09-28T21:05:00Z',
+    grossSales: 500,
+    netSales: 500,
+    totalOrders: 3,
+    cashSales: 100,
+    cardSales: 400,
+    reportJson: JSON.stringify(snapshot),
+  } as StoredZReportRow;
+}
 
-    expect(drawerRow(GIFT_CLOSE_LABELS.giftLiabilityCash)).toEqual([
-      { Section: 'Cash Drawer', Metric: GIFT_CLOSE_LABELS.giftLiabilityCash, Value: 20 },
+describe('gift close in the Z export (shared document)', () => {
+  const label = (key: Parameters<typeof zReportLabel>[1]) => zReportLabel('en', key);
+  const exportRows = (action: () => string) => {
+    const downloads = captureDownloads();
+    action();
+    return parseCsv(downloads[0].csv, ',');
+  };
+
+  it('exports gift card cash once in the drawer, outside sales, with the confirmed proof and each original in its currency', () => {
+    const rows = exportRows(() => exportStoredZReportCsv(storedRow(report()), 'en'));
+    const drawer = rows.filter((cells) => cells[0] === label('section.cashDrawer'));
+
+    expect(drawer.filter((cells) => cells[1] === label('drawer.giftCash'))).toEqual([
+      [label('section.cashDrawer'), label('drawer.giftCash'), '+20.00'],
     ]);
-    expect(drawerRow(GIFT_CLOSE_LABELS.ordinaryExpected)[0]?.Value).toBe(123.45);
-    expect(drawerRow(GIFT_CLOSE_LABELS.expected)[0]?.Value).toBe(143.45);
-    expect(drawerRow(GIFT_CLOSE_LABELS.counted)[0]?.Value).toBe(140);
-    expect(rows.some((row) => row.Section === 'Sales')).toBe(false);
-    expect(rows).toContainEqual({
-      Section: GIFT_CLOSE_LABELS.title,
-      Metric: GIFT_CLOSE_LABELS.proofStatus,
-      Value: GIFT_CLOSE_LABELS.proofFinal,
-    });
-    expect(rows).toContainEqual({ Section: GIFT_CLOSE_LABELS.title, Metric: GIFT_CLOSE_LABELS.currency, Value: 'EUR' });
-    expect(rows).toContainEqual({
-      Section: `${GIFT_CLOSE_LABELS.title}: Maria`,
-      Metric: GIFT_CLOSE_LABELS.variance,
-      Value: -3.45,
-    });
-    expect(rows.some((row) => row.Metric === GIFT_CLOSE_LABELS.finalActions)).toBe(false);
+    expect(drawer).toContainEqual([label('section.cashDrawer'), label('drawer.giftOrdinaryExpected'), '123.45']);
+    // Gift card cash sits in the expectation exactly once (14345, never 16345).
+    expect(drawer).toContainEqual([label('section.cashDrawer'), label('drawer.expected'), '143.45']);
+    expect(drawer).toContainEqual([label('section.cashDrawer'), label('drawer.counted'), '140.00']);
+    // Never a sales, tender or tax line.
+    expect(rows.filter((cells) => cells[0] === label('section.sales')).map((cells) => cells[1]))
+      .not.toContain(label('drawer.giftCash'));
+    expect(rows).toContainEqual([label('section.sales'), label('sales.gross'), '500.00']);
+    expect(rows).toContainEqual([label('section.giftClose'), label('gift.status'), label('gift.final')]);
+    const original = `${label('section.giftClose')} · Maria`;
+    expect(rows).toContainEqual([original, zReportLabel('en', 'gift.shift', { shift: 'shift-1' }), 'EUR']);
+    expect(rows).toContainEqual([original, label('drawer.variance'), '-3.45']);
   });
 
-  it('exports pending proof as not final with the same recovery wording', () => {
-    const rows = buildZReportGiftCloseCsvRows(report({
+  it('exports an ordinary Z without any gift line', () => {
+    const rows = exportRows(() =>
+      exportStoredZReportCsv(storedRow(report({ giftFinancialClose: undefined, cashDrawer: ORDINARY_CASH_DRAWER })), 'en'));
+    expect(rows.some((cells) => cells[0].startsWith(label('section.giftClose')))).toBe(false);
+    expect(rows.some((cells) => cells[1] === label('drawer.giftCash'))).toBe(false);
+  });
+
+  it('exports a preview with pending proof as not final, never as a confirmed close', () => {
+    const rows = exportRows(() => exportProvisionalZReportCsv(report({
       zReportId: undefined,
       cashDrawer: ORDINARY_CASH_DRAWER,
       giftFinancialClose: giftFinancialClose({ ready: false, originals: [], blockers: [PENDING_BLOCKER] }),
-    }));
+    }), 'en'));
 
-    expect(rows).toContainEqual({
-      Section: GIFT_CLOSE_LABELS.title,
-      Metric: GIFT_CLOSE_LABELS.proofStatus,
-      Value: GIFT_CLOSE_LABELS.proofNotFinal,
-    });
-    expect(rows).toContainEqual({
-      Section: GIFT_CLOSE_LABELS.blockerSection,
-      Metric: 'GIFT_CLOSE_PROOF_PENDING',
-      Value: GIFT_CLOSE_LABELS.recovery.GIFT_CLOSE_PROOF_PENDING.replace('{{staff}}', 'Maria'),
-    });
-    expect(rows).toContainEqual({
-      Section: GIFT_CLOSE_LABELS.title,
-      Metric: GIFT_CLOSE_LABELS.finalActions,
-      Value: GIFT_CLOSE_LABELS.blocked,
-    });
-  });
-
-  it('appends the gift rows to the Z CSV export while sales rows stay unchanged', () => {
-    const csvParts: string[] = [];
-    class CapturingBlob {
-      constructor(chunks: string[]) {
-        csvParts.push(chunks.join(''));
-      }
-    }
-    vi.stubGlobal('Blob', CapturingBlob);
-    Object.defineProperty(URL, 'createObjectURL', { value: vi.fn(() => 'blob:z-report'), configurable: true, writable: true });
-    Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true, writable: true });
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
-
-    exportZReportToCSV(report(), 'z-report-2026-09-28');
-
-    expect(click).toHaveBeenCalledTimes(1);
-    const lines = csvParts[0].split('\n');
-    expect(lines).toContain('"Sales","Total Sales",500');
-    expect(lines).toContain('"Sales","Cash Sales",100');
-    expect(lines.filter((line) => line.startsWith(`"Cash Drawer","${GIFT_CLOSE_LABELS.giftLiabilityCash}"`)))
-      .toEqual([`"Cash Drawer","${GIFT_CLOSE_LABELS.giftLiabilityCash}",20`]);
-    expect(lines).toContain(`"Cash Drawer","${GIFT_CLOSE_LABELS.expected}",143.45`);
-    expect(lines).toContain(`"${GIFT_CLOSE_LABELS.title}","${GIFT_CLOSE_LABELS.proofStatus}","${GIFT_CLOSE_LABELS.proofFinal}"`);
-    expect(lines).toContain(`"${GIFT_CLOSE_LABELS.title}","${GIFT_CLOSE_LABELS.currency}","EUR"`);
+    expect(rows[1]).toEqual([label('section.report'), label('report.status'), label('status.provisional')]);
+    expect(rows).toContainEqual([label('section.giftClose'), label('gift.status'), label('gift.notFinal')]);
+    expect(rows.some((cells) => cells[2] === label('gift.final'))).toBe(false);
   });
 });

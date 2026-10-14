@@ -151,15 +151,18 @@ test('NSIS captures the generated helper path outside macros', () => {
   assert.doesNotMatch(macroBody, /\$\{__FILEDIR__\}/);
 });
 
-test('named managed credential gate is wired into normal runtime and parity gates', () => {
+test('named managed credential gate is wired into normal runtime and parity gates', async () => {
   assert.match(
     packageJson.scripts['test:managed-credential-cleanup'],
     /check-managed-credential-nsis-smoke\.mjs/,
   );
   assert.match(packageJson.scripts['test:native-runtime'], /test:managed-credential-cleanup/);
-  assert.match(
-    fs.readFileSync(path.resolve(process.cwd(), 'scripts/run-parity-tests.mjs'), 'utf8'),
-    /managed-credential-cleanup\.test\.ts/,
+  // The parity runner discovers its entry points; this file must stay among them.
+  const parityFiles = await import('../../scripts/parity-test-files.mjs');
+  assert.ok(
+    parityFiles.listParityTestFiles(path.resolve(process.cwd(), 'tests'))
+      .includes('scripts/managed-credential-cleanup.test.ts'),
+    'the parity runner must run managed-credential-cleanup.test.ts',
   );
   assert.match(
     fs.readFileSync(path.resolve(process.cwd(), '../.github/workflows/pos-tauri-auto-release.yml'), 'utf8'),

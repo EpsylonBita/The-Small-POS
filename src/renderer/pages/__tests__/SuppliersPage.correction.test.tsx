@@ -72,7 +72,7 @@ describe('recorded invoice corrections', () => {
   it('loads the current amount and sends only the changed number, then permits restoring the original number', async () => {
     render(<SuppliersPage />);
     await open();
-    await screen.findByDisplayValue('25');
+    await screen.findByDisplayValue('25,00');
     changeNumber('second');
     save();
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith('pos/supplier-invoices/A', { invoiceNumber: 'second' }));

@@ -4084,27 +4084,65 @@ fn build_item_note_text(item: &Value) -> Option<String> {
     }
 }
 
-/// Completed receipts retain their original currency across later country
-/// changes. Missing/mixed historical units stay visibly unresolved, not guessed.
+/// Order documents print the order's recorded currency, so completed receipts
+/// keep their original unit across later country changes (founder, 13/10/2026:
+/// the order's recorded currency, else the store's, never a hard-coded euro).
+/// Mixed or mismatched evidence, or no unit known anywhere, stays visibly
+/// unresolved ("?").
 pub(crate) fn apply_order_currency_to_layout(
     db: &DbState,
     order_id: &str,
     layout: &mut LayoutConfig,
 ) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
-    layout.currency_symbol =
-        match crate::fiscal::payload_builder::resolve_order_document_currency(&conn, order_id) {
-            Ok(currency) => format!(" {currency}"),
-            Err(error)
-                if error == "PAYMENT_CURRENCY_UNAVAILABLE"
-                    || error == "PAYMENT_CURRENCY_MIXED"
-                    || error == "PAYMENT_CURRENCY_MISMATCH" =>
-            {
-                " ?".to_string()
-            }
-            Err(error) => return Err(error),
-        };
+    let currency = order_print_currency(&conn, order_id)?;
+    layout.currency_symbol = match currency {
+        Some(code) => format!(" {code}"),
+        None => " ?".to_string(),
+    };
     Ok(())
+}
+
+/// The currency code an order prints with. The completed payments and the
+/// order agree on it when both are known; when the payments cannot name it
+/// (`PAYMENT_CURRENCY_UNAVAILABLE`: none yet, or a row without a unit) the
+/// order's own recorded unit wins before the store's. `Ok(None)` means
+/// unresolved: mixed or mismatched evidence, or no unit known anywhere.
+/// Other errors (database) are returned to the caller.
+fn order_print_currency(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Option<String>, String> {
+    match crate::fiscal::payload_builder::resolve_order_document_currency(conn, order_id) {
+        Ok(currency) => Ok(Some(currency)),
+        Err(error) if error == "PAYMENT_CURRENCY_UNAVAILABLE" => {
+            Ok(order_recorded_currency(conn, order_id)
+                .or_else(|| crate::fiscal::payload_builder::resolve_store_currency_code(conn)))
+        }
+        Err(error) if error == "PAYMENT_CURRENCY_MIXED" || error == "PAYMENT_CURRENCY_MISMATCH" => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// `orders.currency` when it holds a valid code.
+fn order_recorded_currency(conn: &rusqlite::Connection, order_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT currency FROM orders WHERE id = ?1",
+        params![order_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .as_deref()
+    .and_then(crate::fiscal::payload_builder::normalize_currency_code)
+}
+
+/// The platform banner's currency: like `order_print_currency`, with a
+/// database error leaving the banner without a unit rather than failing.
+fn order_print_currency_code(conn: &rusqlite::Connection, order_id: &str) -> Option<String> {
+    order_print_currency(conn, order_id).ok().flatten()
 }
 
 pub fn resolve_layout_config(
@@ -4523,10 +4561,7 @@ pub fn resolve_layout_config(
         layout_density,
         header_emphasis,
         layout_density_scale,
-        decimal_comma: matches!(
-            app_language.as_str(),
-            "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" | "sq"
-        ),
+        decimal_comma: layout_language_uses_decimal_comma(&app_language),
         classic_customer_render_mode,
         emulation_mode,
         printable_width_dots,
@@ -5524,10 +5559,15 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     } else {
         None
     };
+    // Text built here prints in the app language, as the layout does.
+    let print_language = setting_text(&conn, "general", "language").unwrap_or_default();
     if platform_short_code.is_some() {
         let external_order_id = external_order_id.trim();
         if !external_order_id.is_empty() {
-            order_notes.push(format!("ΚΩΔΙΚΟΣ ΠΑΡΑΓΓΕΛΙΑΣ: {external_order_id}"));
+            order_notes.push(format!(
+                "{}: {external_order_id}",
+                receipt_renderer::receipt_label(&print_language, "Order Code")
+            ));
         }
     }
 
@@ -5694,6 +5734,13 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     let resolved_driver_name = non_empty_field(driver_name)
         .or_else(|| resolve_driver_name_from_shifts(&conn, &driver_id))
         .or_else(|| resolve_driver_name_from_shifts(&conn, &staff_id));
+    // The platform banner is text built here, before layout: it takes the
+    // same app language and order currency the rest of the print uses.
+    let print_currency = if is_food_delivery_plugin(&plugin) {
+        order_print_currency_code(&conn, order_id)
+    } else {
+        None
+    };
 
     Ok(OrderReceiptDoc {
         order_id: order_id.to_string(),
@@ -5726,14 +5773,21 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         // and the handoff payment line; the completed/canceled variants
         // overwrite this with their own label downstream.
         status_label: {
-            let banner =
-                platform_slip_banner(&plugin, &ghost_metadata, &payment_status, total_amount);
+            let banner = platform_slip_banner(
+                &plugin,
+                &ghost_metadata,
+                &payment_status,
+                total_amount,
+                &print_language,
+                print_currency.as_deref(),
+            );
             if is_test != 0 {
                 // Sandbox slips only print behind the print_sandbox_orders
                 // override — when they do, the paper must say so loudly.
+                let test_label = receipt_renderer::receipt_label(&print_language, "TEST ORDER");
                 Some(match banner {
-                    Some(banner) => format!("ΔΟΚΙΜΗ TEST · {banner}"),
-                    None => "ΔΟΚΙΜΗ TEST".to_string(),
+                    Some(banner) => format!("{test_label} · {banner}"),
+                    None => test_label.to_string(),
                 })
             } else {
                 banner
@@ -6125,11 +6179,16 @@ fn food_delivery_short_code(ghost_metadata_json: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The platform banner on a delivery-platform order's slip, in the app
+/// language and with the order's currency (founder, 13/10/2026): it used to
+/// print Greek words and a hard-coded euro for every store.
 fn platform_slip_banner(
     plugin: &str,
     ghost_metadata_json: &str,
     payment_status: &str,
     total_amount: f64,
+    lang: &str,
+    currency: Option<&str>,
 ) -> Option<String> {
     let plugin = plugin.trim();
     if !is_food_delivery_plugin(plugin) {
@@ -6156,11 +6215,31 @@ fn platform_slip_banner(
         banner.push_str(&format!(" #{short_code}"));
     }
     if prepaid == Some(true) || payment_status.eq_ignore_ascii_case("paid") {
-        banner.push_str(" · ΠΛΗΡΩΜΕΝΗ");
+        let paid = receipt_renderer::receipt_label(lang, "Paid");
+        banner.push_str(&format!(
+            " · {}",
+            receipt_renderer::platform_uppercase(paid)
+        ));
     } else if method.eq_ignore_ascii_case("cash") {
-        banner.push_str(&format!(" · ΑΝΤΙΚΑΤΑΒΟΛΗ {total_amount:.2}€"));
+        let cash_on_delivery = receipt_renderer::receipt_label(lang, "Cash on delivery");
+        let mut amount = format!("{:.2}", total_amount);
+        if layout_language_uses_decimal_comma(lang) {
+            amount = amount.replace('.', ",");
+        }
+        if let Some(code) = currency.map(str::trim).filter(|code| !code.is_empty()) {
+            amount = format!("{amount} {code}");
+        }
+        banner.push_str(&format!(
+            " · {} {amount}",
+            receipt_renderer::platform_uppercase(cash_on_delivery)
+        ));
     }
     Some(banner)
+}
+
+/// Languages whose printed amounts use a decimal comma (as the layout does).
+fn layout_language_uses_decimal_comma(lang: &str) -> bool {
+    matches!(lang, "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" | "sq")
 }
 
 /// The ingest appends a "--- Order Items ---" text fallback to
@@ -6414,8 +6493,9 @@ fn build_shift_checkout_doc(
             payments
                 .iter()
                 .map(|payment| crate::receipt_renderer::StaffPayoutLine {
+                    // A missing name prints a neutral dash, never English text.
                     staff_name: text_from_paths(payment, &["/staff_name", "/staffName"])
-                        .unwrap_or_else(|| "Unknown".to_string()),
+                        .unwrap_or_else(|| "—".to_string()),
                     role_type: text_from_paths(payment, &["/role_type", "/roleType"])
                         .unwrap_or_else(|| "staff".to_string()),
                     amount: number_from_paths(payment, &["/amount"]).unwrap_or(0.0),
@@ -6538,7 +6618,7 @@ fn build_shift_checkout_doc(
             .or_else(|| shift.get("staffName"))
             .and_then(Value::as_str)
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or("Unknown")
+            .unwrap_or("—")
             .to_string(),
         terminal_name,
         check_in: shift
@@ -6682,7 +6762,8 @@ fn build_shift_checkout_doc(
                     order_number: d
                         .get("order_number")
                         .and_then(Value::as_str)
-                        .unwrap_or("N/A")
+                        // A missing number prints a neutral dash, never English.
+                        .unwrap_or("—")
                         .to_string(),
                     delivery_address: text_from_paths(
                         d,
@@ -7143,6 +7224,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         terminal_name,
         total_orders,
         gross_sales,
+        tax_total: number_from_paths(payload, &["/sales/taxTotal"]).unwrap_or(0.0),
         net_sales,
         cash_sales,
         drawer_cash_sales,
@@ -7165,6 +7247,9 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
             .and_then(Value::as_bool),
         delivery_module_enabled: payload
             .pointer("/presentation/deliveryModuleEnabled")
+            .and_then(Value::as_bool),
+        tables_module_enabled: payload
+            .pointer("/presentation/tablesModuleEnabled")
             .and_then(Value::as_bool),
         platform_online_sales: number_from_paths(
             payload,
@@ -7405,6 +7490,8 @@ fn build_z_report_doc_with_conn(
         terminal_name,
         total_orders,
         gross_sales,
+        // The VAT the stored Z recorded; none on a report made before it did.
+        tax_total: number_from_paths(&rj, &["/sales/taxTotal"]).unwrap_or(0.0),
         net_sales,
         cash_sales,
         drawer_cash_sales: number_from_paths(&rj, &["/cashDrawer/cashSales"]),
@@ -7427,6 +7514,9 @@ fn build_z_report_doc_with_conn(
             .and_then(Value::as_bool),
         delivery_module_enabled: rj
             .pointer("/presentation/deliveryModuleEnabled")
+            .and_then(Value::as_bool),
+        tables_module_enabled: rj
+            .pointer("/presentation/tablesModuleEnabled")
             .and_then(Value::as_bool),
         platform_online_sales: number_from_paths(
             &rj,
@@ -9089,8 +9179,23 @@ fn render_managed_payload(
     String,
 > {
     let mut layout = resolve_layout_config(db, profile, entity_type)?;
-    if let ReceiptDocument::OrderReceipt(receipt) = document {
-        apply_order_currency_to_layout(db, &receipt.order_id, &mut layout)?;
+    match document {
+        ReceiptDocument::OrderReceipt(receipt) => {
+            apply_order_currency_to_layout(db, &receipt.order_id, &mut layout)?;
+        }
+        // Delivery slips print order money too: the order's currency, not
+        // only the store's (founder, 13/10/2026). A failed lookup keeps the
+        // store currency the slip always printed instead of failing the slip.
+        ReceiptDocument::DeliverySlip(slip) => {
+            if let Err(error) = apply_order_currency_to_layout(db, &slip.order_id, &mut layout) {
+                warn!(
+                    order_id = %slip.order_id,
+                    error = %error,
+                    "Delivery slip order currency unavailable; printing the store currency"
+                );
+            }
+        }
+        _ => {}
     }
     receipt_renderer::apply_document_currency(document, &mut layout);
     let mut rendered = receipt_renderer::render_escpos(document, &layout);
@@ -10776,40 +10881,71 @@ mod tests {
     #[test]
     fn platform_slip_banner_speaks_rider() {
         let metadata = r#"{"food_delivery":{"short_code":"42","payment_method":"cash","prepaid":false,"delivery_provider":"platform_delivery"}}"#;
+        let banner = |plugin: &str, meta: &str, status: &str, total: f64| {
+            platform_slip_banner(plugin, meta, status, total, "el", Some("EUR"))
+        };
         assert_eq!(
-            platform_slip_banner("efood", metadata, "pending", 5.9),
-            Some("EFOOD #42 · ΑΝΤΙΚΑΤΑΒΟΛΗ 5.90€".to_string())
+            banner("efood", metadata, "pending", 5.9),
+            Some("EFOOD #42 · ΑΝΤΙΚΑΤΑΒΟΛΗ 5,90 EUR".to_string())
         );
 
         let prepaid =
             r#"{"food_delivery":{"short_code":"42","payment_method":"online","prepaid":true}}"#;
         assert_eq!(
-            platform_slip_banner("efood", prepaid, "paid", 5.9),
+            banner("efood", prepaid, "paid", 5.9),
             Some("EFOOD #42 · ΠΛΗΡΩΜΕΝΗ".to_string())
         );
 
         // Platform order without food_delivery metadata (wolt/box today):
         // still branded, payment line only when payment_status says paid.
         assert_eq!(
-            platform_slip_banner("wolt", "", "paid", 12.0),
+            banner("wolt", "", "paid", 12.0),
             Some("WOLT · ΠΛΗΡΩΜΕΝΗ".to_string())
         );
 
         // Non-platform orders get no banner at all.
-        assert_eq!(platform_slip_banner("", metadata, "pending", 5.9), None);
+        assert_eq!(banner("", metadata, "pending", 5.9), None);
 
         // Internal sources are not delivery platforms: the kiosk route stores
         // platform='web', and 'pos'/'kiosk' receipts must never grow a rider
         // banner even when metadata or payment_status would decorate one.
-        assert_eq!(platform_slip_banner("web", metadata, "paid", 5.9), None);
-        assert_eq!(platform_slip_banner("kiosk", "", "paid", 5.9), None);
-        assert_eq!(platform_slip_banner("pos", "", "pending", 5.9), None);
+        assert_eq!(banner("web", metadata, "paid", 5.9), None);
+        assert_eq!(banner("kiosk", "", "paid", 5.9), None);
+        assert_eq!(banner("pos", "", "pending", 5.9), None);
 
         // The gate is case-insensitive — sync may deliver 'Efood'.
         assert_eq!(
-            platform_slip_banner("Efood", prepaid, "paid", 5.9),
+            banner("Efood", prepaid, "paid", 5.9),
             Some("EFOOD #42 · ΠΛΗΡΩΜΕΝΗ".to_string())
         );
+    }
+
+    /// Founder, 13/10/2026: the banner follows the app language and the
+    /// order's currency; it never prints Greek words or a euro for a Swiss
+    /// French store.
+    #[test]
+    fn platform_slip_banner_follows_app_language_and_order_currency() {
+        let cash =
+            r#"{"food_delivery":{"short_code":"7","payment_method":"cash","prepaid":false}}"#;
+        assert_eq!(
+            platform_slip_banner("wolt", cash, "pending", 24.5, "fr", Some("CHF")),
+            Some("WOLT #7 · CONTRE-REMBOURSEMENT 24,50 CHF".to_string())
+        );
+        assert_eq!(
+            platform_slip_banner("wolt", "", "paid", 24.5, "fr", Some("CHF")),
+            Some("WOLT · PAYEE".to_string())
+        );
+        assert_eq!(
+            platform_slip_banner("wolt", cash, "pending", 24.5, "en", None),
+            Some("WOLT #7 · CASH ON DELIVERY 24.50".to_string())
+        );
+        for lang in ["fr", "de", "it", "sq", "en"] {
+            let text = platform_slip_banner("wolt", cash, "pending", 24.5, lang, Some("CHF"))
+                .expect("banner");
+            assert!(!text.contains('€'), "{lang}: {text}");
+            assert!(!text.contains("ΑΝΤΙΚΑΤΑΒΟΛΗ"), "{lang}: {text}");
+            assert!(text.ends_with(" CHF"), "{lang}: {text}");
+        }
     }
 
     #[test]
@@ -10986,6 +11122,178 @@ mod tests {
         let preview = build_z_report_doc_from_payload(&db, &frozen, "preview");
         assert_eq!(preview.twint_sales, doc.twint_sales);
         assert_eq!(preview.twint_plugin_enabled, doc.twint_plugin_enabled);
+    }
+
+    /// Stored Z snapshots in, visible lines out: the export (shared Jest
+    /// suite), the Android print test and this print read the same cases.
+    const Z_REPORT_GOLDEN: &str =
+        include_str!("../../../shared/reports/__fixtures__/z-report-golden.json");
+
+    /// Founder (14/10/2026): the Z export is based on the Z's real data. For
+    /// every local desktop golden Z (a z_reports row with its columns), the
+    /// lines the printed Z shows are the fixture's `expected.print`, the lines
+    /// the export shows. The server copy without columns is the export's case
+    /// alone: the till always prints its own row.
+    #[test]
+    fn printed_z_shows_the_golden_lines_of_every_stored_desktop_z() {
+        let golden: Value = serde_json::from_str(Z_REPORT_GOLDEN).expect("golden fixture parses");
+        let comparable: std::collections::HashSet<&str> = golden["printComparableKeys"]["desktop"]
+            .as_array()
+            .expect("desktop print-comparable keys")
+            .iter()
+            .map(|key| key.as_str().expect("key is text"))
+            .collect();
+        let money = |columns: &Value, key: &str| columns[key].as_f64().unwrap_or(0.0);
+        let cents = |amount: f64| crate::money::Cents::round_half_even(amount).as_i64();
+        let mut checked = Vec::new();
+        for case in golden["cases"].as_array().expect("golden cases") {
+            let columns = &case["columns"];
+            if case["shape"] != "desktop" || columns.get("grossSales").is_none() {
+                continue;
+            }
+            let name = case["name"].as_str().expect("case name");
+            let id = columns["reportId"].as_str().expect("report id");
+            let db = test_db();
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO staff_shifts (id, staff_id, role_type, status, check_in_time, created_at, updated_at)
+                     VALUES ('golden-shift', 'golden-staff', 'cashier', 'closed', ?1, ?1, ?1)",
+                    params![columns["generatedAt"].as_str()],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO z_reports (
+                        id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                        gross_sales, gross_sales_cents, net_sales, net_sales_cents, total_orders,
+                        cash_sales, cash_sales_cents, card_sales, card_sales_cents,
+                        refunds_total, refunds_total_cents, voids_total, voids_total_cents,
+                        discounts_total, discounts_total_cents, tips_total, tips_total_cents,
+                        expenses_total, expenses_total_cents, cash_variance, cash_variance_cents,
+                        opening_cash, opening_cash_cents, closing_cash, closing_cash_cents,
+                        expected_cash, expected_cash_cents, report_json, created_at, updated_at
+                     ) VALUES (
+                        ?1, 'golden-shift', ?2, ?3, ?4, ?5,
+                        ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14,
+                        ?15, ?16, ?17, ?18,
+                        ?19, ?20, ?21, ?22,
+                        ?23, ?24, ?25, ?26,
+                        ?27, ?28, ?29, ?30,
+                        ?31, ?32, ?33, ?5, ?5
+                     )",
+                    params![
+                        id,
+                        columns["branchId"].as_str(),
+                        columns["terminalId"].as_str(),
+                        columns["reportDate"].as_str(),
+                        columns["generatedAt"].as_str(),
+                        money(columns, "grossSales"),
+                        cents(money(columns, "grossSales")),
+                        money(columns, "netSales"),
+                        cents(money(columns, "netSales")),
+                        columns["totalOrders"].as_i64(),
+                        money(columns, "cashSales"),
+                        cents(money(columns, "cashSales")),
+                        money(columns, "cardSales"),
+                        cents(money(columns, "cardSales")),
+                        money(columns, "refundsTotal"),
+                        cents(money(columns, "refundsTotal")),
+                        money(columns, "voidsTotal"),
+                        cents(money(columns, "voidsTotal")),
+                        money(columns, "discountsTotal"),
+                        cents(money(columns, "discountsTotal")),
+                        money(columns, "tipsTotal"),
+                        cents(money(columns, "tipsTotal")),
+                        money(columns, "expensesTotal"),
+                        cents(money(columns, "expensesTotal")),
+                        money(columns, "cashVariance"),
+                        cents(money(columns, "cashVariance")),
+                        money(columns, "openingCash"),
+                        cents(money(columns, "openingCash")),
+                        money(columns, "closingCash"),
+                        cents(money(columns, "closingCash")),
+                        money(columns, "expectedCash"),
+                        cents(money(columns, "expectedCash")),
+                        case["data"].to_string(),
+                    ],
+                )
+                .unwrap_or_else(|error| panic!("{name}: insert z_reports row: {error}"));
+            }
+            let doc = {
+                let conn = db.conn.lock().unwrap();
+                build_z_report_doc_with_conn(&conn, id)
+                    .unwrap_or_else(|error| panic!("{name}: {error}"))
+            };
+            let mut printed = receipt_renderer::z_report_print_comparable_lines(&doc)
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect::<Vec<_>>();
+            for (key, _) in &printed {
+                assert!(
+                    comparable.contains(key.as_str()),
+                    "{name}: {key} is not a print-comparable key"
+                );
+            }
+            let mut expected = case["expected"]["print"]
+                .as_array()
+                .expect("expected print lines")
+                .iter()
+                .map(|line| {
+                    (
+                        line[0].as_str().expect("line key").to_string(),
+                        line[1].as_i64().expect("line value"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            printed.sort();
+            expected.sort();
+            assert_eq!(printed, expected, "{name}: printed Z lines");
+            checked.push(name.to_string());
+        }
+        // Never a vacuous pass: the fixture has local desktop Zs to print.
+        assert!(
+            checked.len() >= 2,
+            "local desktop golden Zs printed: {checked:?}"
+        );
+    }
+
+    /// The printed Z shows the VAT its stored snapshot recorded
+    /// (`sales.taxTotal`), reprint and live preview alike, and no VAT line
+    /// for a report that recorded none.
+    #[test]
+    fn printed_z_shows_the_recorded_vat_and_no_vat_line_without_it() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,status,check_in_time,created_at,updated_at) VALUES('shift','staff','cashier','closed','2026-10-13T08:00:00Z','now','now')",[]).unwrap();
+            for (id, report_json) in [
+                (
+                    "with-vat",
+                    r#"{"sales":{"taxTotal":7.34,"taxTotal_cents":734}}"#,
+                ),
+                ("without-vat", r#"{"sales":{}}"#),
+            ] {
+                conn.execute("INSERT INTO z_reports(id,shift_id,branch_id,terminal_id,report_date,generated_at,gross_sales,net_sales,report_json,created_at,updated_at) VALUES(?1,'shift','branch','term','2026-10-13','2026-10-13T18:00:00Z',100,90,?2,'now','now')",params![id, report_json]).unwrap();
+            }
+        }
+        let with_vat = build_z_report_doc(&db, "with-vat").unwrap();
+        assert_eq!(with_vat.tax_total, 7.34);
+        assert!(receipt_renderer::z_report_print_comparable_lines(&with_vat)
+            .contains(&("sales.vatIncluded", 734)));
+        let without_vat = build_z_report_doc(&db, "without-vat").unwrap();
+        assert_eq!(without_vat.tax_total, 0.0);
+        assert!(
+            !receipt_renderer::z_report_print_comparable_lines(&without_vat)
+                .iter()
+                .any(|(key, _)| *key == "sales.vatIncluded")
+        );
+        let preview = build_z_report_doc_from_payload(
+            &db,
+            &serde_json::json!({"sales":{"taxTotal":7.34,"taxTotal_cents":734}}),
+            "preview",
+        );
+        assert_eq!(preview.tax_total, with_vat.tax_total);
     }
 
     fn test_db() -> DbState {
@@ -17375,6 +17683,115 @@ mod tests {
         }
     }
 
+    /// Coordinator follow-up (13/10/2026): order prints use the order's
+    /// recorded currency, else the store's; delivery slips too. Nothing
+    /// invents a euro: with no unit known anywhere the slip says "?".
+    #[test]
+    fn order_prints_use_the_order_currency_else_the_store_currency() {
+        let db = test_db();
+        seed_print_store_currency(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "CHF").unwrap();
+            insert_receipt_order(&conn, "slip-eur", "SLIP-EUR", 12.5);
+            conn.execute("UPDATE orders SET currency='EUR' WHERE id='slip-eur'", [])
+                .unwrap();
+            // A platform order ingested without a currency.
+            insert_receipt_order(&conn, "slip-none", "SLIP-NONE", 8.0);
+        }
+        for (order_id, expected) in [("slip-eur", "EUR"), ("slip-none", "CHF")] {
+            for entity_type in ["delivery_slip", "order_receipt"] {
+                let document = build_document_for_job(&db, entity_type, order_id, None).unwrap();
+                let (_, layout, _, _) =
+                    render_managed_payload(&db, entity_type, &serde_json::json!({}), &document)
+                        .unwrap();
+                assert_eq!(
+                    layout.currency_symbol.trim(),
+                    expected,
+                    "{entity_type} for {order_id}"
+                );
+            }
+        }
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "store_currency_available", "false").unwrap();
+        }
+        for entity_type in ["delivery_slip", "order_receipt"] {
+            let document = build_document_for_job(&db, entity_type, "slip-none", None).unwrap();
+            let (bytes, layout, _, _) =
+                render_managed_payload(&db, entity_type, &serde_json::json!({}), &document)
+                    .unwrap();
+            assert_eq!(layout.currency_symbol.trim(), "?", "{entity_type}");
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("EUR"), "{entity_type} invented a euro");
+        }
+    }
+
+    /// Review of 13/10/2026: a payment row without a unit makes the payments
+    /// unable to name the currency; the order's own recorded unit must still
+    /// win over the store's (an EUR order must not print CHF after the store
+    /// moved to CHF).
+    #[test]
+    fn order_currency_wins_over_store_when_a_payment_row_has_no_unit() {
+        let db = test_db();
+        seed_print_store_currency(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "restaurant", "currency", "CHF").unwrap();
+            insert_receipt_order(&conn, "eur-order", "EUR-ORDER", 12.5);
+            conn.execute("UPDATE orders SET currency='EUR' WHERE id='eur-order'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE orders SET plugin='wolt',
+                    ghost_metadata='{\"food_delivery\":{\"short_code\":\"9\",\"payment_method\":\"cash\",\"prepaid\":false}}'
+                 WHERE id='eur-order'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, amount_cents, status, currency,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'pay-no-unit', 'eur-order', 'cash', 12.5, 1250, 'completed', '',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            assert_eq!(
+                crate::fiscal::payload_builder::resolve_order_document_currency(&conn, "eur-order"),
+                Err("PAYMENT_CURRENCY_UNAVAILABLE".to_string())
+            );
+            assert_eq!(
+                order_print_currency_code(&conn, "eur-order").as_deref(),
+                Some("EUR")
+            );
+        }
+        for entity_type in ["delivery_slip", "order_receipt"] {
+            let document = build_document_for_job(&db, entity_type, "eur-order", None).unwrap();
+            let (_, layout, _, _) =
+                render_managed_payload(&db, entity_type, &serde_json::json!({}), &document)
+                    .unwrap();
+            assert_eq!(layout.currency_symbol.trim(), "EUR", "{entity_type}");
+        }
+        let doc = build_order_receipt_doc(&db, "eur-order").unwrap();
+        let banner = doc.status_label.unwrap_or_default();
+        assert!(banner.ends_with(" EUR"), "{banner}");
+        assert!(!banner.contains("CHF"), "{banner}");
+    }
+
+    #[test]
+    fn driver_delivery_line_without_order_number_prints_a_dash() {
+        let source = include_str!("print.rs");
+        let builder = &source[source
+            .find("lines.push(crate::receipt_renderer::DriverDeliveryLine {")
+            .expect("driver delivery line builder")..];
+        let order_number = &builder[..builder.find("delivery_address").expect("next field")];
+        assert!(order_number.contains("unwrap_or(\"—\")"), "{order_number}");
+        assert!(!order_number.contains("N/A"), "{order_number}");
+    }
+
     #[test]
     fn unpaid_order_print_keeps_original_currency_after_country_changes() {
         let db = test_db();
@@ -20172,6 +20589,8 @@ mod tests {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
+            // A Greek efood store: the slip speaks the app language.
+            db::set_setting(&conn, "general", "language", "el").unwrap();
             insert_receipt_order(&conn, "ord-efood-slip", "EFOOD-1787677685257-64656281", 2.6);
             conn.execute(
                 r#"UPDATE orders
@@ -20199,6 +20618,23 @@ mod tests {
         // The kitchen matches bags to riders by the same code.
         let kitchen = build_kitchen_ticket_doc(&db, "ord-efood-slip").unwrap();
         assert_eq!(kitchen.order_number, "20");
+
+        // The same slip in a French store prints French (13/10/2026).
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "general", "language", "fr").unwrap();
+        }
+        let doc = build_order_receipt_doc(&db, "ord-efood-slip").unwrap();
+        assert!(doc
+            .order_notes
+            .iter()
+            .any(|note| note == "Code commande: 64656281"));
+        let label = doc.status_label.unwrap_or_default();
+        assert!(label.contains("CONTRE-REMBOURSEMENT"), "{label}");
+        assert!(
+            !label.contains("ΑΝΤΙΚΑΤΑΒΟΛΗ") && !label.contains('€'),
+            "{label}"
+        );
     }
 
     #[test]
@@ -20286,6 +20722,8 @@ mod tests {
             .unwrap();
             crate::db::set_setting(&conn, "receipt_actions", "print_sandbox_orders", "true")
                 .unwrap();
+            // The test banner prints in the app language (Greek here).
+            crate::db::set_setting(&conn, "general", "language", "el").unwrap();
         }
 
         let result = enqueue_print_job(

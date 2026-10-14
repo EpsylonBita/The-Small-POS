@@ -45,6 +45,11 @@ test('TerminalCardCompact controls + default-star badge use aria-label, no nativ
   assert.match(source, /aria-label=\{t\('ecr\.actions\.setDefault', 'Set as Default'\)\}/);
   assert.match(source, /aria-label=\{t\('ecr\.actions\.edit', 'Edit'\)\}/);
   assert.match(source, /aria-label=\{t\('ecr\.actions\.delete', 'Delete'\)\}/);
+
+  // The Bluetooth reason came back as a native title on the disabled Connect button (07/09/2026,
+  // 1.4.103). It is the visible notice under the card, tied to the button with aria-describedby.
+  assert.match(source, /aria-describedby=\{bluetoothUnavailable \? bluetoothNoticeId : undefined\}/);
+  assert.match(source, /<p id=\{bluetoothNoticeId\}[^>]*>\s*\{bluetoothUnavailableMessage\}/);
 });
 
 test('ECR modal title heading props are preserved (title= not globally forbidden)', () => {

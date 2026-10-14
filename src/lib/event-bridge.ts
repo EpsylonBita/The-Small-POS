@@ -79,6 +79,10 @@ const EVENT_MAP: Record<string, string> = {
 
   // --- Shift events ---
   'shift_updated': 'shift-updated',
+  // The server refused a shift over its person's open shift, or a check-in
+  // made without a connection it re-checked (Rust `emit_shift_conflicts`);
+  // useAppEvents tells the cashier. Identity-mapped: Rust emits this name.
+  'recovery:shift-conflict': 'recovery:shift-conflict',
 
   // --- Database health ---
   'database_health_update': 'database-health-update',

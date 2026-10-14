@@ -284,7 +284,7 @@ describe('GiftCardTender', () => {
     fireEvent.click(check);
     expect(await screen.findByText('Card •••• 4321 · balance 50.00 EUR')).toBeInTheDocument();
     expect(h.api.lookup).toHaveBeenCalledExactlyOnceWith(CARD_NUMBER);
-    expect(screen.getByLabelText('Amount to charge')).toHaveValue('20.00');
+    expect(screen.getByLabelText('Amount to charge')).toHaveValue('20,00');
     fireEvent.click(screen.getByRole('button', { name: 'Charge gift card' }));
     expect(await screen.findByText('Gift card payment recorded: 20.00 EUR')).toBeInTheDocument();
 
@@ -606,7 +606,7 @@ describe('GiftCardTender', () => {
 
     fireEvent.click(await enterCard());
     const amount = await screen.findByLabelText('Amount to charge');
-    expect(amount).toHaveValue('10.00');
+    expect(amount).toHaveValue('10,00');
     expect(amount).toHaveAttribute('readonly');
     fireEvent.click(screen.getByRole('button', { name: 'Charge gift card' }));
 

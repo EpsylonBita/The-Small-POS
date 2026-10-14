@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-// Cashier closeout inline forms (StaffShiftModal): decimal-comma amount input,
+// Cashier closeout inline forms (StaffShiftModal): digit-entry amount input,
 // submit-disabled validation mirroring ExpenseModal, and opened forms scrolling
 // into view above the sticky footer.
 const source = readFileSync(
@@ -11,18 +11,18 @@ const source = readFileSync(
   'utf8',
 );
 
-test('closeout inline expense amount input accepts a decimal comma', () => {
+test('closeout inline expense amount input uses digit entry in cents', () => {
   // The old filter stripped everything except digits and '.', turning "2,50" into "250".
   assert.doesNotMatch(
     source,
     /replace\(\/\[\^0-9\.\]\/g, ''\)/,
     'expense amount input must not strip the decimal comma',
   );
-  // Both expense amount inputs route through the comma-aware money formatter.
-  const formatterUsages = source.match(/setExpenseAmount\(formatMoneyInputWithCents\(e\.target\.value\)\)/g);
+  // Both expense amount inputs are digit-entry money fields (3350 -> 33,50).
+  const formatterUsages = source.match(/<CentsMoneyInput\s+aria-label=\{[^}]+\}\s+value=\{expenseAmount\}\s+onValueChange=\{setExpenseAmount\}/g);
   assert.ok(
     formatterUsages && formatterUsages.length >= 2,
-    'both expense amount inputs should use formatMoneyInputWithCents',
+    'both expense amount inputs should be CentsMoneyInput digit-entry fields',
   );
 });
 

@@ -35,7 +35,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Tests are bundled by esbuild into `node_modules/.cache/parity-tests/`
+// Tests are bundled by esbuild into `.cache/parity-tests/`
 // and run with `cwd` = project root. Resolve source paths from cwd so
 // the test works both from `node --test` (bundled) and from direct ts
 // execution (unbundled).

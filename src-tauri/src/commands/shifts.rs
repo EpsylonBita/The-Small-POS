@@ -787,7 +787,14 @@ pub async fn shift_open(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing shift payload")?;
-    let result = shift_service::open_shift(&db, &payload)?;
+    // Whether this person's PIN was checked on this till (the server could
+    // not be reached) is native state, never the renderer's claim.
+    let staff_id = value_str(&payload, &["staffId", "staff_id"]).unwrap_or_default();
+    let admission = crate::offline_check_in::admission_for(&staff_id, chrono::Utc::now());
+    let result = shift_service::open_shift_with_admission(&db, &payload, &admission)?;
+    if admission != crate::offline_check_in::CheckInAdmission::Ordinary {
+        crate::offline_check_in::complete(&staff_id);
+    }
     if let Some(shift_id) = result.get("shiftId").and_then(serde_json::Value::as_str) {
         schedule_immediate_sync(app.clone(), "shift", shift_id.to_string());
     }

@@ -3,6 +3,11 @@ import { toast } from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
 import { AlertTriangle, Power, RefreshCw, Ban, CheckCircle, Clock } from 'lucide-react';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import {
+    SHIFT_CONFLICT_CHANNEL,
+    describeShiftConflict,
+    readShiftConflictNotice,
+} from '../services/shiftConflictNotice';
 
 interface UseAppEventsProps {
     onLogout: () => void;
@@ -187,6 +192,19 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             );
         };
 
+        const handleShiftConflict = (data: unknown) => {
+            // An operator matter (the refused shift holds the Z until it is
+            // reviewed in Sync), never shown on a customer-facing screen.
+            if (isExternalDisplayWebview()) return;
+            const notice = readShiftConflictNotice(data);
+            if (!notice) return;
+            toast.error(describeShiftConflict(notice, tRef.current), {
+                // One toast per shift, however often the sync reports it.
+                id: `shift-conflict-${notice.shiftId}`,
+                duration: 15000,
+            });
+        };
+
         // List of channels we're subscribing to
         const handlers: Record<string, (data?: any) => void> = {
             'app-close': handleAppClose,
@@ -198,6 +216,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             'session-timeout': handleSessionTimeout,
             'terminal-settings-updated': handleTerminalSettingsUpdated,
             'print-worker-alert': handlePrintWorkerAlert,
+            [SHIFT_CONFLICT_CHANNEL]: handleShiftConflict,
         };
         const channels = Object.keys(handlers);
 

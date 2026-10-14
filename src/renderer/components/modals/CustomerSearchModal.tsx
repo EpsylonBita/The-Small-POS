@@ -246,6 +246,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Results came from the customers saved on this till: the server could not
+  // be asked (offline customer search, 13/10/2026).
+  const [showingSavedCustomers, setShowingSavedCustomers] = useState(false);
   const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchInputId = useId();
@@ -346,6 +349,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     setError(null);
     setCustomer(null);
     setCustomers([]);
+    setShowingSavedCustomers(false);
 
     try {
       if (localFirstPhoneLookupRef.current && PHONE_LIKE_QUERY.test(query.trim())) {
@@ -440,6 +444,29 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     } catch (err) {
       if (isSearchRequestStale(requestId)) return;
       console.error('Error searching customer:', err);
+      // The server could not be asked: search the customers this till holds
+      // (looked up, created, synced from the directory, Caller ID) by name or
+      // phone, without a request. It used to find only a query typed exactly
+      // as one answered online.
+      try {
+        const saved = await getBridge().customers.search(query.trim(), { cacheOnly: true });
+        if (isSearchRequestStale(requestId)) return;
+        const savedCustomers = Array.isArray(saved) ? saved.map((c: any) => toCustomerRecord(c)) : [];
+        if (savedCustomers.length > 0) {
+          setShowingSavedCustomers(true);
+          setError(null);
+          if (savedCustomers.length === 1) {
+            setCustomer(savedCustomers[0]);
+            setCustomers([]);
+          } else {
+            setCustomers(savedCustomers);
+            setCustomer(null);
+          }
+          return;
+        }
+      } catch {
+        if (isSearchRequestStale(requestId)) return;
+      }
       setError(t('modals.customerSearch.searchError'));
     } finally {
       if (!isSearchRequestStale(requestId)) {
@@ -775,6 +802,15 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           </p>
         )}
       </div>
+
+      {showingSavedCustomers && !isSearching && (
+        <p
+          className="mb-3 text-xs font-medium text-amber-700 dark:text-amber-300"
+          data-testid="customer-search-saved-results"
+        >
+          {t('modals.customerSearch.offlineSavedResults')}
+        </p>
+      )}
 
       {/* Error Message */}
       {error && (!callerIdWorkspace || error !== t('modals.customerSearch.customerNotFound')) && (

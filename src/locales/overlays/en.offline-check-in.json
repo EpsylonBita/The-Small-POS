@@ -1,0 +1,32 @@
+{
+  "modals": {
+    "staffShift": {
+      "offlineCheckIn": {
+        "checkedInTitle": "Checked in without a connection",
+        "checkedInMessage": "The server checks this check-in once the connection is back.",
+        "roleNotAllowed": "Without a connection, only a cashier, manager or driver can check in on this till.",
+        "giftCardsNeedServer": "With gift cards, opening the drawer needs the server. Check in once the connection is back.",
+        "noPinOnTill": "This till holds no PIN for this person, so they can't check in without a connection.",
+        "locked": "Too many wrong PINs. Try again in 15 minutes, or once the connection is back.",
+        "waiterPhone": "A waiter phone checks staff in through the server. Try again once the connection is back."
+      },
+      "pinLocked": "This PIN is locked for now. Try again later.",
+      "staffNotFound": "This staff member was not found in this store.",
+      "rateLimited": "Too many check-in attempts. Wait a moment and try again.",
+      "checkInUnavailable": "This till cannot ask the server: its connection settings are incomplete.",
+      "syncConflict": {
+        "offlineTitle": "The server refused a check-in made without a connection",
+        "reason": {
+          "waiter_terminal": "a waiter phone cannot check staff in without a connection.",
+          "staff_not_found": "the person is not in this store.",
+          "active_shift_elsewhere": "the person is checked in on another till.",
+          "unresolved_shift": "an earlier shift of this person on this till is still open.",
+          "unknown": "it could not be confirmed."
+        },
+        "shiftTitle": "The server refused a shift",
+        "shiftBody": "the staff member already has another open shift. Close or repair it, then retry it in Sync.",
+        "review": "The shift stays on this till for review in Sync."
+      }
+    }
+  }
+}

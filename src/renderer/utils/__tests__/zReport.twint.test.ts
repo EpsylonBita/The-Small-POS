@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ZReportData } from '../../types/reports';
 import { resolveZReportPresentation, resolveZReportTwintTotal, resolveShiftEarnedTotal } from '../zReport';
-import { exportZReportToCSV } from '../reportExport';
+import { exportProvisionalZReportCsv } from '../reportExport';
+import { captureDownloads, parseCsv } from './zReportExportKit';
 const report = (patch: Partial<ZReportData> = {}): ZReportData => ({
   date: '2026-10-02', shifts: {total:1,cashier:1,driver:0},
   sales:{totalOrders:1,totalSales:55,cashSales:10,cardSales:20,twintSales:25},
@@ -35,15 +36,15 @@ describe('TWINT Z presentation and CSV',()=>{
     expect(resolveZReportPresentation({...stored,presentation:{twintPluginEnabled:false}}).twint).toBe(false);
   });
   it('exports distinct mixed amounts and omits empty optional sections',()=>{
-    let csv=''; class CaptureBlob {constructor(chunks:string[]){csv=chunks.join('');}}
-    vi.stubGlobal('Blob',CaptureBlob);
-    Object.defineProperty(URL,'createObjectURL',{value:vi.fn(()=> 'blob:z'),configurable:true,writable:true});
-    Object.defineProperty(URL,'revokeObjectURL',{value:vi.fn(),configurable:true,writable:true});
-    vi.spyOn(HTMLAnchorElement.prototype,'click').mockImplementation(()=>undefined);
-    exportZReportToCSV(report());
-    expect(csv).toContain('"Sales","TWINT",25');expect(csv).toContain('"Sales","Card Sales",20');
-    expect(csv).not.toContain('"Expenses"');expect(csv).not.toContain('"Driver Earnings"');expect(csv).not.toContain('"Shifts","Driver"');
-    exportZReportToCSV(report({sales:{totalOrders:0,totalSales:0,cashSales:0,cardSales:0},presentation:{twintPluginEnabled:true}}));
-    expect(csv).toContain('"Sales","TWINT",0');
+    const downloads=captureDownloads();
+    exportProvisionalZReportCsv(report(),'en');
+    const rows=parseCsv(downloads[0].csv,',');
+    expect(rows).toContainEqual(['Payments','TWINT','25.00']);expect(rows).toContainEqual(['Payments','Card','20.00']);
+    expect(rows).toContainEqual(['Payments','Cash','10.00']);
+    expect(rows.some(r=>r[0]==='Expenses')).toBe(false);expect(rows.some(r=>r[0]==='Driver summary')).toBe(false);
+    expect(rows.some(r=>r[0]==='Shifts'&&r[1]==='Drivers')).toBe(false);
+    // Printed Z rules (13/10/2026): TWINT shows only when it took payments; an enabled plugin alone is not one.
+    exportProvisionalZReportCsv(report({sales:{totalOrders:0,totalSales:0,cashSales:0,cardSales:0},presentation:{twintPluginEnabled:true}}),'en');
+    expect(parseCsv(downloads[1].csv,',').some(r=>r[1].startsWith('TWINT'))).toBe(false);
   });
 });

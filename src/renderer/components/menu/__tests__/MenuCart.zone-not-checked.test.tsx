@@ -77,6 +77,11 @@ describe('MenuCart: delivery zone not checked', () => {
     renderCart({ deliveryFeeStatus: 'not_checked', onRepickDeliveryAddress: onRepick, onCheckout })
 
     expect(screen.getByTestId('menu-cart-zone-not-checked')).toHaveTextContent('menu.cart.deliveryZoneNotCheckedNotice')
+    // On the app palette (amber, as the retail catalog's same notice), never off-theme sky blue.
+    const noticeClasses = [screen.getByTestId('menu-cart-zone-not-checked'), screen.getByTestId('menu-cart-zone-repick')]
+      .map(element => element.className).join(' ')
+    expect(noticeClasses).toMatch(/amber-/)
+    expect(noticeClasses).not.toMatch(/sky-|blue-|cyan-|indigo-/)
     expect(screen.getByText('menu.cart.deliveryFeeZoneNotChecked')).toBeInTheDocument()
     expect(screen.queryByText('menu.cart.deliveryFeeOutOfZone')).toBeNull()
 

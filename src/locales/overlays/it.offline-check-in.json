@@ -1,0 +1,32 @@
+{
+  "modals": {
+    "staffShift": {
+      "offlineCheckIn": {
+        "checkedInTitle": "Check-in senza connessione",
+        "checkedInMessage": "Il server controllerà questo check-in appena torna la connessione.",
+        "roleNotAllowed": "Senza connessione, su questa cassa può fare il check-in solo un cassiere, un responsabile o un fattorino.",
+        "giftCardsNeedServer": "Con le carte regalo, l'apertura del cassetto ha bisogno del server. Fai il check-in appena torna la connessione.",
+        "noPinOnTill": "Questa cassa non conserva il PIN di questa persona, quindi non può fare il check-in senza connessione.",
+        "locked": "Troppi PIN sbagliati. Riprova tra 15 minuti o appena torna la connessione.",
+        "waiterPhone": "Sul telefono del cameriere il check-in passa dal server. Riprova appena torna la connessione."
+      },
+      "pinLocked": "Questo PIN è bloccato per ora. Riprova più tardi.",
+      "staffNotFound": "Questo membro del personale non è stato trovato in questo negozio.",
+      "rateLimited": "Troppi tentativi di check-in. Attendi un momento e riprova.",
+      "checkInUnavailable": "Questa cassa non può interrogare il server: le sue impostazioni di connessione sono incomplete.",
+      "syncConflict": {
+        "offlineTitle": "Il server ha rifiutato un check-in fatto senza connessione",
+        "reason": {
+          "waiter_terminal": "un telefono del cameriere non può fare il check-in del personale senza connessione.",
+          "staff_not_found": "la persona non fa parte di questo negozio.",
+          "active_shift_elsewhere": "la persona ha fatto il check-in su un'altra cassa.",
+          "unresolved_shift": "un turno precedente di questa persona su questa cassa è ancora aperto.",
+          "unknown": "non è stato possibile confermarlo."
+        },
+        "shiftTitle": "Il server ha rifiutato un turno",
+        "shiftBody": "il membro del personale ha già un altro turno aperto. Chiudilo o correggilo, poi riprova da Sincronizzazione.",
+        "review": "Il turno resta su questa cassa per la verifica in Sincronizzazione."
+      }
+    }
+  }
+}

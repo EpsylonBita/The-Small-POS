@@ -346,8 +346,9 @@ describe('table check workflow ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
     const firstSheet = screen.getAllByRole('dialog').at(-1)!;
     const inputs = within(firstSheet).getAllByRole('textbox');
-    fireEvent.change(inputs[0], { target: { value: '6' } });
-    fireEvent.change(inputs[1], { target: { value: '8' } });
+    // Digit entry in cents: 600 is 6,00 and 800 is 8,00.
+    fireEvent.change(inputs[0], { target: { value: '600' } });
+    fireEvent.change(inputs[1], { target: { value: '800' } });
     fireEvent.click(within(firstSheet).getByRole('button', { name: 'Cash' }));
     await waitFor(() => expect(screen.getByText('Due').nextElementSibling).toHaveTextContent('EUR 6.00'));
     expect(mocks.recordPayment).toHaveBeenCalledWith(expect.objectContaining({ amount: 14, amount_cents: 1400, tip_amount_cents: 800 }));
@@ -379,8 +380,8 @@ describe('table check workflow ownership', () => {
     await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
     const sheet = screen.getAllByRole('dialog').at(-1)!;
-    fireEvent.change(within(sheet).getAllByRole('textbox')[0], { target: { value: '1' } });
-    fireEvent.change(within(sheet).getAllByRole('textbox')[1], { target: { value: '2' } });
+    fireEvent.change(within(sheet).getAllByRole('textbox')[0], { target: { value: '100' } });
+    fireEvent.change(within(sheet).getAllByRole('textbox')[1], { target: { value: '200' } });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Full Table' }));
     fireEvent.click(within(sheet).getByRole('button', { name: 'Cash' }));
     await waitFor(() => expect(mocks.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
@@ -414,7 +415,7 @@ describe('table check workflow ownership', () => {
     fireEvent.pointerUp(coffee);
     fireEvent.click(screen.getByRole('button', { name: 'Pay Selected' }));
     const sheet = screen.getAllByRole('dialog').at(-1)!;
-    fireEvent.change(within(sheet).getAllByRole('textbox')[0], { target: { value: '2' } });
+    fireEvent.change(within(sheet).getAllByRole('textbox')[0], { target: { value: '200' } });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Cash' }));
     await waitFor(() => expect(mocks.recordPayment).toHaveBeenCalledWith(expect.objectContaining({
       amount: 8, amount_cents: 800, tip_amount_cents: 200,
@@ -512,7 +513,7 @@ describe('table check workflow ownership', () => {
     await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
     const abandoned = screen.getAllByRole('dialog').at(-1)!;
-    fireEvent.change(within(abandoned).getAllByRole('textbox')[1], { target: { value: '8' } });
+    fireEvent.change(within(abandoned).getAllByRole('textbox')[1], { target: { value: '800' } });
     fireEvent.click(within(abandoned).getByRole('button', { name: 'Close' }));
     await openItemAction('Pay Item');
     const itemSheet = screen.getAllByRole('dialog').at(-1)!;

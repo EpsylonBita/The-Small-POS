@@ -1,126 +1,201 @@
-import type { ZReportData, ZReportDayOrder, StaffPerformance } from '../types/reports';
-import { buildZReportGiftCloseCsvRows, resolveZReportPeriod, resolveZReportPresentation, resolveZReportTwintTotal } from './zReport';
+/**
+ * CSV exports of the till.
+ *
+ * A Z export is made from the STORED Z only (founder, 14/10/2026: "the Z export must be based on the Z's real
+ * data"): the `z_reports` row (`zreport_list` / `zreport_get`) with its frozen `report_json`, read and written by
+ * `shared/reports`, the same document Android and the admin export. Nothing here recomputes a figure. The live
+ * preview of a day that is still open can be exported too, but only marked "Provisional – not a Z": on its first
+ * line and in its file name (`z-provisional_...`).
+ *
+ * Every file is written for spreadsheets: UTF-8 with a BOM, CRLF, RFC 4180 quoting, formula-like text
+ * neutralized, and `;` with decimal commas wherever the app language writes decimal commas.
+ */
+import i18next from 'i18next';
+import type { StoredZReportRow } from '../../lib/ipc-contracts';
+import type { ZReportData } from '../types/reports';
+import {
+  desktopZReportColumns,
+  zReportDocumentFromSnapshot,
+  zReportOrdersFromSnapshot,
+  type ZReportColumns,
+  type ZReportDocument,
+  type ZReportOrderLine,
+  type ZReportSnapshotInput,
+} from '../../../../shared/reports/z-report-document';
+import {
+  serializeZReportCsv,
+  serializeZReportOrdersCsv,
+  zReportCsvCell,
+  zReportCsvDelimiter,
+  zReportDecimalSeparator,
+  zReportFileName,
+  Z_REPORT_CSV_BOM,
+} from '../../../../shared/reports/z-report-export';
 
-function recordedCurrency(value: string | null | undefined): string {
-  return typeof value === 'string' && /^[A-Z]{3}$/.test(value) ? value : 'Unknown';
+export interface StoredZReportExportOptions {
+  /**
+   * This till's display name, for its own Zs: a stored row carries only the terminal id, and the printed Z
+   * shows the till's display name the same way. Never replaces a name the row recorded.
+   */
+  terminalName?: string | null;
 }
 
-export function exportArrayToCSV(data: Record<string, any>[], filename: string) {
-  if (!data || data.length === 0) {
-    const headers = Object.keys(data?.[0] || { Empty: '' });
-    const csv = [headers.join(',')].join('\n');
-    downloadCSV(csv, filename);
-    return;
+/** One Z read once: its document, the order list it recorded and whether that list was cut short. */
+export interface ZReportExportView {
+  document: ZReportDocument;
+  orders: ZReportOrderLine[];
+  /** The Z recorded only its first orders (the builder keeps at most 1000). */
+  ordersTruncated: boolean;
+}
+
+export interface StoredZReportView extends ZReportExportView {
+  id: string;
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is UnknownRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** `report_json` is JSON text; parsed once here, the shared reader takes the object. */
+function parseSnapshot(reportJson: unknown): unknown {
+  if (typeof reportJson !== 'string') return reportJson;
+  try {
+    return JSON.parse(reportJson);
+  } catch {
+    // Unreadable text stays as received: the reader then keeps only the row's own columns.
+    return reportJson;
   }
-  const headers = Object.keys(data[0]);
-  const csv = [headers.join(','), ...data.map(r => headers.map(h => JSON.stringify((r as any)[h] ?? '')).join(','))].join('\n');
-  downloadCSV(csv, filename);
 }
 
-function downloadCSV(csvString: string, filename: string) {
-  const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+function ordersWereTruncated(snapshot: unknown): boolean {
+  if (!isRecord(snapshot)) return false;
+  if (Array.isArray(snapshot.dayOrders)) return snapshot.dayOrdersTruncated === true;
+  // Reports persisted before 1.4.97 keep one order list per staff shift.
+  return Array.isArray(snapshot.staffReports)
+    && snapshot.staffReports.some((staff) => isRecord(staff) && staff.ordersTruncated === true);
+}
+
+function storedColumns(row: StoredZReportRow, options: StoredZReportExportOptions = {}): ZReportColumns {
+  const columns = desktopZReportColumns(row);
+  const terminalName = typeof options.terminalName === 'string' ? options.terminalName.trim() : '';
+  return terminalName && !columns.terminalName ? { ...columns, terminalName } : columns;
+}
+
+function readView(input: ZReportSnapshotInput, provisional: boolean): ZReportExportView {
+  return {
+    document: zReportDocumentFromSnapshot(input, { provisional }),
+    orders: zReportOrdersFromSnapshot(input),
+    ordersTruncated: ordersWereTruncated(input.data),
+  };
+}
+
+/** A stored Z: the row's columns and its frozen snapshot, exactly as the till saved them. */
+export function readStoredZReport(row: StoredZReportRow, options?: StoredZReportExportOptions): StoredZReportView {
+  const view = readView(
+    { data: parseSnapshot(row.reportJson), shape: 'desktop', columns: storedColumns(row, options) },
+    false,
+  );
+  return { id: row.id, ...view };
+}
+
+/** The live preview of the open day: provisional, never a Z. */
+export function readProvisionalZReport(liveReport: ZReportData): ZReportExportView {
+  return readView({ data: liveReport, shape: 'desktop', columns: desktopZReportColumns(liveReport) }, true);
+}
+
+/**
+ * Hand the file to the webview's download. The shared serializer already wrote the BOM; nothing is added.
+ * Returns the file name.
+ */
+function downloadCsvFile(csv: string, fileName: string): string {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `${filename}.csv`;
+  link.download = fileName;
   link.click();
-  URL.revokeObjectURL(url);
+  // Released after the click has handed the blob to the download.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  return fileName;
 }
 
-export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-report') {
-  if (!zReport) return;
-  const rows: Record<string, any>[] = [];
-  const period = resolveZReportPeriod(zReport);
-  const sections = resolveZReportPresentation(zReport);
-  const driverEarnings = zReport.driverEarnings ?? {
-    totalDeliveries: 0,
-    totalEarnings: 0,
-    unsettledCount: 0,
-  };
+function exportReportCsv(view: ZReportExportView, language: string | null | undefined): string {
+  return downloadCsvFile(
+    serializeZReportCsv(view.document, { language }),
+    zReportFileName(view.document, { extension: 'csv' }),
+  );
+}
 
-  rows.push({ Section: 'Report', Metric: 'Business Day', Value: zReport.date });
-  rows.push({ Section: 'Report', Metric: 'Currency', Value: recordedCurrency(zReport.currency) });
-  rows.push({ Section: 'Report', Metric: 'Period Start', Value: period.start ?? '' });
-  rows.push({ Section: 'Report', Metric: 'Period End', Value: period.end ?? '' });
+function exportOrdersCsv(view: ZReportExportView, language: string | null | undefined): string {
+  return downloadCsvFile(
+    serializeZReportOrdersCsv(view.orders, view.document, { language }),
+    zReportFileName(view.document, { extension: 'csv', kind: 'orders' }),
+  );
+}
 
-  rows.push({ Section: 'Shifts', Metric: 'Total', Value: zReport.shifts.total });
-  rows.push({ Section: 'Shifts', Metric: 'Cashier', Value: zReport.shifts.cashier });
-  if (sections.drivers) rows.push({ Section: 'Shifts', Metric: 'Driver', Value: zReport.shifts.driver });
+/** The stored Z as CSV, in the app language. Returns the file name (`z-report_<terminal>_<closing time>.csv`). */
+export function exportStoredZReportCsv(
+  row: StoredZReportRow,
+  language: string | null | undefined,
+  options?: StoredZReportExportOptions,
+): string {
+  return exportReportCsv(readStoredZReport(row, options), language);
+}
 
-  rows.push({ Section: 'Sales', Metric: 'Total Orders', Value: zReport.sales.totalOrders });
-  rows.push({ Section: 'Sales', Metric: 'Total Sales', Value: zReport.sales.totalSales });
-  rows.push({ Section: 'Sales', Metric: 'Cash Sales', Value: zReport.sales.cashSales });
-  rows.push({ Section: 'Sales', Metric: 'Card Sales', Value: zReport.sales.cardSales });
-  if (sections.twint) rows.push({ Section: 'Sales', Metric: 'TWINT', Value: resolveZReportTwintTotal(zReport) });
+/** The order list the stored Z recorded, as CSV. Returns the file name (`z-report-orders_...`). */
+export function exportStoredZReportOrdersCsv(
+  row: StoredZReportRow,
+  language: string | null | undefined,
+  options?: StoredZReportExportOptions,
+): string {
+  return exportOrdersCsv(readStoredZReport(row, options), language);
+}
 
-  rows.push({ Section: 'Cash Drawer', Metric: 'Total Variance', Value: zReport.cashDrawer.totalVariance });
-  rows.push({ Section: 'Cash Drawer', Metric: 'Total Cash Drops', Value: zReport.cashDrawer.totalCashDrops });
-  rows.push({ Section: 'Cash Drawer', Metric: 'Unreconciled Drawers', Value: zReport.cashDrawer.unreconciledCount });
-  // Gift card cash is a drawer liability: reconciliation and proof rows only, never sales/tender/tax.
-  rows.push(...buildZReportGiftCloseCsvRows(zReport));
+/** The live preview as CSV, marked provisional (`z-provisional_...`, "Provisional – not a Z" on its first line). */
+export function exportProvisionalZReportCsv(liveReport: ZReportData, language: string | null | undefined): string {
+  return exportReportCsv(readProvisionalZReport(liveReport), language);
+}
 
-  if (sections.expenses) {
-  rows.push({ Section: 'Expenses', Metric: 'Total', Value: zReport.expenses.total });
-  rows.push({ Section: 'Expenses', Metric: 'Pending Count', Value: zReport.expenses.pendingCount });
+/** The live preview's orders as CSV, marked provisional in the file name (`z-provisional-orders_...`). */
+export function exportProvisionalZReportOrdersCsv(
+  liveReport: ZReportData,
+  language: string | null | undefined,
+): string {
+  return exportOrdersCsv(readProvisionalZReport(liveReport), language);
+}
 
+function plainCellText(value: unknown, decimal: ',' | '.'): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return '';
+    // Float noise (16.860000000000003) is dropped; the language's decimal separator is used.
+    const text = String(Number(value.toFixed(10)));
+    return decimal === ',' ? text.replace('.', ',') : text;
   }
-  if (sections.drivers || driverEarnings.unsettledCount > 0) {
-  rows.push({ Section: 'Driver Earnings', Metric: 'Total Deliveries', Value: driverEarnings.totalDeliveries });
-  rows.push({ Section: 'Driver Earnings', Metric: 'Total Earnings', Value: driverEarnings.totalEarnings });
-  rows.push({ Section: 'Driver Earnings', Metric: 'Unsettled Count', Value: driverEarnings.unsettledCount });
-
-  }
-
-  const headers = Object.keys(rows[0]);
-  const csv = [headers.join(','), ...rows.map(r => headers.map(h => JSON.stringify(r[h] ?? '')).join(','))].join('\n');
-  downloadCSV(csv, filename);
+  if (typeof value === 'string') return value;
+  if (typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toISOString();
+  return JSON.stringify(value) ?? '';
 }
-
-export function exportStaffPerformanceToCSV(staff: StaffPerformance[], filename: string = 'staff-performance') {
-  if (!staff?.length) return;
-  const rows = staff.map(s => ({
-    'Staff ID': s.staffId,
-    Name: s.name,
-    Role: s.role || '',
-    Currency: recordedCurrency(s.currency),
-    Hours: s.hours ?? '',
-    Orders: s.orders ?? '',
-    Sales: s.sales ?? '',
-    Variance: s.variance ?? '',
-    Expenses: s.expenses ?? '',
-    Deliveries: s.deliveries ?? ''
-  }));
-  const headers = Object.keys(rows[0]);
-  const csv = [headers.join(','), ...rows.map(r => headers.map(h => JSON.stringify((r as any)[h] ?? '')).join(','))].join('\n');
-  downloadCSV(csv, filename);
-}
-
 
 /**
- * Export the Z day's order list — store AND platform orders — to CSV. Rows are
- * `ZReportData.dayOrders` (or the staff-list fallback the modal builds for
- * reports persisted before 1.4.97). Platform rows have no staff, so `Source`
- * names the platform instead.
+ * A plain table as CSV (the Reports page), with the same spreadsheet rules as the Z export. Without a language
+ * the app's current language decides the separators. Returns the file name.
  */
-export function exportDayOrdersToCSV(
-  orders: Array<ZReportDayOrder & { staffName?: string | null }>,
-  filename: string = 'z-report-orders',
-) {
-  if (!orders?.length) return;
-  const rows: Record<string, any>[] = orders.map((order) => ({
-    'Source': order.staffName || (order.platform ? `platform:${order.platform}` : '—'),
-    'Order Number': order.orderNumber,
-    'Order Type': order.orderType,
-    'Table/Address': order.orderType === 'delivery'
-      ? (order.deliveryAddress || '—')
-      : order.orderType === 'dine-in'
-        ? (order.tableNumber ? `Table ${order.tableNumber}` : '—')
-        : '—',
-    'Amount': order.amount,
-    'Currency': recordedCurrency(order.currency),
-    'Payment Method': order.paymentMethod === 'twint' ? 'TWINT' : order.paymentMethod || '—',
-    'Status': order.status,
-    'Time': order.createdAt,
-  }));
-  exportArrayToCSV(rows, filename);
+export function exportArrayToCSV(
+  data: Record<string, unknown>[],
+  filename: string,
+  options: { language?: string | null } = {},
+): string {
+  const decimal = zReportDecimalSeparator(options.language ?? i18next.language);
+  const delimiter = zReportCsvDelimiter(decimal);
+  const rows = Array.isArray(data) ? data.filter(isRecord) : [];
+  const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
+  const cell = (value: unknown) => zReportCsvCell(plainCellText(value, decimal), delimiter);
+  const lines = headers.length > 0
+    ? [headers.map(cell), ...rows.map((row) => headers.map((header) => cell(row[header])))]
+    : [];
+  const csv = Z_REPORT_CSV_BOM + lines.map((line) => line.join(delimiter)).map((line) => `${line}\r\n`).join('');
+  return downloadCsvFile(csv, /\.csv$/i.test(filename) ? filename : `${filename}.csv`);
 }

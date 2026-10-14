@@ -37,7 +37,7 @@ import {
   resolveDeliveryFee,
   type DeliveryFeeStatus,
 } from '../../utils/delivery-fee';
-import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import {
   buildSavedAddressQuery,
   extractSavedAddressCoordinates,
@@ -399,7 +399,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   useEffect(() => {
     if (!hasDeliveryPro) {
       const normalized = Math.max(0, manualDeliveryFee || 0);
-      setManualDeliveryFeeInput(normalized > 0 ? normalized.toFixed(2).replace('.', ',') : '');
+      setManualDeliveryFeeInput(normalized > 0 ? normalized.toFixed(2) : '');
       return;
     }
 
@@ -1160,7 +1160,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 <p
                   role="status"
                   data-testid="product-catalog-zone-not-checked"
-                  className="mb-1 rounded-lg border border-sky-400/30 bg-sky-500/15 px-2 py-1.5 text-xs text-sky-100"
+                  className="mb-1 rounded-2xl border border-amber-400/30 bg-amber-500/15 px-2 py-1.5 text-xs text-amber-100"
                 >
                   {t('menu.cart.deliveryZoneNotCheckedNotice')}
                   {onRepickDeliveryAddress && (
@@ -1168,7 +1168,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       type="button"
                       onClick={onRepickDeliveryAddress}
                       data-testid="product-catalog-zone-repick"
-                      className="mt-1.5 block min-h-[36px] rounded-lg border border-sky-300/40 px-3 py-1 text-xs font-semibold text-sky-100 active:bg-sky-400/20"
+                      className="mt-1.5 block min-h-[36px] rounded-2xl border border-amber-300/40 px-3 py-1 text-xs font-semibold text-amber-100 active:bg-amber-400/20"
                     >
                       {t('menu.cart.repickDeliveryAddress')}
                     </button>
@@ -1181,15 +1181,13 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   {hasDeliveryPro ? (
                     <span>{deliveryFeeText}</span>
                   ) : (
-                    <input
-                      type="text"
-                      inputMode="decimal"
+                    <CentsMoneyInput
+                      aria-label={t('menu.cart.deliveryFee')}
                       value={manualDeliveryFeeInput}
-                      onChange={(event) => {
+                      onValueChange={(value, amount) => {
                         manualDeliveryFeeEditedRef.current = true;
-                        const formatted = formatMoneyInputWithCents(event.target.value)
-                        setManualDeliveryFeeInput(formatted)
-                        setManualDeliveryFee(parseMoneyInputValue(formatted))
+                        setManualDeliveryFeeInput(value)
+                        setManualDeliveryFee(amount)
                       }}
                       placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
                       className="w-24 rounded-2xl border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-yellow-400"

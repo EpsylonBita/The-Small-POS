@@ -10,6 +10,7 @@ import type {
   OrderEditSettlementRefund,
 } from '../../../lib/ipc-adapter';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import {
   RefundAttributionFields,
   refundRouteForTender,
@@ -325,15 +326,12 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                       </span>
                       <div className="relative">
                         <span className="liquid-glass-modal-text-muted absolute left-3 top-1/2 -translate-y-1/2 text-sm">{payment.currency ?? '—'}</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          max={payment.remainingRefundable || 0}
+                        <CentsMoneyInput
+                          aria-label={t('modals.refund.amount', { defaultValue: 'Amount' })}
                           value={draft.amount}
-                          onChange={(event) => setDraft(payment.id, (current) => ({ ...current, amount: event.target.value }))}
+                          onValueChange={(amount) => setDraft(payment.id, (current) => ({ ...current, amount }))}
                           className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3 text-sm focus:border-orange-400/50 focus:outline-none"
-                          placeholder="0.00"
+                          placeholder="0,00"
                         />
                       </div>
                     </label>

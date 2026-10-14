@@ -8,7 +8,8 @@ import { useServices } from '../../../hooks/useServices';
 import { Scissors, Clock, Search, Plus, Edit2, Trash2, Loader2, RefreshCw, X } from 'lucide-react';
 import { servicesService, type Service } from '../../../services/ServicesService';
 import { formatCurrency } from '../../../utils/format';
-import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../../utils/moneyInput';
+import { parseMoneyInputValue } from '../../../utils/moneyInput';
+import { CentsMoneyInput } from '../../../components/ui/CentsMoneyInput';
 import { renderModalPortal } from '../../../utils/render-modal-portal';
 import { offEvent, onEvent } from '../../../../lib';
 import {
@@ -566,10 +567,10 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   <span className={`mb-1 block text-sm font-medium ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                     {t('serviceCatalog.fields.price', { defaultValue: 'Price' })}
                   </span>
-                  <input
-                    inputMode="decimal"
+                  <CentsMoneyInput
+                    aria-label={t('serviceCatalog.fields.price', { defaultValue: 'Price' })}
                     value={serviceDraft.price}
-                    onChange={(event) => setServiceDraft((current) => ({ ...current, price: formatMoneyInputWithCents(event.target.value) }))}
+                    onValueChange={(price) => setServiceDraft((current) => ({ ...current, price }))}
                     placeholder="0,00"
                     className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-none focus:ring-2 focus:ring-yellow-400`}
                   />

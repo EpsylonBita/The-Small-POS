@@ -12,10 +12,12 @@
 //! # Queue Semantics
 //!
 //! - FIFO within priority bands (higher priority processed first).
-//! - Max replayable queue size: 5000 `pending`/`processing` rows
-//!   (`MAX_QUEUE_SIZE`); `conflict` rows are bounded separately by
-//!   `MAX_CONFLICT_ROWS` because they drain via operator resolution,
-//!   not replay.
+//! - Max replayable queue size: 20,000 `pending`/`processing` rows
+//!   (`MAX_QUEUE_SIZE`, about four busy days offline); `conflict` rows are
+//!   bounded separately by `MAX_CONFLICT_ROWS` because they drain via
+//!   operator resolution, not replay. At either ceiling a write fails
+//!   closed with the typed `SYNC_QUEUE_FULL` / `SYNC_QUEUE_CONFLICTS_FULL`
+//!   refusal; nothing already queued is ever dropped to make room.
 //! - Capacity early warning at 80% of either ceiling (`capacity_warning`),
 //!   emitted to the renderer as `sync:queue-capacity-warning`.
 //! - Exponential backoff: initial 1s, doubles per attempt, capped at 60s.
@@ -50,26 +52,65 @@ use crate::{db, storage, sync};
 /// Maximum number of replayable rows (status `pending` or `processing`)
 /// allowed in the queue before `enqueue` rejects new entries.
 ///
-/// Sizing (founder decision 2026-06-10): this cap fail-closes domain writes
-/// (order/payment/refund/shift transactions roll back when enqueue rejects),
-/// so it must absorb a full busy day fully offline with fiscalization
-/// active. Fiscal-active branches enqueue ~2-3 parity rows per order
-/// (order + payment + fiscal/adjustment follow-ups), and a high-volume
-/// store does ~600-800 orders/day, so a worst-case offline day is
-/// ~800 x 3 = 2,400 rows. 5,000 keeps roughly two such days of headroom
-/// before checkout stops. The previous value of 500 dated from the file's
-/// creation and was never sized against volume; it walled out at ~170-250
-/// offline orders mid-day.
+/// Sizing (offline-week audit 07/10/2026, founder go-ahead 13/10/2026):
+/// this cap fail-closes domain writes (order/payment/refund/shift
+/// transactions roll back when enqueue rejects), so it must absorb several
+/// busy days fully offline. Rule: rows/order x orders/day x days.
 ///
-/// Depth-sensitive queries stay in the same cost class at this size: the
-/// capacity COUNT rides the `idx_parity_sync_queue_active` partial index
-/// (migrate_v50), and `dequeue`/`peek` are `LIMIT 1` scans ordered by
-/// `idx_parity_sq_priority_created`.
+/// - Rows per order, measured on the producers: a delivery order queues
+///   its create, its payment, its fiscal receipt (queued for every order,
+///   whatever the branch's fiscal verdict), the driver assignment update
+///   and the driver earning = 5; a pickup 4 (create, payment, fiscal,
+///   completion). Each extra status tap adds one update row; status rows
+///   are never merged offline. Budget 6 per order (up to ~9 when every
+///   status is tapped).
+/// - A busy store: 800 orders/day x 6 rows = 4,800 rows/day; four days =
+///   19,200, rounded to 20,000. The 80% warning (16,000) then fires on
+///   day 4.
+/// - Tomikro (300 orders/day, 70% delivery: 0.7 x 5 + 0.3 x 4 = 4.7 rows
+///   per order, ~1,420 rows/day; ~1,720 with one extra tap per order):
+///   the warning on day 9-11, the cap on day 11-14. With every status
+///   tapped (~8.9 rows/order, ~2,670 rows/day) still 7 full days.
+///
+/// The former 5,000 (sized 2026-06-10 on 2-3 rows/order) stopped
+/// checkout on day 3-4 at Tomikro, and on the evening of day 2 with every
+/// status tapped.
+///
+/// Cost at this size, measured 13/10/2026 by the ignored
+/// `queue_capacity_cost_at_the_cap` (4,000 offline delivery orders with
+/// their payments; 5,000 / 10,000 / 20,000 rows): the capacity COUNT rides
+/// the `idx_parity_sync_queue_active` partial index (migrate_v50;
+/// `capacity_count_rides_the_active_partial_index` pins the plan) at
+/// 0.7 / 1.2 / 2.5 ms; an enqueue costs 36 / 70 / 107 ms, a claim
+/// 64 / 118 / 234 ms and a queue pass's maintenance 0.5 / 0.7 / 2.0 s, all
+/// linear in depth (full-table scans through SQLite's default 2 MB page
+/// cache). Two costs were quadratic and are now key lookups: a record's own
+/// queued rows (migration v98's `idx_parity_sq_table_record`; one payment
+/// mirror reconcile took 15 s at 5,000 rows and ~200 s at 20,000) and the
+/// repair-settlement money predicate (10 s per pass at 20,000 rows).
 ///
 /// `conflict` rows do NOT count against this cap -- they never drain
 /// offline and have their own operator-resolution path -- they are bounded
 /// separately by `MAX_CONFLICT_ROWS`.
-pub const MAX_QUEUE_SIZE: i64 = 5000;
+pub const MAX_QUEUE_SIZE: i64 = 20_000;
+
+/// Rows a fiscal receipt may take above `MAX_QUEUE_SIZE`.
+///
+/// A receipt row follows an order this till already saved (the dispatcher
+/// queues it after the order's own transaction commits), so refusing it
+/// for capacity would lose the receipt for good. New sales stop at the cap,
+/// and each order keeps one receipt row (`enqueue_fiscal_row` replaces an
+/// unsent one), so receipts above the cap are bounded by the few orders
+/// saved in its last slots; the reserve only has to cover those.
+pub const FISCAL_RECEIPT_RESERVE: i64 = 200;
+
+/// Machine code that leads the refusal of a write at `MAX_QUEUE_SIZE`
+/// (the renderer localizes it: `sync.capacity.full`).
+pub const SYNC_QUEUE_FULL: &str = "SYNC_QUEUE_FULL";
+
+/// Machine code that leads the refusal of a write at `MAX_CONFLICT_ROWS`
+/// (the renderer localizes it: `sync.capacity.conflictsFull`).
+pub const SYNC_QUEUE_CONFLICTS_FULL: &str = "SYNC_QUEUE_CONFLICTS_FULL";
 
 /// Separate fail-closed ceiling for `conflict` rows.
 ///
@@ -310,6 +351,105 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Default cooldown when the admin API responds with rate limiting.
 const DEFAULT_RATE_LIMIT_RETRY_SECS: i64 = 60;
 
+/// Header the admin API reads to count a till's own replays in their own
+/// per-terminal bucket (`POS_REPLAY`, `admin-dashboard/src/lib/pos-rate-limit.ts`)
+/// instead of the 20 per minute live order entry needs.
+pub(crate) const POS_REPLAY_HEADER: &str = "x-pos-replay";
+
+/// A queued row this old when it is sent is a replay. Every desktop write goes
+/// through this queue, and a fresh one leaves on the next 15 s pass, so it stays
+/// live; a row that waited out an outage, a backlog or a failed attempt is a
+/// replay. Catch-up 13/10/2026: none carried the header, so four days of
+/// Tomikro (about 5,600 rows) shared the live 20 per minute and took about 4 h
+/// (`catch_up_harness_report`); now about 25 minutes.
+const REPLAY_AGE_SECS: i64 = 60;
+
+/// Whether this send of `item` is a replay (see [`REPLAY_AGE_SECS`]).
+fn is_replay_send(item: &SyncQueueItem, now: chrono::DateTime<Utc>) -> bool {
+    if item.attempts > 0 {
+        return true;
+    }
+    parse_queue_timestamp(&item.created_at).is_some_and(|created_at| {
+        now.signed_duration_since(created_at) >= ChronoDuration::seconds(REPLAY_AGE_SECS)
+    })
+}
+
+/// A queue timestamp: RFC 3339 (`enqueue`) or SQLite's `datetime('now')` in UTC.
+fn parse_queue_timestamp(value: &str) -> Option<chrono::DateTime<Utc>> {
+    let trimmed = value.trim();
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// Until when a 429's `Retry-After` holds every queue pass to one admin
+/// origin. The refused row used to wait alone while the next pass (15 s
+/// background, 30 s renderer) sent the next row into the same closed window,
+/// and the one after that, until the window reopened. Keyed by origin so
+/// passes to different servers (tests) stay independent; in memory, because a
+/// restart outlives any window.
+fn rate_limit_pauses(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn rate_limit_pause_key(api_base_url: &str) -> String {
+    api_base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+/// Hold every pass to `api_base_url` for `retry_after_secs` (at least 1 s).
+fn pause_queue_for_rate_limit(api_base_url: &str, retry_after_secs: i64) {
+    let until = std::time::Instant::now()
+        + Duration::from_secs(u64::try_from(retry_after_secs.max(1)).unwrap_or(1));
+    if let Ok(mut pauses) = rate_limit_pauses().lock() {
+        let entry = pauses
+            .entry(rate_limit_pause_key(api_base_url))
+            .or_insert(until);
+        if *entry < until {
+            *entry = until;
+        }
+    }
+}
+
+/// Test-only: hold (`Some`) or release (`None`) the pause of `api_base_url`,
+/// so a harness running on a virtual clock decides when a window reopens.
+#[cfg(test)]
+pub(crate) fn set_rate_limit_pause_for_test(api_base_url: &str, until: Option<std::time::Instant>) {
+    if let Ok(mut pauses) = rate_limit_pauses().lock() {
+        let key = rate_limit_pause_key(api_base_url);
+        match until {
+            Some(until) => {
+                pauses.insert(key, until);
+            }
+            None => {
+                pauses.remove(&key);
+            }
+        }
+    }
+}
+
+/// Time left before the queue may send to `api_base_url` again, if any.
+pub(crate) fn rate_limit_pause_remaining(api_base_url: &str) -> Option<Duration> {
+    let mut pauses = rate_limit_pauses().lock().ok()?;
+    let key = rate_limit_pause_key(api_base_url);
+    let until = *pauses.get(&key)?;
+    let now = std::time::Instant::now();
+    if until <= now {
+        pauses.remove(&key);
+        return None;
+    }
+    Some(until - now)
+}
+
 /// Versioned recipe id for the bounded customer-address default-switch
 /// recovery probe. Persisted alongside each guarded row in `local_settings`
 /// so a restart cannot reset the cooldown/cap (guard survives process exit).
@@ -402,6 +542,37 @@ pub struct SyncResult {
     /// never serialized to the renderer.
     #[serde(skip)]
     pub(crate) closeout_exempt: CloseoutExemptCounts,
+    /// Shifts the server refused because the person's open shift is held
+    /// elsewhere, or check-ins made offline it refused on replay. The sync
+    /// emits each as `recovery:shift-conflict` so the till tells the cashier.
+    #[serde(default)]
+    pub shift_conflicts: Vec<ShiftConflictNotice>,
+}
+
+/// One refused shift for the `recovery:shift-conflict` event. Machine codes
+/// only: the renderer words the notice in the store's language.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftConflictNotice {
+    pub shift_id: String,
+    /// `OFFLINE_CHECK_IN_CONFLICT` or `SHIFT_CONFLICT`.
+    pub code: String,
+    /// The server's reason for an offline check-in it refused
+    /// (`waiter_terminal`, `staff_not_found`, `active_shift_elsewhere`,
+    /// `unresolved_shift`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The server refused a check-in made offline (`offline-check-in.ts`).
+pub(crate) const OFFLINE_CHECK_IN_CONFLICT: &str = "OFFLINE_CHECK_IN_CONFLICT";
+/// The server refused a shift because the person's open shift is elsewhere.
+pub(crate) const SHIFT_CONFLICT: &str = "SHIFT_CONFLICT";
+
+/// The server's sentence for a shift refused over the person's open shift.
+pub(crate) fn is_shift_conflict_message(message: &str) -> bool {
+    message.contains("unresolved active shift")
+        || message.contains("already has another active shift")
 }
 
 /// SQL predicate for the parity rows that never block the day close: the
@@ -931,37 +1102,60 @@ fn gift_close_bound_predicate(alias: &str) -> String {
     )
 }
 
+/// Whether a queue row belongs to a repair settlement's money (its order, a
+/// payment of it, or an adjustment of such a payment).
+///
+/// Each branch is driven by the queue row's own `record_id` through a key
+/// lookup (the orders primary key or `idx_orders_supabase_id`, the payment or
+/// adjustment primary key), then checks the order's context. It is the same
+/// predicate as "an order with `repair_settlement` context exists such that
+/// (A or B or C)", distributed over the branches. That earlier form scanned
+/// every local order for every queue row it was evaluated on; a pass's
+/// maintenance runs it over the whole queue, so it was O(queued rows x local
+/// orders): about 10 s at 20,000 rows and 4,000 orders, while holding the
+/// database (measured 13/10/2026, `queue_capacity_cost_at_the_cap`).
 fn semantic_repair_financial_queue_owner_predicate(alias: &str) -> String {
     let order_context = semantic_sql_value("repair_owner.order_context");
     let table = semantic_sql_value(&format!("{alias}.table_name"));
     format!(
-        "EXISTS (
-             SELECT 1
-             FROM orders repair_owner
-             WHERE {order_context} = 'repair_settlement'
-               AND (
-                    ({table} = 'orders'
-                     AND (repair_owner.id = {alias}.record_id
-                          OR repair_owner.supabase_id = {alias}.record_id))
-                    OR ({table} IN ('payments', 'order_payments')
-                        AND EXISTS (
-                            SELECT 1 FROM order_payments repair_payment
-                            WHERE repair_payment.id = {alias}.record_id
-                              AND repair_payment.order_id = repair_owner.id
-                        ))
-                    OR ({table} = 'payment_adjustments'
-                        AND EXISTS (
-                            SELECT 1
-                            FROM payment_adjustments repair_adjustment
-                            LEFT JOIN order_payments repair_adjustment_payment
-                              ON repair_adjustment_payment.id = repair_adjustment.payment_id
-                            WHERE repair_adjustment.id = {alias}.record_id
-                              AND COALESCE(
-                                    NULLIF(repair_adjustment.order_id, ''),
-                                    repair_adjustment_payment.order_id
-                                  ) = repair_owner.id
-                        ))
-               )
+        "(
+             ({table} = 'orders'
+              AND (
+                   EXISTS (
+                       SELECT 1
+                       FROM orders repair_owner
+                       WHERE repair_owner.id = {alias}.record_id
+                         AND {order_context} = 'repair_settlement'
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                       FROM orders repair_owner
+                       WHERE repair_owner.supabase_id = {alias}.record_id
+                         AND {order_context} = 'repair_settlement'
+                   )
+              ))
+             OR ({table} IN ('payments', 'order_payments')
+                 AND EXISTS (
+                     SELECT 1
+                     FROM order_payments repair_payment
+                     JOIN orders repair_owner ON repair_owner.id = repair_payment.order_id
+                     WHERE repair_payment.id = {alias}.record_id
+                       AND {order_context} = 'repair_settlement'
+                 ))
+             OR ({table} = 'payment_adjustments'
+                 AND EXISTS (
+                     SELECT 1
+                     FROM payment_adjustments repair_adjustment
+                     LEFT JOIN order_payments repair_adjustment_payment
+                       ON repair_adjustment_payment.id = repair_adjustment.payment_id
+                     JOIN orders repair_owner
+                       ON repair_owner.id = COALESCE(
+                            NULLIF(repair_adjustment.order_id, ''),
+                            repair_adjustment_payment.order_id
+                          )
+                     WHERE repair_adjustment.id = {alias}.record_id
+                       AND {order_context} = 'repair_settlement'
+                 ))
          )"
     )
 }
@@ -1300,6 +1494,15 @@ enum RequestPreparation {
     WaitingForParent {
         reason: String,
     },
+    /// The row waits for its order's create, still queued on this till (an
+    /// order update, a fiscal receipt). Like `WaitingForParent` it spends no
+    /// budget; it looks again when the create does
+    /// ([`mark_waiting_for_order_create`]) and is woken when the create lands
+    /// ([`wake_rows_waiting_for_order_create`]).
+    WaitingForOrderCreate {
+        reason: String,
+        local_order_id: String,
+    },
     Failed {
         reason: String,
     },
@@ -1378,6 +1581,9 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_parity_sq_org
             ON parity_sync_queue (organization_id);
 
+        CREATE INDEX IF NOT EXISTS idx_parity_sq_table_record
+            ON parity_sync_queue (table_name, record_id, created_at);
+
         CREATE TABLE IF NOT EXISTS conflict_audit_log (
             id                    TEXT PRIMARY KEY,
             operation_type        TEXT NOT NULL,
@@ -1403,6 +1609,21 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
 // Queue operations
 // ---------------------------------------------------------------------------
 
+/// The parity queue indexed by table and record (migration v98, and the
+/// newest schema in `create_tables`): a record's own queued rows (a payment's
+/// latest row, an order's queued create or updates) are a key lookup instead
+/// of a scan of the whole queue.
+pub(crate) const PARITY_QUEUE_TABLE_RECORD_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_parity_sq_table_record
+         ON parity_sync_queue (table_name, record_id, created_at);";
+
+/// The capacity COUNT; its WHERE clause is the `idx_parity_sync_queue_active`
+/// predicate, character for character.
+const CAPACITY_USAGE_SQL: &str = "SELECT status, COUNT(*)
+             FROM parity_sync_queue
+             WHERE status IN ('pending', 'processing', 'conflict')
+             GROUP BY status";
+
 /// Count active rows split into replayable (`pending`/`processing`) and
 /// `conflict` buckets.
 ///
@@ -1410,15 +1631,11 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
 /// partial-index predicate (migrate_v50) exactly, keeping this O(active
 /// rows). SQLite's partial-index implication check is syntactic, so a
 /// narrower `IN ('pending', 'processing')` filter would NOT use the index
-/// and would fall back to a full-table scan.
+/// and would fall back to a full-table scan
+/// (`capacity_count_rides_the_active_partial_index` pins the plan).
 pub fn capacity_usage(conn: &Connection) -> Result<QueueCapacityUsage, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT status, COUNT(*)
-             FROM parity_sync_queue
-             WHERE status IN ('pending', 'processing', 'conflict')
-             GROUP BY status",
-        )
+        .prepare(CAPACITY_USAGE_SQL)
         .map_err(|e| format!("sync_queue capacity prepare: {e}"))?;
 
     let rows = stmt
@@ -1500,10 +1717,58 @@ pub fn capacity_warning(conn: &Connection) -> Result<Option<QueueCapacityWarning
     }))
 }
 
+/// The typed refusal of a write that would queue `rows` more replayable
+/// rows, or `None` when they fit. Shared by `enqueue` and
+/// `ensure_enqueue_capacity`, so every refusal reads the same.
+fn queue_full_refusal(usage: &QueueCapacityUsage, rows: i64) -> Option<String> {
+    if usage.conflicts >= MAX_CONFLICT_ROWS {
+        return Some(format!(
+            "{SYNC_QUEUE_CONFLICTS_FULL}: Sync queue conflict backlog is full ({}/{MAX_CONFLICT_ROWS}). \
+             Resolve conflicted items before enqueuing more.",
+            usage.conflicts
+        ));
+    }
+    if usage.replayable.saturating_add(rows) > MAX_QUEUE_SIZE {
+        return Some(format!(
+            "{SYNC_QUEUE_FULL}: Sync queue is full ({}/{MAX_QUEUE_SIZE}). \
+             New sales stop until this terminal reconnects and the queue drains; \
+             nothing already queued is lost.",
+            usage.replayable
+        ));
+    }
+    None
+}
+
+/// Fail closed BEFORE a local change whose sync rows would not fit: `rows`
+/// is how many rows the change is about to queue.
+///
+/// A command that changes local state and then queues its sync row(s)
+/// calls this first, under the same connection lock as its enqueues, so a
+/// full queue refuses the change with the typed `SYNC_QUEUE_FULL` /
+/// `SYNC_QUEUE_CONFLICTS_FULL` answer instead of applying it locally and
+/// dropping the row the server would have heard (offline-week audit
+/// 07/10/2026, blocker #3 part 2).
+pub fn ensure_enqueue_capacity(conn: &Connection, rows: i64) -> Result<(), String> {
+    let usage = capacity_usage(conn)?;
+    match queue_full_refusal(&usage, rows.max(1)) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// Whether this input is a fiscal receipt row (`fiscal::dispatcher`), the
+/// follow-up of an order the till already saved: it may use
+/// `FISCAL_RECEIPT_RESERVE`.
+fn is_fiscal_receipt_input(input: &EnqueueInput) -> bool {
+    input.module_type.as_deref() == Some("fiscal") && input.table_name == "fiscal_submission"
+}
+
 /// Enqueue a new sync item. Returns the generated UUID.
 ///
-/// Rejects (fail-closed) if replayable rows have reached `MAX_QUEUE_SIZE`
-/// or conflict rows have reached `MAX_CONFLICT_ROWS`.
+/// Rejects (fail-closed, typed `SYNC_QUEUE_FULL` / `SYNC_QUEUE_CONFLICTS_FULL`)
+/// if replayable rows have reached `MAX_QUEUE_SIZE` or conflict rows have
+/// reached `MAX_CONFLICT_ROWS`. A fiscal receipt of an order already saved
+/// is refused only past `MAX_QUEUE_SIZE + FISCAL_RECEIPT_RESERVE`.
 pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String> {
     if classify_repair_queue_ownership(input.module_type.as_deref(), &input.table_name)
         != RepairQueueOwnership::Generic
@@ -1526,23 +1791,20 @@ pub fn enqueue(conn: &Connection, input: &EnqueueInput) -> Result<String, String
     // conflict growth still surfaces. `capacity_usage` rides the
     // `idx_parity_sync_queue_active` partial index, so both gates stay
     // O(active rows).
-    let QueueCapacityUsage {
-        replayable,
-        conflicts,
-    } = capacity_usage(conn)?;
+    let usage = capacity_usage(conn)?;
 
-    if conflicts >= MAX_CONFLICT_ROWS {
-        return Err(format!(
-            "Sync queue conflict backlog is full ({conflicts}/{MAX_CONFLICT_ROWS}). \
-             Resolve conflicted items before enqueuing more."
-        ));
-    }
-
-    if replayable >= MAX_QUEUE_SIZE {
-        return Err(format!(
-            "Sync queue is full ({replayable}/{MAX_QUEUE_SIZE}). \
-             Clear or process pending items before enqueuing more."
-        ));
+    if is_fiscal_receipt_input(input) {
+        // The receipt of an order already saved: never refused at the cap,
+        // only past its bounded reserve (see `FISCAL_RECEIPT_RESERVE`).
+        if usage.replayable >= MAX_QUEUE_SIZE + FISCAL_RECEIPT_RESERVE {
+            return Err(format!(
+                "{SYNC_QUEUE_FULL}: Sync queue is full ({}/{MAX_QUEUE_SIZE}) and its \
+                 fiscal receipt reserve is used up.",
+                usage.replayable
+            ));
+        }
+    } else if let Some(refusal) = queue_full_refusal(&usage, 1) {
+        return Err(refusal);
     }
 
     // Validate operation
@@ -5085,14 +5347,31 @@ pub fn dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
 fn dequeue_with_quarantine_count(
     conn: &Connection,
 ) -> Result<(Option<SyncQueueItem>, i64), String> {
+    dequeue_due_by_with_quarantine_count(conn, None)
+}
+
+/// [`dequeue_with_quarantine_count`] limited to rows due by `due_by` (an
+/// RFC 3339 instant; `None` = now). A queue pass passes its own start, so it
+/// claims each row at most once: a row it reschedules (a parent wait, a
+/// transport backoff) waits for the next pass instead of being claimed again
+/// in this one. Without it a pass slower than the 15 s parent-wait recheck
+/// (a few hundred waiting rows offline at 20,000 rows) re-claimed its own
+/// waiting rows forever and never returned (measured 13/10/2026).
+fn dequeue_due_by_with_quarantine_count(
+    conn: &Connection,
+    due_by: Option<&str>,
+) -> Result<(Option<SyncQueueItem>, i64), String> {
     retry_transaction(conn, |conn| {
         let table_quarantined = quarantine_existing_refused_table_batches(conn)? as i64;
         let quarantined = quarantine_reserved_repair_lookalikes(conn)? + table_quarantined;
-        claim_next_internal_item(conn).map(|item| (item, quarantined))
+        claim_next_internal_item(conn, due_by).map(|item| (item, quarantined))
     })
 }
 
-fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+fn claim_next_internal_item(
+    conn: &Connection,
+    due_by: Option<&str>,
+) -> Result<Option<SyncQueueItem>, String> {
     let now = Utc::now().to_rfc3339();
     let candidate_generic = semantic_generic_nonfinancial_owner_predicate("candidate");
     let claim_generic = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
@@ -5112,7 +5391,7 @@ fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, 
                    AND {table_order}
                    AND (
                         candidate.next_retry_at IS NULL
-                        OR julianday(candidate.next_retry_at) <= julianday('now')
+                        OR julianday(candidate.next_retry_at) <= julianday(COALESCE(?2, 'now'))
                    )
                    AND (
                         {candidate_generic}
@@ -5229,14 +5508,14 @@ fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, 
             AND ({claim_generic} OR {claim_canonical})
             AND (
                 next_retry_at IS NULL
-                OR julianday(next_retry_at) <= julianday('now')
+                OR julianday(next_retry_at) <= julianday(COALESCE(?2, 'now'))
             )
         RETURNING id, table_name, record_id, operation, data, organization_id,
                   created_at, attempts, last_attempt, error_message, next_retry_at,
                   retry_delay_ms, priority, COALESCE(module_type, 'orders'),
                   conflict_strategy, version, claim_generation, status"
     );
-    conn.query_row(&sql, params![now], map_internal_queue_item)
+    conn.query_row(&sql, params![now, due_by], map_internal_queue_item)
         .optional()
         .map_err(|e| format!("sync_queue dequeue: {e}"))
 }
@@ -5245,6 +5524,15 @@ fn claim_next_internal_item(conn: &Connection) -> Result<Option<SyncQueueItem>, 
 /// returned across the generic IPC boundary, even when they have the highest
 /// queue priority.
 pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem>, String> {
+    renderer_dequeue_due_by(conn, None)
+}
+
+/// [`renderer_dequeue`] limited to rows due by `due_by` (`None` = now); see
+/// [`dequeue_due_by_with_quarantine_count`].
+fn renderer_dequeue_due_by(
+    conn: &Connection,
+    due_by: Option<&str>,
+) -> Result<Option<SyncQueueItem>, String> {
     let now = Utc::now().to_rfc3339();
     let candidate_generic = renderer_visible_owner_predicate("candidate");
     let claim_generic = renderer_visible_owner_predicate("parity_sync_queue");
@@ -5263,7 +5551,7 @@ pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem
                AND {candidate_generic}
                AND (
                     candidate.next_retry_at IS NULL
-                    OR julianday(candidate.next_retry_at) <= julianday('now')
+                    OR julianday(candidate.next_retry_at) <= julianday(COALESCE(?2, 'now'))
                )
                AND {candidate_exclusion}
              ORDER BY candidate.priority DESC, candidate.created_at ASC, candidate.id ASC
@@ -5273,7 +5561,7 @@ pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem
            AND {claim_generic}
            AND (
                 next_retry_at IS NULL
-                OR julianday(next_retry_at) <= julianday('now')
+                OR julianday(next_retry_at) <= julianday(COALESCE(?2, 'now'))
            )
            AND {claim_exclusion}
          RETURNING id, table_name, record_id, operation, data, organization_id,
@@ -5281,7 +5569,7 @@ pub(crate) fn renderer_dequeue(conn: &Connection) -> Result<Option<SyncQueueItem
                    retry_delay_ms, priority, COALESCE(module_type, 'orders'),
                    conflict_strategy, version, claim_generation, status"
     );
-    conn.query_row(&sql, params![now], |row| {
+    conn.query_row(&sql, params![now, due_by], |row| {
         Ok(SyncQueueItem {
             id: row.get(0)?,
             table_name: row.get(1)?,
@@ -7965,6 +8253,75 @@ pub(crate) fn mark_waiting_for_parent(
     expected_generation: i64,
 ) -> Result<(), String> {
     let next_retry = Utc::now() + ChronoDuration::seconds(PARENT_WAIT_RECHECK_SECS);
+    mark_waiting_until(conn, item_id, reason, expected_generation, next_retry)
+}
+
+/// Park a row that waits for its order's create, still queued on this till
+/// (an order update, a fiscal receipt), without spending its budget. It
+/// looks again when the create itself does, never sooner than
+/// `PARENT_WAIT_RECHECK_SECS`: offline the create backs off to a minute, and
+/// rechecking its waiting rows every 15 s only cost claims (at 20,000 rows a
+/// claim is a few full-table scans). When the create lands its waiting rows
+/// are woken at once ([`wake_rows_waiting_for_order_create`]).
+fn mark_waiting_for_order_create(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+    local_order_id: &str,
+) -> Result<(), String> {
+    let floor = Utc::now() + ChronoDuration::seconds(PARENT_WAIT_RECHECK_SECS);
+    let create_next_attempt: Option<String> = conn
+        .query_row(
+            "SELECT MAX(next_retry_at)
+             FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND record_id = ?1
+               AND operation = 'INSERT'
+               AND status = 'pending'",
+            params![local_order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("sync_queue order create next attempt: {e}"))?;
+    let next_retry = create_next_attempt
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .filter(|create_next| *create_next > floor)
+        .unwrap_or(floor);
+    mark_waiting_until(conn, item_id, reason, expected_generation, next_retry)
+}
+
+/// Wake the rows that wait for this order's create, now that it landed: its
+/// queued updates and its fiscal receipt go out in the same pass instead of
+/// at their next recheck (a Z drain does not wait for a recheck).
+fn wake_rows_waiting_for_order_create(
+    conn: &Connection,
+    local_order_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET next_retry_at = NULL
+         WHERE record_id = ?1
+           AND status = 'pending'
+           AND next_retry_at IS NOT NULL
+           AND (
+                (table_name = 'orders' AND operation <> 'INSERT'
+                 AND error_message = 'Waiting for parent order sync')
+             OR (module_type = 'fiscal' AND error_message = ?2)
+           )",
+        params![local_order_id, FISCAL_ORDER_WAIT_REASON],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("sync_queue wake rows waiting for order create: {e}"))
+}
+
+fn mark_waiting_until(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+    next_retry: chrono::DateTime<Utc>,
+) -> Result<(), String> {
     let rows_affected = conn
         .execute(
             "UPDATE parity_sync_queue
@@ -8015,6 +8372,34 @@ fn parent_order_write_in_flight(conn: &Connection, order_ref: &str) -> bool {
         .ok()
         .flatten();
     local_id.is_some_and(|id| sync::has_outstanding_local_order_queue(conn, &id))
+}
+
+/// Whether this local order's own create is still in the queue: its
+/// `orders` INSERT row is pending, processing, failed or a conflict. The
+/// rows that need the order on the server first (its later updates, its
+/// fiscal receipt) wait for it without spending their budget; the create's
+/// row is the one Sync health shows. Narrower than
+/// [`parent_order_write_in_flight`], which also counts the order's queued
+/// updates and so would count an update waiting on itself.
+fn order_create_in_flight(conn: &Connection, local_order_id: &str) -> bool {
+    let local_order_id = local_order_id.trim();
+    if local_order_id.is_empty() {
+        return false;
+    }
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM parity_sync_queue
+             WHERE table_name = 'orders'
+               AND record_id = ?1
+               AND operation = 'INSERT'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND status IN ('pending', 'processing', 'failed', 'conflict')
+         )",
+        params![local_order_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Whether a parent payment still has its own row in the queue.
@@ -9017,12 +9402,7 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
     };
 
     if item.module_type == "fiscal" {
-        return Ok(RequestPreparation::Ready(RequestSpec {
-            endpoint: resolve_endpoint(item),
-            method: Method::POST,
-            body: Some(normalize_fiscal_request_payload(&payload).to_string()),
-            terminal_id,
-        }));
+        return prepare_fiscal_request(conn, item, &payload, terminal_id);
     }
 
     match item.table_name.as_str() {
@@ -9080,6 +9460,85 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             terminal_id,
         })),
     }
+}
+
+/// Why a fiscal receipt waits: the server must know its order first.
+const FISCAL_ORDER_WAIT_REASON: &str = "Waiting for parent order sync before fiscal submission";
+
+/// The fiscal route's code for a receipt whose order it does not know
+/// (`/api/plugins/fiscal/submit`, HTTP 409).
+const FISCAL_ORDER_NOT_FOUND: &str = "fiscal_order_not_found";
+
+/// Prepare a fiscal receipt row (offline-week audit #8).
+///
+/// A receipt needs its order on the server. Receipts have priority 100, so
+/// they used to go out before their order's create, got 409
+/// `fiscal_order_not_found`, and the generic conflict path resolved that
+/// as "server wins" and deleted the receipt unsent. Now:
+/// - while the order's own create is still queued here, the receipt waits
+///   for it without spending its budget;
+/// - the receipt names its order by the id the server knows
+///   (`payload_builder::fiscal_order_reference`: the server id once the
+///   order synced), whatever the stored payload says: receipts queued before
+///   this fix carry the local `orders.id`, which the server never knows;
+/// - an order no longer on this till keeps the stored id.
+///
+/// A 409 that still comes back is never resolved "server wins" (see the
+/// fiscal branch of the response handling in `process_queue`).
+fn prepare_fiscal_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: String,
+) -> Result<RequestPreparation, String> {
+    let mut body = normalize_fiscal_request_payload(payload);
+    let local_order: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT id, NULLIF(TRIM(COALESCE(supabase_id, '')), '') IS NOT NULL
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![item.record_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue prepare_fiscal_request order: {e}"))?;
+    if let Some((local_order_id, synced)) = local_order {
+        if !synced && order_create_in_flight(conn, &local_order_id) {
+            return Ok(RequestPreparation::WaitingForOrderCreate {
+                reason: FISCAL_ORDER_WAIT_REASON.to_string(),
+                local_order_id,
+            });
+        }
+        let reference =
+            crate::fiscal::payload_builder::fiscal_order_reference(conn, &local_order_id)?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert("orderId".to_string(), Value::String(reference));
+        }
+    }
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: resolve_endpoint(item),
+        method: Method::POST,
+        body: Some(body.to_string()),
+        terminal_id,
+    }))
+}
+
+/// Whether a fiscal route answer says the server does not know the
+/// receipt's order yet (409 `fiscal_order_not_found`).
+fn is_fiscal_order_not_found_response(status: u16, response_body: &str) -> bool {
+    if status != 409 {
+        return false;
+    }
+    serde_json::from_str::<Value>(response_body)
+        .ok()
+        .and_then(|body| {
+            body.pointer("/error/code")
+                .or_else(|| body.get("code"))
+                .and_then(Value::as_str)
+                .map(|code| code == FISCAL_ORDER_NOT_FOUND)
+        })
+        .unwrap_or_else(|| response_body.contains(FISCAL_ORDER_NOT_FOUND))
 }
 
 fn prepare_table_status_request(
@@ -9924,9 +10383,21 @@ fn prepare_order_request(
                 reason: STALE_ORDER_UPDATE_PARENT_WAIT_REASON.to_string(),
             });
         }
-        return Ok(RequestPreparation::Deferred {
-            reason: "Waiting for parent order sync".to_string(),
-        });
+        let reason = "Waiting for parent order sync".to_string();
+        // Offline-week audit #14: the order's own create is still queued
+        // here (offline, or in its backoff), so its update waits for it
+        // without spending its budget. Each wait used to cost an attempt:
+        // 50 made the update a conflict in about four minutes offline, and
+        // 1,000 conflicts stop every write. The create's own row stays the
+        // visible one in Sync health. With no create in flight the deferral
+        // stays budgeted, so an order that can never sync still surfaces.
+        if order_create_in_flight(conn, item.record_id.as_str()) {
+            return Ok(RequestPreparation::WaitingForOrderCreate {
+                reason,
+                local_order_id: item.record_id.clone(),
+            });
+        }
+        return Ok(RequestPreparation::Deferred { reason });
     };
 
     if let Some(reason) = superseded_synced_order_status_update_reason(
@@ -12777,6 +13248,7 @@ fn apply_success(
                 }
                 adopt_insert_ack_vat(conn, item, response);
                 sync::promote_payments_for_order(conn, item.record_id.as_str());
+                wake_rows_waiting_for_order_create(conn, item.record_id.as_str())?;
             } else {
                 conn.execute(
                     "UPDATE orders
@@ -13202,6 +13674,50 @@ fn shift_item_acknowledgement(
             result_text(result, &["message", "error"]),
         ),
     }
+}
+
+/// The notice of a shift the server refused over the person's open shift,
+/// or a refused offline check-in (`code: OFFLINE_CHECK_IN_CONFLICT`).
+fn shift_conflict_notice(
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> Option<ShiftConflictNotice> {
+    if item.table_name != "staff_shifts" {
+        return None;
+    }
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+    let shift_id = string_field(&payload, &["shiftId", "shift_id"])
+        .unwrap_or_else(|| item.record_id.trim().to_string());
+    let result = response_results(response)?.iter().find(|result| {
+        result_text(result, &["shift_id"]).as_deref() == Some(shift_id.as_str())
+            && !matches!(
+                result_text(result, &["status"])
+                    .map(|value| value.to_ascii_lowercase())
+                    .as_deref(),
+                Some("ok" | "skipped")
+            )
+    })?;
+    let code = result_text(result, &["code"]).and_then(|code| bounded_parity_machine_code(&code));
+    if code.as_deref() == Some(OFFLINE_CHECK_IN_CONFLICT) {
+        let reason = result_text(result, &["reason"]).filter(|reason| {
+            reason.len() <= 64
+                && reason
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        });
+        return Some(ShiftConflictNotice {
+            shift_id,
+            code: OFFLINE_CHECK_IN_CONFLICT.to_string(),
+            reason,
+        });
+    }
+    is_shift_conflict_message(&result_text(result, &["message", "error"]).unwrap_or_default()).then(
+        || ShiftConflictNotice {
+            shift_id,
+            code: SHIFT_CONFLICT.to_string(),
+            reason: None,
+        },
+    )
 }
 
 /// Classify a refused item the way Android does: the server's own
@@ -14099,6 +14615,7 @@ where
                     batch_block: Some(block),
                     telemetry,
                     closeout_exempt: CloseoutExemptCounts::default(),
+                    shift_conflicts: Vec::new(),
                 });
             }
         };
@@ -14135,6 +14652,7 @@ where
                     batch_block: Some(block),
                     telemetry,
                     closeout_exempt: CloseoutExemptCounts::default(),
+                    shift_conflicts: Vec::new(),
                 });
             }
         };
@@ -14255,12 +14773,28 @@ where
     // Wave 4 H: collect monetary dead-letters so the caller can emit
     // `sync:dead-letter:monetary` events in the Tauri command layer.
     let mut monetary_dead_letters: Vec<MonetaryDeadLetter> = Vec::new();
+    let mut shift_conflicts: Vec<ShiftConflictNotice> = Vec::new();
     let mut telemetry = SyncTelemetryBuilder::new(started_at, queue_depth_before);
     let mut exact_claim_consumed = false;
+    // One visit per row per pass: only rows due when the pass starts are
+    // claimed (see `dequeue_due_by_with_quarantine_count`).
+    let pass_due_by = Utc::now().to_rfc3339();
 
     loop {
         if selection != QueueProcessSelection::All && exact_claim_consumed {
             break;
+        }
+        // A 429's Retry-After holds the whole queue, not only the refused row:
+        // rows stay pending, unclaimed, until the window reopens. An exact
+        // manual retry is the operator's own request and still goes.
+        if selection == QueueProcessSelection::All {
+            if let Some(remaining) = rate_limit_pause_remaining(api_base_url) {
+                debug!(
+                    remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+                    "Parity queue holds for the admin rate limit's Retry-After"
+                );
+                break;
+            }
         }
         // The lifecycle gate is acquired before any queue candidate is read or
         // claimed and remains alive through HTTP plus authoritative local ack.
@@ -14284,11 +14818,14 @@ where
                 let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                 match visibility {
                     QueueProcessVisibility::InternalAll => {
-                        let (item, newly_quarantined) = dequeue_with_quarantine_count(&db)?;
+                        let (item, newly_quarantined) =
+                            dequeue_due_by_with_quarantine_count(&db, Some(&pass_due_by))?;
                         quarantined += newly_quarantined;
                         item
                     }
-                    QueueProcessVisibility::RendererNonRepair => renderer_dequeue(&db)?,
+                    QueueProcessVisibility::RendererNonRepair => {
+                        renderer_dequeue_due_by(&db, Some(&pass_due_by))?
+                    }
                 }
             }
         };
@@ -14494,6 +15031,27 @@ where
                 }
                 continue;
             }
+            RequestPreparation::WaitingForOrderCreate {
+                reason,
+                local_order_id,
+            } => {
+                let applied = {
+                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_waiting_for_order_create(
+                            db,
+                            &item.id,
+                            &reason,
+                            item.claim_generation,
+                            &local_order_id,
+                        )
+                    })?
+                };
+                if applied.is_some() {
+                    telemetry.record_deferred(&item, &reason);
+                }
+                continue;
+            }
             RequestPreparation::Conflict { reason } => {
                 let applied = {
                     let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
@@ -14593,11 +15151,15 @@ where
             request_spec.endpoint
         );
 
+        let replay_send = is_replay_send(&item, Utc::now());
         let mut request = client
             .request(request_spec.method.clone(), &url)
             .header("x-pos-api-key", api_key)
             .header("x-terminal-id", request_spec.terminal_id.as_str())
             .header("Content-Type", "application/json");
+        if replay_send {
+            request = request.header(POS_REPLAY_HEADER, "1");
+        }
         if let Some(capabilities) =
             crate::api::pos_capabilities_for(request_spec.method.as_str(), &request_spec.endpoint)
         {
@@ -14892,6 +15454,7 @@ where
                         .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
                     telemetry.record_error(&item, "failed", PARITY_ITEM_REJECTED, Some(status));
                     errors.push(safe_sync_error(&item, PARITY_ITEM_REJECTED, Some(status)));
+                    shift_conflicts.extend(shift_conflict_notice(&item, response_json.as_ref()));
                 } else if is_remote_handover_frozen_response(status, &response_body) {
                     // The server refused a write against a shift whose money a
                     // remote close froze. A retry can never succeed and the
@@ -15056,6 +15619,78 @@ where
                             "reconciliation_required_set_aside",
                         );
                     }
+                } else if item.module_type == "fiscal" && status == 409 {
+                    // Offline-week audit #8: a fiscal 409 is never "server
+                    // wins" -- that deleted the receipt unsent. When the
+                    // server does not know the order yet, the receipt waits
+                    // for its create (free while that create is still queued
+                    // here, budgeted otherwise, so an order that never syncs
+                    // ends as a visible conflict). Any other fiscal 409
+                    // parks as a conflict for a manager.
+                    let order_not_found =
+                        is_fiscal_order_not_found_response(status, &response_body);
+                    let outcome = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            if order_not_found {
+                                if order_create_in_flight(db, &item.record_id) {
+                                    mark_waiting_for_order_create(
+                                        db,
+                                        &item.id,
+                                        FISCAL_ORDER_WAIT_REASON,
+                                        item.claim_generation,
+                                        &item.record_id,
+                                    )?;
+                                } else {
+                                    mark_deferred(
+                                        db,
+                                        &item.id,
+                                        FISCAL_ORDER_WAIT_REASON,
+                                        item.claim_generation,
+                                    )?;
+                                }
+                                return Ok(false);
+                            }
+                            let reason = server_conflict_reason(
+                                &response_body,
+                                &item.table_name,
+                                &item.operation,
+                            );
+                            log_conflict(
+                                db,
+                                &item.operation,
+                                &item.record_id,
+                                &item.table_name,
+                                item.version,
+                                item.version,
+                                &item.data,
+                                "manual",
+                                is_monetary_item(&item),
+                                false,
+                            )?;
+                            mark_conflict(db, &item.id, item.claim_generation, &reason)?;
+                            Ok(true)
+                        })?
+                    };
+                    match outcome {
+                        Some(false) => telemetry.record_deferred(&item, FISCAL_ORDER_WAIT_REASON),
+                        Some(true) => {
+                            conflicts += 1;
+                            closeout_exempt.record_conflict(closeout_exempt_row);
+                            telemetry.record_error(
+                                &item,
+                                "conflict",
+                                "FISCAL_SUBMISSION_CONFLICT",
+                                Some(status),
+                            );
+                            errors.push(safe_sync_error(
+                                &item,
+                                "FISCAL_SUBMISSION_CONFLICT",
+                                Some(status),
+                            ));
+                        }
+                        None => {}
+                    }
                 } else if is_parent_order_wait_response(status, &response_body) {
                     let reason = "Waiting for parent order sync";
                     let marked = {
@@ -15172,7 +15807,11 @@ where
                     let server_version =
                         derive_server_version(server_record.as_ref(), &response_body, item.version);
                     let is_monetary = is_monetary_item(&item);
+                    // A fiscal receipt is a tax record: never auto-resolved
+                    // (offline-week audit #8), whatever its stored strategy.
+                    let fiscal_receipt = item.module_type == "fiscal";
                     let resolution = match item.conflict_strategy.as_str() {
+                        _ if fiscal_receipt => "manual",
                         "manual" => "manual",
                         "client-wins" => "client-wins",
                         _ if is_monetary => "server-wins",
@@ -15249,12 +15888,14 @@ where
                         })?
                     };
                     if marked.is_some() {
+                        pause_queue_for_rate_limit(api_base_url, retry_after_secs);
                         failed += 1;
                         telemetry.record_error(&item, "pending", &error_message, Some(status));
                         errors.push(safe_sync_error(&item, &error_message, Some(status)));
                         warn!(
                             retry_after_secs = retry_after_secs,
-                            "Parity sync hit admin rate limiting; pausing the batch"
+                            replay = replay_send,
+                            "Parity sync hit admin rate limiting; the queue holds for Retry-After"
                         );
                         break;
                     }
@@ -15381,6 +16022,9 @@ where
                             .header("x-pos-api-key", api_key)
                             .header("x-terminal-id", fallback_spec.terminal_id.as_str())
                             .header("Content-Type", "application/json");
+                        if replay_send {
+                            fallback_request = fallback_request.header(POS_REPLAY_HEADER, "1");
+                        }
 
                         if let Some(body) = fallback_spec.body.as_ref() {
                             fallback_request = fallback_request.body(body.clone());
@@ -15530,6 +16174,7 @@ where
         batch_block,
         telemetry,
         closeout_exempt,
+        shift_conflicts,
     })
 }
 
@@ -16814,6 +17459,7 @@ mod tests {
     struct MockResponse {
         status_code: u16,
         body: String,
+        retry_after_secs: Option<u64>,
     }
 
     impl MockResponse {
@@ -16821,6 +17467,15 @@ mod tests {
             Self {
                 status_code,
                 body: body.into(),
+                retry_after_secs: None,
+            }
+        }
+
+        fn rate_limited(retry_after_secs: u64) -> Self {
+            Self {
+                status_code: 429,
+                body: r#"{"success":false,"error":"Rate limit exceeded."}"#.to_string(),
+                retry_after_secs: Some(retry_after_secs),
             }
         }
     }
@@ -17561,12 +18216,18 @@ mod tests {
             200 => "OK",
             401 => "Unauthorized",
             409 => "Conflict",
+            429 => "Too Many Requests",
             _ => "OK",
         };
+        let retry_after = response
+            .retry_after_secs
+            .map(|secs| format!("Retry-After: {secs}\r\n"))
+            .unwrap_or_default();
         let response_text = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.status_code,
             reason,
+            retry_after,
             response.body.len(),
             response.body
         );
@@ -34932,6 +35593,74 @@ mod tests {
             );
         }
 
+        /// A check-in this till made without a connection travels with its
+        /// `offline_check_in` marker. When the server refuses it on replay
+        /// (`OFFLINE_CHECK_IN_CONFLICT`, `offline-check-in.ts`) the open
+        /// stops as `failed` for review, is never sent again on its own, and
+        /// is noticed for `recovery:shift-conflict` with the server's reason.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_refused_offline_check_in_parks_failed_and_is_noticed() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let queue_id = queue_money_row(
+                &conn,
+                "staff_shifts",
+                "shift-offline",
+                "INSERT",
+                "shifts",
+                "manual",
+                json!({
+                    "shiftId": "shift-offline",
+                    "branchId": TEST_BRANCH_ID,
+                    "staffId": "staff-1",
+                    "roleType": "cashier",
+                    "openingCash": 50.0,
+                    "checkInTime": "2026-10-14T07:00:00Z",
+                    "offline_check_in": true
+                }),
+            );
+            let (conn, result, requests) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    207,
+                    r#"{"success":false,"results":[{"shift_id":"shift-offline","status":"error","code":"OFFLINE_CHECK_IN_CONFLICT","reason":"active_shift_elsewhere","retryable":false,"message":"Staff already has another active shift. Close or repair it before opening a new shift."}]}"#,
+                )],
+            )
+            .await;
+            let body: Value = serde_json::from_str(&requests[0].body).expect("shift sync body");
+            assert_eq!(body["events"][0]["event_type"], "shift_open");
+            assert_eq!(body["events"][0]["data"]["offline_check_in"], true);
+
+            assert_eq!((result.processed, result.failed), (0, 1));
+            let (status, attempts, error) = row_state(&conn, &queue_id).expect("kept for review");
+            assert_eq!(status, "failed");
+            assert!(
+                error.as_deref().is_some_and(
+                    |error| error.starts_with("PARITY_ITEM_REJECTED:OFFLINE_CHECK_IN_CONFLICT")
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                result.shift_conflicts,
+                vec![ShiftConflictNotice {
+                    shift_id: "shift-offline".to_string(),
+                    code: OFFLINE_CHECK_IN_CONFLICT.to_string(),
+                    reason: Some("active_shift_elsewhere".to_string()),
+                }]
+            );
+
+            let (conn, again, _) = run_once(conn, Vec::new()).await;
+            assert_eq!((again.processed, again.failed), (0, 0));
+            assert!(again.shift_conflicts.is_empty());
+            assert_eq!(
+                row_state(&conn, &queue_id).map(|(status, tries, _)| (status, tries)),
+                Some(("failed".to_string(), attempts)),
+                "never sent again on its own"
+            );
+        }
+
         /// A 2xx without this shift's own result is no acknowledgement; a
         /// result of `ok` or `skipped` is.
         #[tokio::test]
@@ -35327,6 +36056,1606 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(status, "completed");
+        }
+    }
+
+    // ── Catch-up after reconnection (13/10/2026) ───────────────────────────
+    //
+    // Every desktop write leaves through this queue. Before, none carried
+    // `x-pos-replay`, so a backlog shared the 20 per minute live entry needs,
+    // and a 429 parked one row while the next pass sent the next row into the
+    // same closed window. Four days of Tomikro took about 3 h.
+
+    #[test]
+    fn a_queued_row_is_a_replay_once_it_waited_or_was_tried() {
+        let now = Utc::now();
+        let mut item = queue_item("orders", "INSERT", "order-1", json!({}));
+
+        item.created_at = (now - ChronoDuration::seconds(5)).to_rfc3339();
+        assert!(!is_replay_send(&item, now), "a fresh sale stays live");
+
+        item.created_at = (now - ChronoDuration::seconds(REPLAY_AGE_SECS)).to_rfc3339();
+        assert!(is_replay_send(&item, now), "a row that waited is a replay");
+
+        // SQLite `datetime('now')` rows (UTC, no zone) count the same way.
+        item.created_at = (now - ChronoDuration::minutes(30))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        assert!(is_replay_send(&item, now));
+
+        item.created_at = now.to_rfc3339();
+        item.attempts = 1;
+        assert!(is_replay_send(&item, now), "a retry is a replay");
+
+        item.attempts = 0;
+        item.created_at = "not a time".to_string();
+        assert!(!is_replay_send(&item, now), "an unreadable time stays live");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_sends_waiting_rows_as_replays_and_fresh_rows_live() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+            .expect("store terminal id");
+        let waited = enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-waited",
+            json!({ "name": "Taken offline" }),
+        );
+        enqueue_test_item(
+            &conn,
+            "customers",
+            "INSERT",
+            "cust-fresh",
+            json!({ "name": "Taken now" }),
+        );
+        conn.execute(
+            "UPDATE parity_sync_queue SET created_at = ?1 WHERE id = ?2",
+            params![
+                (Utc::now() - ChronoDuration::hours(26)).to_rfc3339(),
+                waited
+            ],
+        )
+        .expect("age the offline row");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(200, r#"{"success":true}"#),
+            MockResponse::json(200, r#"{"success":true}"#),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(result.processed, 2);
+
+        let first = requests.recv().await.expect("offline row");
+        assert!(first.body.contains("Taken offline"));
+        assert_eq!(
+            first.headers.get(POS_REPLAY_HEADER).map(String::as_str),
+            Some("1")
+        );
+        let second = requests.recv().await.expect("fresh row");
+        assert!(second.body.contains("Taken now"));
+        assert_eq!(second.headers.get(POS_REPLAY_HEADER), None);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn process_queue_holds_every_row_for_retry_after_after_a_429() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+            .expect("store terminal id");
+        for index in 0..2 {
+            enqueue_test_item(
+                &conn,
+                "customers",
+                "INSERT",
+                &format!("cust-{index}"),
+                json!({ "name": format!("Customer {index}") }),
+            );
+        }
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::rate_limited(2),
+            MockResponse::json(200, r#"{"success":true}"#),
+            MockResponse::json(200, r#"{"success":true}"#),
+        ])
+        .await;
+
+        let refused = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("first pass");
+        assert_eq!(refused.failed, 1);
+        requests.recv().await.expect("refused request");
+        assert!(rate_limit_pause_remaining(&base_url).is_some());
+
+        // The next pass (15 s background or 30 s renderer) inside the window
+        // sends nothing: the other row used to go straight into the 429.
+        let held = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("pass inside the window");
+        assert_eq!(held.processed, 0);
+        assert_eq!(held.failed, 0);
+        assert!(
+            requests.try_recv().is_err(),
+            "no request may reach the server before Retry-After"
+        );
+
+        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        let resumed = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("pass after the window");
+        assert_eq!(resumed.processed, 2);
+        assert_eq!(rate_limit_pause_remaining(&base_url), None);
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    /// Admin API buckets a desktop catch-up meets (requests per minute).
+    #[derive(Debug, Clone, Copy)]
+    struct SimServerLimits {
+        /// `POS_ORDERS`: live order, payment, cash-return and table writes.
+        pos_orders: u64,
+        /// `POS_REPLAY`: the same writes sent with `x-pos-replay`.
+        pos_replay: u64,
+        /// `POS_WRITE`: a fiscal receipt per terminal.
+        pos_write: u64,
+        /// Fiscal submit's pre-auth limit per IP.
+        fiscal_ip: u64,
+        /// Whether a replayed receipt counts in `POS_REPLAY` (else `POS_WRITE`).
+        fiscal_replay_in_replay_bucket: bool,
+    }
+
+    /// The server before 13/10/2026 (66a23cf58).
+    const SIM_SERVER_BEFORE: SimServerLimits = SimServerLimits {
+        pos_orders: 20,
+        pos_replay: 120,
+        pos_write: 50,
+        fiscal_ip: 30,
+        fiscal_replay_in_replay_bucket: false,
+    };
+
+    /// The server now: `admin-dashboard/src/lib/rate-limit.ts` (`POS_ORDERS`,
+    /// `POS_REPLAY`, `POS_WRITE`) and `app/api/plugins/fiscal/submit/route.ts`
+    /// (`FISCAL_SUBMIT_IP_LIMIT_PER_MINUTE`). Mirrored here, not read: this
+    /// suite's CI gate does not cover admin files; change both together.
+    const SIM_SERVER_NOW: SimServerLimits = SimServerLimits {
+        pos_orders: 20,
+        pos_replay: 300,
+        pos_write: 50,
+        fiscal_ip: 600,
+        fiscal_replay_in_replay_bucket: true,
+    };
+
+    /// A simulated admin API on a virtual clock: fixed one-minute windows per
+    /// bucket (the window starts at its first request, as Redis' TTL does),
+    /// `latency_ms` per request, Retry-After to the end of the window.
+    struct SimServer {
+        limits: SimServerLimits,
+        latency_ms: u64,
+        now_ms: u64,
+        windows: HashMap<&'static str, (u64, u64)>,
+        requests: u64,
+        replays: u64,
+        refusals: u64,
+        last_refusal_until_ms: u64,
+    }
+
+    impl SimServer {
+        fn admit(&mut self, bucket: &'static str, limit: u64) -> Option<u64> {
+            let now = self.now_ms;
+            let window = self.windows.entry(bucket).or_insert((now, 0));
+            if now >= window.0 + 60_000 {
+                *window = (now, 0);
+            }
+            window.1 += 1;
+            if window.1 <= limit {
+                return None;
+            }
+            let retry_after_secs = (window.0 + 60_000 - now).div_ceil(1_000).max(1);
+            Some(retry_after_secs)
+        }
+
+        fn answer(&mut self, kind: &str, replay: bool) -> MockResponse {
+            self.now_ms += self.latency_ms;
+            self.requests += 1;
+            if replay {
+                self.replays += 1;
+            }
+            let limits = self.limits;
+            let checks: Vec<(&'static str, u64)> = match kind {
+                "orders" if replay => vec![("pos_replay", limits.pos_replay)],
+                "orders" => vec![("pos_orders", limits.pos_orders)],
+                "fiscal" if replay && limits.fiscal_replay_in_replay_bucket => vec![
+                    ("fiscal_ip", limits.fiscal_ip),
+                    ("pos_replay", limits.pos_replay),
+                ],
+                "fiscal" => vec![
+                    ("fiscal_ip", limits.fiscal_ip),
+                    ("pos_write", limits.pos_write),
+                ],
+                _ => Vec::new(),
+            };
+            for (bucket, limit) in checks {
+                if let Some(retry_after_secs) = self.admit(bucket, limit) {
+                    self.refusals += 1;
+                    self.last_refusal_until_ms = self.now_ms + retry_after_secs * 1_000;
+                    return MockResponse::rate_limited(retry_after_secs);
+                }
+            }
+            MockResponse::json(200, r#"{"success":true}"#)
+        }
+    }
+
+    #[derive(Debug)]
+    struct CatchUpReport {
+        rows: u64,
+        minutes: f64,
+        requests: u64,
+        replays: u64,
+        refusals: u64,
+        passes: u64,
+    }
+
+    /// Replays `days` of a Tomikro-like main till (300 orders a day, 70 %
+    /// delivery) through the real queue pass, against [`SimServer`]:
+    /// per order a fiscal receipt (priority 100), the order and its payment
+    /// (priority 1), a driver earning for deliveries (priority 1, unlimited
+    /// endpoint) and a status or driver update (priority 0). Rows are tagged
+    /// with the endpoint they stand for; the payloads themselves are inert.
+    /// The background loop's 15 s between passes is virtual time; the
+    /// renderer's extra 30 s pass is left out (both runs alike).
+    async fn run_catch_up_harness(
+        days: u64,
+        limits: SimServerLimits,
+        latency_ms: u64,
+    ) -> CatchUpReport {
+        clear_terminal_identity();
+        let conn = test_connection();
+        crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
+            .expect("store terminal id");
+        let orders = 300 * days;
+        let started = Utc::now() - ChronoDuration::days(i64::try_from(days).unwrap_or(1));
+        conn.execute_batch("BEGIN").expect("begin seed");
+        let mut rows = 0_u64;
+        for order in 0..orders {
+            let created_at =
+                started + ChronoDuration::seconds(i64::try_from(order * 280).unwrap_or(0));
+            let mut kinds = vec![
+                ("fiscal", 100_i64),
+                ("orders", 1),
+                ("orders", 1),
+                ("orders", 0),
+            ];
+            if order % 10 < 7 {
+                kinds.push(("financial", 1));
+            }
+            for (index, (kind, priority)) in kinds.into_iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO parity_sync_queue
+                        (id, table_name, record_id, operation, data, organization_id,
+                         created_at, attempts, retry_delay_ms, priority, module_type,
+                         conflict_strategy, version, status)
+                     VALUES (?1, 'customers', ?2, 'INSERT', ?3, 'org-1', ?4, 0, ?5, ?6,
+                             'customers', 'manual', 1, 'pending')",
+                    params![
+                        format!("sim-{order}-{index}"),
+                        format!("sim-cust-{order}-{index}"),
+                        json!({ "name": format!("Sim {order}"), "sim_endpoint": kind }).to_string(),
+                        (created_at + ChronoDuration::seconds(index as i64)).to_rfc3339(),
+                        DEFAULT_INITIAL_RETRY_DELAY_MS,
+                        priority,
+                    ],
+                )
+                .expect("seed backlog row");
+                rows += 1;
+            }
+        }
+        conn.execute_batch("COMMIT").expect("commit seed");
+        let conn = std::sync::Mutex::new(conn);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind sim server");
+        let base_url = format!("http://{}", listener.local_addr().expect("sim address"));
+        let server = std::sync::Arc::new(std::sync::Mutex::new(SimServer {
+            limits,
+            latency_ms,
+            now_ms: 0,
+            windows: HashMap::new(),
+            requests: 0,
+            replays: 0,
+            refusals: 0,
+            last_refusal_until_ms: 0,
+        }));
+        let server_task = {
+            let server = std::sync::Arc::clone(&server);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let request = read_http_request(&mut stream).await;
+                    let kind = serde_json::from_str::<Value>(&request.body)
+                        .ok()
+                        .and_then(|body| {
+                            body.get("sim_endpoint")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default();
+                    let replay =
+                        request.headers.get(POS_REPLAY_HEADER).map(String::as_str) == Some("1");
+                    let response = server.lock().expect("sim lock").answer(&kind, replay);
+                    let _ = write_http_response(&mut stream, &response).await;
+                }
+            })
+        };
+
+        // Virtual due time of each refused row (the real queue parks it by the
+        // wall clock; the harness releases it when the virtual window ends).
+        let mut parked: HashMap<String, u64> = HashMap::new();
+        let mut passes = 0_u64;
+        loop {
+            let now_ms = server.lock().expect("sim lock").now_ms;
+            let released: Vec<String> = parked
+                .iter()
+                .filter(|(_, due)| **due <= now_ms)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &released {
+                parked.remove(id);
+                conn.lock()
+                    .expect("lock db")
+                    .execute(
+                        "UPDATE parity_sync_queue SET next_retry_at = ?1 WHERE id = ?2",
+                        params![(Utc::now() - ChronoDuration::seconds(1)).to_rfc3339(), id],
+                    )
+                    .expect("release parked row");
+            }
+            if parked.is_empty() {
+                set_rate_limit_pause_for_test(&base_url, None);
+            }
+
+            let refusals_before = server.lock().expect("sim lock").refusals;
+            process_queue(&conn, &base_url, "api-key")
+                .await
+                .expect("catch-up pass");
+            passes += 1;
+
+            let (refusals_after, refusal_until_ms) = {
+                let server = server.lock().expect("sim lock");
+                (server.refusals, server.last_refusal_until_ms)
+            };
+            if refusals_after > refusals_before {
+                let newly_parked: Vec<String> = {
+                    let db = conn.lock().expect("lock db");
+                    let mut statement = db
+                        .prepare(
+                            "SELECT id FROM parity_sync_queue
+                             WHERE status = 'pending' AND error_message = 'HTTP_429_RATE_LIMITED'",
+                        )
+                        .expect("prepare parked rows");
+                    let ids = statement
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .expect("query parked rows")
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("read parked rows");
+                    ids
+                };
+                for id in newly_parked {
+                    parked.entry(id).or_insert(refusal_until_ms);
+                }
+                // The pause is the client's; keep it closed on the wall clock
+                // until the virtual window reopens.
+                if rate_limit_pause_remaining(&base_url).is_some() {
+                    set_rate_limit_pause_for_test(
+                        &base_url,
+                        Some(std::time::Instant::now() + Duration::from_secs(3_600)),
+                    );
+                }
+            }
+
+            let remaining: i64 = conn
+                .lock()
+                .expect("lock db")
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE status IN ('pending', 'processing')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count backlog");
+            if remaining == 0 {
+                break;
+            }
+            assert!(passes < 200_000, "catch-up harness did not converge");
+            // The background loop sleeps 15 s between passes.
+            server.lock().expect("sim lock").now_ms += 15_000;
+        }
+
+        server_task.abort();
+        set_rate_limit_pause_for_test(&base_url, None);
+        clear_terminal_identity();
+        let server = server.lock().expect("sim lock");
+        CatchUpReport {
+            rows,
+            minutes: server.now_ms as f64 / 60_000.0,
+            requests: server.requests,
+            replays: server.replays,
+            refusals: server.refusals,
+            passes,
+        }
+    }
+
+    /// A Tomikro day (1,410 rows) uploads at the round trip, never held by a
+    /// bucket: under 7 virtual minutes at 250 ms. Before 13/10/2026 it took
+    /// about 55 (the live 20 per minute, receipts at 30 per minute per IP, a
+    /// probe into every closed window). Four days: `catch_up_harness_report`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn catch_up_harness_a_tomikro_day_uploads_at_the_round_trip() {
+        let report = run_catch_up_harness(1, SIM_SERVER_NOW, 250).await;
+        eprintln!("desktop catch-up, 1 day, 250 ms: {report:?}");
+        assert_eq!(report.rows, 1_410);
+        assert!(
+            report.minutes < 7.0,
+            "one day took {:.1} virtual minutes",
+            report.minutes
+        );
+        assert_eq!(
+            report.replays, report.requests,
+            "every backlog row is a replay"
+        );
+        assert_eq!(report.refusals, 0, "no bucket holds a one-lane replay");
+        assert_eq!(report.passes, 1, "one pass drains what is due");
+    }
+
+    /// Numbers for the report (about 80 s per run in a debug build):
+    /// `cargo test --lib catch_up_harness_report -- --ignored --nocapture`.
+    #[tokio::test]
+    #[serial_test::serial]
+    #[ignore = "measurement, run on demand"]
+    async fn catch_up_harness_report() {
+        for (latency_ms, label, limits) in [
+            (150, "server now", SIM_SERVER_NOW),
+            (250, "server now", SIM_SERVER_NOW),
+            (400, "server now", SIM_SERVER_NOW),
+            (250, "server before", SIM_SERVER_BEFORE),
+        ] {
+            let report = run_catch_up_harness(4, limits, latency_ms).await;
+            eprintln!("desktop catch-up, 4 days, {latency_ms} ms, {label}: {report:?}");
+        }
+    }
+
+    /// Offline-week audit (07/10/2026), items 2 and 8, and #14; founder
+    /// go-ahead 13/10/2026: the queue holds four busy days, refuses typed at
+    /// its ceilings, a fiscal receipt never goes out before its order nor is
+    /// deleted unsent, and a row waiting for its order's create never burns
+    /// its budget.
+    mod offline_week_replay_regressions {
+        use super::*;
+
+        const FISCAL_NOT_FOUND_409: &str = r#"{"status":"failed","error":{"code":"fiscal_order_not_found","message":"The order must be synchronized to this branch before fiscal submission"}}"#;
+
+        fn seed_local_order(conn: &Connection, id: &str, supabase_id: Option<&str>) {
+            conn.execute(
+                "INSERT INTO orders (
+                     id, supabase_id, client_request_id, items, total_amount,
+                     total_amount_cents, status, payment_status, sync_status,
+                     branch_id, created_at, updated_at
+                 ) VALUES (
+                     ?1, ?2, ?3, '[]', 10.0, 1000, 'pending', 'paid', 'pending',
+                     ?4, datetime('now'), datetime('now')
+                 )",
+                params![id, supabase_id, format!("client-{id}"), TEST_BRANCH_ID],
+            )
+            .expect("seed local order");
+        }
+
+        /// The order's own create, still queued here and in its backoff:
+        /// the till is offline.
+        fn queue_create_in_backoff(conn: &Connection, order_id: &str) -> String {
+            let id = format!("create-{order_id}");
+            conn.execute(
+                "INSERT INTO parity_sync_queue (
+                     id, table_name, record_id, operation, data, organization_id,
+                     created_at, attempts, error_message, next_retry_at,
+                     retry_delay_ms, priority, module_type, conflict_strategy,
+                     version, status
+                 ) VALUES (
+                     ?1, 'orders', ?2, 'INSERT', '{}', 'org-1', datetime('now'), 3,
+                     'NETWORK_ERROR', '2099-01-01T00:00:00Z', 8000, 1, 'orders',
+                     'server-wins', 1, 'pending'
+                 )",
+                params![id, order_id],
+            )
+            .expect("queue the order's create");
+            id
+        }
+
+        /// A receipt as `fiscal::dispatcher::enqueue_fiscal_row` queues it,
+        /// with the body a till before this fix built: the local order id.
+        fn queue_fiscal_receipt(conn: &Connection, order_id: &str) -> Result<String, String> {
+            enqueue_payload_item(
+                conn,
+                "fiscal_submission",
+                order_id,
+                "INSERT",
+                &json!({
+                    "organizationId": "org-1",
+                    "branchId": TEST_BRANCH_ID,
+                    "orderId": order_id,
+                    "receiptNumber": "R-1",
+                    "issuedAt": "2026-10-13T10:00:00Z",
+                    "totals": {"netCents": 806, "vatCents": 194, "grossCents": 1000, "currency": "EUR"},
+                    "vatBreakdown": [],
+                    "lines": [],
+                    "payments": [],
+                    "metadata": {"kind": "receipt"}
+                }),
+                Some(100),
+                Some("fiscal"),
+                Some("last-write-wins"),
+                Some(1),
+            )
+        }
+
+        fn queue_order_update(conn: &Connection, order_id: &str) -> String {
+            enqueue(
+                conn,
+                &EnqueueInput {
+                    table_name: "orders".to_string(),
+                    record_id: order_id.to_string(),
+                    operation: "UPDATE".to_string(),
+                    data: json!({"orderId": order_id, "status": "ready"}).to_string(),
+                    organization_id: "org-1".to_string(),
+                    priority: Some(0),
+                    module_type: Some("orders".to_string()),
+                    conflict_strategy: Some("server-wins".to_string()),
+                    version: Some(1),
+                },
+            )
+            .expect("queue the order update")
+        }
+
+        /// `(status, attempts, error_message)`, or `None` once the row left.
+        fn row_state(conn: &Connection, id: &str) -> Option<(String, i64, Option<String>)> {
+            conn.query_row(
+                "SELECT status, attempts, error_message FROM parity_sync_queue WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .expect("read queue row")
+        }
+
+        /// One queue pass against a server that answers `responses` in
+        /// order; returns the requests it actually received.
+        async fn run_once(
+            conn: Connection,
+            responses: Vec<MockResponse>,
+        ) -> (Connection, SyncResult, Vec<CapturedRequest>) {
+            let expected = responses.len();
+            let conn = std::sync::Mutex::new(conn);
+            let (base_url, mut requests, server) = spawn_mock_http_server(responses).await;
+            let result = process_queue(&conn, &base_url, "api-key")
+                .await
+                .expect("process queue");
+            let mut captured = Vec::new();
+            for _ in 0..expected {
+                match tokio::time::timeout(Duration::from_millis(300), requests.recv()).await {
+                    Ok(Some(request)) => captured.push(request),
+                    _ => break,
+                }
+            }
+            server.abort();
+            (conn.into_inner().expect("db"), result, captured)
+        }
+
+        /// Blocker #3: rows/order x orders/day x days for a busy store, as
+        /// sized at `MAX_QUEUE_SIZE`. The former 5,000 refused this on the
+        /// second day.
+        #[test]
+        fn offline_week_queue_holds_four_busy_days() {
+            const ROWS_PER_ORDER: i64 = 6;
+            const ORDERS_PER_DAY: i64 = 800;
+            const DAYS: i64 = 4;
+            let rows = ROWS_PER_ORDER * ORDERS_PER_DAY * DAYS;
+            let conn = test_connection();
+            insert_raw_queue_rows(&conn, rows - ROWS_PER_ORDER, "pending");
+
+            // The last order of day four still checks out: its create,
+            // payment, receipt, assignment, earning and one status tap.
+            for (table, operation, module) in [
+                ("orders", "INSERT", "orders"),
+                ("payments", "INSERT", "payment"),
+                ("fiscal_submission", "INSERT", "fiscal"),
+                ("orders", "UPDATE", "orders"),
+                ("driver_earnings", "INSERT", "driver_earning"),
+                ("orders", "UPDATE", "orders"),
+            ] {
+                enqueue(
+                    &conn,
+                    &EnqueueInput {
+                        table_name: table.to_string(),
+                        record_id: "last-order-of-day-four".to_string(),
+                        operation: operation.to_string(),
+                        data: "{}".to_string(),
+                        organization_id: "org-1".to_string(),
+                        priority: None,
+                        module_type: Some(module.to_string()),
+                        conflict_strategy: Some("server-wins".to_string()),
+                        version: Some(1),
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{table} {operation} refused: {error}"));
+            }
+            assert_eq!(capacity_usage(&conn).unwrap().replayable, rows);
+            assert!(rows <= MAX_QUEUE_SIZE);
+            // The 80% warning has fired by then (day four), long before
+            // checkout stops.
+            assert!(capacity_warning(&conn).unwrap().is_some());
+        }
+
+        /// At either ceiling the refusal leads with its machine code, so the
+        /// renderer can say it in the store's language, and nothing already
+        /// queued is dropped to make room.
+        #[test]
+        fn a_full_queue_refusal_is_typed() {
+            let conn = test_connection();
+            insert_raw_queue_rows(&conn, MAX_QUEUE_SIZE, "pending");
+            let error = enqueue(&conn, &capacity_enqueue_input("over-cap"))
+                .expect_err("a full queue refuses");
+            assert!(
+                error.starts_with(&format!("{SYNC_QUEUE_FULL}: ")),
+                "typed: {error}"
+            );
+            assert!(error.contains(&format!("({MAX_QUEUE_SIZE}/{MAX_QUEUE_SIZE})")));
+            assert_eq!(capacity_usage(&conn).unwrap().replayable, MAX_QUEUE_SIZE);
+
+            let conn = test_connection();
+            insert_raw_queue_rows(&conn, MAX_CONFLICT_ROWS, "conflict");
+            let error = enqueue(&conn, &capacity_enqueue_input("conflict-wall"))
+                .expect_err("a full conflict backlog refuses");
+            assert!(
+                error.starts_with(&format!("{SYNC_QUEUE_CONFLICTS_FULL}: ")),
+                "typed: {error}"
+            );
+            assert_eq!(capacity_usage(&conn).unwrap().conflicts, MAX_CONFLICT_ROWS);
+        }
+
+        /// A change that queues several rows asks for all of them before it
+        /// touches local state; conflicts keep their own ceiling.
+        #[test]
+        fn ensure_enqueue_capacity_counts_the_rows_a_change_needs() {
+            let conn = test_connection();
+            insert_raw_queue_rows(&conn, MAX_QUEUE_SIZE - 2, "pending");
+            ensure_enqueue_capacity(&conn, 2).expect("two rows fit");
+            let error = ensure_enqueue_capacity(&conn, 3).expect_err("three do not");
+            assert!(error.starts_with(SYNC_QUEUE_FULL), "{error}");
+
+            insert_raw_queue_rows(&conn, MAX_CONFLICT_ROWS, "conflict");
+            let error = ensure_enqueue_capacity(&conn, 1).expect_err("conflict ceiling");
+            assert!(error.starts_with(SYNC_QUEUE_CONFLICTS_FULL), "{error}");
+        }
+
+        /// A receipt follows an order the till already saved: refusing it at
+        /// the cap lost it for good (the dispatcher only logs). It may use a
+        /// bounded reserve; past that, it is refused typed too.
+        #[test]
+        fn a_fiscal_receipt_of_a_saved_order_is_queued_at_the_cap() {
+            let conn = test_connection();
+            insert_raw_queue_rows(&conn, MAX_QUEUE_SIZE, "pending");
+            assert!(
+                enqueue(&conn, &capacity_enqueue_input("new-sale")).is_err(),
+                "new sales stop at the cap"
+            );
+            queue_fiscal_receipt(&conn, "order-saved-at-cap")
+                .expect("the receipt of a saved order is queued");
+
+            insert_raw_queue_rows(&conn, FISCAL_RECEIPT_RESERVE - 1, "pending");
+            let error = queue_fiscal_receipt(&conn, "order-past-reserve")
+                .expect_err("the reserve is bounded");
+            assert!(error.starts_with(SYNC_QUEUE_FULL), "{error}");
+        }
+
+        /// "Keep the partial-index-exact COUNT": the capacity COUNT that runs
+        /// on every enqueue reads the active partial index, never the table.
+        #[test]
+        fn capacity_count_rides_the_active_partial_index() {
+            let conn = test_connection();
+            let mut statement = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {CAPACITY_USAGE_SQL}"))
+                .unwrap();
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(" | ");
+            assert!(
+                plan.contains("idx_parity_sync_queue_active"),
+                "capacity COUNT plan: {plan}"
+            );
+            assert!(!plan.contains("SCAN parity_sync_queue "), "{plan}");
+        }
+
+        /// A record's own queued rows are a key lookup, never a scan of the
+        /// whole queue: a payment's latest row (its mirror, on every pass and
+        /// after every marked row) and an order's queued create. Without the
+        /// v98 index one mirror reconcile took ~200 s at 20,000 rows and
+        /// 4,000 local payments (measured 13/10/2026).
+        #[test]
+        fn a_records_own_queue_rows_are_a_key_lookup() {
+            let conn = test_connection();
+            for sql in [
+                "SELECT latest.id FROM parity_sync_queue latest
+                  WHERE latest.table_name = 'payments' AND latest.record_id = ?1
+                  ORDER BY latest.created_at DESC LIMIT 1",
+                "SELECT EXISTS(SELECT 1 FROM parity_sync_queue
+                  WHERE table_name = 'orders' AND record_id = ?1 AND operation = 'INSERT'
+                    AND status IN ('pending', 'processing', 'failed', 'conflict'))",
+            ] {
+                let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+                let plan = statement
+                    .query_map(params!["record-1"], |row| row.get::<_, String>(3))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+                    .join(" | ");
+                assert!(plan.contains("idx_parity_sq_table_record"), "{sql}\n{plan}");
+                assert!(!plan.contains("TEMP B-TREE"), "{sql}\n{plan}");
+            }
+        }
+
+        /// The repair-settlement money predicate before 13/10/2026, verbatim:
+        /// one scan of every local order per queue row.
+        fn repair_money_owner_predicate_before(alias: &str) -> String {
+            let order_context = semantic_sql_value("repair_owner.order_context");
+            let table = semantic_sql_value(&format!("{alias}.table_name"));
+            format!(
+                "EXISTS (
+                     SELECT 1
+                     FROM orders repair_owner
+                     WHERE {order_context} = 'repair_settlement'
+                       AND (
+                            ({table} = 'orders'
+                             AND (repair_owner.id = {alias}.record_id
+                                  OR repair_owner.supabase_id = {alias}.record_id))
+                            OR ({table} IN ('payments', 'order_payments')
+                                AND EXISTS (
+                                    SELECT 1 FROM order_payments repair_payment
+                                    WHERE repair_payment.id = {alias}.record_id
+                                      AND repair_payment.order_id = repair_owner.id
+                                ))
+                            OR ({table} = 'payment_adjustments'
+                                AND EXISTS (
+                                    SELECT 1
+                                    FROM payment_adjustments repair_adjustment
+                                    LEFT JOIN order_payments repair_adjustment_payment
+                                      ON repair_adjustment_payment.id = repair_adjustment.payment_id
+                                    WHERE repair_adjustment.id = {alias}.record_id
+                                      AND COALESCE(
+                                            NULLIF(repair_adjustment.order_id, ''),
+                                            repair_adjustment_payment.order_id
+                                          ) = repair_owner.id
+                                ))
+                       )
+                 )"
+            )
+        }
+
+        /// The key-driven repair-settlement money predicate selects exactly
+        /// the rows the scanning one did, over every branch, the semantic
+        /// (case and whitespace) spellings, and non-repair controls.
+        #[test]
+        fn the_repair_money_owner_predicate_keeps_its_meaning() {
+            let conn = test_connection();
+            // Legacy adjustments may carry an empty order id (the predicate
+            // then follows their payment); the foreign key would refuse one.
+            conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+            conn.execute_batch(
+                "INSERT INTO orders (id, supabase_id, items, total_amount, status, order_context,
+                                     created_at, updated_at)
+                 VALUES ('repair-order', 'repair-remote', '[]', 10, 'completed', 'repair_settlement', 'now', 'now'),
+                        ('repair-spaced', NULL, '[]', 10, 'completed', '  Repair_Settlement ', 'now', 'now'),
+                        ('plain-order', 'plain-remote', '[]', 10, 'completed', NULL, 'now', 'now');
+                 INSERT INTO order_payments (id, order_id, method, amount, status, created_at, updated_at)
+                 VALUES ('repair-pay', 'repair-order', 'cash', 10, 'completed', 'now', 'now'),
+                        ('spaced-pay', 'repair-spaced', 'cash', 10, 'completed', 'now', 'now'),
+                        ('plain-pay', 'plain-order', 'cash', 10, 'completed', 'now', 'now');
+                 INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason,
+                                                  created_at, updated_at)
+                 VALUES ('repair-adj-direct', 'plain-pay', 'repair-order', 'refund', 1, 'r', 'now', 'now'),
+                        ('repair-adj-via-payment', 'repair-pay', '', 'refund', 1, 'r', 'now', 'now'),
+                        ('repair-adj-spaced', 'spaced-pay', '', 'void', 1, 'r', 'now', 'now'),
+                        ('plain-adj', 'plain-pay', '', 'refund', 1, 'r', 'now', 'now'),
+                        ('plain-adj-direct', 'repair-pay', 'plain-order', 'refund', 1, 'r', 'now', 'now');",
+            )
+            .expect("seed orders, payments and adjustments");
+            let rows = [
+                ("orders", "repair-order"),
+                ("orders", "repair-remote"),
+                (" ORDERS ", "repair-spaced"),
+                ("orders", "plain-order"),
+                ("orders", "plain-remote"),
+                ("orders", "missing"),
+                ("payments", "repair-pay"),
+                ("Order_Payments", "spaced-pay"),
+                ("payments", "plain-pay"),
+                ("payments", "repair-order"),
+                ("payment_adjustments", "repair-adj-direct"),
+                ("payment_adjustments", "repair-adj-via-payment"),
+                ("payment_adjustments", "repair-adj-spaced"),
+                ("payment_adjustments", "plain-adj"),
+                ("payment_adjustments", "plain-adj-direct"),
+                ("driver_earnings", "repair-order"),
+                ("fiscal_submission", "repair-order"),
+            ];
+            for (index, (table, record)) in rows.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data,
+                         organization_id, created_at, attempts, retry_delay_ms, priority,
+                         module_type, conflict_strategy, version, status)
+                     VALUES (?1, ?2, ?3, 'INSERT', '{}', 'org-1', datetime('now'), 0, 1000, 0,
+                             'orders', 'server-wins', 1, 'pending')",
+                    params![format!("row-{index:02}"), table, record],
+                )
+                .unwrap();
+            }
+            let select = |predicate: String| -> Vec<String> {
+                let mut statement = conn
+                    .prepare(&format!(
+                        "SELECT q.id FROM parity_sync_queue q WHERE {predicate} ORDER BY q.id"
+                    ))
+                    .unwrap();
+                let ids = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                ids
+            };
+            let before = select(repair_money_owner_predicate_before("q"));
+            let after = select(semantic_repair_financial_queue_owner_predicate("q"));
+            assert_eq!(after, before);
+            // The fixture really exercises both sides.
+            assert_eq!(
+                before,
+                ["row-00", "row-01", "row-02", "row-06", "row-07", "row-10", "row-11", "row-12"]
+            );
+
+            // And it no longer scans the local orders for each row.
+            let mut statement = conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN SELECT q.id FROM parity_sync_queue q WHERE {}",
+                    semantic_repair_financial_queue_owner_predicate("q")
+                ))
+                .unwrap();
+            let plan = statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(" | ");
+            assert!(!plan.contains("SCAN repair_owner"), "{plan}");
+        }
+
+        /// #8: a receipt queued before its order reached the server went out
+        /// first (priority 100), got 409 `fiscal_order_not_found`, and was
+        /// resolved "server wins": deleted unsent. While the order's create
+        /// is still queued it now waits, sending nothing and spending no
+        /// attempt.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_fiscal_receipt_waits_for_its_order_create_without_spending_attempts() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-offline", None);
+            queue_create_in_backoff(&conn, "order-offline");
+            let receipt = queue_fiscal_receipt(&conn, "order-offline").unwrap();
+
+            let (conn, _, requests) = run_once(
+                conn,
+                vec![
+                    MockResponse::json(409, FISCAL_NOT_FOUND_409),
+                    MockResponse::json(404, r#"{"success":false}"#),
+                ],
+            )
+            .await;
+
+            let (status, attempts, error) =
+                row_state(&conn, &receipt).expect("a receipt is never deleted unsent");
+            assert_eq!(status, "pending");
+            assert_eq!(attempts, 0, "waiting for the order spends no attempt");
+            assert_eq!(error.as_deref(), Some(FISCAL_ORDER_WAIT_REASON));
+            assert!(
+                requests.is_empty(),
+                "nothing is sent before the order: {:?}",
+                requests.iter().map(|r| &r.request_line).collect::<Vec<_>>()
+            );
+        }
+
+        /// #8: once the order synced, a receipt queued with the local id
+        /// (every desktop receipt before this fix) goes out with the
+        /// server's id, which the fiscal route resolves.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_receipt_of_a_synced_order_goes_out_with_the_server_id() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-synced", Some("srv-order-synced"));
+            let receipt = queue_fiscal_receipt(&conn, "order-synced").unwrap();
+
+            let (conn, result, requests) = run_once(
+                conn,
+                vec![MockResponse::json(
+                    200,
+                    r#"{"status":"skipped","outboxRowId":null,"pluginId":null,"reason":"no_active_plugin"}"#,
+                )],
+            )
+            .await;
+
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0]
+                .request_line
+                .starts_with("POST /api/plugins/fiscal/submit"));
+            let body: Value = serde_json::from_str(&requests[0].body).unwrap();
+            assert_eq!(body["orderId"], "srv-order-synced");
+            assert_eq!(result.processed, 1);
+            assert!(
+                row_state(&conn, &receipt).is_none(),
+                "delivered, then cleared"
+            );
+        }
+
+        /// #8: a fiscal 409 is never "server wins". With no create of the
+        /// order queued here the wait is budgeted, and a spent budget leaves
+        /// a visible conflict, never a deleted receipt.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_fiscal_409_is_never_resolved_server_wins() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-unknown", Some("srv-order-unknown"));
+            let receipt = queue_fiscal_receipt(&conn, "order-unknown").unwrap();
+
+            let (conn, result, _) = run_once(
+                conn,
+                vec![
+                    MockResponse::json(409, FISCAL_NOT_FOUND_409),
+                    MockResponse::json(404, r#"{"success":false}"#),
+                ],
+            )
+            .await;
+            assert_eq!(result.processed, 0, "never acknowledged");
+            let (status, attempts, error) =
+                row_state(&conn, &receipt).expect("a receipt is never deleted unsent");
+            assert_eq!((status.as_str(), attempts), ("pending", 1));
+            assert_eq!(error.as_deref(), Some(FISCAL_ORDER_WAIT_REASON));
+
+            conn.execute(
+                "UPDATE parity_sync_queue SET attempts = ?1, next_retry_at = NULL WHERE id = ?2",
+                params![MAX_DEFERRAL_CYCLES - 1, receipt],
+            )
+            .unwrap();
+            let (conn, _, _) =
+                run_once(conn, vec![MockResponse::json(409, FISCAL_NOT_FOUND_409)]).await;
+            let (status, _, _) = row_state(&conn, &receipt).expect("still never deleted");
+            assert_eq!(status, "conflict", "a visible conflict for a manager");
+        }
+
+        /// #8: any other fiscal 409 parks the receipt as a conflict.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn any_other_fiscal_409_parks_the_receipt_as_a_conflict() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-refused", Some("srv-order-refused"));
+            let receipt = queue_fiscal_receipt(&conn, "order-refused").unwrap();
+
+            let (conn, result, _) = run_once(
+                conn,
+                vec![
+                    MockResponse::json(
+                        409,
+                        r#"{"status":"failed","error":{"code":"REPAIR_FISCAL_ROUTE_REQUIRED","message":"Use the protected repair fiscalization endpoint"}}"#,
+                    ),
+                    MockResponse::json(404, r#"{"success":false}"#),
+                ],
+            )
+            .await;
+            assert_eq!((result.processed, result.conflicts), (0, 1));
+            let (status, _, _) = row_state(&conn, &receipt).expect("kept");
+            assert_eq!(status, "conflict");
+        }
+
+        /// #14: an order update waiting for its order's create spent an
+        /// attempt per wait, became a conflict after 50 (about four minutes
+        /// offline), and 1,000 such conflicts stop every write. It now waits
+        /// for free while the create is queued.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn order_update_waiting_for_create_spends_no_attempt() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-waits", None);
+            queue_create_in_backoff(&conn, "order-waits");
+            let update = queue_order_update(&conn, "order-waits");
+
+            let db = std::sync::Mutex::new(conn);
+            for _ in 0..(MAX_DEFERRAL_CYCLES + 10) {
+                db.lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE parity_sync_queue SET next_retry_at = NULL WHERE id = ?1",
+                        params![update],
+                    )
+                    .unwrap();
+                // The create is in its backoff and the update waits locally:
+                // nothing reaches this (closed) address.
+                process_queue(&db, "http://127.0.0.1:9", "api-key")
+                    .await
+                    .expect("process queue");
+            }
+            let conn = db.into_inner().unwrap();
+            let (status, attempts, error) = row_state(&conn, &update).expect("kept");
+            assert_eq!(status, "pending", "never a conflict while its create waits");
+            assert_eq!(attempts, 0);
+            assert_eq!(error.as_deref(), Some("Waiting for parent order sync"));
+        }
+
+        /// #14, the other side: with no create of its order queued here the
+        /// wait keeps its budget, so an order that can never sync still
+        /// surfaces as a conflict.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_order_update_with_no_create_queued_keeps_its_budget() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-orphan", None);
+            let update = queue_order_update(&conn, "order-orphan");
+
+            let db = std::sync::Mutex::new(conn);
+            process_queue(&db, "http://127.0.0.1:9", "api-key")
+                .await
+                .expect("process queue");
+            let conn = db.into_inner().unwrap();
+            let (status, attempts, _) = row_state(&conn, &update).expect("kept");
+            assert_eq!((status.as_str(), attempts), ("pending", 1));
+        }
+
+        /// A pass claims only the rows due when it started, so each row at
+        /// most once. Measured 13/10/2026 at 20,000 rows: a pass slower than
+        /// the 15 s parent-wait recheck re-claimed its own waiting rows (77
+        /// times each for 100 waiting receipts) and never returned. Here the
+        /// second receipt falls due while the first one's request is in
+        /// flight: it waits for the next pass instead of being sent now.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_queue_pass_claims_only_rows_due_when_it_started() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-first", Some("srv-order-first"));
+            seed_local_order(&conn, "order-later", Some("srv-order-later"));
+            let first = queue_fiscal_receipt(&conn, "order-first").unwrap();
+            let later = queue_fiscal_receipt(&conn, "order-later").unwrap();
+            let due_soon = (Utc::now() + ChronoDuration::milliseconds(400)).to_rfc3339();
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = ?1 WHERE id = ?2",
+                params![due_soon, later],
+            )
+            .unwrap();
+
+            let conn = std::sync::Mutex::new(conn);
+            let (base_url, observed, release, server) =
+                spawn_blocked_first_response_server(MockResponse::json(
+                    200,
+                    r#"{"status":"skipped","outboxRowId":null,"pluginId":null,"reason":"no_active_plugin"}"#,
+                ))
+                .await;
+            let processor = process_queue(&conn, &base_url, "api-key");
+            tokio::pin!(processor);
+            tokio::select! {
+                _ = observed => {
+                    // The second receipt falls due meanwhile.
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    release.send(()).expect("release the first answer");
+                }
+                _ = &mut processor => panic!("the pass ended before its first request"),
+            }
+            let result = processor.await.expect("process queue");
+            let requests = server.await.expect("join mock server");
+
+            assert_eq!(
+                requests.len(),
+                1,
+                "a row due after the pass started waits for the next pass"
+            );
+            assert_eq!(result.processed, 1);
+            let conn = conn.lock().unwrap();
+            assert!(row_state(&conn, &first).is_none());
+            let (status, attempts, _) = row_state(&conn, &later).expect("still queued");
+            assert_eq!((status.as_str(), attempts), ("pending", 0));
+        }
+
+        /// Offline the create backs off to a minute; the rows waiting for it
+        /// look again when it does, not every 15 s (each look is a claim).
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_waiting_row_looks_again_when_its_order_create_does() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-backoff", None);
+            let create = queue_create_in_backoff(&conn, "order-backoff");
+            let create_next = Utc::now() + ChronoDuration::seconds(50);
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = ?1 WHERE id = ?2",
+                params![create_next.to_rfc3339(), create],
+            )
+            .unwrap();
+            let update = queue_order_update(&conn, "order-backoff");
+            let receipt = queue_fiscal_receipt(&conn, "order-backoff").unwrap();
+
+            let db = std::sync::Mutex::new(conn);
+            process_queue(&db, "http://127.0.0.1:9", "api-key")
+                .await
+                .expect("process queue");
+            let conn = db.into_inner().unwrap();
+            for id in [&update, &receipt] {
+                let next: String = conn
+                    .query_row(
+                        "SELECT next_retry_at FROM parity_sync_queue WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let next = chrono::DateTime::parse_from_rfc3339(&next)
+                    .unwrap()
+                    .with_timezone(&Utc);
+                assert_eq!(next, create_next, "{id} looks again with its create");
+                assert_eq!(row_state(&conn, id).unwrap().1, 0, "no attempt spent");
+            }
+        }
+
+        /// When the create lands, its waiting update and receipt are due at
+        /// once (a Z drain does not wait for their recheck), and the receipt
+        /// goes out with the server's id.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn the_order_create_wakes_the_rows_waiting_for_it() {
+            clear_terminal_identity();
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            seed_local_order(&conn, "order-lands", None);
+            let create = queue_create_in_backoff(&conn, "order-lands");
+            let update = queue_order_update(&conn, "order-lands");
+            let receipt = queue_fiscal_receipt(&conn, "order-lands").unwrap();
+            let db = std::sync::Mutex::new(conn);
+            process_queue(&db, "http://127.0.0.1:9", "api-key")
+                .await
+                .expect("process queue");
+            let conn = db.into_inner().unwrap();
+            for id in [&update, &receipt] {
+                let next: Option<String> = conn
+                    .query_row(
+                        "SELECT next_retry_at FROM parity_sync_queue WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(next.is_some(), "{id} waits");
+            }
+
+            let create_item = conn
+                .query_row(
+                    "SELECT id,table_name,record_id,operation,data,organization_id,created_at,
+                            attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,
+                            priority,module_type,conflict_strategy,version,claim_generation,status
+                     FROM parity_sync_queue WHERE id = ?1",
+                    params![create],
+                    map_internal_queue_item,
+                )
+                .unwrap();
+            apply_success(
+                &conn,
+                &create_item,
+                Some(&json!({"success": true, "data": {"id": "srv-order-lands"}})),
+            )
+            .expect("the create lands");
+
+            for id in [&update, &receipt] {
+                let next: Option<String> = conn
+                    .query_row(
+                        "SELECT next_retry_at FROM parity_sync_queue WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(next, None, "{id} is due at once");
+            }
+            let receipt_item = conn
+                .query_row(
+                    "SELECT id,table_name,record_id,operation,data,organization_id,created_at,
+                            attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,
+                            priority,module_type,conflict_strategy,version,claim_generation,status
+                     FROM parity_sync_queue WHERE id = ?1",
+                    params![receipt],
+                    map_internal_queue_item,
+                )
+                .unwrap();
+            match prepare_request(&conn, &receipt_item).unwrap() {
+                RequestPreparation::Ready(spec) => {
+                    let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+                    assert_eq!(body["orderId"], "srv-order-lands");
+                }
+                other => panic!("the receipt is ready once its order landed: {other:?}"),
+            }
+        }
+
+        /// The renderer's claim takes the same cutoff.
+        #[test]
+        fn the_renderer_claim_takes_the_pass_cutoff_too() {
+            let conn = test_connection();
+            let update = queue_order_update(&conn, "order-renderer");
+            let due = Utc::now() - ChronoDuration::minutes(1);
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = ?1 WHERE id = ?2",
+                params![due.to_rfc3339(), update],
+            )
+            .unwrap();
+            let before_due = (due - ChronoDuration::seconds(1)).to_rfc3339();
+            assert!(renderer_dequeue_due_by(&conn, Some(&before_due))
+                .unwrap()
+                .is_none());
+            assert!(
+                dequeue_due_by_with_quarantine_count(&conn, Some(&before_due))
+                    .unwrap()
+                    .0
+                    .is_none()
+            );
+            let claimed = renderer_dequeue(&conn).unwrap().expect("due by now");
+            assert_eq!(claimed.id, update);
+        }
+
+        fn mean_micros(runs: u32, mut work: impl FnMut()) -> f64 {
+            let start = std::time::Instant::now();
+            for _ in 0..runs {
+                work();
+            }
+            start.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(runs)
+        }
+
+        /// The cost of the queue at its 20,000-row ceiling (13/10/2026):
+        /// file size, the capacity COUNT, enqueue, the claim, the parent
+        /// lookups and one offline pass of waiting receipts. A measurement,
+        /// not a gate (timings depend on the machine and the build):
+        /// `cargo test --lib queue_capacity_cost_at_the_cap -- --ignored --nocapture`.
+        #[test]
+        #[ignore]
+        fn queue_capacity_cost_at_the_cap() {
+            let (_fixture, conn) = FileBackedTestDb::new("capacity-cost");
+            conn.execute_batch("PRAGMA synchronous = FULL;").unwrap();
+            // `QUEUE_BENCH_CACHE_KIB` tries a larger SQLite page cache than the
+            // till's default (2,000 KiB); the measured scans are I/O-bound.
+            if let Some(kib) = std::env::var("QUEUE_BENCH_CACHE_KIB")
+                .ok()
+                .and_then(|kib| kib.parse::<i64>().ok())
+            {
+                conn.execute_batch(&format!("PRAGMA cache_size = -{kib};"))
+                    .unwrap();
+            }
+            crate::db::set_setting(&conn, "terminal", "__ignore_keyring", "1").unwrap();
+            seed_terminal_context(&conn);
+            let page_bytes = |conn: &Connection| -> i64 {
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .unwrap();
+                conn.query_row(
+                    "SELECT (SELECT page_count FROM pragma_page_count())
+                          * (SELECT page_size FROM pragma_page_size())",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            let empty_bytes = page_bytes(&conn);
+
+            // Payloads of the real producers' size: a 3-item delivery create,
+            // its payment, its receipt, the assignment update, the earning.
+            let items: Vec<Value> = (0..3)
+                .map(|line| {
+                    json!({"id": Uuid::new_v4().to_string(), "menu_item_id": Uuid::new_v4().to_string(),
+                        "name": format!("Crepe {line} with chocolate and banana"), "quantity": 1,
+                        "unit_price": 6.5, "total_price": 6.5, "notes": "",
+                        "customizations": [{"name": "Extra banana", "price": 0.5}]})
+                })
+                .collect();
+            let create =
+                json!({"clientOrderId": Uuid::new_v4().to_string(), "orderType": "delivery",
+                "items": items, "totalAmount": 21.0, "subtotal": 19.5, "deliveryFee": 1.5,
+                "customerName": "Maria Papadopoulou", "customerPhone": "6900000000",
+                "deliveryAddress": "Odos Ermou 12, 3rd floor", "deliveryCity": "Thessaloniki",
+                "deliveryPostalCode": "54624", "deliveryNotes": "Ring twice",
+                "branchId": TEST_BRANCH_ID, "terminal_id": TEST_TERMINAL_ID,
+                "staffShiftId": Uuid::new_v4().to_string(), "paymentMethod": "cash",
+                "paymentStatus": "paid", "taxAmount": 2.52})
+                .to_string();
+            let payment = json!({"id": Uuid::new_v4().to_string(), "orderId": "x", "amount": 21.0,
+                "method": "cash", "currency": "EUR", "idempotencyKey": Uuid::new_v4().to_string(),
+                "staffShiftId": Uuid::new_v4().to_string(), "cashReceived": 25.0, "changeGiven": 4.0})
+            .to_string();
+            let receipt = json!({"organizationId": "org-1", "branchId": TEST_BRANCH_ID,
+                "orderId": "x", "receiptNumber": "R-00042", "issuedAt": "2026-10-13T10:00:00.000Z",
+                "totals": {"netCents": 1694, "vatCents": 406, "grossCents": 2100, "currency": "EUR"},
+                "vatBreakdown": [{"rateBasisPoints": 2400, "netCents": 1694, "vatCents": 406}],
+                "lines": items, "payments": [{"method": "cash", "amountCents": 2100}],
+                "metadata": {"operatorOib": "", "sequenceNumber": 42, "paymentMethodCode": "G", "kind": "receipt"}})
+            .to_string();
+            let assignment = json!({"orderId": "x", "orderType": "delivery", "status": "delivered",
+                "driverId": Uuid::new_v4().to_string(), "driverName": "Nikos", "deliveryNotes": null})
+            .to_string();
+            let earning = json!({"id": Uuid::new_v4().to_string(), "order_id": "x",
+                "driver_id": Uuid::new_v4().to_string(), "staff_shift_id": Uuid::new_v4().to_string(),
+                "delivery_fee": 1.5, "tip_amount": 0.0, "cash_collected": 21.0, "payment_method": "cash",
+                "branch_id": TEST_BRANCH_ID, "created_at": "2026-10-13T10:00:00Z"})
+            .to_string();
+
+            // 4,000 offline delivery orders x 5 rows = the cap. Every row is
+            // in its backoff (the till is offline), the creates first.
+            // `QUEUE_BENCH_ROWS` compares another depth (the former cap: 5000).
+            let orders = std::env::var("QUEUE_BENCH_ROWS")
+                .ok()
+                .and_then(|rows| rows.parse::<i64>().ok())
+                .unwrap_or(MAX_QUEUE_SIZE)
+                / 5;
+            let fill_started = std::time::Instant::now();
+            conn.execute_batch("BEGIN").unwrap();
+            {
+                let mut order = conn
+                    .prepare(
+                        "INSERT INTO orders (id, client_request_id, items, total_amount,
+                             total_amount_cents, status, payment_status, sync_status, branch_id,
+                             order_type, created_at, updated_at)
+                         VALUES (?1, ?1, '[]', 21.0, 2100, 'delivered', 'paid', 'pending', ?2,
+                             'delivery', datetime('now'), datetime('now'))",
+                    )
+                    .unwrap();
+                let mut row = conn
+                    .prepare(
+                        "INSERT INTO parity_sync_queue (id, table_name, record_id, operation,
+                             data, organization_id, created_at, attempts, error_message,
+                             next_retry_at, retry_delay_ms, priority, module_type,
+                             conflict_strategy, version, status)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'org-1', ?6, 3, 'NETWORK_ERROR',
+                             '2099-01-01T00:00:00Z', 8000, ?7, ?8, 'server-wins', 1, 'pending')",
+                    )
+                    .unwrap();
+                let mut cash = conn
+                    .prepare(
+                        "INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                             currency, status, sync_status, sync_state, created_at, updated_at)
+                         VALUES (?1, ?2, 'cash', 21.0, 2100, 'EUR', 'completed', 'pending',
+                             'pending', datetime('now'), datetime('now'))",
+                    )
+                    .unwrap();
+                for index in 0..orders {
+                    let order_id = format!("bench-order-{index:05}");
+                    let payment_id = format!("bench-pay-{index:05}");
+                    order.execute(params![order_id, TEST_BRANCH_ID]).unwrap();
+                    cash.execute(params![payment_id, order_id]).unwrap();
+                    let created = (Utc::now() + ChronoDuration::milliseconds(index)).to_rfc3339();
+                    for (table, record, operation, data, priority, module) in [
+                        ("orders", &order_id, "INSERT", &create, 1, "orders"),
+                        ("payments", &payment_id, "INSERT", &payment, 1, "payment"),
+                        (
+                            "fiscal_submission",
+                            &order_id,
+                            "INSERT",
+                            &receipt,
+                            100,
+                            "fiscal",
+                        ),
+                        ("orders", &order_id, "UPDATE", &assignment, 0, "orders"),
+                        (
+                            "driver_earnings",
+                            &order_id,
+                            "INSERT",
+                            &earning,
+                            1,
+                            "financial",
+                        ),
+                    ] {
+                        row.execute(params![
+                            Uuid::new_v4().to_string(),
+                            table,
+                            record,
+                            operation,
+                            data,
+                            created,
+                            priority,
+                            module
+                        ])
+                        .unwrap();
+                    }
+                }
+            }
+            conn.execute_batch("COMMIT").unwrap();
+            let depth = capacity_usage(&conn).unwrap().replayable;
+            let full_bytes = page_bytes(&conn);
+            eprintln!(
+                "[{depth} rows] fill {} ms; file {:.1} MB (empty schema {:.1} MB, +{:.0} bytes/row)",
+                fill_started.elapsed().as_millis(),
+                full_bytes as f64 / 1_048_576.0,
+                empty_bytes as f64 / 1_048_576.0,
+                (full_bytes - empty_bytes) as f64 / depth as f64,
+            );
+
+            let step = |label: &str, runs: u32, work: &mut dyn FnMut()| {
+                let us = mean_micros(runs, work);
+                eprintln!("[{depth} rows] {label}: {us:.0} us (mean of {runs})");
+            };
+            step("capacity COUNT", 200, &mut || {
+                capacity_usage(&conn).unwrap();
+            });
+            step("get_length", 50, &mut || {
+                get_length(&conn).unwrap();
+            });
+            step("get_status", 5, &mut || {
+                get_status(&conn).unwrap();
+            });
+            step("order_create_in_flight", 100, &mut || {
+                order_create_in_flight(&conn, "bench-order-02000");
+            });
+            step("has_outstanding_local_order_queue", 100, &mut || {
+                sync::has_outstanding_local_order_queue(&conn, "bench-order-02000");
+            });
+            // Nothing is due: the claim's whole candidate scan, plus the
+            // quarantine prepasses every claim runs.
+            step("dequeue, nothing due", 5, &mut || {
+                assert!(dequeue(&conn).unwrap().is_none());
+            });
+            step("quarantine_reserved_repair_lookalikes", 5, &mut || {
+                quarantine_reserved_repair_lookalikes(&conn).unwrap();
+            });
+            step("quarantine_existing_refused_table_batches", 5, &mut || {
+                quarantine_existing_refused_table_batches(&conn).unwrap();
+            });
+
+            // Enqueue at depth: the prepasses, the COUNT and the insert.
+            conn.execute(
+                "DELETE FROM parity_sync_queue WHERE id IN (
+                     SELECT id FROM parity_sync_queue WHERE table_name = 'driver_earnings' LIMIT 20)",
+                [],
+            )
+            .unwrap();
+            let mut extra = 0;
+            step("enqueue", 20, &mut || {
+                extra += 1;
+                enqueue(
+                    &conn,
+                    &capacity_enqueue_input(&format!("bench-extra-{extra}")),
+                )
+                .unwrap();
+            });
+
+            // The per-pass maintenance, step by step.
+            step("pass: redact repair audit payloads", 1, &mut || {
+                redact_identifiable_legacy_repair_audit_payloads(&conn).unwrap();
+            });
+            step("pass: check_age_warnings", 1, &mut || {
+                check_age_warnings(&conn).unwrap();
+            });
+            step("pass: recover_stale_processing_items", 1, &mut || {
+                recover_stale_processing_items(&conn).unwrap();
+            });
+            step("pass: reconcile_payment_queue_mirrors", 1, &mut || {
+                reconcile_payment_queue_mirrors(&conn, None).unwrap();
+            });
+            step("pass: resume_exhausted_transport_items", 1, &mut || {
+                resume_exhausted_transport_items(&conn).unwrap();
+            });
+            step(
+                "pass: resume_table_opens_waiting_for_parent",
+                1,
+                &mut || {
+                    resume_table_opens_waiting_for_parent(&conn).unwrap();
+                },
+            );
+            step(
+                "pass: cleanup_superseded_synced_order_status_updates",
+                1,
+                &mut || {
+                    cleanup_superseded_synced_order_status_updates(&conn).unwrap();
+                },
+            );
+            step("pass: legacy edit recovery", 1, &mut || {
+                let _ = crate::edit_settlement_recovery::requeue_legacy_edits(&conn);
+                let _ = crate::edit_settlement_recovery::mark_legacy_edits_for_review(&conn);
+            });
+            step("pass: bounded failed-row retries", 1, &mut || {
+                retry_failed_terminal_context_items_limited(&conn, 3).unwrap();
+                retry_failed_rate_limited_items_limited(&conn, 3).unwrap();
+                retry_failed_invalid_fiscal_issued_at_items_limited(&conn, 3).unwrap();
+                retry_failed_legacy_order_insert_items_limited(&conn, 3).unwrap();
+                resolve_failed_payment_total_conflict_items_limited(&conn, 3).unwrap();
+                retry_failed_customer_address_not_found_items_limited(&conn, 3).unwrap();
+                retry_failed_customer_address_default_conflict_items_limited(&conn, 3).unwrap();
+                retry_failed_table_session_local_placeholder_items_limited(&conn, 3).unwrap();
+            });
+
+            // A pass with nothing due: the per-pass maintenance alone.
+            let conn = {
+                let db = std::sync::Mutex::new(conn);
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                for round in ["first", "second"] {
+                    let started = std::time::Instant::now();
+                    runtime
+                        .block_on(process_queue(&db, "http://127.0.0.1:9", "api-key"))
+                        .unwrap();
+                    eprintln!(
+                        "[{depth} rows] a pass with nothing due ({round}): {:.0} ms",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                db.into_inner().unwrap()
+            };
+
+            // A sampled pass with the till offline: 100 receipts are due,
+            // their creates are not; each receipt waits for its create.
+            const SAMPLE: i64 = 100;
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = NULL
+                 WHERE id IN (SELECT id FROM parity_sync_queue
+                              WHERE module_type = 'fiscal' ORDER BY created_at LIMIT ?1)",
+                params![SAMPLE],
+            )
+            .unwrap();
+            let db = std::sync::Mutex::new(conn);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let pass_started = std::time::Instant::now();
+            runtime
+                .block_on(process_queue(&db, "http://127.0.0.1:9", "api-key"))
+                .unwrap();
+            let pass_ms = pass_started.elapsed().as_secs_f64() * 1000.0;
+            let conn = db.into_inner().unwrap();
+            let waiting: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue
+                     WHERE module_type = 'fiscal' AND attempts = 3 AND error_message = ?1",
+                    params![FISCAL_ORDER_WAIT_REASON],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            eprintln!(
+                "[{depth} rows] offline pass of {SAMPLE} waiting receipts: {pass_ms:.0} ms \
+                 ({:.1} ms per waiting row)",
+                pass_ms / SAMPLE as f64,
+            );
+            assert_eq!(waiting, SAMPLE, "each waited without spending an attempt");
         }
     }
 }

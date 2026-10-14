@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SERVICE_NAME = 'the-small-pos';
 const SUPPORTED_KEYRING_VERSION = '3.6.3';
@@ -168,6 +168,13 @@ function run() {
   fs.writeFileSync(helperPath, expectedHelper, 'utf8');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run only as this script. Bundled into a test (the parity runner bundles each test with its
+// imports), `import.meta.url` is the test file, which is also argv[1]: without the name check
+// every parity run regenerated the targets (and flipped their line endings on Windows).
+const invokedAsScript =
+  Boolean(process.argv[1]) &&
+  import.meta.url === pathToFileURL(process.argv[1]).href &&
+  /generate-managed-credential-targets\.m?js$/.test(fileURLToPath(import.meta.url));
+if (invokedAsScript) {
   run();
 }

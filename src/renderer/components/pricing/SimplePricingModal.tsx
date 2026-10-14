@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Save, ShoppingBag, Truck } from 'lucide-react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 
 interface PricingData {
   pickup_price: number;
@@ -75,13 +76,10 @@ const SimplePricingModal: React.FC<SimplePricingModalProps> = ({
                 <ShoppingBag className="h-4 w-4 text-yellow-400" aria-hidden="true" />
                 {t('modals.simplePricing.pickupPrice')} ({getStoreCurrency() ?? '—'})
               </label>
-              <input
-                type="number"
+              <CentsMoneyInput
                 id="pickup_price"
                 value={formData.pickup_price}
-                onChange={(e) => handleChange('pickup_price', parseFloat(e.target.value) || 0)}
-                step="0.01"
-                min="0"
+                onValueChange={(_, amount) => handleChange('pickup_price', amount)}
                 className="liquid-glass-modal-input w-full px-3 py-3 focus:ring-2 focus:ring-yellow-400/60"
                 placeholder={t('forms.placeholders.amount')}
               />
@@ -95,13 +93,10 @@ const SimplePricingModal: React.FC<SimplePricingModalProps> = ({
                 <Truck className="h-4 w-4 text-emerald-500 dark:text-emerald-300" aria-hidden="true" />
                 {t('modals.simplePricing.deliveryPrice')} ({getStoreCurrency() ?? '—'})
               </label>
-              <input
-                type="number"
+              <CentsMoneyInput
                 id="delivery_price"
                 value={formData.delivery_price}
-                onChange={(e) => handleChange('delivery_price', parseFloat(e.target.value) || 0)}
-                step="0.01"
-                min="0"
+                onValueChange={(_, amount) => handleChange('delivery_price', amount)}
                 className="liquid-glass-modal-input w-full px-3 py-3 focus:ring-2 focus:ring-yellow-400/60"
                 placeholder={t('forms.placeholders.amount')}
               />

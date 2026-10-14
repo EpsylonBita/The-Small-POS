@@ -430,6 +430,17 @@ fn is_caller_id_admin_route(path: &str) -> bool {
     route == "/api/pos/caller-id" || route.starts_with("/api/pos/caller-id/")
 }
 
+/// The customer directory, a customer search, one customer and its addresses:
+/// personal data a privacy erasure (tombstone) must reach. This cache is not
+/// tombstone-aware, so an erased customer stayed on the till inside every
+/// saved search answer, with no expiry, and was served offline (14/10/2026).
+/// They are never saved here; offline, the customer search reads
+/// `customer_cache_v1`, which tombstones clean.
+fn is_customer_admin_route(path: &str) -> bool {
+    let route = canonical_admin_route(path);
+    route == "/api/pos/customers" || route.starts_with("/api/pos/customers/")
+}
+
 fn decode_admin_route_once(route: &str) -> String {
     fn hex_value(byte: u8) -> Option<u8> {
         match byte {
@@ -561,6 +572,7 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         && route != "/api/pos/waiter-service-requests"
         && !route.starts_with("/api/pos/waiter-service-requests/")
         && !is_caller_id_admin_route(path)
+        && !is_customer_admin_route(path)
         && !is_repair_admin_route(path)
         && !is_delta_cursor_admin_get(path)
         // Version fences and their pages must represent current server state.
@@ -643,6 +655,55 @@ pub(crate) fn purge_caller_id_admin_cache(db: &db::DbState) -> Result<usize, Str
     .map_err(|e| format!("purge legacy Caller ID API cache: {e}"))
 }
 
+/// Removes every customer answer an earlier build saved in this cache (see
+/// [`is_customer_admin_route`]). Runs at startup, like the Caller ID purge.
+pub(crate) fn purge_customer_admin_cache(db: &db::DbState) -> Result<usize, String> {
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let transaction = conn
+        .transaction()
+        .map_err(|e| format!("begin saved customer API cache purge: {e}"))?;
+    let keys = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT setting_key
+                 FROM local_settings
+                 WHERE setting_category = 'local'
+                   AND setting_key LIKE ?1",
+            )
+            .map_err(|e| format!("scan saved customer API cache: {e}"))?;
+        let rows = statement
+            .query_map([format!("{ADMIN_API_CACHE_PREFIX}%")], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| format!("query saved customer API cache: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read saved customer API cache: {e}"))?;
+        rows
+    };
+    let mut removed = 0usize;
+    for key in keys {
+        let Some(path) = key.strip_prefix(ADMIN_API_CACHE_PREFIX) else {
+            continue;
+        };
+        if !is_customer_admin_route(path) {
+            continue;
+        }
+        removed = removed.saturating_add(
+            transaction
+                .execute(
+                    "DELETE FROM local_settings
+                     WHERE setting_category = 'local' AND setting_key = ?1",
+                    [&key],
+                )
+                .map_err(|e| format!("delete saved customer API cache: {e}"))?,
+        );
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("commit saved customer API cache purge: {e}"))?;
+    Ok(removed)
+}
+
 pub(crate) fn purge_repair_admin_cache(db: &db::DbState) -> Result<usize, String> {
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let transaction = conn
@@ -720,7 +781,7 @@ pub(crate) fn cache_admin_get_response(
     path: &str,
     response: &serde_json::Value,
 ) -> Result<(), String> {
-    if is_repair_admin_route(path) {
+    if is_repair_admin_route(path) || is_customer_admin_route(path) {
         return Ok(());
     }
     let envelope = serde_json::json!({
@@ -748,7 +809,9 @@ pub(crate) fn read_cached_admin_get_response(
     db: &db::DbState,
     path: &str,
 ) -> Option<(serde_json::Value, Option<String>)> {
-    if is_repair_admin_route(path) {
+    // A customer answer an earlier build saved is never served, even before
+    // the startup purge has run.
+    if is_repair_admin_route(path) || is_customer_admin_route(path) {
         return None;
     }
     let envelope = read_local_json(db, &admin_api_cache_key(path)).ok()?;
@@ -948,7 +1011,11 @@ pub async fn api_fetch_from_admin(
     };
 
     match admin_fetch_with_request_headers(&db, &final_path, &method, body, &opts).await {
-        Ok(v) => {
+        Ok(mut v) => {
+            // Staff PIN hashes (staff directory/schedule) never reach the
+            // renderer or the response cache; the native directory refresh
+            // keeps them in the OS credential store (staff_pin_vault.rs).
+            crate::staff_pin_vault::redact_pin_hashes(&mut v);
             if let Some(original) = &table_original {
                 let conn = db
                     .conn
@@ -989,9 +1056,10 @@ pub async fn api_fetch_from_admin(
                     .map_err(|error| format!("db lock: {error}"))?;
                 return table_mutation_failure_payload(&conn, original, &e);
             }
-            if let Some((cached_data, cached_at)) =
+            if let Some((mut cached_data, cached_at)) =
                 read_admin_get_fallback_after_error(&db, &final_path, cacheable_get, &e)
             {
+                crate::staff_pin_vault::redact_pin_hashes(&mut cached_data);
                 return Ok(serde_json::json!({
                     "success": true,
                     "data": cached_data,
@@ -2037,6 +2105,68 @@ mod dto_tests {
         ] {
             assert_eq!(validate_generic_admin_fetch("GET", allowed), Ok(()));
         }
+    }
+
+    /// Privacy erasure (14/10/2026): every customer search answer was saved
+    /// per query, with no expiry, and a tombstone only reached
+    /// `customer_cache_v1`, so an erased customer stayed on the till inside
+    /// them and was served offline.
+    #[test]
+    fn customer_answers_are_never_offline_cacheable() {
+        for path in [
+            "/api/pos/customers",
+            "/api/pos/customers/",
+            "/api/pos/customers?search=6948&phone=6948",
+            "/api/pos/customers?page=1&limit=500",
+            "/api/pos/customers#list",
+            "/api/pos/customers/cust-1",
+            "/api/pos/customers/cust-1/addresses",
+        ] {
+            assert!(!is_cacheable_admin_get("GET", path), "{path}");
+        }
+        assert!(is_cacheable_admin_get("GET", "/api/pos/suppliers"));
+    }
+
+    #[test]
+    fn saved_customer_answers_are_purged_and_never_served() {
+        let db = test_db_state();
+        let saved_search = "/api/pos/customers?search=maria&phone=maria";
+        let saved_addresses = "/api/pos/customers/cust-1/addresses";
+        let ordinary = "/api/pos/suppliers";
+        // Rows an earlier build saved.
+        for path in [saved_search, saved_addresses] {
+            write_local_json(
+                &db,
+                &admin_api_cache_key(path),
+                &serde_json::json!({
+                    "path": path,
+                    "cachedAt": "2026-10-01T10:00:00Z",
+                    "data": {
+                        "success": true,
+                        "customers": [{ "id": "cust-1", "name": "Μαρία", "phone": "6948128474" }]
+                    }
+                }),
+            )
+            .expect("seed a saved customer answer");
+        }
+        cache_admin_get_response(&db, ordinary, &serde_json::json!({ "items": [] }))
+            .expect("seed ordinary cache");
+
+        // Never served, not even before the startup purge.
+        assert!(read_cached_admin_get_response(&db, saved_search).is_none());
+        // A new answer is not saved.
+        cache_admin_get_response(
+            &db,
+            "/api/pos/customers?search=ada",
+            &serde_json::json!({ "success": true, "customers": [{ "id": "cust-2" }] }),
+        )
+        .expect("customer answer refused quietly");
+
+        assert_eq!(purge_customer_admin_cache(&db).expect("purge"), 2);
+        assert_eq!(
+            list_cached_admin_get_paths(&db, &[]).expect("list cache paths"),
+            vec![ordinary.to_string()]
+        );
     }
 
     #[test]

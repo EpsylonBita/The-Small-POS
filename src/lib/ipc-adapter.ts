@@ -107,6 +107,9 @@ import type {
   GiftFundingStatusRequest,
   GiftFundingStatusResponse,
   TerminalRuntimeConfig,
+  ZReportGetResponse,
+  ZReportListParams,
+  ZReportListResponse,
   ZReportSubmitResponse,
 } from "./ipc-contracts";
 
@@ -1978,7 +1981,11 @@ export interface PlatformBridge {
       options?: { cacheOnly?: boolean },
     ): Promise<Customer | null>;
     lookupById(customerId: string): Promise<Customer | null>;
-    search(query: string): Promise<Customer[]>;
+    /**
+     * `cacheOnly` searches this terminal's customer cache by name, email or
+     * phone without any network request (the search modal's offline answer).
+     */
+    search(query: string, options?: { cacheOnly?: boolean }): Promise<Customer[]>;
     create(data: Partial<Customer>): Promise<IpcResult<Customer>>;
     update(
       customerId: string,
@@ -2249,6 +2256,13 @@ export interface PlatformBridge {
       branchId: string;
       date?: string;
     }): Promise<ZReportSubmitResponse>;
+    /**
+     * The stored Zs of this till (`z_reports`), newest first: the last 30
+     * days (at most 50) or, with both dates, that business-date range.
+     */
+    listZReports(params?: ZReportListParams): Promise<ZReportListResponse>;
+    /** One stored Z by its `z_reports` id. */
+    getZReport(params: { zReportId: string }): Promise<ZReportGetResponse>;
   };
 
   // -- Menu ------------------------------------------------------------------
@@ -2994,6 +3008,10 @@ export const CHANNEL_MAP: Record<string, string> = {
   "report:print-z-report": "reports.printZReport",
   "report:submit-z-report": "reports.submitZReport",
   "report:resolve-payment-blocker": "reports.resolvePaymentBlocker",
+  // Stored Zs (`z_reports`): every Z export reads one of these, never the
+  // live preview (founder, 14/10/2026).
+  "zreport:list": "reports.listZReports",
+  "zreport:get": "reports.getZReport",
 
   // Product dashboard metrics
   // Direct-invoke channels (no bridge method). See comment above
@@ -3738,7 +3756,10 @@ export class TauriBridge implements PlatformBridge {
         ? this.inv("customer:lookup-by-phone", { phone, cacheOnly: true })
         : this.inv("customer:lookup-by-phone", phone),
     lookupById: (id: string) => this.inv("customer:lookup-by-id", id),
-    search: (q: string) => this.inv("customer:search", q),
+    search: (q: string, options?: { cacheOnly?: boolean }) =>
+      options?.cacheOnly
+        ? this.inv("customer:search", { query: q, cacheOnly: true })
+        : this.inv("customer:search", q),
     create: (d: Partial<Customer>) => this.inv("customer:create", d),
     update: (id: string, u: Partial<Customer>, v: number) =>
       this.inv("customer:update", id, u, v),
@@ -4045,6 +4066,8 @@ export class TauriBridge implements PlatformBridge {
       this.inv("report:resolve-payment-blocker", p),
     submitZReport: (p: { branchId: string; date?: string }) =>
       this.inv("report:submit-z-report", p),
+    listZReports: (p?: ZReportListParams) => this.inv("zreport:list", p),
+    getZReport: (p: { zReportId: string }) => this.inv("zreport:get", p),
   };
 
   menu = {

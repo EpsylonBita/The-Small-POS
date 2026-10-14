@@ -64,6 +64,7 @@ mod manual_order_cancellation;
 mod memory_trim;
 mod menu;
 mod money;
+mod offline_check_in;
 mod order_header_preflight;
 mod order_ownership;
 mod panic_hook;
@@ -89,6 +90,7 @@ mod scanner;
 mod serial;
 mod shifts;
 mod staff_cash_returns;
+mod staff_pin_vault;
 mod startup_recovery;
 mod storage;
 mod sync;
@@ -989,9 +991,23 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             if let Err(error) = commands::api_bridge::purge_repair_admin_cache(&db_state) {
                 warn!(error = %error, "Failed to purge legacy repair API cache");
             }
+            if let Err(error) = commands::api_bridge::purge_customer_admin_cache(&db_state) {
+                warn!(error = %error, "Failed to purge saved customer API answers");
+            }
             if let Err(error) = scrub_sensitive_local_settings_checked(&db_state) {
                 error!(error = %error, "Failed to scrub protected local settings");
                 repairs::latch_startup_maintenance_failure();
+            }
+            // Staff PIN hashes move from SQLite to the OS credential store; the
+            // SQLite copies are wiped (desktop offline check-in, 14/10/2026).
+            match auth::migrate_plaintext_staff_pin_hashes(&db_state) {
+                Ok(report) if report.changed() => {
+                    info!(?report, "Moved staff PIN hashes out of SQLite")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(error = %error, "Failed to move staff PIN hashes out of SQLite")
+                }
             }
             let caller_id_manager = Arc::new(callerid::CallerIdManager::new());
             app.manage(db_state);

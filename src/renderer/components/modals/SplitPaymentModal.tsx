@@ -1,7 +1,6 @@
 import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { roundMoney } from '@shared/utils/money';
-import { formatCurrencyInput, parseCurrencyDigits } from '@shared/utils/currencyInput';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Banknote, BadgePercent, Check, ChevronDown, CreditCard, Loader2, Plus, ShoppingCart, Split, Trash2, Users } from 'lucide-react';
@@ -10,6 +9,7 @@ import toast from 'react-hot-toast';
 import { getBridge } from '../../../lib';
 import type { PaymentSettlementSnapshot } from '../../../lib/ipc-adapter';
 import { usePaymentPrintPrompt } from '../../hooks/usePaymentPrintPrompt';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import { createInFlightGuard, settleDraftPortions, settleTerminalPortion, toTerminalCardPortion, type InFlightGuard, type SplitOrderFinancials, type TerminalSettlementResult } from '../../utils/splitPaymentSettlement';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import './split-payment-modal.css';
@@ -181,28 +181,15 @@ const extractOrderFinancialState = (order: any, fallbackTotal: number): OrderFin
 
 const SplitAmountInput: React.FC<{
   amount: number; label: string; disabled: boolean; onAmountChange: (amount: number) => void;
-}> = ({ amount, label, disabled, onAmountChange }) => {
-  const [text, setText] = useState(() => formatCurrencyInput(amount));
-  useEffect(() => setText(formatCurrencyInput(amount)), [amount]);
-  return (
-    <input
-      type="text"
-      inputMode="numeric"
-      aria-label={label}
-      className="split-payment-money-input w-full py-2 pl-12 pr-3 font-medium disabled:cursor-not-allowed disabled:opacity-70"
-      value={text}
-      disabled={disabled}
-      onFocus={(event) => event.currentTarget.select()}
-      onBlur={() => setText(formatCurrencyInput(amount))}
-      onChange={(event) => {
-        const next = parseCurrencyDigits(event.currentTarget.value);
-        if (next === null) return;
-        setText(event.currentTarget.value === '' ? '' : formatCurrencyInput(next));
-        onAmountChange(next);
-      }}
-    />
-  );
-};
+}> = ({ amount, label, disabled, onAmountChange }) => (
+  <CentsMoneyInput
+    aria-label={label}
+    className="split-payment-money-input w-full py-2 pl-12 pr-3 font-medium disabled:cursor-not-allowed disabled:opacity-70"
+    value={amount}
+    disabled={disabled}
+    onValueChange={(_, next) => onAmountChange(next)}
+  />
+);
 
 export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope }) => {
   const { t } = useTranslation();

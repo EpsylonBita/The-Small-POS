@@ -37,7 +37,12 @@ test('SyncStatusIndicator collapsed controls expose accessible labels with activ
   const block = collapsedRenderBlock();
 
   // Heart/status button: accessible name from getStatusText(); click-to-open preserved; active press.
-  assert.match(block, /aria-label=\{getStatusText\(\)\}/);
+  // Since 30/09/2026 the name also announces a print stall, which the heart now shows.
+  assert.match(block, /aria-label=\{heartLabel\}/);
+  assert.match(
+    source,
+    /const heartLabel = printingStallActive\s*\?\s*`\$\{getStatusText\(\)\} \| \$\{t\(healthImpactKey\('printingStopped'\)\)\}`\s*:\s*getStatusText\(\);/,
+  );
   assert.match(block, /onClick=\{\(\) => setShowDetailPanel\(!showDetailPanel\)\}/);
   assert.match(block, /active:bg-slate-100\/80 dark:active:bg-white\/10/);
 

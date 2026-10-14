@@ -5,7 +5,7 @@
  * language of the settings modal.
  */
 
-import React, { memo } from 'react'
+import React, { memo, useId } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   CreditCard,
@@ -140,6 +140,9 @@ export const TerminalCardCompact: React.FC<Props> = memo(
       'ecr.bluetoothUnavailable',
       'Bluetooth payment terminals are not available in this version. Use USB/Serial or Network (TCP).'
     )
+    // Touchscreen POS: the reason is the visible notice under the card, tied
+    // to the disabled Connect button for screen readers (no hover tooltip).
+    const bluetoothNoticeId = useId()
 
     return (
       <div className="rounded-2xl p-3 bg-white/5 dark:bg-gray-800/20 border liquid-glass-modal-border transition-all">
@@ -204,9 +207,9 @@ export const TerminalCardCompact: React.FC<Props> = memo(
               <button
                 onClick={onConnect}
                 disabled={isConnecting || bluetoothUnavailable}
-                title={bluetoothUnavailable ? bluetoothUnavailableMessage : undefined}
                 className="p-1.5 rounded-md text-green-400 active:bg-green-500/20 transition-colors disabled:opacity-50"
                 aria-label={t('ecr.actions.connect', 'Connect')}
+                aria-describedby={bluetoothUnavailable ? bluetoothNoticeId : undefined}
               >
                 {isConnecting ? (
                   <Loader2 size={14} className="animate-spin" />
@@ -247,7 +250,7 @@ export const TerminalCardCompact: React.FC<Props> = memo(
           </div>
         </div>
         {bluetoothUnavailable && (
-          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+          <p id={bluetoothNoticeId} className="mt-2 text-xs text-amber-700 dark:text-amber-300">
             {bluetoothUnavailableMessage}
           </p>
         )}

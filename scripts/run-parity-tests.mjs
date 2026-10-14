@@ -1,191 +1,71 @@
 #!/usr/bin/env node
+// Desktop parity suite: `npm test` / `npm run test:desktop-parity`, run by CI's
+// "POS Tauri contract and runtime checks". It bundles every
+// tests/**/*.test.{ts,tsx} file with esbuild and runs them in one `node --test`.
+//
+// Until 14/10/2026 this file kept a hand-written entry list, and a test missing
+// from it ran nowhere: recovery-panel-ui, integrations-page-ui and
+// capture-ui-i18n were each registered late for that reason, and 45 more files
+// turned up unregistered, 13 of them failing. The entry points are now
+// discovered (scripts/parity-test-files.mjs), so a new test runs without
+// registration. Only a file another script owns is excluded there, by name;
+// tests/scripts/test-runner-coverage.test.ts guards that split.
+//
+// Notes the old list carried (each test's own header has the detail):
+// - services/sync-recovery-issues: known recovery matchers reject unrelated or
+//   confusable failures and keep general warnings for incomplete queue reads.
+// - renderer/session-storage, renderer/login-migration: Wave 0 regression
+//   tests, written skipped and un-skipped as each Critical fix landed (see
+//   D:\The-Small-002\planning\claude\now-create-a-plan-vivid-sutton.md).
+// - renderer/order-vat-contract (07/10/2026): order VAT is native; screens show
+//   the printed VAT only.
+// - renderer/retail-checkout-money-contract (THE-324): the retail checkout
+//   money/order-item seam, a fee-exclusive total contract with OrderFlow and
+//   offer-reward lines mapped to real UUIDs.
+// - renderer/capture-ui-i18n (invoice scan capture, spec task 12.6): the
+//   capture UI speaks only `suppliers.capture.*`, hardcodes no user-facing
+//   string and answers every runtime-built variant in every locale.
+// - renderer/scanner-failure-detail (06/09/2026): BMP/TIFF transfers decode,
+//   the driver's detail reaches the settings screen, the eSCL entry lists first.
+// - renderer/featured-live-refresh: Featured follows the day's sales live, with
+//   a minutes-scale refresh throttle and a re-check whenever the order menu opens.
+// - renderer/recovery-panel-ui: Settings > Data > Local Recovery never renders
+//   raw snapshot/terminal/branch identifiers or filesystem paths to the cashier.
+// - renderer/recovery-center-panel-ui: the sync recovery assistant's summary
+//   cards show friendly names, never raw terminal/branch/organization UUIDs,
+//   while internal action-log IDs are preserved.
+// - renderer/release-notes-changelog: every shipped version carries the
+//   plain-language changelog section the update dialog shows the operator.
+// - renderer/payment-blocker-localization (17/09/2026): a Greek till read its
+//   blocker in English, because the settlement-shape sentences live in the Rust
+//   classifier and no locale carried their reason codes.
+// - renderer/z-report-fiscal-close-blocked (29/09/2026): the fiscal close-day
+//   refusal is typed and localized in every store language, and the Z modal
+//   holds the commit for queued receipts.
+// - renderer/secure-session-validation (Wave 8 H29): a corrupt keyring blob is
+//   rejected by validateSecureSessionUser and the keyring entry is cleared.
+// - renderer/integrations-page-ui (myDATA simple setup): the MyData modal
+//   signposts the Admin Dashboard (Plugins -> MyData) and keeps its toasts
+//   localized.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { build } from 'esbuild';
+import { listParityTestFiles } from './parity-test-files.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 const testsRoot = path.join(projectRoot, 'tests');
-const outDir = path.join(projectRoot, 'node_modules', '.cache', 'parity-tests');
+// Not under node_modules: `node --test` treats each argument as a glob and never matches a
+// path inside node_modules, so a relative node_modules path reports "Could not find".
+// `.cache/` is gitignored.
+const outDir = path.join(projectRoot, '.cache', 'parity-tests');
 
-const entryPoints = [
-  path.join(testsRoot, 'scripts', 'managed-credential-cleanup.test.ts'),
-  path.join(testsRoot, 'services', 'RealtimeManager.test.ts'),
-  path.join(testsRoot, 'services', 'SyncQueueBridge.test.ts'),
-  // Known recovery matchers must reject unrelated/confusable failures and
-  // retain general warnings for incomplete queue observations.
-  path.join(testsRoot, 'services', 'sync-recovery-issues.test.ts'),
-  path.join(testsRoot, 'services', 'ParitySyncCoordinator.test.ts'),
-  path.join(testsRoot, 'services', 'offline-page-capabilities.test.ts'),
-  path.join(testsRoot, 'services', 'VerticalOfflineFlows.test.ts'),
-  path.join(testsRoot, 'services', 'supplier-import-parser.test.ts'),
-  path.join(testsRoot, 'scripts', 'update-release-notes.test.ts'),
-  path.join(testsRoot, 'scripts', 'fake-capdriver.test.ts'),
-  path.join(testsRoot, 'renderer', 'cap-driver-settings-contract.test.ts'),
-  path.join(testsRoot, 'renderer', 'efood-partner-module.test.ts'),
-  path.join(testsRoot, 'pages', 'OrderDetailsModal.test.tsx'),
-  // Wave 0 regression tests — currently `test.skip`, un-skip as each
-  // Critical fix lands in its wave. See
-  // D:\The-Small-002\planning\claude\now-create-a-plan-vivid-sutton.md.
-  path.join(testsRoot, 'renderer', 'session-storage.test.ts'),
-  path.join(testsRoot, 'renderer', 'login-migration.test.ts'),
-  path.join(testsRoot, 'renderer', 'login-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'onboarding-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'kiosk-order-auto-print.test.ts'),
-  path.join(testsRoot, 'renderer', 'print-queue-panel-live-refresh.test.ts'),
-  path.join(testsRoot, 'renderer', 'edit-order-reprice.test.ts'),
-  path.join(testsRoot, 'renderer', 'after-edit-reprint.test.ts'),
-  path.join(testsRoot, 'renderer', 'orders-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'orders-dashboard-refresh-keeps-cart.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-category-tabs-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'order-taking-performance.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-modal-customer-popover.test.ts'),
-  path.join(testsRoot, 'renderer', 'modal-escape-native-menu-focus.test.ts'),
-  path.join(testsRoot, 'renderer', 'liquid-glass-modal-a11y.test.ts'),
-  path.join(testsRoot, 'renderer', 'modal-theme-consistency.test.ts'),
-  path.join(testsRoot, 'renderer', 'manual-address-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'order-modal-plural-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'order-edit-modals-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'order-modal-totals.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-cart-line-discounts.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-item-card-currency.test.ts'),
-  path.join(testsRoot, 'renderer', 'order-card-currency.test.ts'),
-  path.join(testsRoot, 'renderer', 'edit-settlement-financials.test.ts'),
-  path.join(testsRoot, 'renderer', 'edit-settlement-delta-modal.test.ts'),
-  path.join(testsRoot, 'renderer', 'edit-options-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'edit-customer-info-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'customer-search-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'expense-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-item-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'payment-method-cards-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'payment-print-prompt-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'payment-method-edit-guard.test.ts'),
-  path.join(testsRoot, 'renderer', 'payment-modal-terminal-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'pos-greek-flow-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'tables-cleaning-card-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'refund-void-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'reservation-form-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'reservations-view-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'reservation-timeline.test.ts'),
-  path.join(testsRoot, 'renderer', 'rooms-view-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'appointments-view-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'housekeeping-view-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'housekeeping-fallback.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-schedule-date-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-schedule-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-shift-duration.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-schedule-role-filter-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-shift-role-labels.test.ts'),
-  path.join(testsRoot, 'renderer', 'edit-settlement-flow.test.ts'),
-  path.join(testsRoot, 'renderer', 'split-payment-discount-persistence.test.ts'),
-  path.join(testsRoot, 'renderer', 'split-payment-terminal-card-integrity.test.ts'),
-  path.join(testsRoot, 'renderer', 'split-payment-currency.test.ts'),
-  path.join(testsRoot, 'renderer', 'checkout-failure-contract.test.ts'),
-  // 07/10/2026: order VAT is native; screens show the printed VAT only.
-  path.join(testsRoot, 'renderer', 'order-vat-contract.test.ts'),
-  path.join(testsRoot, 'renderer', 'split-checkout-dismissal.test.ts'),
-  // THE-324: retail checkout money/order-item seam — fee-exclusive total
-  // contract with OrderFlow and offer-reward lines mapped to real UUIDs.
-  path.join(testsRoot, 'renderer', 'retail-checkout-money-contract.test.ts'),
-  path.join(testsRoot, 'renderer', 'delivery-zones-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-schedule-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'module-context-sync.test.ts'),
-  path.join(testsRoot, 'renderer', 'suppliers-page-ui.test.ts'),
-  // Invoice scan capture (spec task 12.6): the capture UI must speak only
-  // `suppliers.capture.*`, hardcode no user-facing string, and answer every
-  // runtime-built status/reason/device/history/source variant in all five
-  // locales. Registered here so the guard runs with the rest of the suite.
-  path.join(testsRoot, 'renderer', 'capture-ui-i18n.test.ts'),
-  // 06/09/2026: BMP/TIFF transfers decode, the driver's detail reaches the
-  // settings screen, the eSCL entry lists first.
-  path.join(testsRoot, 'renderer', 'scanner-failure-detail.test.ts'),
-  path.join(testsRoot, 'renderer', 'inventory-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'coupon-loyalty-scan-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'loyalty-redemption-checkout.test.ts'),
-  path.join(testsRoot, 'renderer', 'users-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'user-directory-filters.test.ts'),
-  path.join(testsRoot, 'renderer', 'custom-titlebar-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'sync-status-health-modal-theme-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'automatic-update-check.test.ts'),
-  path.join(testsRoot, 'renderer', 'release-1-4-33-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'featured-weekly-ranking.test.ts'),
-  // Featured must follow the day's sales live: minutes-scale refresh throttle
-  // plus a re-check whenever the order menu opens.
-  path.join(testsRoot, 'renderer', 'featured-live-refresh.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-featured-offers.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-management-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'tip-and-floor-checkout.test.ts'),
-  path.join(testsRoot, 'renderer', 'navigation-sidebar-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'i18n-labels.test.ts'),
-  path.join(testsRoot, 'renderer', 'remaining-page-headers-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'payment-terminals-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'settings-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'printer-queue-wizard-i18n.test.ts'),
-  // Settings > Data > Local Recovery: guards that the selected recovery detail never renders raw snapshot/
-  // terminal/branch identifiers or filesystem paths (cashier-facing). Registered here so the guard actually
-  // runs in the parity suite -- it previously existed but was never executed by this runner.
-  path.join(testsRoot, 'renderer', 'recovery-panel-ui.test.ts'),
-  // Sync recovery assistant (RecoveryCenterPanel): guards that the visible summary cards render friendly
-  // names/labels only -- never the raw terminalId/branchId/organizationId UUIDs -- while internal action-log
-  // IDs are preserved.
-  path.join(testsRoot, 'renderer', 'recovery-center-panel-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'sync-recovery-modal-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'update-changelog-ui.test.ts'),
-  // Every shipped version must carry a plain-language changelog section —
-  // that section is what the update dialog shows the operator.
-  path.join(testsRoot, 'renderer', 'release-notes-changelog.test.ts'),
-  path.join(testsRoot, 'renderer', 'z-report-closeout-sync.test.ts'),
-  path.join(testsRoot, 'renderer', 'z-report-headline-total-revenue.test.ts'),
-  path.join(testsRoot, 'renderer', 'z-report-reconciliation-and-platforms.test.ts'),
-  path.join(testsRoot, 'renderer', 'platform-held-payment-notice.test.ts'),
-  // 17/09/2026: a Greek till read its blocker in English, because the
-  // settlement-shape sentences live in the Rust classifier and no locale
-  // carried their reason codes.
-  path.join(testsRoot, 'renderer', 'payment-blocker-localization.test.ts'),
-  path.join(testsRoot, 'renderer', 'z-report-day-orders-list.test.ts'),
-  path.join(testsRoot, 'renderer', 'z-report-action-rail-scroll.test.ts'),
-  // 29/09/2026: the fiscal close-day refusal is typed and localized in every
-  // store language, and the Z modal holds the commit for queued receipts.
-  path.join(testsRoot, 'renderer', 'z-report-fiscal-close-blocked.test.ts'),
-  path.join(testsRoot, 'renderer', 'display-pages-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'order-number-utils.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-order-flow.test.ts'),
-  path.join(testsRoot, 'renderer', 'orders-table-customer-display.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-check-manager-display.test.ts'),
-  path.join(testsRoot, 'renderer', 'menu-modal-coupon-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'connectivity-status-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-floor-plan.test.ts'),
-  path.join(testsRoot, 'renderer', 'tables-action-modal-portal.test.ts'),
-  path.join(testsRoot, 'renderer', 'vertical-modal-portals.test.ts'),
-  path.join(testsRoot, 'renderer', 'inline-overlay-portals.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-selector-i18n.test.ts'),
-  path.join(testsRoot, 'renderer', 'service-catalog-route.test.ts'),
-  path.join(testsRoot, 'renderer', 'service-catalog-stats.test.ts'),
-  path.join(testsRoot, 'renderer', 'service-catalog-management.test.ts'),
-  path.join(testsRoot, 'renderer', 'tables-page-status-modal-portal.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-grid-scroll-reset.test.ts'),
-  path.join(testsRoot, 'renderer', 'tables-page-new-order-terminal-gate.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-reservation-module-gate.test.ts'),
-  path.join(testsRoot, 'renderer', 'table-reservation-submit-shared.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-shift-checkout-print.test.ts'),
-  path.join(testsRoot, 'renderer', 'staff-shift-closeout-inline-forms.test.ts'),
-  path.join(testsRoot, 'renderer', 'kds-live-draft-sync.test.ts'),
-  // Wave 8 H29 regression: corrupt keyring blob must be rejected by
-  // validateSecureSessionUser AND the keyring entry must be cleared.
-  path.join(testsRoot, 'renderer', 'secure-session-validation.test.ts'),
-  path.join(testsRoot, 'renderer', 'privileged-actions.test.ts'),
-  path.join(testsRoot, 'renderer', 'reset-actions.test.ts'),
-  // myDATA simple setup: IntegrationsPage MyData modal must signpost the Admin
-  // Dashboard (Plugins -> MyData) and keep its toasts localized. Registered here so
-  // these guards actually run -- the files existed but were never executed by this
-  // runner (same gap recovery-panel-ui.test.ts had).
-  path.join(testsRoot, 'renderer', 'integrations-page-ui.test.ts'),
-  path.join(testsRoot, 'renderer', 'fiscal-integration-entitlement.test.ts'),
-  path.join(testsRoot, 'renderer', 'mydata-fiscal-device-contract.test.ts'),
-];
+const entryPoints = listParityTestFiles(testsRoot).map((file) =>
+  path.join(testsRoot, ...file.split('/')),
+);
 
 await fs.mkdir(outDir, { recursive: true });
 
@@ -205,10 +85,12 @@ await build({
   external: ['node:test', 'node:assert/strict'],
 });
 
+// Relative to the cwd below: every test is one argument of a single `node --test`, and with
+// absolute paths 185 files already took ~25K of Windows' 32,767-character command line.
 const outFiles = entryPoints.map((entryPoint) =>
-  path.join(
-    outDir,
-    path.relative(testsRoot, entryPoint).replace(/\.(ts|tsx)$/, '.js'),
+  path.relative(
+    projectRoot,
+    path.join(outDir, path.relative(testsRoot, entryPoint).replace(/\.(ts|tsx)$/, '.js')),
   ),
 );
 

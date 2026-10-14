@@ -2,6 +2,7 @@ import twintLogo from '../../../../../shared/payments/assets/twint-logo.png';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { translateRoleName } from '../../utils/role-labels';
+import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import { useShift } from '../../contexts/shift-context';
 import { useTheme } from '../../contexts/theme-context';
 import { useFeatures } from '../../hooks/useFeatures';
@@ -12,7 +13,7 @@ import type {
   ZReportGiftCloseBlocker,
 } from '../../types/reports';
 import { getSyncQueueBridge } from '../../services/SyncQueueBridge';
-import { exportZReportToCSV, exportDayOrdersToCSV } from '../../utils/reportExport';
+import ZReportExportDialog, { type ZReportExportKind } from './ZReportExportDialog';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { parseLocalDateString, toLocalDateString } from '../../utils/date';
 import { clearBusinessDayStorage } from '../../utils/session-utils';
@@ -248,6 +249,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const [twintReturnError, setTwintReturnError] = useState<string | null>(null);
   const [twintReturned, setTwintReturned] = useState<TwintReturnedReceipt[]>([]);
   const [retryingFiscalQueue, setRetryingFiscalQueue] = useState(false);
+  // The export picker (founder, 14/10/2026): every Z export reads a stored Z.
+  const [exportDialogIntent, setExportDialogIntent] = useState<ZReportExportKind | null>(null);
   const [reportReloadVersion, setReportReloadVersion] = useState(0);
   // The till's own connection (native health probe). Offline the day cannot
   // close, so the checklist must not read "No sync blocker detected" (offline
@@ -361,6 +364,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       setResolvingBlockerKey(null);
       setSetAsideConfirmation(null);
       setRetryingFiscalQueue(false);
+      setExportDialogIntent(null);
       setZReport(null);
       setLoading(true);
       setSelectedDate(nextDate);
@@ -1062,15 +1066,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     setReportReloadVersion((current) => current + 1);
   }, []);
 
+  // Both exports open the picker of stored Zs (founder, 14/10/2026: the Z export is based on
+  // the Z's real data). The open day's live preview is offered there only as a provisional file.
   const handleExportReport = useCallback(() => {
-    if (!zReport) return;
-    exportZReportToCSV(zReport, `z-report-${resolvedBusinessDate}`);
-  }, [resolvedBusinessDate, zReport]);
+    setExportDialogIntent('report');
+  }, []);
 
   const handleExportOrdersReport = useCallback(() => {
-    if (!dayOrderDetails.length) return;
-    exportDayOrdersToCSV(dayOrderDetails, `z-report-orders-${resolvedBusinessDate}`);
-  }, [dayOrderDetails, resolvedBusinessDate]);
+    setExportDialogIntent('orders');
+  }, []);
 
   const handlePrintReport = useCallback(async () => {
     // Final print only reprints the persisted z_reports row (native verifies it exists). There is no
@@ -1661,8 +1665,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     return <AlertTriangle className="h-4 w-4 text-amber-500" />;
   };
 
+  // Every dialog the Z window opens (the set-aside, unsaved and TWINT-return confirms, Record
+  // cash/card, the manager PIN, the export picker) renders beside it, outside its glass modal.
+  // The recovery context puts them on the Z window's layer: without it they sat at the default
+  // modal layer, under the Z window, wherever it is opened outside GlobalCashierGate.
   return (
-    <>
+    <CashierRecovery>
     <LiquidGlassModal
       recoveryAccess
       isOpen={isOpen}
@@ -1882,7 +1890,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 {[
                   { key: 'refresh', label: t('modals.zReport.refresh'), icon: RefreshCw, onClick: handleRefreshReport, disabled: loading },
                   { key: 'print', label: t('modals.zReport.print'), icon: Printer, onClick: handlePrintReport, disabled: printing || !canPrintFinalReport, hint: printUnavailableHint },
-                  { key: 'export', label: t('modals.zReport.exportCSV'), icon: UploadCloud, onClick: handleExportReport, disabled: !zReport },
+                  // Stored Zs export even while the live preview cannot load.
+                  { key: 'export', label: t('modals.zReport.exportCSV'), icon: UploadCloud, onClick: handleExportReport, disabled: false },
                 ].map((action) => {
                   const Icon = action.icon;
                   return (
@@ -2152,7 +2161,6 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           <button
                             type="button"
                             onClick={handleExportOrdersReport}
-                            disabled={!dayOrderDetails.length}
                             className="min-h-[36px] rounded-lg border border-slate-900/[0.12] px-3 text-xs font-black text-slate-700 transition active:bg-slate-900/[0.06] disabled:opacity-50 dark:border-white/[0.14] dark:text-white/80 dark:active:bg-white/[0.1]"
                           >
                             {t('modals.zReport.exportOrdersCSV')}
@@ -2625,9 +2633,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       cancelText={t('common.actions.cancel', { defaultValue: 'Cancel' })}
     />
     )}
+    {isOpen && exportDialogIntent && (
+    <ZReportExportDialog
+      isOpen
+      onClose={() => setExportDialogIntent(null)}
+      shownReport={zReport}
+      intent={exportDialogIntent}
+    />
+    )}
     {recordBlocker.confirmDialog}
     {confirmationModal}
-    </>
+    </CashierRecovery>
   );
 
 };

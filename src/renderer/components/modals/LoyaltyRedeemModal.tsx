@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { X, Gift, Award, Star, Minus, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 
 interface LoyaltyRedeemModalProps {
   isOpen: boolean;
@@ -258,11 +259,10 @@ export function LoyaltyRedeemModal({
           </label>
           <div className="liquid-glass-modal-input flex items-center px-3 py-2">
             <span className="mr-2 font-semibold opacity-70">{getStoreCurrency() ?? '—'}</span>
-            <input
-              type="text"
-              inputMode="decimal"
+            <CentsMoneyInput
+              aria-label={t('loyalty.amountToRedeem', 'Discount amount')}
               value={amountInput}
-              onChange={(e) => handleAmountChange(e.target.value)}
+              onValueChange={handleAmountChange}
               onBlur={normalizeAmountInput}
               className="w-full bg-transparent text-2xl font-bold outline-none liquid-glass-modal-text"
             />

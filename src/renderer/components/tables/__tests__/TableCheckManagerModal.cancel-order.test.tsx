@@ -212,10 +212,10 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
       onRefreshTables={vi.fn()} />);
     await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
     expect(screen.getAllByRole('dialog')).toContain(sheet);
-    expect(within(sheet).getAllByRole('textbox').map(field => (field as HTMLInputElement).value)).toEqual(['12.34', '1.50', '2']);
+    expect(within(sheet).getAllByRole('textbox').map(field => (field as HTMLInputElement).value)).toEqual(['12,34', '1,50', '2']);
     await act(async () => { finishRead({ success: true, data: { success: true, session: { ...canonical } } }); });
     expect(screen.getAllByRole('dialog')).toContain(sheet);
-    expect(within(sheet).getAllByRole('textbox').map(field => (field as HTMLInputElement).value)).toEqual(['12.34', '1.50', '2']);
+    expect(within(sheet).getAllByRole('textbox').map(field => (field as HTMLInputElement).value)).toEqual(['12,34', '1,50', '2']);
     expect(mocks.toastError).not.toHaveBeenCalled();
   });
 
@@ -311,7 +311,7 @@ describe('cancelling an owing order from its table check', { timeout: 20_000 }, 
     view.rerender(<TableCheckManagerModal {...base} localOrders={[{ ...order }] as any} />);
     await waitFor(() => expect(screen.getByText(/Saved check — amounts may be stale/)).toBeInTheDocument());
     expect(screen.getAllByRole('dialog')).toContain(sheet);
-    expect((within(sheet).getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('12.34');
+    expect((within(sheet).getAllByRole('textbox')[0] as HTMLInputElement).value).toBe('12,34');
     expect(within(sheet).getByRole('button', { name: 'Cash' })).toBeDisabled();
     expect(mocks.invoke.mock.calls.filter(([command]) => command === 'orders:apply-table-session-snapshot')).toHaveLength(1);
     expect(mocks.toastError).not.toHaveBeenCalled();

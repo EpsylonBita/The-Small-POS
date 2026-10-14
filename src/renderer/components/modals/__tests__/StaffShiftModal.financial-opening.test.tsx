@@ -171,7 +171,8 @@ describe('StaffShiftModal native financial opening', () => {
     unpublished();
   });
 
-  it.each(['', '12,', '-1250', '12abc', '100000000'])('refuses invalid displayed opening %j without ordinary fallback', async (input) => {
+  // Digit entry refuses '-1250' and '12abc' at the keyboard, so the field stays empty.
+  it.each(['', '-1250', '12abc', '1e3', '100000000'])('refuses invalid displayed opening %j without ordinary fallback', async (input) => {
     render(<StaffShiftModal {...props} />); await enterCash(); cash(input); submit();
     await screen.findByText('modals.staffShift.invalidOpeningCash'); expect(bridge.shiftFinancialOpening.begin).not.toHaveBeenCalled(); unpublished();
   });

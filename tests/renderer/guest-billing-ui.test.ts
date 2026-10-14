@@ -31,7 +31,12 @@ test('Round 394: GuestBillingView uses touch-first glass chrome without old blue
   assert.doesNotMatch(source, /rounded-lg/);
   assert.doesNotMatch(source, /(?:bg|text|border|ring|focus:ring)-blue-/);
   assert.doesNotMatch(source, /bg-gray-750/);
-  assert.doesNotMatch(source, /[Ââ·—]/);
+  // Mojibake: UTF-8 read as Latin-1/cp1252 (Â·, Ã©, â€”, ðŸ, Î/Ï for Greek) or a replacement
+  // character. A real "—" or "·" is typography, not mojibake: since 04/10/2026 the amount label
+  // shows the folio's recorded currency and "—" while none is recorded (never an assumed €).
+  assert.doesNotMatch(source, /[ÂÃâðÎÏ�]/, 'source must not contain mojibake');
+  assert.match(source, /\{t\('guestBilling\.fields\.amount', \{ defaultValue: 'Amount' \}\)\} \(\{folio\.currency \?\? '—'\}\)/);
+  assert.doesNotMatch(source, /€|&euro;/, 'no hard-coded euro sign');
 });
 
 test('Round 394: GuestBillingView scroll panes hide native scrollbars and icon buttons are labelled', () => {

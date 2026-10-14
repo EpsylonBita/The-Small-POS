@@ -18,6 +18,7 @@ import {
 } from './policy'
 import { canCreateSecureRepairId, createSecureRepairId } from './secure-id'
 import { normalizeUuid } from '../../utils/staffAttribution'
+import { CentsMoneyInput } from '../../components/ui/CentsMoneyInput'
 import type { RepairCatalogItem, RepairCatalogKind } from './RepairCatalogService'
 
 export type RepairWorkspaceActionTab =
@@ -414,6 +415,7 @@ export function RepairWorkspaceActions({
           <label className="text-sm font-semibold sm:col-span-2">{t('repairs.actions.lineName')}<input value={lineName} onChange={(event) => { clearCatalogSelection(); setLineName(event.target.value) }} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.actions.sku')}<input value={lineSku} onChange={(event) => { clearCatalogSelection(); setLineSku(event.target.value) }} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 ring-blue-500 focus:ring-2 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.actions.quantity')}<input type="number" min="0.001" step="0.001" value={lineQuantity} onChange={(event) => setLineQuantity(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
+          {/* Catalogue unit prices can carry sub-cent precision (12.3456): like unit costs they stay on decimal entry, so the snapshot is neither rounded on screen nor truncated by an edit. */}
           <label className="text-sm font-semibold">{t('repairs.actions.unitPrice')}<input type="number" min="0" step="0.01" value={linePrice} onChange={(event) => { clearCatalogSelection(); setLinePrice(event.target.value) }} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.actions.vatRate')}<input type="number" min="0" step="0.01" value={lineVat} onChange={(event) => { clearCatalogSelection(); setLineVat(event.target.value) }} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
         </div>
@@ -465,7 +467,7 @@ export function RepairWorkspaceActions({
     return (
       <section className="space-y-3 border-t border-slate-200 pt-4 dark:border-white/10">
         <div className="grid gap-3 sm:grid-cols-3">
-          <label className="text-sm font-semibold">{t('repairs.actions.discount')}<input type="number" min="0" step="0.01" value={estimateDiscount} onChange={(event) => setEstimateDiscount(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
+          <label className="text-sm font-semibold">{t('repairs.actions.discount')}<CentsMoneyInput aria-label={t('repairs.actions.discount')} value={estimateDiscount} onValueChange={setEstimateDiscount} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.actions.validUntil')}<input type="datetime-local" value={estimateValidUntil} onChange={(event) => setEstimateValidUntil(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.actions.estimateNote')}<input value={estimateNote} onChange={(event) => setEstimateNote(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
         </div>

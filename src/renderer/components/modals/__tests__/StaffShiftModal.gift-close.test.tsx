@@ -393,6 +393,23 @@ describe('StaffShiftModal gift-bound close', () => {
     expect(screen.queryByTestId('gift-close-pending-open')).toBeNull();
   });
 
+  it('takes the ordinary End Shift closing cash as digit entry in cents and closes with the numeric amount', async () => {
+    bridge.shiftFinancialOpening.status.mockResolvedValue({ success: true, openings: [] });
+    bridge.shifts.close.mockResolvedValue({ success: true, variance: 0 });
+    render(<StaffShiftModal {...props} />);
+    const field = await screen.findByRole('textbox', { name: 'modals.staffShift.closingCashLabel' });
+    expect(field).toHaveAttribute('type', 'text');
+    expect(field).toHaveAttribute('inputmode', 'numeric');
+    fireEvent.change(field, { target: { value: '100000' } });
+    expect(field).toHaveValue('1.000,00');
+    // A letter is refused at the keyboard; the counted amount stays.
+    fireEvent.change(field, { target: { value: '1.000,00x' } });
+    expect(field).toHaveValue('1.000,00');
+    fireEvent.click(screen.getByTestId('staff-checkout-confirm-button'));
+    await waitFor(() => expect(bridge.shifts.close).toHaveBeenCalledTimes(1));
+    expect(bridge.shifts.close.mock.calls[0][0]).toMatchObject({ shiftId: SHIFT_ID, closingCash: 1000 });
+  });
+
   it('keeps ordinary cashier and driver checkout free of the gift close', async () => {
     bridge.shiftFinancialOpening.status.mockResolvedValue({ success: true, openings: [] });
     bridge.shifts.close.mockResolvedValue({ success: true, variance: 0 });

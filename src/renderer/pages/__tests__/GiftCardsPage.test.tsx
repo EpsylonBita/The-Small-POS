@@ -348,7 +348,8 @@ async function renderReady(button: string) {
   return { view, button: await enabledButton(button) };
 }
 
-function fillIntent(amount = '25', reason = 'Birthday') {
+// The funding amount is a digit-entry money field: '2500' shows 25,00.
+function fillIntent(amount = '2500', reason = 'Birthday') {
   fireEvent.change(screen.getByLabelText('Amount'), { target: { value: amount } });
   fireEvent.change(screen.getByLabelText('Reason'), { target: { value: reason } });
 }
@@ -456,7 +457,7 @@ describe('GiftCardsPage', () => {
 
   it('completes a one-person manager grant only after separate authorization and explicit confirmation', async () => {
     await renderReady('Prepare funding');
-    fillIntent('25', 'Loyalty');
+    fillIntent('2500', 'Loyalty');
     fireEvent.click(screen.getByRole('radio', { name: 'Manager grant' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Manager authorization' });
@@ -565,7 +566,7 @@ describe('GiftCardsPage', () => {
 
   it('issues a card through prepare, a direct begin acknowledgement and recorded external-card evidence', async () => {
     const { button: prepare } = await renderReady('Prepare funding');
-    fillIntent('25', 'Birthday');
+    fillIntent('2500', 'Birthday');
     mocks.funding.prepare.mockResolvedValueOnce(ok.attempt(attemptOf()));
     fireEvent.click(prepare);
 
@@ -606,7 +607,7 @@ describe('GiftCardsPage', () => {
     await enabledButton('Prepare funding');
 
     fireEvent.click(screen.getByRole('radio', { name: 'Reload the selected card' }));
-    fillIntent('10', 'Top up');
+    fillIntent('1000', 'Top up');
     const prepared = attemptOf({ operation: 'reload', cardId: 'card-1', amountCents: 1000, reason: 'Top up' });
     mocks.funding.prepare.mockResolvedValueOnce(ok.attempt(prepared));
     fireEvent.click(screen.getByRole('button', { name: 'Prepare funding' }));

@@ -422,8 +422,11 @@ describe('OrderDetailsModal with RefundVoidModal: original-card gift returns', (
     await openGiftPanel();
     await authorize();
 
-    // Sub-cent input never reaches native.
+    // Digit entry in cents: a sub-cent amount cannot be typed (4.005 reads as
+    // 40,05) and an empty amount never reaches native.
     fireEvent.change(await screen.findByTestId('gift-return-amount'), { target: { value: '4.005' } });
+    expect(screen.getByTestId('gift-return-amount')).toHaveValue('40,05');
+    fireEvent.change(screen.getByTestId('gift-return-amount'), { target: { value: '' } });
     fireEvent.change(screen.getByTestId('gift-return-reason'), { target: { value: 'Damaged' } });
     fireEvent.click(screen.getByTestId('gift-return-review'));
     expect(screen.getByTestId('gift-return-notice')).toHaveTextContent(
@@ -668,7 +671,7 @@ describe('OrderDetailsModal with RefundVoidModal: original-card gift returns', (
     fireEvent.click(await screen.findByTestId('order-details-void-refund'));
     const cashRow = await screen.findByTestId('refund-payment-pay-cash');
     fireEvent.click(within(cashRow).getByRole('button', { name: tr('modals.refund.refundButton') }));
-    fireEvent.change(await screen.findByRole('spinbutton'), { target: { value: '5' } });
+    fireEvent.change(await screen.findByRole('textbox', { name: tr('modals.refund.refundAmount') }), { target: { value: '500' } });
     const reasons = document.querySelectorAll('textarea');
     fireEvent.change(reasons[reasons.length - 1], { target: { value: 'Cold food' } });
     fireEvent.click(screen.getByRole('button', { name: tr('modals.refund.confirmRefund') }));
@@ -700,7 +703,7 @@ describe('OrderDetailsModal with RefundVoidModal: original-card gift returns', (
     fireEvent.click(await screen.findByTestId('order-details-void-refund'));
     const cashRow = await screen.findByTestId('refund-payment-pay-cash');
     fireEvent.click(within(cashRow).getByRole('button', { name: tr('modals.refund.refundButton') }));
-    fireEvent.change(await screen.findByRole('spinbutton'), { target: { value: '5' } });
+    fireEvent.change(await screen.findByRole('textbox', { name: tr('modals.refund.refundAmount') }), { target: { value: '500' } });
     const reasons = document.querySelectorAll('textarea');
     fireEvent.change(reasons[reasons.length - 1], { target: { value: 'Cold food' } });
     fireEvent.click(screen.getByRole('button', { name: tr('modals.refund.confirmRefund') }));

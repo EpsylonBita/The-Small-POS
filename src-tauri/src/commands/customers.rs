@@ -30,6 +30,11 @@ struct CustomerPhonePayload {
 struct CustomerSearchPayload {
     #[serde(alias = "q", alias = "term", alias = "search")]
     query: String,
+    /// Search this terminal's customer cache only, without any request: the
+    /// search modal's answer when the server cannot be asked (offline
+    /// customer search, 13/10/2026).
+    #[serde(default, alias = "cacheOnly")]
+    cache_only: bool,
 }
 
 #[derive(Debug)]
@@ -130,6 +135,7 @@ fn parse_search_payload(arg0: Option<serde_json::Value>) -> CustomerSearchPayloa
     let mut parsed: CustomerSearchPayload =
         serde_json::from_value(payload).unwrap_or_else(|_| CustomerSearchPayload {
             query: String::new(),
+            cache_only: false,
         });
     parsed.query = parsed.query.trim().to_string();
     parsed
@@ -1263,6 +1269,20 @@ fn scrub_order_customer_snapshot(
     Ok(())
 }
 
+/// An erased customer's loyalty copy (name, email, phone, points) leaves this
+/// terminal with the customer: the loyalty snapshot is replaced only on its
+/// next full sync, and a tombstone used to reach `customer_cache_v1` alone
+/// (14/10/2026).
+fn remove_loyalty_customer_copy(db: &db::DbState, customer_id: &str) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM loyalty_customers WHERE customer_id = ?1 OR user_profile_id = ?1",
+        rusqlite::params![customer_id],
+    )
+    .map_err(|e| format!("remove erased customer's loyalty copy: {e}"))?;
+    Ok(())
+}
+
 fn apply_privacy_tombstones_to_cache(
     db: &db::DbState,
     tombstones: &[serde_json::Value],
@@ -1291,6 +1311,7 @@ fn apply_privacy_tombstones_to_cache(
                         .unwrap_or(true)
                 });
                 scrub_order_customer_snapshot(db, &target_id, &action)?;
+                remove_loyalty_customer_copy(db, &target_id)?;
             }
             "customer_address" | "customer_addresses" | "address" => {
                 for entry in &mut cache {
@@ -1754,6 +1775,40 @@ fn caller_id_phone_key(value: &str) -> String {
     }
 }
 
+/// Cached customers a search finds: a name or email containing the query in
+/// any case, or a phone containing it. A query that is mostly digits is also
+/// compared as a Caller ID number, so "0694 812" finds "+30 694 812 8474"
+/// (the raw text never matched a phone stored with spaces or a country code).
+fn cached_customer_matches(cache: Vec<serde_json::Value>, query: &str) -> Vec<serde_json::Value> {
+    let lowered = query.trim().to_lowercase();
+    if lowered.is_empty() {
+        return Vec::new();
+    }
+    let digits = lowered.chars().filter(char::is_ascii_digit).count();
+    let visible = lowered.chars().filter(|c| !c.is_whitespace()).count();
+    let phone_key = (digits >= 3 && digits * 2 >= visible)
+        .then(|| caller_id_phone_key(&lowered))
+        .filter(|key| key.len() >= 3);
+    cache
+        .into_iter()
+        .filter(|entry| {
+            let name = value_str(entry, &["name", "fullName"])
+                .unwrap_or_default()
+                .to_lowercase();
+            let phone = value_str(entry, &["phone", "customerPhone"]).unwrap_or_default();
+            let email = value_str(entry, &["email"])
+                .unwrap_or_default()
+                .to_lowercase();
+            name.contains(&lowered)
+                || email.contains(&lowered)
+                || phone.to_lowercase().contains(&lowered)
+                || phone_key
+                    .as_deref()
+                    .is_some_and(|key| caller_id_phone_key(&phone).contains(key))
+        })
+        .collect()
+}
+
 /// First cached customer whose phone matches `phone` as a Caller ID number.
 fn find_cached_customer_for_caller_id(
     cache: Vec<serde_json::Value>,
@@ -1859,7 +1914,17 @@ pub async fn customer_search(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
-    let query = parse_search_payload(arg0).query.to_lowercase();
+    let payload = parse_search_payload(arg0);
+    let query = payload.query.to_lowercase();
+    if payload.cache_only {
+        // Offline: only the customers this terminal already holds, never the
+        // network (and never a whole directory without a query).
+        if query.is_empty() {
+            return Ok(serde_json::json!([]));
+        }
+        let cache = read_local_json_array(&db, "customer_cache_v1")?;
+        return Ok(serde_json::json!(cached_customer_matches(cache, &query)));
+    }
     if query.is_empty() {
         // Fetch all customers through the fastest configured sync path and
         // refresh local cache. Do not call the admin privacy-tombstone endpoint
@@ -1877,21 +1942,7 @@ pub async fn customer_search(
 
     let _ = sync_customer_privacy_tombstones(&db).await;
     let cache = read_local_json_array(&db, "customer_cache_v1")?;
-    let matches: Vec<serde_json::Value> = cache
-        .into_iter()
-        .filter(|entry| {
-            let name = value_str(entry, &["name", "fullName"])
-                .unwrap_or_default()
-                .to_lowercase();
-            let phone = value_str(entry, &["phone", "customerPhone"])
-                .unwrap_or_default()
-                .to_lowercase();
-            let email = value_str(entry, &["email"])
-                .unwrap_or_default()
-                .to_lowercase();
-            name.contains(&query) || phone.contains(&query) || email.contains(&query)
-        })
-        .collect();
+    let matches = cached_customer_matches(cache, &query);
     if matches.is_empty() {
         let path = format!(
             "/api/pos/customers?search={}",
@@ -3583,6 +3634,48 @@ mod dto_tests {
     }
 
     #[test]
+    fn parse_search_payload_accepts_the_cache_only_flag() {
+        let cache_only = parse_search_payload(Some(serde_json::json!({
+            "query": "Παπα",
+            "cacheOnly": true
+        })));
+        assert!(cache_only.cache_only);
+        assert_eq!(cache_only.query, "Παπα");
+        assert!(!parse_search_payload(Some(serde_json::json!("Παπα"))).cache_only);
+    }
+
+    #[test]
+    fn cached_customer_search_finds_names_emails_and_phones_in_any_format() {
+        let cache = vec![
+            serde_json::json!({ "id": "c1", "name": "Μαρία Παπαδοπούλου", "phone": "+30 694 812 8474" }),
+            serde_json::json!({ "id": "c2", "name": "Ada Lovelace", "phone": "2101234567", "email": "ada@example.test" }),
+            serde_json::json!({ "id": "c3", "name": "Nikos", "phone": "0041 79 123 45 67" }),
+        ];
+        let ids = |query: &str| -> Vec<String> {
+            cached_customer_matches(cache.clone(), query)
+                .into_iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        };
+        // A phone stored with spaces and a country code, typed as dialled.
+        assert_eq!(ids("6948128474"), vec!["c1"]);
+        assert_eq!(ids("0694 812"), vec!["c1"]);
+        assert_eq!(ids("+306948128474"), vec!["c1"]);
+        assert_eq!(ids("791234567"), vec!["c3"]);
+        // A name in any case, Greek included, and an email.
+        assert_eq!(ids("παπαδοπ"), vec!["c1"]);
+        assert_eq!(ids("LOVELACE"), vec!["c2"]);
+        assert_eq!(ids("ada@example"), vec!["c2"]);
+        assert!(ids("Unknown person").is_empty());
+        assert!(ids("   ").is_empty());
+    }
+
+    #[test]
     fn parse_phone_payload_accepts_the_cache_only_flag() {
         let cache_only = parse_phone_payload(Some(serde_json::json!({
             "phone": "2101234567",
@@ -4196,6 +4289,51 @@ mod dto_tests {
             "phone": "6948128474"
         }));
         assert_eq!(customer_create_precondition_failure(&body), None);
+    }
+
+    #[test]
+    fn a_customer_erasure_also_removes_the_customer_s_loyalty_copy() {
+        let db = customer_test_db();
+        let erased = "4f0c8d9e-2f7a-4d0b-9a55-0e7f2b3c1a10";
+        let kept = "5a1d9e0f-3a8b-4e1c-8b66-1f8a3c4d2b21";
+        seed_customer_cache(&db);
+        {
+            let conn = db.conn.lock().expect("lock db");
+            for (row, customer) in [("loyalty-1", erased), ("loyalty-2", kept)] {
+                conn.execute(
+                    "INSERT INTO loyalty_customers (id, user_profile_id, customer_id, organization_id,
+                        customer_name, customer_phone)
+                     VALUES (?1, ?2, ?2, 'org-1', 'Synthetic', '6948128474')",
+                    rusqlite::params![row, customer],
+                )
+                .expect("seed loyalty copy");
+            }
+        }
+
+        let applied = apply_privacy_tombstones_to_cache(
+            &db,
+            &[serde_json::json!({
+                "id": "tombstone-1",
+                "target_type": "customer",
+                "target_id": erased,
+                "action": "erase"
+            })],
+        )
+        .expect("apply tombstone");
+
+        assert_eq!(applied, vec!["tombstone-1".to_string()]);
+        assert!(read_local_json_array(&db, "customer_cache_v1")
+            .expect("read cache")
+            .is_empty());
+        let conn = db.conn.lock().expect("lock db");
+        let remaining: Vec<String> = conn
+            .prepare("SELECT customer_id FROM loyalty_customers ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("read");
+        assert_eq!(remaining, vec![kept.to_string()]);
     }
 
     fn customer_test_db() -> db::DbState {

@@ -3,12 +3,9 @@ import { Banknote, Bike, HandCoins, UserRound, WalletCards } from 'lucide-react'
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
 import { roundMoney } from '@shared/utils/money';
-import {
-  formatMoneyInputFromNumber,
-  formatMoneyInputWithCents,
-  parseMoneyInputValue,
-} from '../../utils/moneyInput';
+import { parseMoneyInputValue } from '../../utils/moneyInput';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 
 export type TipRecipientRole = 'waiter' | 'cashier' | 'driver';
 
@@ -61,7 +58,7 @@ export const TipModal: React.FC<TipModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    setManualAmount(selection?.amount ? formatMoneyInputFromNumber(selection.amount) : '');
+    setManualAmount(selection?.amount ? selection.amount.toFixed(2) : '');
     setSelectedPercentage(null);
     setRecipientRole(selection?.recipientRole || defaultRecipientForOrder(orderType));
   }, [isOpen, orderType, selection]);
@@ -77,7 +74,7 @@ export const TipModal: React.FC<TipModalProps> = ({
 
   const choosePercentage = (percentage: number) => {
     setSelectedPercentage(percentage);
-    setManualAmount(formatMoneyInputFromNumber(roundMoney(baseAmount * percentage / 100)));
+    setManualAmount(roundMoney(baseAmount * percentage / 100).toFixed(2));
   };
 
   const handleApply = () => {
@@ -153,13 +150,12 @@ export const TipModal: React.FC<TipModalProps> = ({
           </label>
           <div className="relative">
             <Banknote className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-emerald-400" />
-            <input
-              type="text"
-              inputMode="decimal"
+            <CentsMoneyInput
+              aria-label={t('modals.tip.manualLabel', 'Or enter an amount')}
               value={manualAmount}
-              onChange={event => {
+              onValueChange={value => {
                 setSelectedPercentage(null);
-                setManualAmount(formatMoneyInputWithCents(event.target.value));
+                setManualAmount(value);
               }}
               placeholder="0,00"
               className="w-full rounded-xl border-2 border-slate-200/90 bg-white/90 py-2.5 pl-10 pr-4 text-lg font-bold liquid-glass-modal-text shadow-inner outline-none transition-colors focus:border-emerald-400/60 dark:border-white/15 dark:bg-white/10"

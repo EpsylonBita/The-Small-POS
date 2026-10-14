@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 97;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 98;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -739,6 +739,9 @@ where
                 .map_err(|error| error.to_string())
         })?;
     }
+    if current < 98 {
+        run_migration_tx(conn, 98, migrate_v98)?;
+    }
 
     Ok(())
 }
@@ -1320,6 +1323,25 @@ fn migrate_v96(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|error| format!("v96 schema version: {error}"))?;
+    Ok(())
+}
+
+/// Migration v98: the parity queue indexed by table and record
+/// (`sync_queue::PARITY_QUEUE_TABLE_RECORD_INDEX_SQL`). Offline-week audit,
+/// 13/10/2026: every lookup of a record's own queued rows (a payment's latest
+/// row for its mirror, an order's queued create or updates) scanned the whole
+/// queue. `reconcile_payment_queue_mirrors` does that once per local payment
+/// on every queue pass and after every row a pass marks, so at 20,000 queued
+/// rows and 4,000 local payments one call took about 200 s while holding the
+/// database. Purely additive: it reads no repair state and rewrites nothing.
+fn migrate_v98(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(crate::sync_queue::PARITY_QUEUE_TABLE_RECORD_INDEX_SQL)
+        .map_err(|e| format!("v98 parity queue table/record index: {e}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (98)",
+        [],
+    )
+    .map_err(|e| format!("v98 schema version: {e}"))?;
     Ok(())
 }
 
@@ -2013,6 +2035,7 @@ enum PreMigrationRecoveryMode {
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
+    98,
 ];
 
 fn computed_pending_migrations(
@@ -9440,6 +9463,34 @@ mod tests {
         );
     }
 
+    /// v98 (13/10/2026): a register migrated before the index existed gets
+    /// it, and a fresh one has it from the newest queue schema.
+    #[test]
+    fn migration_v98_indexes_the_parity_queue_by_table_and_record() {
+        let (_tmp, conn) = current_file_fixture();
+        let has_index = |conn: &Connection| -> bool {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                  WHERE type = 'index' AND name = 'idx_parity_sq_table_record')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read index")
+        };
+        assert!(has_index(&conn), "a fresh register has the index");
+
+        // A register at v97: no index, no v98 row.
+        conn.execute_batch(
+            "DROP INDEX idx_parity_sq_table_record;
+             DELETE FROM schema_version WHERE version >= 98;",
+        )
+        .expect("rewind to v97");
+        assert!(!has_index(&conn));
+        run_migrations(&conn).expect("migrate v97 -> v98");
+        assert!(has_index(&conn), "v98 adds the index");
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
     #[test]
     fn test_migrations_are_idempotent() {
         let conn = test_db();
@@ -9518,16 +9569,16 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97
+                96, 97, 98
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
+            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
         // the newest version and MAX(schema_version) says the database is current.
@@ -9554,7 +9605,10 @@ mod tests {
         // v97 only creates the staff cash-return journal and its indexes in
         // run_migration_tx; it neither reads nor rewrites native repair data.
         assert!(native_repair_atomic_only_allowed(96, &[97]));
-        assert!(!native_repair_atomic_only_allowed(97, &[98]));
+        // v98 only adds an index on the parity queue (table, record); like
+        // v95's index it neither reads nor rewrites native repair data.
+        assert!(native_repair_atomic_only_allowed(97, &[98]));
+        assert!(!native_repair_atomic_only_allowed(98, &[99]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -9837,7 +9891,7 @@ mod tests {
         // guard trigger; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(85, false, false, false, false),
-            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
+            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
     }
@@ -9848,7 +9902,7 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
+            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -9954,7 +10008,7 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
+            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -9994,7 +10048,7 @@ mod tests {
         gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
         assert_eq!(
             computed_pending_migrations(83, false, false, false, true),
-            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97]
+            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
         );
         let error = run_migrations_with_preflight(
             &conn,

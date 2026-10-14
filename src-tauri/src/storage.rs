@@ -60,6 +60,47 @@ pub const CALLERID_ACTIVATION_CACHE_BANK_B_KEYS: [&str; 8] = [
     "callerid_activation_cache_b6_v1",
     "callerid_activation_cache_b7_v1",
 ];
+/// The staff PIN hashes a main till checks an offline check-in against
+/// (`staff_pin_vault.rs`): a manifest naming the live bank, and two banks of
+/// chunks so a rewrite never corrupts the last good copy. Native only: the
+/// renderer can neither read nor write them.
+pub const KEY_STAFF_PIN_VAULT_MANIFEST: &str = "staff_pin_vault_manifest_v1";
+pub const STAFF_PIN_VAULT_BANK_A_KEYS: [&str; 16] = [
+    "staff_pin_vault_a0_v1",
+    "staff_pin_vault_a1_v1",
+    "staff_pin_vault_a2_v1",
+    "staff_pin_vault_a3_v1",
+    "staff_pin_vault_a4_v1",
+    "staff_pin_vault_a5_v1",
+    "staff_pin_vault_a6_v1",
+    "staff_pin_vault_a7_v1",
+    "staff_pin_vault_a8_v1",
+    "staff_pin_vault_a9_v1",
+    "staff_pin_vault_a10_v1",
+    "staff_pin_vault_a11_v1",
+    "staff_pin_vault_a12_v1",
+    "staff_pin_vault_a13_v1",
+    "staff_pin_vault_a14_v1",
+    "staff_pin_vault_a15_v1",
+];
+pub const STAFF_PIN_VAULT_BANK_B_KEYS: [&str; 16] = [
+    "staff_pin_vault_b0_v1",
+    "staff_pin_vault_b1_v1",
+    "staff_pin_vault_b2_v1",
+    "staff_pin_vault_b3_v1",
+    "staff_pin_vault_b4_v1",
+    "staff_pin_vault_b5_v1",
+    "staff_pin_vault_b6_v1",
+    "staff_pin_vault_b7_v1",
+    "staff_pin_vault_b8_v1",
+    "staff_pin_vault_b9_v1",
+    "staff_pin_vault_b10_v1",
+    "staff_pin_vault_b11_v1",
+    "staff_pin_vault_b12_v1",
+    "staff_pin_vault_b13_v1",
+    "staff_pin_vault_b14_v1",
+    "staff_pin_vault_b15_v1",
+];
 /// Renderer-side authenticated session blob. Wave 1 C6 moved this out of
 /// renderer-accessible `localStorage` because the stored object includes
 /// `sessionId`, `staffId`, `branchId`, and `organizationId` — all of which
@@ -107,6 +148,39 @@ const ALL_KEYS: &[&str] = &[
     CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[6],
     CALLERID_ACTIVATION_CACHE_BANK_B_KEYS[7],
     KEY_POS_SESSION,
+    KEY_STAFF_PIN_VAULT_MANIFEST,
+    STAFF_PIN_VAULT_BANK_A_KEYS[0],
+    STAFF_PIN_VAULT_BANK_A_KEYS[1],
+    STAFF_PIN_VAULT_BANK_A_KEYS[2],
+    STAFF_PIN_VAULT_BANK_A_KEYS[3],
+    STAFF_PIN_VAULT_BANK_A_KEYS[4],
+    STAFF_PIN_VAULT_BANK_A_KEYS[5],
+    STAFF_PIN_VAULT_BANK_A_KEYS[6],
+    STAFF_PIN_VAULT_BANK_A_KEYS[7],
+    STAFF_PIN_VAULT_BANK_A_KEYS[8],
+    STAFF_PIN_VAULT_BANK_A_KEYS[9],
+    STAFF_PIN_VAULT_BANK_A_KEYS[10],
+    STAFF_PIN_VAULT_BANK_A_KEYS[11],
+    STAFF_PIN_VAULT_BANK_A_KEYS[12],
+    STAFF_PIN_VAULT_BANK_A_KEYS[13],
+    STAFF_PIN_VAULT_BANK_A_KEYS[14],
+    STAFF_PIN_VAULT_BANK_A_KEYS[15],
+    STAFF_PIN_VAULT_BANK_B_KEYS[0],
+    STAFF_PIN_VAULT_BANK_B_KEYS[1],
+    STAFF_PIN_VAULT_BANK_B_KEYS[2],
+    STAFF_PIN_VAULT_BANK_B_KEYS[3],
+    STAFF_PIN_VAULT_BANK_B_KEYS[4],
+    STAFF_PIN_VAULT_BANK_B_KEYS[5],
+    STAFF_PIN_VAULT_BANK_B_KEYS[6],
+    STAFF_PIN_VAULT_BANK_B_KEYS[7],
+    STAFF_PIN_VAULT_BANK_B_KEYS[8],
+    STAFF_PIN_VAULT_BANK_B_KEYS[9],
+    STAFF_PIN_VAULT_BANK_B_KEYS[10],
+    STAFF_PIN_VAULT_BANK_B_KEYS[11],
+    STAFF_PIN_VAULT_BANK_B_KEYS[12],
+    STAFF_PIN_VAULT_BANK_B_KEYS[13],
+    STAFF_PIN_VAULT_BANK_B_KEYS[14],
+    STAFF_PIN_VAULT_BANK_B_KEYS[15],
 ];
 
 fn is_native_repair_private_key(key: &str) -> bool {
@@ -128,6 +202,14 @@ fn is_native_repair_actor_key(key: &str) -> bool {
 fn is_lan_pair_private_key(key: &str) -> bool {
     let normalized = key.trim().to_ascii_lowercase();
     normalized == KEY_LAN_PAIRS_V1 || normalized.starts_with("cafe_lan_pair_v1:")
+}
+
+/// The staff PIN hash vault's own keys: only `staff_pin_vault.rs` reads or
+/// writes them, through the `staff_pin_vault_*` functions below.
+pub(crate) fn is_staff_pin_vault_key(key: &str) -> bool {
+    key.trim()
+        .to_ascii_lowercase()
+        .starts_with("staff_pin_vault_")
 }
 
 fn lan_pair_store_mutex() -> &'static std::sync::Mutex<()> {
@@ -278,7 +360,7 @@ pub(crate) fn delete_lan_pair_credential(key: &str) -> Result<(), String> {
 /// a fake see the existing real-OS-keyring behaviour (namespaced to
 /// `the-small-pos-test`).
 pub fn get_credential(key: &str) -> Option<String> {
-    if is_lan_pair_private_key(key) {
+    if is_lan_pair_private_key(key) || is_staff_pin_vault_key(key) {
         return None;
     }
     match get_credential_strict(key) {
@@ -315,6 +397,9 @@ pub(crate) fn get_credential_strict(key: &str) -> Result<Option<Zeroizing<String
 pub fn set_credential(key: &str, value: &str) -> Result<(), String> {
     if is_lan_pair_private_key(key) {
         return Err("LAN_PAIR_NATIVE_ONLY".to_string());
+    }
+    if is_staff_pin_vault_key(key) {
+        return Err("STAFF_PIN_VAULT_NATIVE_ONLY".to_string());
     }
     if is_terminal_binding_key(key) {
         return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
@@ -416,6 +501,9 @@ pub fn delete_credential(key: &str) -> Result<(), String> {
     if is_lan_pair_private_key(key) {
         return Err("LAN_PAIR_NATIVE_ONLY".to_string());
     }
+    if is_staff_pin_vault_key(key) {
+        return Err("STAFF_PIN_VAULT_NATIVE_ONLY".to_string());
+    }
     if is_terminal_binding_key(key) {
         return Err("TERMINAL_CREDENTIAL_OWNER_REQUIRED".to_string());
     }
@@ -443,6 +531,31 @@ pub(crate) fn delete_terminal_credential(
     crate::repairs::coordinated_identity_credential_write(key, None, || {
         delete_credential_uncoordinated(key)
     })
+}
+
+/// Native-only read of one staff PIN vault key. Only an actual missing entry
+/// is `Ok(None)`, so a credential-store failure never reads as "no hashes".
+pub(crate) fn staff_pin_vault_read(key: &str) -> Result<Option<Zeroizing<String>>, String> {
+    if !is_staff_pin_vault_key(key) {
+        return Err("STAFF_PIN_VAULT_KEY_REQUIRED".to_string());
+    }
+    get_credential_strict(key)
+}
+
+/// Native-only write of one staff PIN vault key.
+pub(crate) fn staff_pin_vault_write(key: &str, value: &str) -> Result<(), String> {
+    if !is_staff_pin_vault_key(key) {
+        return Err("STAFF_PIN_VAULT_KEY_REQUIRED".to_string());
+    }
+    set_credential_uncoordinated(key, value)
+}
+
+/// Native-only delete of one staff PIN vault key (missing is success).
+pub(crate) fn staff_pin_vault_delete(key: &str) -> Result<(), String> {
+    if !is_staff_pin_vault_key(key) {
+        return Err("STAFF_PIN_VAULT_KEY_REQUIRED".to_string());
+    }
+    delete_credential_uncoordinated(key)
 }
 
 /// Remove the managed repair actor only from native authentication/lifecycle

@@ -7,12 +7,13 @@
  * Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6
  */
 
-import type { SyncQueueItem } from '../../../../shared/pos/sync-queue-types';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { SyncQueueItem } from '../../../../../shared/pos/sync-queue-types';
 import {
   DesktopConflictResolver,
   type OrderConflict,
   type ServerRecord,
-} from './ConflictResolver';
+} from '../ConflictResolver';
 
 // =============================================
 // TEST HELPERS

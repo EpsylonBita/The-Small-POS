@@ -10,6 +10,7 @@ import {
   type RepairFiscalReadinessCode,
 } from '../../services/RepairMoneyApiService'
 import { createSecureRepairId } from './secure-id'
+import { CentsMoneyInput } from '../../components/ui/CentsMoneyInput'
 
 export type RepairMoneyService = Pick<typeof repairMoneyApiService,
   | 'getSettlement'
@@ -412,7 +413,7 @@ export function RepairMoneyPanel({
       <fieldset className="space-y-3 rounded-xl border border-slate-200 p-3 dark:border-white/10">
         <legend className="px-1 font-semibold">{t('repairs.money.collect', { defaultValue: 'Collect payment' })}</legend>
         <div className="grid gap-3 sm:grid-cols-3">
-          <label className="text-sm font-semibold">{t('repairs.money.paymentAmount', { defaultValue: 'Payment amount' })}<input aria-label={t('repairs.money.paymentAmount', { defaultValue: 'Payment amount' })} type="number" min="0.01" step="0.01" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
+          <label className="text-sm font-semibold">{t('repairs.money.paymentAmount', { defaultValue: 'Payment amount' })}<CentsMoneyInput aria-label={t('repairs.money.paymentAmount', { defaultValue: 'Payment amount' })} value={paymentAmount} onValueChange={setPaymentAmount} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.money.paymentMethod', { defaultValue: 'Payment method' })}<select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as typeof paymentMethod)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 dark:border-white/15 dark:bg-zinc-900"><option value="cash">Cash</option><option value="card">Card</option><option value="digital_wallet">Digital wallet</option><option value="other">Other</option></select></label>
           <label className="text-sm font-semibold">{t('repairs.money.providerReference', { defaultValue: 'Provider reference' })}<input value={providerReference} onChange={(event) => setProviderReference(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
         </div>
@@ -441,7 +442,7 @@ export function RepairMoneyPanel({
         <legend className="px-1 font-semibold">{t('repairs.money.refund', { defaultValue: 'Refund payment' })}</legend>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm font-semibold">{t('repairs.money.refundPayment', { defaultValue: 'Payment to refund' })}<select aria-label={t('repairs.money.refundPayment', { defaultValue: 'Payment to refund' })} value={refundPaymentId} onChange={(event) => setRefundPaymentId(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 dark:border-white/15 dark:bg-zinc-900"><option value="">—</option>{activeProjection?.payments.filter((payment) => payment.refundable_minor > 0).map((payment) => <option key={payment.id} value={payment.id}>{formatMoney.format(payment.refundable_minor / 100)} · {payment.payment_method}</option>)}</select></label>
-          <label className="text-sm font-semibold">{t('repairs.money.refundAmount', { defaultValue: 'Refund amount' })}<input aria-label={t('repairs.money.refundAmount', { defaultValue: 'Refund amount' })} type="number" min="0.01" step="0.01" value={refundAmount} onChange={(event) => setRefundAmount(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
+          <label className="text-sm font-semibold">{t('repairs.money.refundAmount', { defaultValue: 'Refund amount' })}<CentsMoneyInput aria-label={t('repairs.money.refundAmount', { defaultValue: 'Refund amount' })} value={refundAmount} onValueChange={setRefundAmount} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
           <label className="text-sm font-semibold">{t('repairs.money.refundMethod', { defaultValue: 'Refund method' })}<select value={refundMethod} onChange={(event) => setRefundMethod(event.target.value as typeof refundMethod)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 dark:border-white/15 dark:bg-zinc-900"><option value="cash">Cash</option><option value="card">Card</option></select></label>
           <label className="text-sm font-semibold">{t('repairs.money.refundReason', { defaultValue: 'Refund reason' })}<input aria-label={t('repairs.money.refundReason', { defaultValue: 'Refund reason' })} value={refundReason} onChange={(event) => setRefundReason(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-transparent px-3 dark:border-white/15" /></label>
         </div>

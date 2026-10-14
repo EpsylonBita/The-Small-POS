@@ -7,7 +7,8 @@ import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
 import { formatCurrency } from '../../utils/format';
 import { canCheckoutWithDeliveryFeeStatus, type DeliveryFeeStatus } from '../../utils/delivery-fee';
-import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
+import { parseMoneyInputValue } from '../../utils/moneyInput';
+import { CentsMoneyInput } from '../ui/CentsMoneyInput';
 import {
   applyDiscountToCartLines,
   clearDiscountFromCartLines,
@@ -303,7 +304,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
     const normalized = Math.max(0, manualDeliveryFeeValue || 0);
     setManualDeliveryFeeInput(
-      normalized > 0 ? normalized.toFixed(2).replace('.', ',') : ''
+      normalized > 0 ? normalized.toFixed(2) : ''
     );
   }, [allowManualDeliveryFee, manualDeliveryFeeValue]);
 
@@ -461,7 +462,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       return;
     }
 
-    const next = Number.parseFloat(linePriceDraft.replace(',', '.').trim());
+    const next = linePriceDraft.trim() ? parseMoneyInputValue(linePriceDraft) : Number.NaN;
     if (!Number.isFinite(next) || next < 0) {
       return;
     }
@@ -659,6 +660,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   }, [clearHoldTimers, clearSelectionHoldTimer]);
 
   const parseDiscountInput = (value: string, mode: 'percentage' | 'fixed'): number => {
+    if (mode === 'fixed') {
+      return parseMoneyInputValue(value);
+    }
     const normalized = value.replace(',', '.').trim();
     const parsed = Number.parseFloat(normalized);
     if (!Number.isFinite(parsed)) {
@@ -669,10 +673,6 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     }
     return Math.max(0, parsed);
   };
-
-  const formatManualPriceInput = React.useCallback((value: string) => {
-    return formatMoneyInputWithCents(value);
-  }, []);
 
   const parseManualPriceValue = React.useCallback((value: string) => {
     return parseMoneyInputValue(value);
@@ -815,7 +815,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const editingLineItem = editingLineItemId === null
     ? null
     : cartItems.find(item => item.id === editingLineItemId) ?? null;
-  const parsedLinePriceDraft = Number.parseFloat(linePriceDraft.replace(',', '.').trim());
+  const parsedLinePriceDraft = linePriceDraft.trim() ? parseMoneyInputValue(linePriceDraft) : Number.NaN;
   const isLinePriceDraftValid = Number.isFinite(parsedLinePriceDraft) && parsedLinePriceDraft >= 0;
   const selectedCartItemIdsArray = React.useMemo(
     () => Array.from(selectedCartItemIds),
@@ -1046,11 +1046,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               />
             </div>
             <div className="flex gap-2">
-              <input
-                type="text"
-                inputMode="decimal"
+              <CentsMoneyInput
+                aria-label={t('menu.cart.manualPricePlaceholder', 'Price')}
                 value={manualPrice}
-                onChange={(e) => setManualPrice(formatManualPriceInput(e.target.value))}
+                onValueChange={setManualPrice}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
@@ -1646,14 +1645,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               {t('menu.cart.deliveryFee')}
             </span>
             {allowManualDeliveryFee ? (
-              <input
-                type="text"
-                inputMode="decimal"
+              <CentsMoneyInput
+                aria-label={t('menu.cart.deliveryFee')}
                 value={manualDeliveryFeeInput}
-                onChange={(event) => {
-                  const formatted = formatMoneyInputWithCents(event.target.value);
-                  setManualDeliveryFeeInput(formatted);
-                  onManualDeliveryFeeChange?.(parseMoneyInputValue(formatted));
+                onValueChange={(value, amount) => {
+                  setManualDeliveryFeeInput(value);
+                  onManualDeliveryFeeChange?.(amount);
                 }}
                 placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
                 className="w-24 rounded-lg border bg-black/5 px-2.5 py-1.5 text-right text-sm antialiased dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
@@ -1681,11 +1678,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           <div
             role="status"
             data-testid="menu-cart-zone-not-checked"
-            className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-sky-500/10 dark:bg-sky-500/20 border border-sky-500/25 dark:border-sky-400/30"
+            className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 dark:border-amber-400/30"
           >
-            <MapPin className="w-5 h-5 flex-shrink-0 text-sky-600 dark:text-sky-300" aria-hidden="true" />
+            <MapPin className="w-5 h-5 flex-shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium antialiased text-sky-800 dark:text-sky-200">
+              <p className="text-sm font-medium antialiased text-amber-800 dark:text-amber-200">
                 {t('menu.cart.deliveryZoneNotCheckedNotice')}
               </p>
               {onRepickDeliveryAddress && (
@@ -1693,7 +1690,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   type="button"
                   onClick={onRepickDeliveryAddress}
                   data-testid="menu-cart-zone-repick"
-                  className="mt-2 min-h-[40px] rounded-lg border border-sky-600/40 dark:border-sky-300/40 px-3 py-1.5 text-sm font-semibold antialiased text-sky-800 dark:text-sky-100 active:bg-sky-500/15 dark:active:bg-sky-400/20"
+                  className="mt-2 min-h-[40px] rounded-lg border border-amber-600/40 dark:border-amber-300/40 px-3 py-1.5 text-sm font-semibold antialiased text-amber-800 dark:text-amber-100 active:bg-amber-500/15 dark:active:bg-amber-400/20"
                 >
                   {t('menu.cart.repickDeliveryAddress')}
                 </button>
@@ -1856,28 +1853,47 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   {t('menu.cart.manualDiscount', 'Manual discount')}
                 </label>
                 <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={lineDiscountManualInput}
-                    onChange={(e) => {
-                      const rawValue = e.target.value;
-                      setLineDiscountManualInput(rawValue);
-                      setLineDiscountDraft(parseDiscountInput(rawValue, lineDiscountModeDraft));
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && canApplyLineDiscount) {
-                        applySelectedLineDiscount();
+                  {lineDiscountModeDraft === 'fixed' ? (
+                    <CentsMoneyInput
+                      aria-label={t('menu.cart.discountAmount', 'Discount amount')}
+                      value={lineDiscountManualInput}
+                      onValueChange={(value, amount) => {
+                        setLineDiscountManualInput(value);
+                        setLineDiscountDraft(amount);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && canApplyLineDiscount) {
+                          applySelectedLineDiscount();
+                        }
+                      }}
+                      placeholder={t('menu.cart.discountAmount', 'Discount amount')}
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      autoFocus
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={lineDiscountManualInput}
+                      onChange={(e) => {
+                        const rawValue = e.target.value;
+                        setLineDiscountManualInput(rawValue);
+                        setLineDiscountDraft(parseDiscountInput(rawValue, lineDiscountModeDraft));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && canApplyLineDiscount) {
+                          applySelectedLineDiscount();
+                        }
+                      }}
+                      placeholder={
+                        lineDiscountModeDraft === 'percentage'
+                          ? t('menu.cart.discountLabel')
+                          : t('menu.cart.discountAmount', 'Discount amount')
                       }
-                    }}
-                    placeholder={
-                      lineDiscountModeDraft === 'percentage'
-                        ? t('menu.cart.discountLabel')
-                        : t('menu.cart.discountAmount', 'Discount amount')
-                    }
-                    className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
-                    autoFocus
-                  />
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      autoFocus
+                    />
+                  )}
                   <span className="text-base font-semibold liquid-glass-modal-text">
                     {lineDiscountModeDraft === 'percentage' ? '%' : (getStoreCurrency() ?? '—')}
                   </span>
@@ -1949,19 +1965,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <label className="text-xs font-semibold antialiased liquid-glass-modal-text-muted">
                 {t('menu.cart.unitPrice', 'Unit price')}
               </label>
-              <input
-                type="text"
-                inputMode="decimal"
+              <CentsMoneyInput
+                aria-label={t('menu.cart.unitPrice', 'Unit price')}
                 autoFocus
                 value={linePriceDraft}
-                onChange={(event) => setLinePriceDraft(event.target.value)}
+                onValueChange={setLinePriceDraft}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && isLinePriceDraftValid) {
                     event.preventDefault();
                     applyLinePriceDraft();
                   }
                 }}
-                placeholder="0.00"
+                placeholder="0,00"
                 className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
               />
               {!isLinePriceDraftValid && linePriceDraft.trim().length > 0 && (
@@ -2188,27 +2203,46 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   {t('menu.cart.manualDiscount', 'Manual discount')}
                 </label>
                 <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={discountManualInput}
-                    onChange={(e) => {
-                      const rawValue = e.target.value;
-                      setDiscountManualInput(rawValue);
-                      setDiscountDraft(parseDiscountInput(rawValue, discountModeDraft));
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !isDraftOverMax) {
-                        applyDraftDiscount();
+                  {discountModeDraft === 'fixed' ? (
+                    <CentsMoneyInput
+                      aria-label={t('menu.cart.discountAmount', 'Discount amount')}
+                      value={discountManualInput}
+                      onValueChange={(value, amount) => {
+                        setDiscountManualInput(value);
+                        setDiscountDraft(amount);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !isDraftOverMax) {
+                          applyDraftDiscount();
+                        }
+                      }}
+                      placeholder={t('menu.cart.discountAmount', 'Discount amount')}
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      autoFocus
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={discountManualInput}
+                      onChange={(e) => {
+                        const rawValue = e.target.value;
+                        setDiscountManualInput(rawValue);
+                        setDiscountDraft(parseDiscountInput(rawValue, discountModeDraft));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !isDraftOverMax) {
+                          applyDraftDiscount();
+                        }
+                      }}
+                      placeholder={
+                        discountModeDraft === 'percentage'
+                          ? t('menu.cart.discountLabel')
+                          : t('menu.cart.discountAmount', 'Discount amount')
                       }
-                    }}
-                    placeholder={
-                      discountModeDraft === 'percentage'
-                        ? t('menu.cart.discountLabel')
-                        : t('menu.cart.discountAmount', 'Discount amount')
-                    }
-                    className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
-                  />
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                  )}
                   <span className="text-base font-semibold liquid-glass-modal-text">
                     {discountModeDraft === 'percentage' ? '%' : (getStoreCurrency() ?? '—')}
                   </span>

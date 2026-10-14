@@ -7,6 +7,7 @@ import type { TFunction } from 'i18next';
 import { motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
+import { CentsMoneyInput } from '../../../components/ui/CentsMoneyInput';
 import { CreditCard, User, Calendar, Plus, Search, FileText, RefreshCw, AlertCircle, LogOut, X } from 'lucide-react';
 import { getBridge, isBrowser } from '../../../../lib';
 import { posApiGet, posApiFetch, posApiPost, isModuleRequiredApiError } from '../../../utils/api-helpers';
@@ -286,12 +287,10 @@ const FolioActionModal: React.FC<{
                 {t('guestBilling.fields.amount', { defaultValue: 'Amount' })} ({folio.currency ?? '—'}){' '}
                 <span className="text-red-500">*</span>
               </label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
+              <CentsMoneyInput
+                aria-label={t('guestBilling.fields.amount', { defaultValue: 'Amount' })}
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onValueChange={setAmount}
                 className={fieldClass(isDark)}
               />
             </div>

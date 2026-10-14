@@ -76,6 +76,7 @@ import {
 } from '../utils/capture-review';
 import type { CaptureSourceConfig, ConfidenceTier } from '../types/supplier-capture';
 import { parseInvoiceAmountInput } from '../../../../shared/invoice-amount-input';
+import { CentsMoneyInput } from '../components/ui/CentsMoneyInput';
 
 interface Supplier {
   id: string;
@@ -2207,13 +2208,11 @@ const SuppliersPage: React.FC = () => {
                     {selectedInvoiceCanPay ? (
                       <div className="mt-4 space-y-3">
                         <div className="grid gap-3 sm:grid-cols-3">
-                          <input
-                            type="text"
-                            inputMode="decimal"
+                          <CentsMoneyInput
                             disabled={saving}
                             aria-label={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                             value={paymentAmount}
-                            onChange={(event) => setPaymentAmount(event.target.value)}
+                            onValueChange={setPaymentAmount}
                             className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
                             placeholder={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                           />
@@ -2406,11 +2405,12 @@ const SuppliersPage: React.FC = () => {
                           className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.dueDate', 'Due date')}
                         />
-                        <input
+                        <CentsMoneyInput
+                          aria-label={t('suppliers.amount', 'Amount')}
                           value={correctAmount}
                           disabled={correctLoading || !correctBaseline}
-                          onChange={(event) => {
-                            setCorrectAmount(event.target.value);
+                          onValueChange={(value) => {
+                            setCorrectAmount(value);
                             setImportError(null);
                           }}
                           className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}

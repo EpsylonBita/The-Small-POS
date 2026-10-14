@@ -92,8 +92,8 @@ export const GIFT_CLOSE_REPORT_CONTRACT = 'gift_close_report_v1';
 export const GIFT_CLOSE_PROOF_CONTRACT = 'gift_closing_v1';
 
 /**
- * English copy shared by the Z modal (as i18n fallbacks) and the CSV export, so both
- * name the reconciliation and the proof state the same way.
+ * English i18n fallbacks of the Z modal's gift card close copy. The CSV export takes its
+ * words from `shared/reports` (six languages), never from here.
  */
 export const GIFT_CLOSE_LABELS = {
   title: 'Gift card cash',
@@ -105,18 +105,12 @@ export const GIFT_CLOSE_LABELS = {
   counted: 'Counted cash',
   variance: 'Variance',
   currency: 'Currency',
-  shift: 'Shift',
-  drawer: 'Drawer',
   confirmedAt: 'Confirmed at',
-  adoptedAt: 'Adopted at',
-  proofStatus: 'Gift card close proof',
   proofFinal: 'Closing confirmed',
   proofNotFinal: 'Not final: a gift card close is not confirmed',
   proofUnreadable: 'Closing confirmation is unavailable',
   checklistFinal: 'Gift card cash {{amount}} is confirmed and kept outside sales.',
   blocked: 'Final print and submit stay disabled until every gift card close is confirmed.',
-  blockerSection: 'Gift card close blocker',
-  finalActions: 'Final print and submit',
   finalPrintUnavailable: 'Final printing is available after the Z-report has been saved.',
   recovery: {
     GIFT_CLOSE_PROOF_PENDING:
@@ -402,13 +396,6 @@ export function giftCloseStaffLabel(
   return pickString(blocker.staffName, blocker.staffId, blocker.shiftId) ?? 'a staff member';
 }
 
-/** English recovery wording for one blocker (`null` = unreadable proof). The modal localizes the same keys. */
-export function giftCloseRecoveryText(blocker: ZReportGiftCloseBlocker | null): string {
-  if (!blocker) return GIFT_CLOSE_LABELS.recovery.unreadable;
-  return GIFT_CLOSE_LABELS.recovery[giftCloseRecoveryKey(blocker.code)]
-    .replace(/\{\{staff\}\}/g, giftCloseStaffLabel(blocker));
-}
-
 /** Map native `GIFT_CLOSE_PROOF_REQUIRED:` / `GIFT_CLOSE_SNAPSHOT_STALE:` refusals to a copy key. */
 export function classifyGiftCloseFinalizationError(value: unknown): GiftCloseFinalizationError | null {
   const candidates: unknown[] = [value];
@@ -431,82 +418,6 @@ export function resolvePersistedZReportId(
 ): string | null {
   const id = pickString(report?.zReportId, report?.z_report_id);
   return id && !id.startsWith('snapshot-') ? id : null;
-}
-
-export interface ZReportCsvRow {
-  Section: string;
-  Metric: string;
-  Value: string | number;
-}
-
-function centsToAmount(cents: number): number {
-  return cents / 100;
-}
-
-/**
- * CSV rows for the gift card close: the same reconciliation and proof labels as the modal.
- * Gift card cash is a drawer liability line, never a sales, tender or tax row. Ordinary reports get none.
- */
-export function buildZReportGiftCloseCsvRows(
-  report: Pick<ZReportData, 'cashDrawer' | 'giftFinancialClose' | 'giftCloseReadiness'> | null | undefined,
-): ZReportCsvRow[] {
-  const view = resolveZReportGiftClose(report);
-  if (view.state === 'none') return [];
-
-  const labels = GIFT_CLOSE_LABELS;
-  const section = labels.title;
-  const rows: ZReportCsvRow[] = [
-    {
-      Section: section,
-      Metric: labels.proofStatus,
-      Value: view.state === 'final'
-        ? labels.proofFinal
-        : view.state === 'unreadable'
-          ? labels.proofUnreadable
-          : labels.proofNotFinal,
-    },
-  ];
-  if (view.currency) rows.push({ Section: section, Metric: labels.currency, Value: view.currency });
-
-  if (view.drawer) {
-    const drawer = view.drawer;
-    rows.push({ Section: 'Cash Drawer', Metric: labels.ordinaryExpected, Value: centsToAmount(drawer.ordinaryExpectedCents) });
-    if (drawer.ordinaryAdjustmentCents !== 0) {
-      rows.push({ Section: 'Cash Drawer', Metric: labels.ordinaryAdjustment, Value: centsToAmount(drawer.ordinaryAdjustmentCents) });
-    }
-    rows.push({ Section: 'Cash Drawer', Metric: labels.giftLiabilityCash, Value: centsToAmount(drawer.giftLiabilityCashCents) });
-    rows.push({ Section: 'Cash Drawer', Metric: labels.expected, Value: centsToAmount(drawer.expectedCents) });
-    if (drawer.countedCents !== null) {
-      rows.push({ Section: 'Cash Drawer', Metric: labels.counted, Value: centsToAmount(drawer.countedCents) });
-    }
-  }
-
-  for (const original of view.originals) {
-    const originalSection = `${section}: ${giftCloseStaffLabel(original)}`;
-    rows.push(
-      { Section: originalSection, Metric: labels.shift, Value: original.shiftId },
-      { Section: originalSection, Metric: labels.drawer, Value: original.drawerId },
-      { Section: originalSection, Metric: labels.currency, Value: original.currency },
-      { Section: originalSection, Metric: labels.ordinaryExpected, Value: centsToAmount(original.ordinaryExpected_cents) },
-      { Section: originalSection, Metric: labels.giftLiabilityCash, Value: centsToAmount(original.giftLiabilityCash_cents) },
-      { Section: originalSection, Metric: labels.expected, Value: centsToAmount(original.expected_cents) },
-      { Section: originalSection, Metric: labels.counted, Value: centsToAmount(original.counted_cents) },
-      { Section: originalSection, Metric: labels.variance, Value: centsToAmount(original.variance_cents) },
-      { Section: originalSection, Metric: labels.confirmedAt, Value: original.provenance.confirmedAt ?? '' },
-      { Section: originalSection, Metric: labels.adoptedAt, Value: original.provenance.adoptedAt ?? '' },
-    );
-  }
-
-  for (const blocker of view.blockers) {
-    rows.push({ Section: labels.blockerSection, Metric: blocker.code, Value: giftCloseRecoveryText(blocker) });
-  }
-  if (view.state === 'unreadable') {
-    rows.push({ Section: labels.blockerSection, Metric: 'unreadable', Value: giftCloseRecoveryText(null) });
-  }
-  if (!view.allowsFinal) {
-    rows.push({ Section: section, Metric: labels.finalActions, Value: labels.blocked });
-  }
-  return rows;
 }
 
 /** Canonical tender amount; absent historical reports have no TWINT value. */

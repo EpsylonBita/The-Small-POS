@@ -12,6 +12,7 @@ import path from 'node:path';
 
 const projectRoot = process.cwd();
 const modalPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'ZReportModal.tsx');
+const dialogPath = path.join(projectRoot, 'src', 'renderer', 'components', 'modals', 'ZReportExportDialog.tsx');
 const typesPath = path.join(projectRoot, 'src', 'renderer', 'types', 'reports.ts');
 const exportPath = path.join(projectRoot, 'src', 'renderer', 'utils', 'reportExport.ts');
 const zreportRsPath = path.join(projectRoot, 'src-tauri', 'src', 'zreport.rs');
@@ -83,17 +84,29 @@ test('Z modal payment filter and labels understand platform tenders', () => {
   assert.match(source, /\{ value: 'platform' as const, label: t\('modals\.zReport\.filters\.platform'\) \}/);
 });
 
-test('Orders CSV export is wired to a visible button and exports the day list', () => {
+// Founder, 14/10/2026: "the Z export must be based on the Z's real data". The Orders button
+// opens the picker of stored Zs; the file is the order list the stored Z recorded (its
+// `dayOrders`, else the staff lists), written by shared/reports. A platform row names its
+// platform there. The live preview exports only as a provisional file.
+test('Orders CSV export is wired to a visible button and exports the order list a stored Z recorded', () => {
   const source = read(modalPath);
-  assert.match(source, /import \{ exportZReportToCSV, exportDayOrdersToCSV \} from '\.\.\/\.\.\/utils\/reportExport';/);
-  assert.match(source, /exportDayOrdersToCSV\(dayOrderDetails, `z-report-orders-\$\{resolvedBusinessDate\}`\)/);
+  assert.match(source, /import ZReportExportDialog, \{ type ZReportExportKind \} from '\.\/ZReportExportDialog';/);
+  assert.match(source, /const handleExportOrdersReport = useCallback\(\(\) => \{\s*setExportDialogIntent\('orders'\);/);
   assert.match(source, /onClick=\{handleExportOrdersReport\}/, 'the export handler used to be dead code');
   assert.match(source, /\{t\('modals\.zReport\.exportOrdersCSV'\)\}/);
   assert.match(source, /zReport\?\.dayOrdersTruncated \?[\s\S]*?t\('modals\.zReport\.ordersListTruncated'\)/);
+  assert.match(source, /<ZReportExportDialog[\s\S]*?shownReport=\{zReport\}[\s\S]*?intent=\{exportDialogIntent\}/);
+  assert.doesNotMatch(source, /exportDayOrdersToCSV|exportZReportToCSV/, 'the English live-preview exporters are gone');
   const exporter = read(exportPath);
-  assert.match(exporter, /export function exportDayOrdersToCSV\(/);
+  assert.match(exporter, /export function exportStoredZReportOrdersCsv\(/);
+  assert.match(exporter, /export function exportProvisionalZReportOrdersCsv\(/);
+  assert.match(exporter, /orders: zReportOrdersFromSnapshot\(input\)/);
+  assert.match(exporter, /serializeZReportOrdersCsv\(view\.orders, view\.document, \{ language \}\)/);
+  assert.doesNotMatch(exporter, /export function (exportDayOrdersToCSV|exportZReportToCSV)\(/);
   assert.doesNotMatch(exporter, /exportStaffOrdersToCSV/, 'the staff-scoped exporter is gone with its only caller');
-  assert.match(exporter, /'Source': order\.staffName \|\| \(order\.platform \? `platform:\$\{order\.platform\}` : '—'\)/);
+  const dialog = read(dialogPath);
+  assert.match(dialog, /bridge\.reports\.getZReport\(\{ zReportId: selectedId \}\)/, 'a stored Z is exported from its row, read again by id');
+  assert.match(dialog, /exportStoredZReportOrdersCsv\(result\.report, language/);
 });
 
 test('Z report types expose the day list', () => {
