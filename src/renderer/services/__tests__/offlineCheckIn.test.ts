@@ -3,29 +3,23 @@ import type { TFunction } from 'i18next';
 
 import { localeBundles } from '../../../locales/bundles';
 import {
-  OFFLINE_CHECK_IN_ROLES,
   cachedGiftCardsStore,
   checkedOnTill,
   describeOfflineOpeningRefusal,
-  isOfflineCheckInRole,
 } from '../offlineCheckIn';
 
 const t = ((key: string) => `<${key}>`) as unknown as TFunction;
 
 describe('offline check-in rules (renderer)', () => {
-  it('names the founder roles: cashier, manager and driver', () => {
-    expect(OFFLINE_CHECK_IN_ROLES).toEqual(['cashier', 'manager', 'driver']);
-    expect(isOfflineCheckInRole(' Driver ')).toBe(true);
-    for (const role of ['kitchen', 'server', 'waiter', '', null, undefined]) {
-      expect(isOfflineCheckInRole(role)).toBe(false);
-    }
+  it('tells a PIN this till checked from one the server checked', () => {
     expect(checkedOnTill({ success: true, source: 'offline' })).toBe(true);
     expect(checkedOnTill({ success: true, source: 'server' })).toBe(false);
     expect(checkedOnTill(null)).toBe(false);
   });
 
   it('words each native offline opening refusal and nothing else', () => {
-    expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED', t)).toBe('<modals.staffShift.offlineCheckIn.roleNotAllowed>');
+    // The native shift open no longer refuses a role offline.
+    expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED', t)).toBeNull();
     expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER', t)).toBe('<modals.staffShift.offlineCheckIn.giftCardsNeedServer>');
     expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_WAITER_TERMINAL', t)).toBe('<modals.staffShift.offlineCheckIn.waiterPhone>');
     expect(describeOfflineOpeningRefusal('Staff member already has an active shift (x)', t)).toBeNull();
@@ -41,7 +35,7 @@ describe('offline check-in rules (renderer)', () => {
 
   it('has every offline check-in sentence in all six languages', () => {
     const keys = [
-      'offlineCheckIn.checkedInTitle', 'offlineCheckIn.checkedInMessage', 'offlineCheckIn.roleNotAllowed',
+      'offlineCheckIn.checkedInTitle', 'offlineCheckIn.checkedInMessage',
       'offlineCheckIn.giftCardsNeedServer', 'offlineCheckIn.noPinOnTill', 'offlineCheckIn.locked',
       'offlineCheckIn.waiterPhone', 'pinLocked', 'staffNotFound', 'rateLimited', 'checkInUnavailable',
       'syncConflict.offlineTitle', 'syncConflict.reason.waiter_terminal', 'syncConflict.reason.staff_not_found',
@@ -58,6 +52,8 @@ describe('offline check-in rules (renderer)', () => {
           expect(value, `${language}: ${key} is translated`).not.toBe(englishValue);
         }
       }
+      // The role refusal is gone with the role list.
+      expect((bundle as any).modals.staffShift.offlineCheckIn?.roleNotAllowed, language).toBeUndefined();
     }
   });
 });

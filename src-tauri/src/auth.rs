@@ -437,21 +437,6 @@ fn staff_auth_cache_row_branch(payload: &Value, setting_key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn directory_role_names(value: &Value) -> Vec<String> {
-    let mut names: Vec<String> = value
-        .get("roles")
-        .and_then(Value::as_array)
-        .map(|roles| {
-            roles
-                .iter()
-                .filter_map(|role| value_string_alias(role, &["name", "role_name", "roleName"]))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.extend(value_string_alias(value, &["roleName", "role_name"]));
-    names
-}
-
 /// A directory entry (server `/api/pos/staff-directory` or a legacy cache
 /// row) as the PIN vault reads it.
 fn directory_pin_entry(value: &Value) -> Option<DirectoryPinEntry> {
@@ -470,7 +455,6 @@ fn directory_pin_entry(value: &Value) -> Option<DirectoryPinEntry> {
         active: value_bool_alias(value, &["is_active", "isActive"]) == Some(true),
         can_login_pos: value_bool_alias(value, &["can_login_pos", "canLoginPos", "canLoginPOS"])
             == Some(true),
-        roles: directory_role_names(value),
     })
 }
 
@@ -1643,8 +1627,8 @@ fn parse_check_in_request(arg0: Option<Value>) -> Result<StaffCheckInVerifyReque
 /// decision 13/10/2026, desktop parity with Android PR #356). The server
 /// decides whenever it answers; only on a transport failure (no answer, 502,
 /// 503 or 504) does this till check the PIN against the hash it holds, with
-/// the wrong-PIN lockout and the offline role rule. This never mutates the
-/// global app-login auth session.
+/// the wrong-PIN lockout; every role checks in that way (founder, 15/10/2026).
+/// This never mutates the global app-login auth session.
 pub async fn verify_staff_check_in_pin(
     arg0: Option<Value>,
     db: &db::DbState,
@@ -1785,10 +1769,10 @@ fn server_check_in_refusal(error: &api::AdminFetchError) -> Value {
 
 /// Check a check-in PIN on this till: the server cannot be reached. The
 /// directory cache gives the person and their open shift elsewhere; the PIN
-/// hash, the POS rights and the roles come from the OS credential store,
-/// with the five-wrong-PINs lockout. Only a cashier, manager or driver checks
-/// in this way, and never on a waiter phone. A success leaves the grant the
-/// shift opening reads (`offline_check_in.rs`).
+/// hash and the POS rights come from the OS credential store, with the
+/// five-wrong-PINs lockout. Every role checks in this way (founder,
+/// 15/10/2026), never on a waiter phone. A success leaves the grant the shift
+/// opening reads (`offline_check_in.rs`).
 fn verify_check_in_pin_on_till(
     staff_id: &str,
     branch_id: &str,
@@ -1902,17 +1886,10 @@ fn verify_check_in_pin_on_till(
     }
 
     match staff_pin_vault::verify_offline(branch_id, staff_id, pin, now) {
-        OfflinePinCheck::Accepted { roles } => {
-            if !roles
-                .iter()
-                .any(|role| staff_pin_vault::is_offline_check_in_role(role))
-            {
-                return offline(
-                    "offline_role_not_allowed",
-                    "Without a connection, only a cashier, manager or driver can check in on this till.",
-                );
-            }
-            offline_check_in::record_offline_check_in(staff_id, roles, now);
+        // Every role checks in (founder, 15/10/2026): anyone whose PIN this
+        // till holds. The shift open applies the local rules.
+        OfflinePinCheck::Accepted => {
+            offline_check_in::record_offline_check_in(staff_id, now);
             warn!(
                 staff_id = %staff_id,
                 "Staff PIN checked on this till: the shift opens with the offline_check_in marker"
@@ -2579,7 +2556,7 @@ mod tests {
     // Founder decision 13/10/2026 (desktop parity with Android PR #356): the
     // server decides whenever it answers; the till checks the PIN against the
     // hash it holds in the OS credential store only on a transport failure,
-    // with a five-wrong-PINs lockout and the cashier/manager/driver rule.
+    // with a five-wrong-PINs lockout, for every role (founder, 15/10/2026).
 
     fn staff_entry(id: &str, pin: &str, roles: &[&str]) -> Value {
         serde_json::json!({
@@ -2731,11 +2708,7 @@ mod tests {
         let _keyring = crate::tests::fake_keyring::install_empty();
         // No directory at all on this till: the server decides.
         let db_state = test_db_state();
-        offline_check_in::record_offline_check_in(
-            "staff-online",
-            vec!["cashier".into()],
-            Utc::now(),
-        );
+        offline_check_in::record_offline_check_in("staff-online", Utc::now());
 
         let result = verify_staff_check_in_pin_with(
             check_in_request("staff-online", "4321"),
@@ -2798,9 +2771,7 @@ mod tests {
         }
         assert_eq!(
             offline_check_in::admission_for("staff-no-answer", Utc::now()),
-            offline_check_in::CheckInAdmission::Offline {
-                roles: vec!["cashier".to_string()]
-            }
+            offline_check_in::CheckInAdmission::Offline
         );
         offline_check_in::complete("staff-no-answer");
     }
@@ -2857,10 +2828,15 @@ mod tests {
         offline_check_in::complete("staff-other");
     }
 
+    /// Founder, 15/10/2026: anyone whose PIN this till holds checks in
+    /// offline, whatever their role. POS login switched off in admin still
+    /// refuses.
     #[tokio::test]
-    async fn offline_check_in_is_for_cashiers_managers_and_drivers_only() {
+    async fn every_role_checks_in_offline_with_a_pin_this_till_holds() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let db_state = test_db_state();
+        let mut login_off = staff_entry("staff-login-off", "5555", &["cashier"]);
+        login_off["canLoginPos"] = Value::Bool(false);
         set_staff_auth_cache(
             &db_state,
             "branch-1",
@@ -2868,6 +2844,7 @@ mod tests {
                 staff_entry("staff-kitchen", "1111", &["kitchen", "server"]),
                 staff_entry("staff-driver", "2222", &["driver"]),
                 staff_entry("staff-manager", "3333", &["manager"]),
+                login_off,
             ]),
         );
         let offline_try = |staff: &'static str, pin: &'static str| {
@@ -2876,17 +2853,28 @@ mod tests {
             })
         };
 
-        let kitchen = offline_try("staff-kitchen", "1111").await.unwrap();
-        assert_eq!(reason(&kitchen), ("offline_role_not_allowed", "offline"));
-        assert_eq!(
-            offline_check_in::admission_for("staff-kitchen", Utc::now()),
-            offline_check_in::CheckInAdmission::Ordinary
-        );
-        for (staff, pin) in [("staff-driver", "2222"), ("staff-manager", "3333")] {
+        for (staff, pin) in [
+            ("staff-kitchen", "1111"),
+            ("staff-driver", "2222"),
+            ("staff-manager", "3333"),
+        ] {
             let result = offline_try(staff, pin).await.unwrap();
             assert_eq!(result["success"], true, "{staff}: {result}");
+            assert_eq!(result["source"], "offline", "{staff}");
+            assert_eq!(
+                offline_check_in::admission_for(staff, Utc::now()),
+                offline_check_in::CheckInAdmission::Offline,
+                "{staff}"
+            );
             offline_check_in::complete(staff);
         }
+
+        let refused = offline_try("staff-login-off", "5555").await.unwrap();
+        assert_eq!(reason(&refused), ("pos_login_disabled", "offline"));
+        assert_eq!(
+            offline_check_in::admission_for("staff-login-off", Utc::now()),
+            offline_check_in::CheckInAdmission::Ordinary
+        );
     }
 
     #[tokio::test]

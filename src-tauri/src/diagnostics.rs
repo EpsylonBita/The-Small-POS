@@ -107,13 +107,13 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         let printer_status = get_printer_status(&conn);
         let last_zreport = get_last_zreport(&conn);
 
-        let pending_orders: i64 = conn
+        let pending_orders: Option<i64> = conn
             .query_row(
                 "SELECT COUNT(*) FROM sync_queue WHERE status IN ('pending', 'syncing')",
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
+            .ok();
 
         let db_size = fs::metadata(&db.db_path).map(|m| m.len()).unwrap_or(0);
 
@@ -145,17 +145,51 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         printer_status["defaultProfile"] = json!(display_name);
     }
 
+    // Each read below falls back to "nothing there" so the Health view keeps
+    // working; `readFailures` names the ones that failed, so the incident
+    // reporter never takes a failed read for a cleared incident (review of
+    // PR #367, 15/10/2026).
+    let mut read_failures: Vec<&str> = Vec::new();
+    if sync_backlog_status != "ok" {
+        read_failures.push("syncBacklog");
+    }
+    if pending_orders.is_none() {
+        read_failures.push("pendingOrders");
+    }
+    if printer_status
+        .get("pendingJobs")
+        .is_some_and(Value::is_null)
+        || printer_status.get("recentJobsUnavailable") == Some(&json!(true))
+    {
+        read_failures.push("printerStatus");
+    }
+
     // Validate pending orders against menu cache (acquires its own lock)
-    let invalid_orders = crate::sync::validate_pending_orders(db)
-        .ok()
-        .and_then(|v| v.get("invalid_orders").cloned())
-        .unwrap_or(json!([]));
+    let invalid_orders = match crate::sync::validate_pending_orders(db) {
+        Ok(value) => value.get("invalid_orders").cloned().unwrap_or(json!([])),
+        Err(_) => {
+            read_failures.push("invalidOrders");
+            json!([])
+        }
+    };
     let invalid_orders_count = invalid_orders.as_array().map(|arr| arr.len()).unwrap_or(0);
-    let sync_blocker_details = crate::sync::get_sync_blocker_details(db, 10).unwrap_or_default();
+    let sync_blocker_details = crate::sync::get_sync_blocker_details(db, 10).unwrap_or_else(|_| {
+        read_failures.push("syncBlockerDetails");
+        Default::default()
+    });
     let terminal_context = get_terminal_context(db);
-    let sync_status_summary = get_sync_status_summary(db).unwrap_or_else(|_| json!({}));
-    let parity_queue_status = get_parity_queue_status(db).unwrap_or(Value::Null);
-    let financial_queue_status = get_financial_queue_status(db).unwrap_or(Value::Null);
+    let sync_status_summary = get_sync_status_summary(db).unwrap_or_else(|_| {
+        read_failures.push("syncStatusSummary");
+        json!({})
+    });
+    let parity_queue_status = get_parity_queue_status(db).unwrap_or_else(|_| {
+        read_failures.push("parityQueueStatus");
+        Value::Null
+    });
+    let financial_queue_status = get_financial_queue_status(db).unwrap_or_else(|_| {
+        read_failures.push("financialQueueStatus");
+        Value::Null
+    });
     let last_parity_sync = get_last_parity_sync(db);
     let credential_state = get_credential_state(db);
     let checkout_payment_blockers = get_checkout_payment_blockers(db).unwrap_or_else(|error| {
@@ -181,7 +215,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         "lastSyncTimes": last_sync_times,
         "printerStatus": printer_status,
         "lastZReport": last_zreport,
-        "pendingOrders": pending_orders,
+        "pendingOrders": pending_orders.unwrap_or(0),
         "dbSizeBytes": db_size,
         "panicCount": crate::panic_hook::crash_count(),
         "parityQueueStatus": parity_queue_status,
@@ -192,7 +226,8 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         "invalidOrders": {
             "count": invalid_orders_count,
             "details": invalid_orders
-        }
+        },
+        "readFailures": read_failures,
     }))
 }
 
@@ -717,8 +752,10 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
         })
         .unwrap_or(0);
 
-    // Last 5 print jobs
+    // Last 5 print jobs. A read that fails says so (`recentJobsUnavailable`):
+    // no failed jobs listed is then unknown, not "none failed".
     let mut recent_jobs = Vec::new();
+    let mut recent_jobs_unavailable = true;
     if let Ok(mut stmt) = conn.prepare(
         "SELECT id, entity_type, status, created_at, warning_code
          FROM print_jobs ORDER BY created_at DESC LIMIT 5",
@@ -732,8 +769,12 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
                 "warningCode": row.get::<_, Option<String>>(4)?,
             }))
         }) {
-            for row in rows.flatten() {
-                recent_jobs.push(row);
+            recent_jobs_unavailable = false;
+            for row in rows {
+                match row {
+                    Ok(row) => recent_jobs.push(row),
+                    Err(_) => recent_jobs_unavailable = true,
+                }
             }
         }
     }
@@ -761,6 +802,7 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
         "profileCount": profile_count,
         "defaultProfile": serde_json::Value::Null,
         "recentJobs": recent_jobs,
+        "recentJobsUnavailable": recent_jobs_unavailable,
         "pendingJobs": pending_jobs,
     })
 }

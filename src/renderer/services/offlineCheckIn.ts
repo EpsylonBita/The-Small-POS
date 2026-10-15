@@ -6,27 +6,16 @@
  * The native `staff-auth:verify-check-in-pin` asks the server first and its
  * answer stands. Only when the server cannot be reached does the till check
  * the PIN against the hash it holds in the OS credential store; the answer
- * then says `source: 'offline'`. The native shift open enforces the rules
- * itself (`offline_check_in.rs`); this module only words them and keeps the
- * modal from offering what the till will refuse.
+ * then says `source: 'offline'`. Every role checks in that way (founder,
+ * 15/10/2026: anyone whose PIN this till holds). The native shift open
+ * enforces the rules itself (`offline_check_in.rs`); this module only words
+ * them and keeps the modal from offering what the till will refuse.
  */
 import type { TFunction } from 'i18next';
-
-/** The roles a till checks in without the server; every other role needs it. */
-export const OFFLINE_CHECK_IN_ROLES: readonly string[] = ['cashier', 'manager', 'driver'];
-
-export const isOfflineCheckInRole = (role: string | null | undefined): boolean =>
-  OFFLINE_CHECK_IN_ROLES.includes(String(role ?? '').trim().toLowerCase());
 
 /** A check-in answer whose PIN this till checked itself. */
 export const checkedOnTill = (answer: unknown): boolean =>
   !!answer && typeof answer === 'object' && (answer as { source?: unknown }).source === 'offline';
-
-export const offlineRoleNotAllowedMessage = (t: TFunction): string =>
-  t(
-    'modals.staffShift.offlineCheckIn.roleNotAllowed',
-    'Without a connection, only a cashier, manager or driver can check in on this till.',
-  );
 
 export const offlineGiftCardsMessage = (t: TFunction): string =>
   t(
@@ -37,8 +26,6 @@ export const offlineGiftCardsMessage = (t: TFunction): string =>
 /** The native shift-open refusals of an offline check-in, worded; null otherwise. */
 export function describeOfflineOpeningRefusal(error: string, t: TFunction): string | null {
   switch (error) {
-    case 'OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED':
-      return offlineRoleNotAllowedMessage(t);
     case 'OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER':
       return offlineGiftCardsMessage(t);
     case 'OFFLINE_CHECK_IN_WAITER_TERMINAL':

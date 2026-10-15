@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -73,6 +74,31 @@ pub(crate) fn pos_capabilities_for(method: &str, path: &str) -> Option<&'static 
 /// build-once client) or the same `Err` message repeated. Callers
 /// propagate the error instead of panicking.
 static HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+
+/// Unix milliseconds of the latest reply from the admin server (any HTTP
+/// status below 500), process-wide; 0 until the first one.
+///
+/// A reply proves the terminal was online at that moment, so the incident
+/// reporter never calls an outage across it. Tomikro, 14/10/2026: the till
+/// paged "offline" from two failed `/api/health` probes while its order sync
+/// was answered every 16 seconds (`incident_reporting::advance_network_outage`).
+static LAST_SERVER_REPLY_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Record a reply from the admin server. Statuses of 500 and above (and
+/// transport failures, which never get here) prove nothing.
+pub fn note_server_reply(status: StatusCode) {
+    if status.as_u16() < 500 {
+        LAST_SERVER_REPLY_MS.fetch_max(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+    }
+}
+
+/// The latest reply from the admin server since this process started.
+pub fn last_server_reply_at() -> Option<chrono::DateTime<chrono::Utc>> {
+    match LAST_SERVER_REPLY_MS.load(Ordering::Relaxed) {
+        0 => None,
+        millis => chrono::DateTime::from_timestamp_millis(millis),
+    }
+}
 
 fn shared_client() -> Result<&'static Client, String> {
     HTTP_CLIENT
@@ -545,6 +571,7 @@ pub async fn test_connectivity(admin_url: &str, api_key: &str) -> ConnectivityRe
 
     let latency = start.elapsed().as_millis() as u64;
     let status = resp.status();
+    note_server_reply(status);
 
     if status.is_success() {
         info!(latency_ms = latency, "connectivity test passed");
@@ -823,6 +850,7 @@ pub async fn fetch_from_admin_detailed_with_staff_session(
         .await
         .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
     let status = resp.status();
+    note_server_reply(status);
 
     if !status.is_success() {
         let body_text = read_capped_error_body(&mut resp).await;
@@ -872,6 +900,7 @@ pub(crate) async fn post_admin_json_with_staff_session_reply(
         .await
         .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
     let status = resp.status();
+    note_server_reply(status);
 
     if status.is_success() {
         let body = match read_success_json(resp).await {
@@ -1006,6 +1035,7 @@ pub async fn fetch_raw_from_admin_detailed(
         .await
         .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
     let status = resp.status();
+    note_server_reply(status);
 
     if !status.is_success() {
         let body_text = read_capped_error_body(&mut resp).await;

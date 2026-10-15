@@ -6,7 +6,7 @@ use std::time::Duration;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, diagnostics, incident_reporting, sync};
+use crate::{api, db, diagnostics, incident_reporting, sync};
 
 /// Export options from the renderer. `redactSensitive` is accepted for the
 /// IPC contract and ignored: every bundle is redacted (review 30/09/2026 —
@@ -143,8 +143,22 @@ pub fn start_remote_incident_reporter(
         );
         loop {
             match build_system_health_payload(db.as_ref(), sync_state.as_ref()).await {
-                Ok(health) => {
+                Ok(mut health) => {
+                    let observed_at = Utc::now();
+                    incident_reporting::track_network_outage(
+                        db.as_ref(),
+                        &mut health,
+                        api::last_server_reply_at(),
+                        observed_at,
+                    );
                     let candidates = incident_reporting::classify_incidents(&health);
+                    let cleared = incident_reporting::note_observation(
+                        db.as_ref(),
+                        &health,
+                        &candidates,
+                        observed_at,
+                    );
+                    let mut reached_server = false;
                     for candidate in candidates {
                         if !incident_reporting::should_send_candidate(
                             db.as_ref(),
@@ -162,6 +176,12 @@ pub fn start_remote_incident_reporter(
                         .await
                         {
                             Ok(response) => {
+                                reached_server = true;
+                                incident_reporting::note_reported(
+                                    db.as_ref(),
+                                    &candidate.fingerprint,
+                                    Utc::now(),
+                                );
                                 let _ = app.emit(
                                     "incident_reporting_update",
                                     serde_json::json!({
@@ -195,14 +215,77 @@ pub fn start_remote_incident_reporter(
                             }
                         }
                     }
+                    if reached_server {
+                        // A report reached the server: the till is online now,
+                        // and an outage it was in is over.
+                        incident_reporting::note_reached_server(db.as_ref(), Utc::now());
+                    }
+
+                    // The one report of a real outage, once it is over. No
+                    // "online now" check: it describes a past outage, and the
+                    // server stores it already resolved.
+                    let terminal_id = health
+                        .pointer("/terminalContext/terminalId")
+                        .and_then(|value| value.as_str())
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("unknown-terminal")
+                        .to_string();
+                    if let Some(report) =
+                        incident_reporting::due_outage_report(db.as_ref(), &terminal_id, Utc::now())
+                    {
+                        let sent = incident_reporting::send_candidate_report(
+                            db.as_ref(),
+                            &report,
+                            &health,
+                        )
+                        .await;
+                        incident_reporting::record_outage_report_outcome(
+                            db.as_ref(),
+                            sent.is_ok(),
+                            Utc::now(),
+                        );
+                        match sent {
+                            Ok(_) => {
+                                incident_reporting::note_reached_server(db.as_ref(), Utc::now());
+                                info!(
+                                    summary = %report.summary,
+                                    "Reported a network outage after it ended"
+                                );
+                            }
+                            Err(error) => warn!(
+                                error = %error,
+                                "Post-outage report failed; will retry"
+                            ),
+                        }
+                    }
+
+                    if !cleared.is_empty() {
+                        match incident_reporting::report_cleared_incidents(db.as_ref(), &cleared)
+                            .await
+                        {
+                            Ok(_) => info!(
+                                count = cleared.len(),
+                                "Reported incidents cleared to the server"
+                            ),
+                            Err(error) => warn!(
+                                count = cleared.len(),
+                                error = %error,
+                                "Incident clearance report failed; will retry"
+                            ),
+                        }
+                    }
                 }
                 Err(error) => {
                     let candidate = incident_reporting::health_monitor_failed_candidate(
                         read_terminal_id_for_incident(db.as_ref()),
                         &error,
                     );
+                    incident_reporting::note_failed_observation(
+                        db.as_ref(),
+                        &candidate.fingerprint,
+                    );
                     if incident_reporting::should_send_candidate(db.as_ref(), &candidate, false) {
-                        if let Err(report_error) = incident_reporting::send_candidate_report(
+                        match incident_reporting::send_candidate_report(
                             db.as_ref(),
                             &candidate,
                             &serde_json::json!({
@@ -212,11 +295,16 @@ pub fn start_remote_incident_reporter(
                         )
                         .await
                         {
-                            warn!(
+                            Ok(_) => incident_reporting::note_reported(
+                                db.as_ref(),
+                                &candidate.fingerprint,
+                                Utc::now(),
+                            ),
+                            Err(report_error) => warn!(
                                 error = %report_error,
                                 health_error = %error,
                                 "Failed to report health monitor incident"
-                            );
+                            ),
                         }
                     }
                     warn!(error = %error, "Remote incident reporter health read failed");

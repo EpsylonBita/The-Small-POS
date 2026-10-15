@@ -74,9 +74,7 @@ import {
   cachedGiftCardsStore,
   checkedOnTill,
   describeOfflineOpeningRefusal,
-  isOfflineCheckInRole,
   offlineGiftCardsMessage,
-  offlineRoleNotAllowedMessage,
 } from '../../services/offlineCheckIn';
 import { getCachedTerminalCredentials } from '../../services/terminal-credentials';
 import { financialOpening, openingMatchesScope, parseOpeningCents, type FinancialOpeningScope } from '../../lib/financial-opening';
@@ -543,8 +541,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const financialCompleted = useRef(false);
   const financialClear = useRef<Promise<boolean>>(Promise.resolve(true));
   // The person whose PIN this till checked itself because the server could not
-  // be reached (native `source: 'offline'`): only a cashier, manager or driver
-  // opens, and a gift-card store's drawer opening needs the server.
+  // be reached (native `source: 'offline'`): any role opens (founder,
+  // 15/10/2026), but a gift-card store's drawer opening needs the server.
   const offlineCheckInStaffId = useRef<string | null>(null);
   const checkInGeneration = useRef(0);
   const checkInMounted = useRef(true);
@@ -2618,8 +2616,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           'modals.staffShift.offlineCheckIn.locked',
           'Too many wrong PINs. Try again in 15 minutes, or once the connection is back.',
         );
-      case 'offline_role_not_allowed':
-        return offlineRoleNotAllowedMessage(t);
       case 'offline_waiter_terminal':
         return t(
           'modals.staffShift.offlineCheckIn.waiterPhone',
@@ -2967,10 +2963,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const role = normalizeShiftRole(roleName);
     if (!role) {
       setError(t('modals.staffShift.unsupportedShiftRole', { defaultValue: 'This role cannot open a POS shift. Ask your manager to assign a supported POS role.' }));
-      return;
-    }
-    if (offlineCheckInStaffId.current === selectedStaff?.id && !isOfflineCheckInRole(role)) {
-      setError(offlineRoleNotAllowedMessage(t));
       return;
     }
     if (cashierFirstGateActive && role !== 'cashier') {

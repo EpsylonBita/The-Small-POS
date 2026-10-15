@@ -4,7 +4,6 @@
       "offlineCheckIn": {
         "checkedInTitle": "Checked in without a connection",
         "checkedInMessage": "The server checks this check-in once the connection is back.",
-        "roleNotAllowed": "Without a connection, only a cashier, manager or driver can check in on this till.",
         "giftCardsNeedServer": "With gift cards, opening the drawer needs the server. Check in once the connection is back.",
         "noPinOnTill": "This till holds no PIN for this person, so they can't check in without a connection.",
         "locked": "Too many wrong PINs. Try again in 15 minutes, or once the connection is back.",

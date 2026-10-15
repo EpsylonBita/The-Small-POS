@@ -3552,7 +3552,10 @@ pub async fn check_network_status() -> Value {
         .send()
         .await
     {
-        Ok(resp) => serde_json::json!({ "isOnline": resp.status().is_success() }),
+        Ok(resp) => {
+            api::note_server_reply(resp.status());
+            serde_json::json!({ "isOnline": resp.status().is_success() })
+        }
         Err(_) => serde_json::json!({ "isOnline": false }),
     }
 }

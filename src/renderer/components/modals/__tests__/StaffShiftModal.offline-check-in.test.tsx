@@ -2,10 +2,9 @@
  * The desktop's staff check-in without a connection (founder decision
  * 13/10/2026, Android parity with PR #356). The native verify asks the server
  * first; only when it cannot be reached does the till check the PIN itself
- * and answer `source: 'offline'`. Then only a cashier, manager or driver
- * opens, a gift-card store's cashier opening is refused (never an ordinary
- * one), and the renderer never handles a PIN hash or writes the staff
- * directory cache.
+ * and answer `source: 'offline'`. Then every role opens (founder, 15/10/2026),
+ * a gift-card store's cashier opening is refused (never an ordinary one), and
+ * the renderer never handles a PIN hash or writes the staff directory cache.
  */
 import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -112,13 +111,19 @@ describe('StaffShiftModal check-in without a connection', () => {
     expect(bridge.settings.updateLocal).not.toHaveBeenCalledWith(expect.objectContaining({ category: 'staff_auth_cache' }));
   });
 
-  it('opens only a cashier, manager or driver shift when this till checked the PIN', async () => {
+  it('opens a kitchen shift when this till checked the PIN: every role checks in offline', async () => {
+    // Before 15/10/2026 only a cashier, manager or driver opened this way.
     staff(['kitchen', 'server']);
+    bridge.shifts.open.mockResolvedValue({ success: true, shiftId: 'kitchen-offline', offlineCheckIn: true });
     render(<StaffShiftModal {...props} />);
     await enterPin();
     await chooseRole('kitchenRoleHelper');
-    await screen.findByText('Without a connection, only a cashier, manager or driver can check in on this till.');
-    expect(bridge.shifts.open).not.toHaveBeenCalled();
+    await waitFor(() => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ roleType: 'kitchen' })));
+    await waitFor(() => expect(fixture.toast).toHaveBeenCalledWith(
+      'Checked in without a connection. The server checks this check-in once the connection is back.',
+      expect.anything(),
+    ));
+    expect(screen.queryByText(/only a cashier, manager or driver/)).toBeNull();
   });
 
   it('lets the server decide a role when it checked the PIN', async () => {
@@ -176,7 +181,6 @@ describe('StaffShiftModal check-in without a connection', () => {
 
   it.each([
     ['offline_pin_locked', 'Too many wrong PINs. Try again in 15 minutes, or once the connection is back.'],
-    ['offline_role_not_allowed', 'Without a connection, only a cashier, manager or driver can check in on this till.'],
     ['offline_waiter_terminal', 'A waiter phone checks staff in through the server. Try again once the connection is back.'],
     ['staff_not_available_offline', "This till holds no PIN for this person, so they can't check in without a connection."],
     ['pin_locked', 'This PIN is locked for now. Try again later.'],

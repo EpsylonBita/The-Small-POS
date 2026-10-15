@@ -3,7 +3,8 @@
 //! Android rules of PR #356, `StaffPinHashVault`).
 //!
 //! The hashes are the server's own bcrypt hashes from the staff directory of
-//! this till's branch. They live in the OS credential store only (Windows
+//! this till's branch, for everyone it lists with a PIN, whatever their role:
+//! every role checks in offline (founder, 15/10/2026). They live in the OS credential store only (Windows
 //! Credential Manager through `storage.rs`), never in SQLite and never where
 //! the renderer can read them: the vault keys are native-only, and the
 //! directory cache, the cached admin responses and the settings reads are
@@ -36,15 +37,6 @@ const VAULT_VERSION: u8 = 1;
 // credential; 900 UTF-16 code units leave room for the platform encoding.
 const CHUNK_UTF16_UNITS: usize = 900;
 
-/// The roles a main till checks in without the server (founder decision
-/// 13/10/2026). Every other role needs the server.
-pub(crate) const OFFLINE_CHECK_IN_ROLES: [&str; 3] = ["cashier", "manager", "driver"];
-
-pub(crate) fn is_offline_check_in_role(role: &str) -> bool {
-    let role = role.trim().to_ascii_lowercase();
-    OFFLINE_CHECK_IN_ROLES.contains(&role.as_str())
-}
-
 /// One person as the vault holds them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct VaultEntry {
@@ -54,9 +46,6 @@ pub(crate) struct VaultEntry {
     pub active: bool,
     #[serde(rename = "l", default)]
     pub can_login_pos: bool,
-    /// Lower-case role names from the directory.
-    #[serde(rename = "r", default)]
-    pub roles: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,15 +77,12 @@ pub(crate) struct DirectoryPinEntry {
     pub pin_removed: bool,
     pub active: bool,
     pub can_login_pos: bool,
-    pub roles: Vec<String>,
 }
 
 /// The outcome of a PIN this till checked itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum OfflinePinCheck {
-    Accepted {
-        roles: Vec<String>,
-    },
+    Accepted,
     /// No usable hash for this person on this till (or the vault cannot be
     /// read or written): the server is needed.
     Unavailable,
@@ -251,21 +237,13 @@ fn split_chunks(encoded: &str) -> Option<Vec<String>> {
     (!chunks.is_empty() && chunks.len() <= STAFF_PIN_VAULT_BANK_A_KEYS.len()).then_some(chunks)
 }
 
-/// A vault that does not fit keeps first the people who can use it: POS login
-/// allowed, then also an offline check-in role.
+/// A vault that does not fit keeps the people who can use it: active, with
+/// POS login allowed. Their role does not matter: every role checks in.
 fn fit_to_capacity(doc: &mut VaultDoc) -> Result<Vec<String>, String> {
-    for pass in 0..3 {
-        match pass {
-            1 => doc
-                .staff
-                .retain(|_, entry| entry.active && entry.can_login_pos),
-            2 => doc.staff.retain(|_, entry| {
-                entry
-                    .roles
-                    .iter()
-                    .any(|role| is_offline_check_in_role(role))
-            }),
-            _ => {}
+    for pass in 0..2 {
+        if pass == 1 {
+            doc.staff
+                .retain(|_, entry| entry.active && entry.can_login_pos);
         }
         let staff = &doc.staff;
         doc.failures
@@ -360,21 +338,12 @@ pub(crate) fn vault_from_directory(
         let Some(hash) = hash else {
             continue;
         };
-        let mut roles: Vec<String> = entry
-            .roles
-            .iter()
-            .map(|role| role.trim().to_ascii_lowercase())
-            .filter(|role| !role.is_empty())
-            .collect();
-        roles.sort();
-        roles.dedup();
         staff.insert(
             staff_id.to_string(),
             VaultEntry {
                 hash,
                 active: entry.active,
                 can_login_pos: entry.can_login_pos,
-                roles,
             },
         );
         if let Some(failure) = previous.and_then(|doc| doc.failures.get(staff_id)) {
@@ -486,9 +455,7 @@ pub(crate) fn verify_offline(
                 warn!(%error, "Cleared wrong-PIN count could not be saved");
             }
         }
-        return OfflinePinCheck::Accepted {
-            roles: entry.roles.clone(),
-        };
+        return OfflinePinCheck::Accepted;
     }
 
     // A lock that ran out starts a fresh count.
@@ -565,14 +532,13 @@ mod tests {
         bcrypt::hash(pin, 4).expect("hash test pin")
     }
 
-    fn person(id: &str, pin_hash: Option<String>, roles: &[&str]) -> DirectoryPinEntry {
+    fn person(id: &str, pin_hash: Option<String>) -> DirectoryPinEntry {
         DirectoryPinEntry {
             id: id.to_string(),
             hash: pin_hash,
             pin_removed: false,
             active: true,
             can_login_pos: true,
-            roles: roles.iter().map(|role| role.to_string()).collect(),
         }
     }
 
@@ -580,12 +546,7 @@ mod tests {
     fn hashes_live_in_the_credential_store_and_survive_a_reload() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let now = Utc::now();
-        save_directory(
-            BRANCH,
-            &[person("staff-1", Some(hash("4321")), &["Cashier"])],
-            now,
-        )
-        .expect("save");
+        save_directory(BRANCH, &[person("staff-1", Some(hash("4321")))], now).expect("save");
 
         assert!(crate::tests::fake_keyring::get(KEY_STAFF_PIN_VAULT_MANIFEST).is_some());
         // Native-only: the generic credential surface never hands them out.
@@ -599,12 +560,10 @@ mod tests {
 
         let doc = load().expect("read").expect("vault");
         assert_eq!(doc.branch_id, BRANCH);
-        assert_eq!(doc.staff["staff-1"].roles, vec!["cashier".to_string()]);
+        assert!(doc.staff.contains_key("staff-1"));
         assert_eq!(
             verify_offline(BRANCH, "staff-1", "4321", now),
-            OfflinePinCheck::Accepted {
-                roles: vec!["cashier".to_string()]
-            }
+            OfflinePinCheck::Accepted
         );
         assert_eq!(
             verify_offline("branch-2", "staff-1", "4321", now),
@@ -619,8 +578,8 @@ mod tests {
         save_directory(
             BRANCH,
             &[
-                person("staff-1", Some(hash("4321")), &["cashier"]),
-                person("staff-2", Some(hash("1111")), &["cashier"]),
+                person("staff-1", Some(hash("4321"))),
+                person("staff-2", Some(hash("1111"))),
             ],
             now,
         )
@@ -656,12 +615,7 @@ mod tests {
             OfflinePinCheck::Accepted { .. }
         ));
         // A directory refresh keeps the count of a person still listed.
-        save_directory(
-            BRANCH,
-            &[person("staff-1", Some(hash("4321")), &["cashier"])],
-            now,
-        )
-        .unwrap();
+        save_directory(BRANCH, &[person("staff-1", Some(hash("4321")))], now).unwrap();
         assert!(matches!(
             verify_offline(BRANCH, "staff-1", "4321", now + Duration::minutes(1)),
             OfflinePinCheck::Locked { .. }
@@ -678,12 +632,7 @@ mod tests {
     fn a_wrong_pin_whose_count_cannot_be_saved_closes_offline_check_in() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let now = Utc::now();
-        save_directory(
-            BRANCH,
-            &[person("staff-1", Some(hash("4321")), &["cashier"])],
-            now,
-        )
-        .unwrap();
+        save_directory(BRANCH, &[person("staff-1", Some(hash("4321")))], now).unwrap();
         crate::tests::fake_keyring::fail_writes_for(
             KEY_STAFF_PIN_VAULT_MANIFEST,
             "KEYRING_WRITE_FAILED",
@@ -701,18 +650,18 @@ mod tests {
         let previous = vault_from_directory(
             BRANCH,
             &[
-                person("kept", Some(hash("1111")), &["cashier"]),
-                person("removed", Some(hash("2222")), &["cashier"]),
-                person("gone", Some(hash("3333")), &["cashier"]),
+                person("kept", Some(hash("1111"))),
+                person("removed", Some(hash("2222"))),
+                person("gone", Some(hash("3333"))),
             ],
             None,
             now,
         );
-        let mut removed = person("removed", None, &["cashier"]);
+        let mut removed = person("removed", None);
         removed.pin_removed = true;
         let next = vault_from_directory(
             BRANCH,
-            &[person("kept", None, &["cashier"]), removed],
+            &[person("kept", None), removed],
             Some(&previous),
             now,
         );
@@ -720,12 +669,7 @@ mod tests {
         assert_eq!(next.staff["kept"].hash, previous.staff["kept"].hash);
 
         // Another branch's vault never lends its hashes.
-        let other = vault_from_directory(
-            "branch-2",
-            &[person("kept", None, &[])],
-            Some(&previous),
-            now,
-        );
+        let other = vault_from_directory("branch-2", &[person("kept", None)], Some(&previous), now);
         assert!(other.staff.is_empty());
     }
 
@@ -737,7 +681,6 @@ mod tests {
             &[person(
                 "staff-1",
                 Some("5f4dcc3b5aa765d61d8327deb882cf99".into()),
-                &["cashier"],
             )],
             None,
             now,
@@ -755,7 +698,6 @@ mod tests {
                 person(
                     &format!("00000000-0000-4000-8000-{index:012}"),
                     Some(shared.clone()),
-                    &["cashier"],
                 )
             })
             .collect();
@@ -777,6 +719,64 @@ mod tests {
         }
         assert!(load().unwrap().is_none());
         assert!(crate::tests::fake_keyring::is_empty());
+    }
+
+    /// A vault saved by 1.4.130/1.4.131 carries each person's role list
+    /// (`"r"`). It still reads, and its hashes still check a PIN.
+    #[test]
+    fn a_vault_saved_with_role_lists_still_reads() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let now = Utc::now();
+        let hash = hash("4321");
+        let saved = serde_json::json!({
+            "v": 1, "branch_id": BRANCH, "saved_at": now.to_rfc3339(),
+            "staff": { "staff-1": { "h": hash, "a": true, "l": true, "r": ["kitchen"] } },
+            "failures": {},
+        });
+        backend_write(STAFF_PIN_VAULT_BANK_A_KEYS[0], &saved.to_string()).expect("chunk");
+        backend_write(
+            KEY_STAFF_PIN_VAULT_MANIFEST,
+            r#"{"v":1,"bank":"A","chunks":1}"#,
+        )
+        .expect("manifest");
+
+        assert!(load()
+            .expect("read")
+            .expect("vault")
+            .staff
+            .contains_key("staff-1"));
+        assert_eq!(
+            verify_offline(BRANCH, "staff-1", "4321", now),
+            OfflinePinCheck::Accepted
+        );
+    }
+
+    /// Every role checks in offline (founder, 15/10/2026), so a vault over
+    /// capacity drops only the people who cannot log in to the POS at all.
+    #[test]
+    fn a_vault_over_capacity_keeps_everyone_who_can_log_in() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let now = Utc::now();
+        let shared = hash("4321");
+        let directory: Vec<_> = (0..160)
+            .map(|index| {
+                let mut entry = person(
+                    &format!("00000000-0000-4000-8000-{index:012}"),
+                    Some(shared.clone()),
+                );
+                entry.can_login_pos = index % 2 == 0;
+                entry
+            })
+            .collect();
+        save_directory(BRANCH, &directory, now).expect("save");
+
+        let doc = load().unwrap().unwrap();
+        assert_eq!(doc.staff.len(), 80);
+        assert!(doc.staff.values().all(|entry| entry.can_login_pos));
+        assert_eq!(
+            verify_offline(BRANCH, "00000000-0000-4000-8000-000000000158", "4321", now),
+            OfflinePinCheck::Accepted
+        );
     }
 
     #[test]

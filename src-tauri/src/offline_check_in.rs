@@ -5,11 +5,14 @@
 //! answer stands. Only on a transport failure (no answer, or a 502, 503 or 504
 //! from its gateway) does the till check the PIN against the hash it holds
 //! (`staff_pin_vault.rs`). That check leaves a short-lived grant here, which
-//! the native shift open reads, so neither the role rule nor the marker
-//! depends on the renderer:
-//! - only a cashier, manager or driver opens a shift this way;
+//! the native shift open reads, so neither the rules nor the marker depend on
+//! the renderer:
+//! - every role opens a shift this way (founder, 15/10/2026: anyone whose PIN
+//!   this till holds), under the local rules that hold online too: the first
+//!   check-in of the business day is a cashier;
 //! - in a gift-card store a cashier's opening needs the server (the original
 //!   drawer opening is hosted), as on Android;
+//! - a waiter phone never checks staff in this way;
 //! - the queued `shift_open` carries `offline_check_in: true`, which the
 //!   server re-checks when it arrives (`offline-check-in.ts`).
 
@@ -18,13 +21,11 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::api::AdminFetchError;
-use crate::staff_pin_vault::is_offline_check_in_role;
 
 /// How long a PIN checked on this till admits the shift opening it started
 /// (role choice and the cash count happen in between).
 const GRANT_TTL_MINUTES: i64 = 15;
 
-pub(crate) const OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED: &str = "OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED";
 pub(crate) const OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER: &str =
     "OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER";
 pub(crate) const OFFLINE_CHECK_IN_WAITER_TERMINAL: &str = "OFFLINE_CHECK_IN_WAITER_TERMINAL";
@@ -34,12 +35,11 @@ pub(crate) const OFFLINE_CHECK_IN_WAITER_TERMINAL: &str = "OFFLINE_CHECK_IN_WAIT
 pub(crate) enum CheckInAdmission {
     /// The server checked the PIN (or no check-in preceded the opening).
     Ordinary,
-    /// This till checked the PIN itself: the roles the directory gave.
-    Offline { roles: Vec<String> },
+    /// This till checked the PIN itself.
+    Offline,
 }
 
 struct Grant {
-    roles: Vec<String>,
     expires_at: DateTime<Utc>,
 }
 
@@ -65,26 +65,24 @@ pub(crate) fn record_server_check_in(staff_id: &str) {
 }
 
 /// This till checked this person's PIN itself.
-pub(crate) fn record_offline_check_in(staff_id: &str, roles: Vec<String>, now: DateTime<Utc>) {
+pub(crate) fn record_offline_check_in(staff_id: &str, now: DateTime<Utc>) {
     grants().insert(
         staff_id.trim().to_string(),
         Grant {
-            roles,
             expires_at: now + Duration::minutes(GRANT_TTL_MINUTES),
         },
     );
 }
 
 /// How a shift opening for `staff_id` is admitted now. The grant stays until
-/// the opening succeeds, so a refused role can be corrected.
+/// the opening succeeds, so a refused opening can be corrected.
 pub(crate) fn admission_for(staff_id: &str, now: DateTime<Utc>) -> CheckInAdmission {
     let mut grants = grants();
     grants.retain(|_, grant| grant.expires_at > now);
-    match grants.get(staff_id.trim()) {
-        Some(grant) => CheckInAdmission::Offline {
-            roles: grant.roles.clone(),
-        },
-        None => CheckInAdmission::Ordinary,
+    if grants.contains_key(staff_id.trim()) {
+        CheckInAdmission::Offline
+    } else {
+        CheckInAdmission::Ordinary
     }
 }
 
@@ -93,24 +91,16 @@ pub(crate) fn complete(staff_id: &str) {
     grants().remove(staff_id.trim());
 }
 
-/// The rules of an opening whose PIN this till checked: the person holds an
-/// offline role, the shift's role is one, and a gift-card store's cashier
-/// opening goes through the server.
+/// The rules of an opening whose PIN this till checked: never on a waiter
+/// phone, and a gift-card store's cashier opening goes through the server.
+/// Any role opens otherwise (founder, 15/10/2026).
 pub(crate) fn check_offline_opening(
     role_type: &str,
-    staff_roles: &[String],
     gift_cards_store: bool,
     waiter_terminal: bool,
 ) -> Result<(), String> {
     if waiter_terminal {
         return Err(OFFLINE_CHECK_IN_WAITER_TERMINAL.to_string());
-    }
-    if !is_offline_check_in_role(role_type)
-        || !staff_roles
-            .iter()
-            .any(|role| is_offline_check_in_role(role))
-    {
-        return Err(OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED.to_string());
     }
     if gift_cards_store && role_type.trim().eq_ignore_ascii_case("cashier") {
         return Err(OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER.to_string());
@@ -174,50 +164,41 @@ mod tests {
         let now = Utc::now();
         let staff = "grant-test-staff-1";
         assert_eq!(admission_for(staff, now), CheckInAdmission::Ordinary);
-        record_offline_check_in(staff, vec!["cashier".into()], now);
+        record_offline_check_in(staff, now);
         assert_eq!(
             admission_for(staff, now + Duration::minutes(5)),
-            CheckInAdmission::Offline {
-                roles: vec!["cashier".into()]
-            }
+            CheckInAdmission::Offline
         );
         assert_eq!(
             admission_for(staff, now + Duration::minutes(GRANT_TTL_MINUTES + 1)),
             CheckInAdmission::Ordinary
         );
 
-        record_offline_check_in(staff, vec!["cashier".into()], now);
+        record_offline_check_in(staff, now);
         record_server_check_in(staff);
         assert_eq!(admission_for(staff, now), CheckInAdmission::Ordinary);
     }
 
     #[test]
-    fn offline_openings_follow_the_founder_role_and_gift_card_rules() {
-        let cashier = vec!["cashier".to_string()];
-        let driver = vec!["driver".to_string()];
-        let kitchen = vec!["kitchen".to_string()];
-        assert!(check_offline_opening("cashier", &cashier, false, false).is_ok());
-        assert!(check_offline_opening("manager", &cashier, false, false).is_ok());
-        assert!(check_offline_opening("driver", &driver, false, false).is_ok());
-        assert!(check_offline_opening("driver", &driver, true, false).is_ok());
-        for (role, roles) in [
-            ("kitchen", &kitchen),
-            ("server", &cashier),
-            ("cashier", &kitchen),
-        ] {
+    fn every_role_opens_offline_under_the_gift_card_and_waiter_phone_rules() {
+        // Founder, 15/10/2026: every role checks in offline, not only a
+        // cashier, manager or driver.
+        for role in ["cashier", "manager", "driver", "kitchen", "server"] {
+            assert!(check_offline_opening(role, false, false).is_ok(), "{role}");
+        }
+        for role in ["manager", "driver", "kitchen", "server"] {
+            assert!(check_offline_opening(role, true, false).is_ok(), "{role}");
+        }
+        assert_eq!(
+            check_offline_opening("cashier", true, false).unwrap_err(),
+            OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER
+        );
+        for role in ["cashier", "kitchen"] {
             assert_eq!(
-                check_offline_opening(role, roles, false, false).unwrap_err(),
-                OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED,
+                check_offline_opening(role, false, true).unwrap_err(),
+                OFFLINE_CHECK_IN_WAITER_TERMINAL,
                 "{role}"
             );
         }
-        assert_eq!(
-            check_offline_opening("cashier", &cashier, true, false).unwrap_err(),
-            OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER
-        );
-        assert_eq!(
-            check_offline_opening("cashier", &cashier, false, true).unwrap_err(),
-            OFFLINE_CHECK_IN_WAITER_TERMINAL
-        );
     }
 }

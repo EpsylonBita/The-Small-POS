@@ -257,8 +257,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 }
 
 /// [`open_shift`] for a check-in whose PIN was checked as `admission` says.
-/// A PIN this till checked itself (the server could not be reached) opens
-/// only a cashier, manager or driver shift, never a gift-card store's cashier
+/// A PIN this till checked itself (the server could not be reached) opens a
+/// shift of any role (founder, 15/10/2026), never a gift-card store's cashier
 /// opening, and its queued open carries `offline_check_in: true` for the
 /// server's re-check (founder decision 13/10/2026; Android parity).
 pub(crate) fn open_shift_with_admission(
@@ -266,12 +266,9 @@ pub(crate) fn open_shift_with_admission(
     payload: &Value,
     admission: &CheckInAdmission,
 ) -> Result<Value, String> {
-    let offline_roles = match admission {
-        CheckInAdmission::Offline { roles } => Some(roles.as_slice()),
-        CheckInAdmission::Ordinary => None,
-    };
+    let offline = matches!(admission, CheckInAdmission::Offline);
     // Read before the database lock: the module list is a file of its own.
-    let gift_cards_store = offline_roles.is_some() && crate::offline_check_in::gift_cards_store(db);
+    let gift_cards_store = offline && crate::offline_check_in::gift_cards_store(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let normalize_runtime_identity = |value: String| -> Option<String> {
@@ -338,10 +335,9 @@ pub(crate) fn open_shift_with_admission(
         role @ ("cashier" | "manager" | "driver" | "kitchen" | "server") => role.to_string(),
         _ => return Err("UNSUPPORTED_SHIFT_ROLE".to_string()),
     };
-    if let Some(staff_roles) = offline_roles {
+    if offline {
         crate::offline_check_in::check_offline_opening(
             &role_type,
-            staff_roles,
             gift_cards_store,
             crate::offline_check_in::waiter_terminal(&conn),
         )?;
@@ -629,7 +625,7 @@ pub(crate) fn open_shift_with_admission(
 
         sync_payload["isDayStart"] = Value::Bool(is_day_start);
         sync_payload["currency"] = Value::String(currency.clone());
-        if offline_roles.is_some() {
+        if offline {
             // Travels with the queued open only; the shift sync spreads it
             // into the `shift_open` event the server re-checks.
             sync_payload["offline_check_in"] = Value::Bool(true);
@@ -674,7 +670,7 @@ pub(crate) fn open_shift_with_admission(
     if let Some(warning) = drawer_continuity_warning {
         response["drawerContinuityWarning"] = warning;
     }
-    if offline_roles.is_some() {
+    if offline {
         response["offlineCheckIn"] = Value::Bool(true);
     }
     Ok(response)
@@ -8173,16 +8169,14 @@ mod tests {
     /// A check-in whose PIN this till checked itself because the server could
     /// not be reached (founder decision 13/10/2026, Android parity): its
     /// queued open carries the `offline_check_in` marker the server re-checks,
-    /// the cashier-first rule still holds, and only a cashier, manager or
-    /// driver opens. An ordinary check-in is unchanged.
+    /// the cashier-first rule still holds, and every role opens (founder,
+    /// 15/10/2026). An ordinary check-in is unchanged.
     #[test]
-    fn an_offline_check_in_opens_with_the_marker_under_the_founder_role_rules() {
+    fn an_offline_check_in_opens_every_role_with_the_marker_after_the_cashier() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         seed_operating_currency_for_test(&db, "branch-1", "EUR");
-        let offline = |roles: &[&str]| CheckInAdmission::Offline {
-            roles: roles.iter().map(|role| role.to_string()).collect(),
-        };
+        let offline = CheckInAdmission::Offline;
         let open = |staff: &str, role: &str, admission: &CheckInAdmission| {
             open_shift_with_admission(
                 &db,
@@ -8194,35 +8188,36 @@ mod tests {
             )
         };
 
-        let first = open("driver-offline", "driver", &offline(&["driver"])).unwrap_err();
-        assert!(first.contains("must be a cashier"), "{first}");
-        for (staff, role, roles) in [
-            ("kitchen-offline", "kitchen", &["kitchen"][..]),
-            ("server-offline", "server", &["cashier"][..]),
-            ("cashier-without-role", "cashier", &["kitchen"][..]),
-        ] {
-            assert_eq!(
-                open(staff, role, &offline(roles)).unwrap_err(),
-                crate::offline_check_in::OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED,
-                "{staff}"
-            );
+        for (staff, role) in [("driver-offline", "driver"), ("kitchen-offline", "kitchen")] {
+            let first = open(staff, role, &offline).unwrap_err();
+            assert!(first.contains("must be a cashier"), "{staff}: {first}");
         }
 
-        let cashier = open("cashier-offline", "cashier", &offline(&["cashier"]))
-            .expect("an offline cashier opens the day");
+        let cashier =
+            open("cashier-offline", "cashier", &offline).expect("an offline cashier opens the day");
         assert_eq!(cashier["offlineCheckIn"], true);
         let shift_id = cashier["shiftId"].as_str().unwrap();
         assert_eq!(
             load_latest_shift_sync_payload(&db, "insert", shift_id)["offline_check_in"],
             true
         );
-        let driver = open("driver-offline", "driver", &offline(&["driver"]))
-            .expect("an offline driver opens after the cashier");
-        assert_eq!(
-            load_latest_shift_sync_payload(&db, "insert", driver["shiftId"].as_str().unwrap())
-                ["offline_check_in"],
-            true
-        );
+        for (staff, role) in [
+            ("driver-offline", "driver"),
+            ("kitchen-offline", "kitchen"),
+            ("server-offline", "server"),
+            ("manager-offline", "manager"),
+        ] {
+            let opened = open(staff, role, &offline).unwrap_or_else(|error| {
+                panic!("an offline {role} opens after the cashier: {error}")
+            });
+            assert_eq!(opened["offlineCheckIn"], true, "{role}");
+            assert_eq!(
+                load_latest_shift_sync_payload(&db, "insert", opened["shiftId"].as_str().unwrap())
+                    ["offline_check_in"],
+                true,
+                "{role}"
+            );
+        }
 
         let ordinary = open("manager-online", "manager", &CheckInAdmission::Ordinary)
             .expect("an ordinary check-in opens");
@@ -8253,9 +8248,7 @@ mod tests {
             &serde_json::json!({ "apiModules": [{ "module_id": "gift_cards" }] }),
         )
         .unwrap();
-        let offline = CheckInAdmission::Offline {
-            roles: vec!["cashier".to_string(), "manager".to_string()],
-        };
+        let offline = CheckInAdmission::Offline;
         let payload = |role: &str| {
             serde_json::json!({
                 "staffId": "gift-staff", "branchId": "branch-1", "terminalId": "term-1",
