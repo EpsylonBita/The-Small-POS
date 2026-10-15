@@ -18,6 +18,7 @@ import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { CaptureNotificationManager } from "./components/CaptureNotificationManager";
 import { CancellationNoticeManager } from "./components/notices/CancellationNoticeManager";
 import { WaiterServiceRequestManager } from "./components/notices/WaiterServiceRequestManager";
+import { PhoneShiftNoticeManager } from "./components/notices/PhoneShiftNoticeManager";
 import { IncomingOrderAlertManager } from "./components/notices/IncomingOrderAlertManager";
 import { AppRoutes } from "./AppRoutes";
 import { GlobalCashierGate } from './components/GlobalCashierGate';
@@ -1704,6 +1705,9 @@ function AppContent() {
                 hides immediately when `user` clears on logout. */}
             <CancellationNoticeManager enabled={Boolean(user)} />
             <WaiterServiceRequestManager enabled={Boolean(user)} />
+            {/* A phone shift that closes shows on the Main (founder rule
+                13/10/2026: phones hand over to the Main). Main only. */}
+            <PhoneShiftNoticeManager enabled={Boolean(user)} />
 
             {/* Incoming platform / customer orders waiting for accept /
                 decline. Mounted here, beside the routes and never inside

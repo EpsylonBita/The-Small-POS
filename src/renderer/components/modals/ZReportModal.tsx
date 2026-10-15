@@ -11,6 +11,7 @@ import type {
   ZReportDayOrder,
   ZReportFiscalQueue,
   ZReportGiftCloseBlocker,
+  ZReportPhoneShiftHandover,
 } from '../../types/reports';
 import { getSyncQueueBridge } from '../../services/SyncQueueBridge';
 import ZReportExportDialog, { type ZReportExportKind } from './ZReportExportDialog';
@@ -32,6 +33,30 @@ import {
   resolveZReportPresentation,
   resolveZReportTwintTotal,
 } from '../../utils/zReport';
+import {
+  readUnitShiftReadinessRemembered,
+  readinessSinceFromPeriodStart,
+  unitHasPhones,
+  unitIsQuiet,
+  type RememberedUnitReadiness,
+  unitShiftCashToReceive,
+  unitShiftPhoneLabel,
+  unitShiftPhoneState,
+  unitShiftStaffLabel,
+  type UnitReadinessResult,
+  type UnitShift,
+} from '../../utils/unit-shift-readiness';
+import {
+  closedShiftInZWindow,
+  extractUnitShiftsZRefusal,
+  frozenZCutoffMs,
+  phoneShiftCurrency,
+  phoneShiftRowFromReadiness,
+  phoneShiftRowFromStoredZ,
+  unitShiftHoldsZ,
+  type PhoneShiftStaffRow,
+  type UnitShiftsZRefusal,
+} from './z-report/phone-shifts';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
@@ -92,6 +117,14 @@ interface ZReportModalProps {
 }
 
 type CloseoutChecklistState = 'ready' | 'warning' | 'error' | 'pending';
+
+// English fallbacks of the shared `phoneShifts.handover.*` keys.
+const PHONE_SHIFT_HANDOVER_LABELS: Record<ZReportPhoneShiftHandover, string> = {
+  received: 'Received',
+  pending: 'To receive',
+  none: 'Nothing to hand over',
+  not_counted: 'Not counted',
+};
 
 function extractErrorMessage(
   error: unknown,
@@ -256,6 +289,21 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // close, so the checklist must not read "No sync blocker detected" (offline
   // audit 07/10/2026). Informational: the native Z refusal decides.
   const [serverReachable, setServerReachable] = useState<boolean | null>(null);
+  // Phone shifts of this Main's unit (founder rule 13/10/2026): the latest
+  // server read and the window it was made for. A read made for another
+  // window never counts.
+  const [phoneShiftsRead, setPhoneShiftsRead] = useState<{
+    key: string;
+    result: UnitReadinessResult;
+    /** The last good read (this one, or the remembered one when it failed). */
+    lastGood?: RememberedUnitReadiness | null;
+  } | null>(null);
+  const [phoneShiftsReading, setPhoneShiftsReading] = useState(false);
+  const [phoneShiftsReadVersion, setPhoneShiftsReadVersion] = useState(0);
+  const phoneShiftsSeqRef = useRef(0);
+  // When the shown preview arrived: a live preview ends at its build moment,
+  // a frozen (issued) Z window at its cutoff.
+  const [zReportReceivedAt, setZReportReceivedAt] = useState<number | null>(null);
   const wasOpenRef = useRef(false);
   const pendingOpenDateRef = useRef<string | null>(null);
   // Async results (print, submit, blocker resolve) belong to the open + branch + business day that
@@ -366,6 +414,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       setRetryingFiscalQueue(false);
       setExportDialogIntent(null);
       setZReport(null);
+      setZReportReceivedAt(null);
+      setPhoneShiftsRead(null);
       setLoading(true);
       setSelectedDate(nextDate);
       setIsUsingLiveDefaultDate(!lockDate);
@@ -415,6 +465,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
         const report = normalizeZReportData(result?.data || result);
         setZReport(report || null);
+        setZReportReceivedAt(Date.now());
 
         if (shouldAutoRefresh && typeof report?.date === 'string' && report.date.trim()) {
           setSelectedDate((prev) => (prev === report.date ? prev : report.date));
@@ -892,6 +943,47 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   // Final print reprints the stored z_reports row by id; a live preview has no id and cannot print.
   const persistedZReportId = resolvePersistedZReportId(zReport);
   const canPrintFinalReport = Boolean(persistedZReportId) && !giftCloseBlocksFinal;
+  // Phones always hand over to the Main (founder rule 13/10/2026): the Z
+  // cannot run while a phone shift of the unit is open. Read from the server
+  // for the window this till is about to close (the live day or the pending
+  // local submit: every report without a stored id, since native dates those
+  // by their POS day whatever date is picked): on open, every 30 s and on
+  // `shift-updated`. Never for a stored Z the date field shows, never on a
+  // till that cannot run the Z. The latest read decides: a failed read is
+  // "unavailable", never "no phone shifts".
+  const phoneShiftsSince = readinessSinceFromPeriodStart(zReport?.periodStart);
+  const phoneShiftsKey = isOpen
+    && canExecuteZReport
+    && Boolean(zReport)
+    && !persistedZReportId
+    ? `${branchId}|${phoneShiftsSince ?? ''}`
+    : null;
+  useEffect(() => {
+    if (!phoneShiftsKey) return undefined;
+    let active = true;
+    const read = async () => {
+      const seq = ++phoneShiftsSeqRef.current;
+      setPhoneShiftsReading(true);
+      // A good read is remembered on this device: the offline cashier close
+      // and a quiet store without phones rely on it (review 14/10/2026).
+      const { result, lastGood } = await readUnitShiftReadinessRemembered(bridge.shifts, null, phoneShiftsSince);
+      if (!active || seq !== phoneShiftsSeqRef.current) return;
+      setPhoneShiftsRead({ key: phoneShiftsKey, result, lastGood });
+      setPhoneShiftsReading(false);
+    };
+    void read();
+    const intervalId = setInterval(() => { void read(); }, 30000);
+    const handleShiftUpdated = () => { void read(); };
+    onEvent('shift-updated', handleShiftUpdated);
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+      offEvent('shift-updated', handleShiftUpdated);
+    };
+  }, [bridge, phoneShiftsKey, phoneShiftsReadVersion, phoneShiftsSince, reportReloadVersion]);
+  const retryPhoneShifts = useCallback(() => {
+    setPhoneShiftsReadVersion((current) => current + 1);
+  }, []);
   type GiftCloseTextKey = Exclude<keyof typeof GIFT_CLOSE_LABELS, 'recovery' | 'errors'>;
   const giftCloseText = (key: GiftCloseTextKey): string =>
     t(`modals.zReport.giftClose.${key}`, { defaultValue: GIFT_CLOSE_LABELS[key] });
@@ -979,6 +1071,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         return 'border-slate-900/[0.14] bg-slate-900/[0.05] text-slate-700 dark:border-white/[0.16] dark:bg-white/[0.08] dark:text-white/80';
       default:
         return 'border-amber-500/30 bg-amber-500/15 text-amber-800 dark:border-amber-300/30 dark:text-amber-100';
+    }
+  };
+
+  const getHandoverBadgeClasses = (handover: ZReportPhoneShiftHandover | null) => {
+    switch (handover) {
+      case 'received':
+        return 'border-emerald-500/30 bg-emerald-500/15 text-emerald-800 dark:border-emerald-300/30 dark:text-emerald-100';
+      case 'pending':
+      case 'not_counted':
+        return 'border-amber-500/30 bg-amber-500/15 text-amber-800 dark:border-amber-300/30 dark:text-amber-100';
+      default:
+        return 'border-slate-900/[0.14] bg-slate-900/[0.05] text-slate-700 dark:border-white/[0.16] dark:bg-white/[0.08] dark:text-white/80';
     }
   };
 
@@ -1106,6 +1210,80 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     }
   }, [bridge, giftCloseBlocksFinal, persistedZReportId, t, zReport]);
 
+  // A phone, named for the cashier: a deactivated or removed phone says so.
+  const describePhone = useCallback((shift: Pick<UnitShift, 'terminal_name' | 'terminal_id' | 'terminal_active'>) => {
+    const phoneState = unitShiftPhoneState(shift);
+    if (phoneState === 'active') return unitShiftPhoneLabel(shift);
+    const marker = phoneState === 'deactivated'
+      ? t('phoneShifts.phoneDeactivated', { defaultValue: 'phone deactivated' })
+      : t('phoneShifts.phoneRemoved', { defaultValue: 'phone removed' });
+    return `${unitShiftPhoneLabel(shift)} (${marker})`;
+  }, [t]);
+  // An open phone shift: staff · role · phone · check-in time.
+  const describeOpenPhoneShift = useCallback((shift: UnitShift) => [
+    unitShiftStaffLabel(shift),
+    shift.role_type ? translateRoleName(t, shift.role_type) : null,
+    describePhone(shift),
+    shift.check_in_time
+      ? t('phoneShifts.checkedInAt', {
+        time: formatTime(shift.check_in_time, { hour: '2-digit', minute: '2-digit' }),
+        defaultValue: 'checked in {{time}}',
+      })
+      : null,
+  ].filter(Boolean).join(' · '), [describePhone, t]);
+
+  // The native Z stage refused over phone shifts (founder rule 13/10/2026):
+  // name them in the store's language, never the server's English text, hold
+  // the commit on the named list at once, and read the report and the phone
+  // shifts again (a fresh preview also moves a live window's end to now).
+  const applyUnitShiftsRefusal = useCallback((refusal: UnitShiftsZRefusal) => {
+    if (refusal.kind === 'open') {
+      setSubmitResult(refusal.openShifts.length > 0
+        ? t('modals.zReport.phoneShifts.refusedOpen', {
+          shifts: refusal.openShifts.map(describeOpenPhoneShift).join('; '),
+          defaultValue:
+            'The day was not closed: phone shifts are still open: {{shifts}}. Close each one on the phone, or from Staff on this register.',
+        })
+        : t('modals.zReport.phoneShifts.refusedOpenUnnamed', {
+          defaultValue:
+            'The day was not closed: a phone shift is still open. Close it on the phone, or from Staff on this register.',
+        }));
+    } else {
+      setSubmitResult(t('modals.zReport.phoneShifts.refusedUnavailable', {
+        defaultValue:
+          'The day was not closed: the phone shifts could not be checked. Check the connection and try again.',
+      }));
+    }
+    const key = phoneShiftsKey;
+    if (key && (refusal.kind === 'unavailable' || refusal.openShifts.length > 0)) {
+      setPhoneShiftsRead((current) => {
+        if (refusal.kind === 'unavailable') {
+          return {
+            key,
+            result: { kind: 'unavailable', status: null, code: 'Z_REPORT_UNIT_SHIFTS_UNAVAILABLE', error: refusal.error ?? 'unavailable' },
+          };
+        }
+        const base = current?.key === key && current.result.kind === 'ready' ? current.result.readiness : null;
+        return {
+          key,
+          result: {
+            kind: 'ready',
+            readiness: {
+              mainTerminalId: base?.mainTerminalId ?? null,
+              checkedAt: base?.checkedAt ?? null,
+              since: base?.since ?? null,
+              openShifts: refusal.openShifts,
+              closedShifts: base?.closedShifts ?? [],
+              pendingReturns: base?.pendingReturns ?? [],
+              terminals: base?.terminals ?? [],
+            },
+          },
+        };
+      });
+    }
+    setReportReloadVersion((current) => current + 1);
+  }, [describeOpenPhoneShift, phoneShiftsKey, t]);
+
   const handleSubmitReport = useCallback(async () => {
     // Unconfirmed gift card proof keeps the day open; native refuses it too, so never bypass that.
     if (giftCloseBlocksFinal) return;
@@ -1126,6 +1304,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         console.warn('[ZReportModal] Z-Report held by queued fiscal receipts:', res);
         setSubmitResult(fiscalCloseMessage);
         setReportReloadVersion((current) => current + 1);
+        return;
+      }
+
+      const unitShiftsRefusal = extractUnitShiftsZRefusal(res);
+      if (unitShiftsRefusal) {
+        console.warn('[ZReportModal] Z-Report held by phone shifts:', res);
+        if (isInitiatingScope) applyUnitShiftsRefusal(unitShiftsRefusal);
         return;
       }
 
@@ -1189,6 +1374,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         setReportReloadVersion((current) => current + 1);
         return;
       }
+      const unitShiftsRefusal = extractUnitShiftsZRefusal(e);
+      if (unitShiftsRefusal) {
+        applyUnitShiftsRefusal(unitShiftsRefusal);
+        return;
+      }
       const paymentIntegrityPayload = extractPaymentIntegrityPayload(e);
       setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
       const giftCloseError = classifyGiftCloseFinalizationError(e);
@@ -1205,7 +1395,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     } finally {
       if (statusScopeRef.current === statusScope) setSubmitting(false);
     }
-  }, [branchId, bridge, clearShift, giftCloseBlocksFinal, isPendingLocalSubmit, selectedDate, t]);
+  }, [applyUnitShiftsRefusal, branchId, bridge, clearShift, giftCloseBlocksFinal, isPendingLocalSubmit, selectedDate, t]);
 
   // "Send the fiscal receipts again": reset the queued fiscal rows' backoff
   // and run the queue now, then re-read the report. Scheduling a retry is not
@@ -1286,9 +1476,53 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const fiscalQueueBlocking = Boolean(fiscalQueue?.blocking) && (fiscalQueue?.count ?? 0) > 0;
   const fiscalQueueCount = fiscalQueueBlocking ? fiscalQueue?.count ?? 0 : 0;
   const fiscalQueueDate = fiscalQueue?.reportDate ? formatFiscalBusinessDay(fiscalQueue.reportDate) : '';
+  // Phone shifts (founder rule 13/10/2026). Not read yet for this window:
+  // pending, never ready. Unavailable: blocking, never "none open". A frozen
+  // (issued) Z window counts only the phone shifts that checked in by its
+  // cutoff, as the native Z stage does; a live window counts every one.
+  // Unsupported (old server, not a Main): no check, as natively.
+  const phoneShiftsResult = phoneShiftsKey && phoneShiftsRead?.key === phoneShiftsKey
+    ? phoneShiftsRead.result
+    : null;
+  const phoneShiftsReadiness = phoneShiftsResult?.kind === 'ready' ? phoneShiftsResult.readiness : null;
+  const phoneShiftsCutoffMs = frozenZCutoffMs({
+    lockDate,
+    periodEnd: resolvedPeriod.end,
+    receivedAt: zReportReceivedAt,
+  });
+  const openPhoneShifts = (phoneShiftsReadiness?.openShifts ?? [])
+    .filter((shift) => unitShiftHoldsZ(shift, phoneShiftsCutoffMs));
+  const pendingPhoneReturns = phoneShiftsReadiness?.pendingReturns ?? [];
+  // Phone staff for the Staff tab: the live window lists the phone shifts
+  // that closed OR were received in it (re-review 15/10/2026), a stored Z
+  // the ones it reported.
+  const phoneShiftsWindowStartMs = phoneShiftsSince ? Date.parse(phoneShiftsSince) : Number.NaN;
+  const phoneShiftStaffRows: PhoneShiftStaffRow[] = phoneShiftsKey
+    ? (phoneShiftsReadiness?.closedShifts ?? [])
+      .filter((shift) => closedShiftInZWindow(
+        shift,
+        Number.isFinite(phoneShiftsWindowStartMs) ? phoneShiftsWindowStartMs : null,
+        phoneShiftsCutoffMs,
+      ))
+      .map(phoneShiftRowFromReadiness)
+    : (zReport?.phoneShifts ?? []).map(phoneShiftRowFromStoredZ);
+  const phoneShiftsChecking = Boolean(phoneShiftsKey) && !phoneShiftsResult;
+  // A unit without phones (a kiosk is not one) and nothing open or pending
+  // shows no phone row at all (review 14/10/2026). When the read fails, the
+  // last good read decides that; the native Z stage still checks at commit.
+  const phoneShiftsLastGood = phoneShiftsKey && phoneShiftsRead?.key === phoneShiftsKey
+    ? phoneShiftsRead.lastGood?.readiness ?? null
+    : null;
+  const phoneShiftsQuietWithoutPhones = Boolean(phoneShiftsLastGood)
+    && !unitHasPhones(phoneShiftsLastGood!)
+    && unitIsQuiet(phoneShiftsLastGood!);
+  const phoneShiftsUnavailable = phoneShiftsResult?.kind === 'unavailable' && !phoneShiftsQuietWithoutPhones;
+  const phoneShiftsBlockCloseout = phoneShiftsUnavailable || openPhoneShifts.length > 0;
   const closeoutIssueCount =
     blockingPaymentIssues.length +
     (fiscalQueueBlocking ? 1 : 0) +
+    (phoneShiftsBlockCloseout ? 1 : 0) +
+    (pendingPhoneReturns.length > 0 ? 1 : 0) +
     (hasActiveStaffShifts ? 1 : 0) +
     (cashDrawerBlocksCloseout ? closeoutUnreconciledDrawers : 0) +
     closeoutPendingExpenses +
@@ -1297,7 +1531,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     (showMainTerminalWarning ? 1 : 0) +
     (giftCloseBlocksFinal ? 1 : 0) +
     (error ? 1 : 0);
-  const closeoutReady = Boolean(zReport) && !loading && closeoutIssueCount === 0;
+  const closeoutReady = Boolean(zReport) && !loading && !phoneShiftsChecking && closeoutIssueCount === 0;
   const closeoutHasHardSubmitBlocker =
     !Boolean(zReport) ||
     lockedTerminal ||
@@ -1305,6 +1539,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     Boolean(error) ||
     fiscalQueueBlocking ||
     giftCloseBlocksFinal ||
+    phoneShiftsChecking ||
+    phoneShiftsBlockCloseout ||
     hasActiveStaffShifts ||
     blockingPaymentIssues.length > 0;
   const closeoutNeedsCashierCheckout =
@@ -1314,6 +1550,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     !closeoutHasVariance &&
     blockingPaymentIssues.length === 0 &&
     !fiscalQueueBlocking &&
+    !phoneShiftsChecking &&
+    !phoneShiftsBlockCloseout &&
+    pendingPhoneReturns.length === 0 &&
     closeoutPendingExpenses === 0 &&
     closeoutUnsettledDrivers === 0 &&
     !showMainTerminalWarning &&
@@ -1325,6 +1564,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     hasActiveStaffShifts &&
     blockingPaymentIssues.length === 0 &&
     !fiscalQueueBlocking &&
+    !phoneShiftsChecking &&
+    !phoneShiftsBlockCloseout &&
+    pendingPhoneReturns.length === 0 &&
     closeoutPendingExpenses === 0 &&
     closeoutUnsettledDrivers === 0 &&
     !showMainTerminalWarning &&
@@ -1336,6 +1578,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       ? t('zReportOffline.status', { defaultValue: 'No connection: the day closes once it is back' })
     : closeoutReady
       ? t('modals.zReport.readyToClose')
+      // Nothing else to fix while the phone shifts are still being read.
+      : phoneShiftsChecking && closeoutIssueCount === 0
+        ? t('modals.zReport.closeoutLoading')
       : closeoutNeedsStaffCheckout
         ? t('modals.zReport.allStaffCheckoutTitle')
         : closeoutNeedsCashierCheckout
@@ -1352,6 +1597,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     description: string;
     state: CloseoutChecklistState;
     actionLabel?: string;
+    /** One line per thing the row names (an open phone shift, a till to receive). */
+    details?: string[];
   }> = [
     {
       key: 'sync',
@@ -1413,6 +1660,55 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           }),
         state: (giftCloseBlocksFinal ? 'error' : 'ready') as CloseoutChecklistState,
       }]),
+    // Phones hand over to the Main (founder rule 13/10/2026): every open
+    // phone shift is named and holds the Z. No row where the check does not
+    // apply (a stored or past day, an old server, a till that is not a Main).
+    ...(phoneShiftsKey && phoneShiftsResult?.kind !== 'unsupported' && !phoneShiftsQuietWithoutPhones
+      ? [{
+        key: 'phone-shifts',
+        label: t('phoneShifts.title', { defaultValue: 'Phone shifts' }),
+        description: phoneShiftsChecking
+          ? t('modals.zReport.phoneShifts.checking', { defaultValue: 'Checking the phone shifts…' })
+          : phoneShiftsUnavailable
+            ? t('phoneShifts.unavailable', {
+              defaultValue: 'Phone shifts could not be checked. Check the connection and try again.',
+            })
+            : openPhoneShifts.length > 0
+              ? t('modals.zReport.phoneShifts.openDescription', {
+                count: openPhoneShifts.length,
+                defaultValue: '{{count}} phone shift(s) still open. The day cannot close until each one is closed.',
+              })
+              : t('modals.zReport.phoneShifts.noneOpen', { defaultValue: 'No phone shift is open.' }),
+        state: (phoneShiftsChecking
+          ? 'pending'
+          : phoneShiftsBlockCloseout ? 'error' : 'ready') as CloseoutChecklistState,
+        actionLabel: openPhoneShifts.length > 0
+          ? t('modals.zReport.phoneShifts.closeAction', {
+            defaultValue: 'Close it on the phone, or from Staff on this register',
+          })
+          : undefined,
+        details: openPhoneShifts.map(describeOpenPhoneShift),
+      }]
+      : []),
+    // Closed phone tills whose cash this register has not taken yet: a
+    // warning, never a blocker. The server keeps listing them (31 days).
+    ...(pendingPhoneReturns.length > 0
+      ? [{
+        key: 'phone-returns',
+        label: t('modals.zReport.phoneShifts.pendingReturnsTitle', { defaultValue: 'Phone cash to receive' }),
+        description: t('modals.zReport.phoneShifts.pendingReturnsDescription', {
+          defaultValue:
+            'Closed phone tills whose cash this register has not received yet. Receive it here; until then it stays listed, also the next day.',
+        }),
+        state: 'warning' as CloseoutChecklistState,
+        details: pendingPhoneReturns.map((entry) => t('modals.zReport.phoneShifts.returnLine', {
+          staff: unitShiftStaffLabel(entry),
+          phone: describePhone(entry),
+          amount: formatCurrency(unitShiftCashToReceive(entry), phoneShiftCurrency(entry.currency, reportCurrency)),
+          defaultValue: '{{staff}} · {{phone}} · to receive {{amount}}',
+        })),
+      }]
+      : []),
     {
       key: 'cash-drawer',
       label: t('modals.zReport.cashDrawer'),
@@ -2149,6 +2445,83 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           <div className="rounded-2xl border border-dashed border-slate-900/[0.14] bg-slate-900/[0.03] p-6 text-center text-sm font-semibold text-slate-600 dark:border-white/[0.16] dark:bg-white/[0.04] dark:text-white/65">{t('modals.zReport.noStaffReports')}</div>
                         )}
                       </div>
+                      {/* Phone staff after the local staff (founder rule 13/10/2026): what each phone
+                          shift sold and how its till was handed over. Never part of the totals above. */}
+                      {(phoneShiftStaffRows.length > 0 || (phoneShiftsKey && phoneShiftsUnavailable)) && (
+                        <div data-z-report-phone-shifts-staff className="mt-5">
+                          <h4 className={`text-base font-black ${strongTextClass}`}>{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+                          {phoneShiftStaffRows.length === 0 ? (
+                            <div className={`mt-2 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>
+                              {t('phoneShifts.unavailable', {
+                                defaultValue: 'Phone shifts could not be checked. Check the connection and try again.',
+                              })}
+                            </div>
+                          ) : (
+                            <div className={`mt-3 grid gap-3 ${phoneShiftStaffRows.length > 1 ? 'xl:grid-cols-2' : 'grid-cols-1'}`}>
+                              {phoneShiftStaffRows.map((row) => {
+                                const rowCurrency = phoneShiftCurrency(row.currency, reportCurrency);
+                                const money = (value: number | null) => (value === null ? '—' : formatCurrency(value, rowCurrency));
+                                const phoneMarker = row.phoneState === 'deactivated'
+                                  ? t('phoneShifts.phoneDeactivated', { defaultValue: 'phone deactivated' })
+                                  : row.phoneState === 'removed'
+                                    ? t('phoneShifts.phoneRemoved', { defaultValue: 'phone removed' })
+                                    : null;
+                                const statRows = [
+                                  { key: 'orders', label: t('modals.zReport.orders'), value: row.ordersCount === null ? '—' : String(row.ordersCount), tone: strongTextClass },
+                                  { key: 'sales', label: t('modals.zReport.sales'), value: money(row.salesTotal), tone: 'text-emerald-600 dark:text-emerald-300' },
+                                  { key: 'cash', label: t('modals.zReport.cash'), value: money(row.cashSales), tone: 'text-amber-600 dark:text-amber-300' },
+                                  { key: 'card', label: t('modals.zReport.card'), value: money(row.cardSales), tone: 'text-amber-600 dark:text-amber-300' },
+                                  { key: 'counted', label: t('modals.zReport.phoneShifts.countedCash', { defaultValue: 'Counted cash' }), value: money(row.countedCash), tone: mutedTextClass },
+                                  // The till's count against what it should hold: "+" over, "-" short.
+                                  {
+                                    key: 'variance',
+                                    label: t('modals.zReport.variance'),
+                                    value: row.cashVariance === null
+                                      ? '—'
+                                      : Math.abs(row.cashVariance) < 0.005
+                                        ? formatCurrency(0, rowCurrency)
+                                        : `${row.cashVariance > 0 ? '+' : '-'}${formatCurrency(Math.abs(row.cashVariance), rowCurrency)}`,
+                                    tone: row.cashVariance !== null && Math.abs(row.cashVariance) >= 0.005
+                                      ? 'text-amber-600 dark:text-amber-300'
+                                      : mutedTextClass,
+                                  },
+                                ];
+                                return (
+                                  <article key={row.id} data-z-report-phone-shift={row.id} className={`rounded-xl border p-4 ${dashboardTileClass}`}>
+                                    <div className="flex flex-wrap items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <div className={`truncate text-base font-black ${strongTextClass}`}>{row.staffName}</div>
+                                        <div className={`mt-1 break-words text-xs font-semibold ${softTextClass}`}>
+                                          {phoneMarker ? `${row.phoneName} (${phoneMarker})` : row.phoneName} · {formatWindowDateTime(row.checkIn)} - {formatWindowDateTime(row.checkOut)}
+                                        </div>
+                                      </div>
+                                      <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                                        {row.role && (
+                                          <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getRoleBadgeClasses(row.role)}`}>{translateRoleName(t, row.role)}</span>
+                                        )}
+                                        <span data-z-report-phone-shift-handover={row.handover ?? 'unknown'} className={`rounded-full border px-2.5 py-1 text-xs font-bold ${getHandoverBadgeClasses(row.handover)}`}>
+                                          {row.handover
+                                            ? t(`phoneShifts.handover.${row.handover}`, { defaultValue: PHONE_SHIFT_HANDOVER_LABELS[row.handover] })
+                                            : '—'}
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                      {statRows.map((stat) => (
+                                        <div key={stat.key} className="min-w-0 rounded-2xl border border-slate-900/[0.1] bg-white/45 p-3 dark:border-white/[0.12] dark:bg-black/10">
+                                          <div className={`break-words text-xs font-black leading-4 ${softTextClass}`}>{stat.label}</div>
+                                          <div className={`mt-1 break-words text-base font-black ${stat.tone}`}>{stat.value}</div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </article>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </section>
                   )}
 
@@ -2305,8 +2678,29 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                           <div className="min-w-0 flex-1">
                             <div className={`break-words text-sm font-black ${strongTextClass}`}>{item.label}</div>
                             <div className={`mt-0.5 break-words text-xs font-semibold leading-5 ${mutedTextClass}`}>{item.description}</div>
+                            {item.details && item.details.length > 0 && (
+                              <ul data-z-report-checklist-details={item.key} className="mt-1.5 space-y-0.5">
+                                {item.details.map((line, index) => (
+                                  <li key={`${item.key}-${index}`} className={`break-words text-xs font-black leading-5 ${strongTextClass}`}>
+                                    {line}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
                           </div>
-                          {item.key === 'fiscal' ? (
+                          {item.key === 'phone-shifts' && phoneShiftsUnavailable ? (
+                            <button
+                              type="button"
+                              data-z-report-phone-shifts-retry
+                              onClick={retryPhoneShifts}
+                              disabled={phoneShiftsReading}
+                              aria-busy={phoneShiftsReading}
+                              className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-xl border px-3 text-xs font-black transition ${glassControlClass} ${phoneShiftsReading ? 'cursor-not-allowed opacity-60' : ''}`}
+                            >
+                              <RefreshCw className={`h-4 w-4 ${phoneShiftsReading ? 'animate-spin' : ''}`} />
+                              {t('phoneShifts.retry', { defaultValue: 'Retry' })}
+                            </button>
+                          ) : item.key === 'fiscal' ? (
                             <button
                               type="button"
                               data-z-report-fiscal-retry

@@ -667,6 +667,10 @@ pub async fn recovery_execute_action(
     .await
 }
 
+/// The server's refusal to force-close a phone (child terminal) shift: it
+/// must be closed through remote checkout, which counts its cash.
+const PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED: &str = "PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED";
+
 async fn recovery_execute_action_core(
     arg0: Option<Value>,
     db: &db::DbState,
@@ -819,10 +823,25 @@ async fn recovery_execute_action_core(
                 "reason": reason,
             });
 
-            let api_result =
-                crate::admin_fetch(Some(db), "/api/pos/shifts/force-close", "POST", Some(body))
-                    .await
-                    .map_err(|e| format!("Force-close API call failed: {e}"))?;
+            let api_result = crate::admin_fetch_detailed(
+                Some(db),
+                "/api/pos/shifts/force-close",
+                "POST",
+                Some(body),
+            )
+            .await
+            .map_err(|e| {
+                // Phones hand over to the Main (founder rule 13/10/2026): the
+                // server never force-closes a phone shift, which would zero
+                // its cash. The code tells the operator to close it from
+                // Staff on this register (remote checkout) instead.
+                if e.status() == Some(409) && e.code() == Some(PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED)
+                {
+                    PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED.to_string()
+                } else {
+                    format!("Force-close API call failed: {e}")
+                }
+            })?;
 
             let api_success = api_result
                 .get("success")

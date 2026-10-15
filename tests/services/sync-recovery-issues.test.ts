@@ -677,3 +677,77 @@ test('the legacy edit review card reads in every POS locale', async () => {
     }
   }
 });
+
+// Founder rule 13/10/2026, review 14/10/2026: a queued Z the server holds
+// while phone shifts are open waits (pending, never failed) with the code and
+// the shifts' names; Sync health and the closeout blockers name the shifts in
+// the store's language, never the stored code.
+const heldZRow = (overrides: Partial<SyncQueueItem> = {}): SyncQueueItem => ({
+  id: 'held-z-queue', tableName: 'z_reports', recordId: 'z-1', operation: 'INSERT',
+  data: '{"report_date":"2026-10-14"}', organizationId: 'org-1', createdAt: '2026-10-14T23:00:00Z',
+  attempts: 0, lastAttempt: '2026-10-14T23:00:05Z',
+  errorMessage: 'Z_REPORT_UNIT_SHIFTS_OPEN: Maria (Phone 1), Nikos (Phone 2)',
+  nextRetryAt: '2026-10-14T23:01:05Z', retryDelayMs: 1000, priority: 1, moduleType: 'z_report',
+  conflictStrategy: 'manual', version: 1, status: 'pending', ...overrides,
+});
+
+test('a Z held for open phone shifts names them in plain words', async () => {
+  const result = buildSyncRecoveryIssues({
+    systemHealth: baseSystemHealth({parityQueueStatus: {total: 1, failed: 0, pending: 1, conflicts: 0}}),
+    lastParitySync: {status: 'success'} as any,
+    parityItems: [heldZRow()],
+  });
+  const issue = result.issues.find(item => item.code === 'z_report_held_for_phone_shifts');
+  assert.ok(issue, 'the held Z has its own card');
+  assert.equal(issue.params?.shifts, 'Maria (Phone 1), Nikos (Phone 2)');
+  assert.equal(issue.summaryKey, 'recovery.issues.zReportHeldForPhoneShifts.summary');
+  assert.equal(result.issues.filter(item => item.code === 'z_report_held_for_phone_shifts').length, 1);
+
+  // The closeout blocker of the same Z carries the same card, once.
+  const withBlocker = buildSyncRecoveryIssues({
+    systemHealth: baseSystemHealth({
+      parityQueueStatus: {total: 1, failed: 0, pending: 1, conflicts: 0},
+      syncBlockerDetails: [{queueId: 0, entityType: 'z_report', entityId: 'z-1', operation: 'INSERT',
+        queueStatus: 'pending', blockerReason: 'Z_REPORT_UNIT_SHIFTS_OPEN: Maria (Phone 1)',
+        lastError: 'Z_REPORT_UNIT_SHIFTS_OPEN: Maria (Phone 1)'}] as any,
+    }),
+    lastParitySync: {status: 'success'} as any,
+    parityItems: [heldZRow()],
+  });
+  const held = withBlocker.issues.filter(item => item.code === 'z_report_held_for_phone_shifts');
+  assert.equal(held.length, 1);
+  assert.equal(held[0].params?.shifts, 'Maria (Phone 1)');
+  assert.equal(withBlocker.issues.some(item => item.titleKey === 'recovery.issues.syncBlocker.title'), false);
+
+  // Another Z reason keeps its usual handling.
+  assert.equal(buildSyncRecoveryIssues({
+    systemHealth: baseSystemHealth({parityQueueStatus: {total: 1, failed: 1, pending: 0, conflicts: 0}}),
+    lastParitySync: {status: 'failed', error: 'x'} as any,
+    parityItems: [heldZRow({errorMessage: 'HTTP 500', status: 'failed'})],
+  }).issues.some(item => item.code === 'z_report_held_for_phone_shifts'), false);
+
+  for (const locale of ['en', 'el', 'de', 'fr', 'it', 'sq']) {
+    const base = JSON.parse(readFileSync(path.join(process.cwd(), 'src', 'locales', `${locale}.json`), 'utf8'));
+    const overlay = JSON.parse(readFileSync(
+      path.join(process.cwd(), 'src', 'locales', 'overlays', `${locale}.phone-shift-handover.json`), 'utf8'));
+    const i18n = i18next.createInstance();
+    await i18n.init({
+      lng: locale,
+      resources: {[locale]: {translation: base}},
+      interpolation: {escapeValue: false},
+    });
+    i18n.addResourceBundle(locale, 'translation', overlay, true, true);
+    for (const field of ['title', 'summary', 'summaryUnnamed', 'guidance']) {
+      const key = `recovery.issues.zReportHeldForPhoneShifts.${field}`;
+      const text = i18n.t(key, {shifts: 'Maria (Phone 1)'});
+      assert.notEqual(text, key, `${locale} ${field}`);
+      assert.doesNotMatch(text, /\{\{|Z_REPORT/, `${locale} ${field}`);
+    }
+    assert.match(i18n.t('recovery.issues.zReportHeldForPhoneShifts.summary', {shifts: 'Maria (Phone 1)'}), /Maria \(Phone 1\)/);
+    for (const key of ['sync.blockerReasons.zReportUnitShiftsOpen', 'sync.blockerReasons.zReportUnitShiftsOpenUnnamed']) {
+      const text = i18n.t(key, {shifts: 'Maria (Phone 1)'});
+      assert.notEqual(text, key, `${locale} ${key}`);
+      assert.doesNotMatch(text, /\{\{|Z_REPORT/, `${locale} ${key}`);
+    }
+  }
+});

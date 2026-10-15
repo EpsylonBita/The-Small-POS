@@ -1,0 +1,98 @@
+{
+  "phoneShifts": {
+    "title": "Phone shifts",
+    "handover": {
+      "received": "Received",
+      "pending": "To receive",
+      "none": "Nothing to hand over",
+      "not_counted": "Not counted"
+    },
+    "phoneDeactivated": "phone deactivated",
+    "phoneRemoved": "phone removed",
+    "checkedInAt": "checked in {{time}}",
+    "unavailable": "Phone shifts could not be checked. Check the connection and try again.",
+    "retry": "Retry"
+  },
+  "modals": {
+    "zReport": {
+      "phoneShifts": {
+        "checking": "Checking the phone shifts…",
+        "openDescription": "{{count}} phone shift(s) still open. The day cannot close until each one is closed.",
+        "noneOpen": "No phone shift is open.",
+        "closeAction": "Close it on the phone, or from Staff on this register",
+        "pendingReturnsTitle": "Phone cash to receive",
+        "pendingReturnsDescription": "Closed phone tills whose cash this register has not received yet. Receive it here; until then it stays listed, also the next day.",
+        "returnLine": "{{staff}} · {{phone}} · to receive {{amount}}",
+        "refusedOpen": "The day was not closed: phone shifts are still open: {{shifts}}. Close each one on the phone, or from Staff on this register.",
+        "refusedOpenUnnamed": "The day was not closed: a phone shift is still open. Close it on the phone, or from Staff on this register.",
+        "refusedUnavailable": "The day was not closed: the phone shifts could not be checked. Check the connection and try again.",
+        "countedCash": "Counted cash"
+      }
+    },
+    "staffShift": {
+      "phoneShifts": {
+        "openBlocker": "Close the phone shifts before closing this shift: {{shifts}}. Close them on the phone, or here in staff selection.",
+        "shiftEntry": "{{name}} ({{role}}, {{phone}})",
+        "receiveBlocker": "Receive the cash from these phone tills in staff selection before closing this shift: {{tills}}.",
+        "tillEntry": "{{name}} ({{phone}}, {{amount}})",
+        "managerSettles": "This till can't be received here. A manager settles it.",
+        "openHelper": "Still open on a phone. Each one holds the Z until it is closed.",
+        "closeHere": "Close the shift here",
+        "lastChecked": "No connection. Phone shifts as last checked at {{time}}.",
+        "lastCheckedBlocker": "No connection. As last checked at {{time}}: {{reasons}}",
+        "lastSeenStale": "This phone was last online at {{time}}. Orders or payments it has not sent are not in these figures.",
+        "lastSeenUnknown": "This phone's last connection is unknown. Orders or payments it has not sent may be missing from these figures.",
+        "closeWithoutHandover": {
+          "action": "Close without handover",
+          "explain": "The shift closes without cash: nothing is added to this drawer. A manager settles its money.",
+          "reason": "Reason",
+          "reasonHint": "Required, up to {{max}} characters.",
+          "closed": "{{name}}'s shift is closed without a handover. Nothing was added to this drawer.",
+          "closedNotCounted": "{{name}}'s shift is closed without a handover and its cash is marked not counted. Nothing was added to this drawer; a manager settles its money.",
+          "alreadyClosed": "{{name}}'s shift was already closed. Nothing was added to this drawer.",
+          "errors": {
+            "reasonRequired": "Enter a reason, up to 500 characters.",
+            "pinRequired": "A manager enters their own PIN.",
+            "wrongPin": "That PIN can't approve it. A manager with the right to cancel orders enters their own PIN.",
+            "notStaff": "That PIN belongs to no active staff member of this business, so it can't approve it.",
+            "mainOnly": "Only the main till of this phone's register can close its shifts.",
+            "offline": "No connection. The shift closes only online: check the connection and try again.",
+            "failed": "The shift couldn't be closed. Nothing changed; try again.",
+            "approvalRequired": "This manager can't approve closing a shift without a handover."
+          }
+        },
+        "needsCashier": "Received here once a cashier is checked in."
+      }
+    }
+  },
+  "notices": {
+    "phoneShift": {
+      "closed": "{{name}} closed their shift on {{phone}}",
+      "closedByMain": "{{name}}'s shift on {{phone}} was closed at the register",
+      "summary": "Orders: {{orders}} · Sales: {{sales}}",
+      "cashToReceive": "Cash to receive: {{amount}}",
+      "receivedAmount": "Received by the register: {{amount}}",
+      "received": "Received by the register",
+      "openStaff": "Staff shifts"
+    }
+  },
+  "recovery": {
+    "messages": {
+      "phoneShiftRemoteCheckoutRequired": "This shift is on a phone. Close it on the phone, or from Staff on this register, where its cash is counted."
+    },
+    "issues": {
+      "zReportHeldForPhoneShifts": {
+        "title": "Z waiting for phone shifts",
+        "summary": "The server holds this Z until these phone shifts close: {{shifts}}.",
+        "summaryUnnamed": "The server holds this Z until the open phone shifts close.",
+        "guidance": "Close them on the phone, or from Staff on this register. The Z is sent by itself afterwards; nothing is lost."
+      }
+    }
+  },
+  "sync": {
+    "blockerReasons": {
+      "zReportUnitShiftsOpen": "The Z waits: phone shifts are still open: {{shifts}}. Close them on the phone, or from Staff on this register; the Z is sent by itself afterwards.",
+      "zReportUnitShiftsOpenUnnamed": "The Z waits: a phone shift is still open. Close it on the phone, or from Staff on this register; the Z is sent by itself afterwards."
+    }
+  }
+}

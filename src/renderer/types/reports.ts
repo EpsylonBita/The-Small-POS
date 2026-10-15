@@ -56,6 +56,50 @@ export interface ZReportFiscalQueue {
   rows: ZReportFiscalQueueRow[];
 }
 
+/** How a phone till was handed over to the Main (founder rule 13/10/2026). */
+export type ZReportPhoneShiftHandover = 'received' | 'pending' | 'none' | 'not_counted';
+
+/**
+ * One phone shift of the Main's unit, as a committed Z stores it
+ * (`report_json.phoneShifts`, written by the native Z stage from the
+ * readiness `closed_shifts`; founder rule 13/10/2026: phones always hand over
+ * to the Main). Phone staff never enter `staffReports` or any total. Amounts
+ * may be null; `<name>_cents` is authoritative when present.
+ */
+export interface ZReportPhoneShift {
+  staffShiftId: string;
+  staffId?: string | null;
+  staffName?: string | null;
+  role?: string | null;
+  terminalId?: string | null;
+  terminalName?: string | null;
+  /** `false` for a deactivated phone, `null` when its terminal row is gone. */
+  terminalActive?: boolean | null;
+  checkIn?: string | null;
+  checkOut?: string | null;
+  status?: 'closed' | 'abandoned' | null;
+  currency?: string | null;
+  ordersCount?: number | null;
+  salesTotal?: number | null;
+  salesTotal_cents?: number | null;
+  cashSales?: number | null;
+  cashSales_cents?: number | null;
+  cardSales?: number | null;
+  cardSales_cents?: number | null;
+  openingCash?: number | null;
+  openingCash_cents?: number | null;
+  countedCash?: number | null;
+  countedCash_cents?: number | null;
+  expectedCash?: number | null;
+  expectedCash_cents?: number | null;
+  cashVariance?: number | null;
+  cashVariance_cents?: number | null;
+  /** `null` when the stored value is not a known state. */
+  handover?: ZReportPhoneShiftHandover | null;
+  closedBy?: 'main' | 'phone' | null;
+  receivedAt?: string | null;
+}
+
 export interface TodayStatistics {
   totalOrders: number;
   totalSales: number;
@@ -477,4 +521,10 @@ export interface ZReportData {
   giftFinancialClose?: ZReportGiftFinancialClose;
   /** Preview gift close readiness, when the mapper passes it through. */
   giftCloseReadiness?: ZReportGiftCloseReadiness;
+  /**
+   * The unit's phone shifts a committed Z reported (founder rule 13/10/2026).
+   * Absent when the Z skipped the check (older server, not a Main) and on a
+   * live preview, which reads them from the server instead.
+   */
+  phoneShifts?: ZReportPhoneShift[];
 }

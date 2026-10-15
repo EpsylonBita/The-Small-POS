@@ -84,6 +84,13 @@ import frOfflineCheckIn from './overlays/fr.offline-check-in.json';
 import itOfflineCheckIn from './overlays/it.offline-check-in.json';
 import sqOfflineCheckIn from './overlays/sq.offline-check-in.json';
 
+import enPhoneShiftHandover from './overlays/en.phone-shift-handover.json';
+import elPhoneShiftHandover from './overlays/el.phone-shift-handover.json';
+import dePhoneShiftHandover from './overlays/de.phone-shift-handover.json';
+import frPhoneShiftHandover from './overlays/fr.phone-shift-handover.json';
+import itPhoneShiftHandover from './overlays/it.phone-shift-handover.json';
+import sqPhoneShiftHandover from './overlays/sq.phone-shift-handover.json';
+
 type LocaleBundle = Record<string, unknown>;
 
 const isPlainObject = (value: unknown): value is LocaleBundle =>
@@ -111,10 +118,10 @@ const mergeLocaleLayers = (...layers: unknown[]): LocaleBundle =>
   layers.reduce(mergeLocaleBundle) as LocaleBundle;
 
 export const localeBundles = {
-  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit, enPlatforms, enCafeLan, enCheckoutRecovery, enOfflineCheckIn),
-  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit, elPlatforms, elCafeLan, elCheckoutRecovery, elOfflineCheckIn),
-  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms, deCafeLan, deCheckoutRecovery, deOfflineCheckIn),
-  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms, frCafeLan, frCheckoutRecovery, frOfflineCheckIn),
-  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms, itCafeLan, itCheckoutRecovery, itOfflineCheckIn),
-  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms, sqCafeLan, sqCheckoutRecovery, sqOfflineCheckIn),
+  en: mergeLocaleLayers(enBase, enHotfix, enTableCheck, { support: enSupport }, enSettingsWorkflow, enOnboarding, enShiftWorkflow, enRoomWorkflow, enScheduleWorkflow, enWorkflowAudit, enPlatforms, enCafeLan, enCheckoutRecovery, enOfflineCheckIn, enPhoneShiftHandover),
+  el: mergeLocaleLayers(elBase, elHotfix, elTableCheck, { support: elSupport }, elSettingsWorkflow, elOnboarding, elShiftWorkflow, elRoomWorkflow, elScheduleWorkflow, elWorkflowAudit, elPlatforms, elCafeLan, elCheckoutRecovery, elOfflineCheckIn, elPhoneShiftHandover),
+  de: mergeLocaleLayers(deBase, deHotfix, deTableCheck, { support: deSupport }, deSettingsWorkflow, deOnboarding, deShiftWorkflow, deRoomWorkflow, deScheduleWorkflow, deWorkflowAudit, dePlatforms, deCafeLan, deCheckoutRecovery, deOfflineCheckIn, dePhoneShiftHandover),
+  fr: mergeLocaleLayers(frBase, frHotfix, frTableCheck, { support: frSupport }, frSettingsWorkflow, frOnboarding, frShiftWorkflow, frRoomWorkflow, frScheduleWorkflow, frWorkflowAudit, frPlatforms, frCafeLan, frCheckoutRecovery, frOfflineCheckIn, frPhoneShiftHandover),
+  it: mergeLocaleLayers(itBase, itHotfix, itTableCheck, { support: itSupport }, itSettingsWorkflow, itOnboarding, itShiftWorkflow, itRoomWorkflow, itScheduleWorkflow, itWorkflowAudit, itPlatforms, itCafeLan, itCheckoutRecovery, itOfflineCheckIn, itPhoneShiftHandover),
+  sq: mergeLocaleLayers(sqBase, sqHotfix, sqTableCheck, { support: sqSupport }, sqSettingsWorkflow, sqOnboarding, sqShiftWorkflow, sqRoomWorkflow, sqScheduleWorkflow, sqWorkflowAudit, sqPlatforms, sqCafeLan, sqCheckoutRecovery, sqOfflineCheckIn, sqPhoneShiftHandover),
 } as const;

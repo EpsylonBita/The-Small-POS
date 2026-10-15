@@ -1,0 +1,98 @@
+{
+  "phoneShifts": {
+    "title": "Turni sui telefoni",
+    "handover": {
+      "received": "Ricevuto",
+      "pending": "Da ricevere",
+      "none": "Niente da consegnare",
+      "not_counted": "Non contato"
+    },
+    "phoneDeactivated": "telefono disattivato",
+    "phoneRemoved": "telefono rimosso",
+    "checkedInAt": "entrato alle {{time}}",
+    "unavailable": "Impossibile controllare i turni sui telefoni. Controlla la connessione e riprova.",
+    "retry": "Riprova"
+  },
+  "modals": {
+    "zReport": {
+      "phoneShifts": {
+        "checking": "Controllo dei turni sui telefoni…",
+        "openDescription": "Turni sui telefoni ancora aperti: {{count}}. La giornata non si può chiudere finché ognuno non è chiuso.",
+        "noneOpen": "Nessun turno sui telefoni è aperto.",
+        "closeAction": "Chiudilo sul telefono, oppure da Personale su questa cassa",
+        "pendingReturnsTitle": "Contanti dei telefoni da ricevere",
+        "pendingReturnsDescription": "Casse dei telefoni chiuse i cui contanti questa cassa non ha ancora ricevuto. Ricevili qui; fino ad allora restano in elenco, anche il giorno dopo.",
+        "returnLine": "{{staff}} · {{phone}} · da ricevere {{amount}}",
+        "refusedOpen": "La giornata non è stata chiusa: ci sono ancora turni aperti sui telefoni: {{shifts}}. Chiudi ciascuno sul telefono, oppure da Personale su questa cassa.",
+        "refusedOpenUnnamed": "La giornata non è stata chiusa: un turno su un telefono è ancora aperto. Chiudilo sul telefono, oppure da Personale su questa cassa.",
+        "refusedUnavailable": "La giornata non è stata chiusa: impossibile controllare i turni sui telefoni. Controlla la connessione e riprova.",
+        "countedCash": "Contanti contati"
+      }
+    },
+    "staffShift": {
+      "phoneShifts": {
+        "openBlocker": "Chiudi i turni sui telefoni prima di chiudere questo turno: {{shifts}}. Chiudili sul telefono, oppure qui dalla selezione del personale.",
+        "shiftEntry": "{{name}} ({{role}}, {{phone}})",
+        "receiveBlocker": "Ricevi i contanti di queste casse dei telefoni dalla selezione del personale prima di chiudere questo turno: {{tills}}.",
+        "tillEntry": "{{name}} ({{phone}}, {{amount}})",
+        "managerSettles": "Questa cassa non si può ricevere qui. La sistema un responsabile.",
+        "openHelper": "Ancora aperti su un telefono. Ognuno blocca la Z finché non viene chiuso.",
+        "closeHere": "Chiudi il turno qui",
+        "lastChecked": "Nessuna connessione. Turni sui telefoni come all'ultimo controllo, alle {{time}}.",
+        "lastCheckedBlocker": "Nessuna connessione. Secondo l'ultimo controllo, alle {{time}}: {{reasons}}",
+        "lastSeenStale": "Questo telefono è stato online l'ultima volta alle {{time}}. Ordini o pagamenti che non ha inviato non sono in questi dati.",
+        "lastSeenUnknown": "Non si sa quando questo telefono si è connesso l'ultima volta. Ordini o pagamenti che non ha inviato potrebbero mancare da questi dati.",
+        "closeWithoutHandover": {
+          "action": "Chiudi senza consegna",
+          "explain": "Il turno si chiude senza contanti: a questo cassetto non viene aggiunto nulla. I suoi soldi li sistema un responsabile.",
+          "reason": "Motivo",
+          "reasonHint": "Obbligatorio, al massimo {{max}} caratteri.",
+          "closed": "Il turno di {{name}} è chiuso senza consegna. A questo cassetto non è stato aggiunto nulla.",
+          "closedNotCounted": "Il turno di {{name}} è chiuso senza consegna e i suoi contanti risultano non contati. A questo cassetto non è stato aggiunto nulla; i suoi soldi li sistema un responsabile.",
+          "alreadyClosed": "Il turno di {{name}} era già chiuso. A questo cassetto non è stato aggiunto nulla.",
+          "errors": {
+            "reasonRequired": "Scrivi un motivo, al massimo 500 caratteri.",
+            "pinRequired": "Un responsabile inserisce il proprio PIN.",
+            "wrongPin": "Questo PIN non può approvarlo. Un responsabile con il permesso di annullare gli ordini inserisce il proprio PIN.",
+            "notStaff": "Questo PIN non appartiene a nessun membro attivo del personale di questa attività, quindi non può approvarlo.",
+            "mainOnly": "Solo la cassa principale di questo telefono può chiuderne i turni.",
+            "offline": "Nessuna connessione. Il turno si chiude solo online: controlla la connessione e riprova.",
+            "failed": "Non è stato possibile chiudere il turno. Non è cambiato nulla; riprova.",
+            "approvalRequired": "Questo responsabile non può approvare la chiusura di un turno senza consegna."
+          }
+        },
+        "needsCashier": "Si riceve qui appena un cassiere fa il check-in."
+      }
+    }
+  },
+  "notices": {
+    "phoneShift": {
+      "closed": "{{name}} ha chiuso il turno su {{phone}}",
+      "closedByMain": "Il turno di {{name}} su {{phone}} è stato chiuso alla cassa",
+      "summary": "Ordini: {{orders}} · Vendite: {{sales}}",
+      "cashToReceive": "Contanti da ricevere: {{amount}}",
+      "receivedAmount": "Ricevuti dalla cassa: {{amount}}",
+      "received": "Ricevuto dalla cassa",
+      "openStaff": "Turni del personale"
+    }
+  },
+  "recovery": {
+    "messages": {
+      "phoneShiftRemoteCheckoutRequired": "Questo turno è su un telefono. Chiudilo sul telefono, oppure da Personale su questa cassa, dove si contano i suoi contanti."
+    },
+    "issues": {
+      "zReportHeldForPhoneShifts": {
+        "title": "Z in attesa dei turni sui telefoni",
+        "summary": "Il server trattiene questo Z finché non si chiudono questi turni sui telefoni: {{shifts}}.",
+        "summaryUnnamed": "Il server trattiene questo Z finché non si chiudono i turni aperti sui telefoni.",
+        "guidance": "Chiudili sul telefono, oppure da Personale su questa cassa. Poi lo Z parte da solo; non si perde nulla."
+      }
+    }
+  },
+  "sync": {
+    "blockerReasons": {
+      "zReportUnitShiftsOpen": "Lo Z attende: ci sono ancora turni aperti sui telefoni: {{shifts}}. Chiudili sul telefono, oppure da Personale su questa cassa; poi lo Z parte da solo.",
+      "zReportUnitShiftsOpenUnnamed": "Lo Z attende: un turno su telefono è ancora aperto. Chiudilo sul telefono, oppure da Personale su questa cassa; poi lo Z parte da solo."
+    }
+  }
+}

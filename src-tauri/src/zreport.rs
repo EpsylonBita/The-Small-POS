@@ -38,6 +38,10 @@ const PENDING_Z_REPORT_CONTEXT_KEY: &str = business_day::PENDING_Z_REPORT_CONTEX
 /// (founder rule R5, 13/10/2026). The admin derives its own date from
 /// `periodStart` (the last Z); this field lets it date the day the same way.
 const BUSINESS_DAY_START_REPORT_KEY: &str = "businessDayStartAt";
+/// The stored Z's phone staff section (founder rule 13/10/2026): the phone
+/// shifts of the unit that closed inside the window, from the server
+/// (`unit_shift_readiness::phone_shifts_for_z_window`).
+pub(crate) const PHONE_SHIFTS_REPORT_KEY: &str = "phoneShifts";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1338,9 +1342,9 @@ const LAST_CLOSEOUT_ATTEMPT_KEY: &str = "last_closeout_attempt";
 pub(crate) struct CloseoutAttempt {
     /// When the attempt ended (RFC 3339).
     pub at: String,
-    /// The step it reached: `pre_z_sync`, `sync_blocked`,
-    /// `payment_blockers`, `fiscal_guard`, `prepare`, `post_submission_sync`,
-    /// `finalize` or `submitted`.
+    /// The step it reached: `pre_z_sync`, `unit_shifts` (the phone shifts of
+    /// the unit), `sync_blocked`, `payment_blockers`, `fiscal_guard`,
+    /// `prepare`, `post_submission_sync`, `finalize` or `submitted`.
     pub stage: String,
     /// `SUBMITTED`, the refusal's `errorCode`, or `ERROR`.
     pub code: String,
@@ -7233,15 +7237,19 @@ pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value,
 /// entry point serves tests and the gift-close print fixtures.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
-    generate_z_report_for_window(db, payload, None)
+    generate_z_report_for_window(db, payload, None, None)
 }
 
+/// `phone_shifts`: the stored Z's phone staff section (`phoneShifts`, founder
+/// rule 13/10/2026), already cut to the window; `None` when the phone-shift
+/// check was skipped (a server without it), so the key stays absent.
 fn generate_z_report_for_window(
     db: &DbState,
     payload: &Value,
     closing_window: Option<&EffectiveZReportWindow>,
+    phone_shifts: Option<&[Value]>,
 ) -> Result<Value, String> {
-    let built = build_z_report_for_window(db, payload, false, closing_window)?;
+    let mut built = build_z_report_for_window(db, payload, false, closing_window)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
         return Ok(preview_response_from_built_date_z_report(&built, true));
@@ -7320,6 +7328,15 @@ fn generate_z_report_for_window(
     }
 
     let z_report_id = Uuid::new_v4().to_string();
+    // The phones' staff section rides only on a new report: an issued Z is
+    // queued exactly as it was stored (above). `staffReports` and every total
+    // stay the till's own.
+    if let (Some(phone_shifts), Some(report)) = (phone_shifts, built.report_json.as_object_mut()) {
+        report.insert(
+            PHONE_SHIFTS_REPORT_KEY.to_string(),
+            Value::Array(phone_shifts.to_vec()),
+        );
+    }
     let payments_json_str = built.payments_breakdown.to_string();
     let report_json_str = built.report_json.to_string();
     // The new row and its submission carry the same report.
@@ -7545,6 +7562,48 @@ pub(crate) fn prepare_z_report_submission(
     prepare_z_report_submission_at(db, payload, Utc::now())
 }
 
+/// [`prepare_z_report_submission`] with the unit's closed phone shifts, as the
+/// readiness check read them (founder rule 13/10/2026): the ones that closed
+/// inside the window go into the stored Z as `phoneShifts`.
+pub(crate) fn prepare_z_report_submission_with_phone_shifts(
+    db: &DbState,
+    payload: &Value,
+    closed_phone_shifts: Option<&[Value]>,
+) -> Result<PreparedZReportSubmission, String> {
+    prepare_z_report_submission_at_with_phone_shifts(db, payload, Utc::now(), closed_phone_shifts)
+}
+
+/// The branch a Z submission closes: the payload's, else this terminal's.
+fn submission_branch_id(payload: &Value) -> String {
+    str_field(payload, "branchId")
+        .or_else(|| str_field(payload, "branch_id"))
+        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default())
+}
+
+/// What the phone-shift check of a Z submission reads (founder rule
+/// 13/10/2026), before the window is frozen: `since` is the window start (the
+/// end of the previous Z), `None` for a till that never closed one; the
+/// cutoff is set only for a Z already issued, whose later phone check-ins
+/// belong to the next POS day.
+pub(crate) struct UnitShiftCheckWindow {
+    pub since: Option<String>,
+    pub frozen_cutoff: Option<String>,
+}
+
+pub(crate) fn unit_shift_check_window(
+    db: &DbState,
+    payload: &Value,
+) -> Result<UnitShiftCheckWindow, String> {
+    let branch_id = submission_branch_id(payload);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let window = resolve_current_z_report_window(&conn, &branch_id);
+    Ok(UnitShiftCheckWindow {
+        since: Some(window.period_start_at)
+            .filter(|start| !start.trim().is_empty() && !business_day::is_epoch_timestamp(start)),
+        frozen_cutoff: window.cutoff_at.filter(|_| window.frozen),
+    })
+}
+
 /// Founder rules (13/10/2026): the Z refuses while ANY shift is checked in
 /// (R3), and "executing the Z clears everything" (R4): the window ends at the
 /// moment of the Z, and the generated report, the post-submission sync gate
@@ -7556,9 +7615,16 @@ pub(crate) fn prepare_z_report_submission_at(
     payload: &Value,
     now: DateTime<Utc>,
 ) -> Result<PreparedZReportSubmission, String> {
-    let branch_id = str_field(payload, "branchId")
-        .or_else(|| str_field(payload, "branch_id"))
-        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+    prepare_z_report_submission_at_with_phone_shifts(db, payload, now, None)
+}
+
+fn prepare_z_report_submission_at_with_phone_shifts(
+    db: &DbState,
+    payload: &Value,
+    now: DateTime<Utc>,
+    closed_phone_shifts: Option<&[Value]>,
+) -> Result<PreparedZReportSubmission, String> {
+    let branch_id = submission_branch_id(payload);
     let now_rfc3339 = now.to_rfc3339();
 
     // --- Pre-condition: every shift is checked out, then freeze the window ---
@@ -7636,10 +7702,20 @@ pub(crate) fn prepare_z_report_submission_at(
         str_field(payload, "branchId").is_some() || str_field(payload, "date").is_some();
     let window_payload = payload_for_z_report_window(payload, &branch_id, &window);
 
+    // The phone shifts that closed inside this window (the frozen cutoff for
+    // an issued Z, this moment otherwise).
+    let phone_shifts = closed_phone_shifts.map(|closed| {
+        crate::unit_shift_readiness::phone_shifts_for_z_window(
+            closed,
+            &window.period_start_at,
+            window.cutoff_at.as_deref().unwrap_or(now_rfc3339.as_str()),
+        )
+    });
+
     let generated = if has_shift_id && !has_branch_date {
         generate_z_report(db, payload)?
     } else {
-        generate_z_report_for_window(db, &window_payload, Some(&window))?
+        generate_z_report_for_window(db, &window_payload, Some(&window), phone_shifts.as_deref())?
     };
 
     let z_report_id = extract_z_report_id(&generated);
@@ -13927,6 +14003,135 @@ mod tests {
             let status = status_at(&db, local_datetime(2026, 2, 17, hour, minute, 0));
             assert_eq!(status["status"], "pending_local_submit");
             assert_eq!(status["pendingReportDate"], "2026-02-16");
+        }
+    }
+
+    fn issued_window_db_for_phone_shifts() -> DbState {
+        let db = test_db();
+        seed_closed_shift(&db);
+        let conn = db.conn.lock().unwrap();
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                branch_id: "branch-1".to_string(),
+                report_date: "2026-02-16".to_string(),
+                cutoff_at: "2026-02-16T18:00:00Z".to_string(),
+                period_start_at: "2026-02-16T06:00:00Z".to_string(),
+                day_start_at: None,
+                frozen: true,
+            },
+        )
+        .expect("persist frozen context");
+        drop(conn);
+        db
+    }
+
+    fn closed_phone_shift(id: &str, check_out: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "staff_id": format!("staff-{id}"),
+            "staff_name": "Maria",
+            "role_type": "waiter",
+            "terminal_id": "phone-1",
+            "terminal_name": "Phone 1",
+            "terminal_active": true,
+            "check_in_time": "2026-02-16T09:00:00Z",
+            "check_out_time": check_out,
+            "status": "closed",
+            "currency": "EUR",
+            "opening_cash_amount": 0,
+            "closing_cash_amount": 42.5,
+            "expected_cash_amount": 42.5,
+            "cash_variance": 0,
+            "total_orders_count": 6,
+            "total_sales_amount": 97.4,
+            "total_cash_sales": 42.5,
+            "total_card_sales": 54.9,
+            "handover": "pending",
+            "closed_by": "phone",
+            "received_at": null,
+            "receivable": true,
+        })
+    }
+
+    /// Founder rule 13/10/2026: the stored and queued Z carries the phone
+    /// shifts that closed inside its window (`phoneShifts`, its phone staff
+    /// section), read from the server by the Z's readiness check. The till's
+    /// own `staffReports` and every total stay exactly as without them; a
+    /// skipped check (a server without readiness) leaves the key absent.
+    #[test]
+    fn test_prepared_z_carries_the_phone_shifts_of_its_window_and_nothing_else_changes() {
+        let payload = serde_json::json!({ "branchId": "branch-1" });
+        let closed = vec![
+            closed_phone_shift("phone-before", "2026-02-16T05:00:00Z"),
+            closed_phone_shift("phone-inside", "2026-02-16T12:00:00Z"),
+            closed_phone_shift("phone-next-day", "2026-02-16T19:00:00Z"),
+        ];
+
+        let with_phones = issued_window_db_for_phone_shifts();
+        let prepared =
+            prepare_z_report_submission_with_phone_shifts(&with_phones, &payload, Some(&closed))
+                .expect("prepare the Z with its phone shifts");
+        let without_phones = issued_window_db_for_phone_shifts();
+        let skipped =
+            prepare_z_report_submission_with_phone_shifts(&without_phones, &payload, None)
+                .expect("prepare the Z without the check");
+
+        let stored = |db: &DbState, prepared: &PreparedZReportSubmission| -> (Value, Value) {
+            let conn = db.conn.lock().unwrap();
+            let id = prepared.z_report_id.clone().expect("a stored Z");
+            let report_json: String = conn
+                .query_row(
+                    "SELECT report_json FROM z_reports WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let queued: String = conn
+                .query_row(
+                    "SELECT data FROM parity_sync_queue
+                     WHERE table_name = 'z_reports' AND record_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (
+                serde_json::from_str(&report_json).unwrap(),
+                serde_json::from_str::<Value>(&queued).unwrap()["report_data"].clone(),
+            )
+        };
+        let (report, queued) = stored(&with_phones, &prepared);
+        let phone_shifts = report[PHONE_SHIFTS_REPORT_KEY]
+            .as_array()
+            .expect("phoneShifts on the stored Z");
+        assert_eq!(
+            phone_shifts.len(),
+            1,
+            "only the shift that closed inside the window"
+        );
+        assert_eq!(phone_shifts[0]["staffShiftId"], "phone-inside");
+        assert_eq!(phone_shifts[0]["staffName"], "Maria");
+        assert_eq!(phone_shifts[0]["ordersCount"], 6);
+        assert_eq!(phone_shifts[0]["salesTotal_cents"], 9740);
+        assert_eq!(phone_shifts[0]["handover"], "pending");
+        assert_eq!(
+            queued[PHONE_SHIFTS_REPORT_KEY], report[PHONE_SHIFTS_REPORT_KEY],
+            "the queued Z is the stored Z"
+        );
+
+        let (skipped_report, skipped_queued) = stored(&without_phones, &skipped);
+        assert!(skipped_report.get(PHONE_SHIFTS_REPORT_KEY).is_none());
+        assert!(skipped_queued.get(PHONE_SHIFTS_REPORT_KEY).is_none());
+        for key in [
+            "staffReports",
+            "sales",
+            "cashDrawer",
+            "daySummary",
+            "expenses",
+            "drawers",
+            "period",
+        ] {
+            assert_eq!(report[key], skipped_report[key], "{key} is the till's own");
         }
     }
 

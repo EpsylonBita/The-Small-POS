@@ -5,6 +5,7 @@ import { CashierGateContext, CashierRecovery, CashierWaiterContext, useCashierOp
 import { useCashierDayGate } from '../hooks/useCashierDayGate';
 import { useFeatures } from '../hooks/useFeatures';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
+import { PHONE_SHIFT_STAFF_OPEN_EVENT } from '../hooks/usePhoneShiftNotices';
 import { ShiftManager, type ShiftManagerRef } from './ShiftManager';
 import { DeferredModal } from './ui/DeferredModal';
 const ZReportModal = lazy(() => import('./modals/ZReportModal'));
@@ -87,6 +88,14 @@ export function GlobalCashierGate({ children, onLogout, onOpenSettings }: {
   const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(day.branchId);
   const shiftManager = useRef<ShiftManagerRef>(null);
   const [showZ, setShowZ] = useState(false);
+  // The phone-shift notice's «Staff shifts» (founder rule 13/10/2026: phones
+  // hand over to the Main) opens this staff modal: always mounted while logged
+  // in and a recovery surface, so it also opens while the cashier day is locked.
+  useEffect(() => {
+    const open = () => shiftManager.current?.openCheckin();
+    window.addEventListener(PHONE_SHIFT_STAFF_OPEN_EVENT, open);
+    return () => window.removeEventListener(PHONE_SHIFT_STAFF_OPEN_EVENT, open);
+  }, []);
   useEffect(() => {
     if (!locked) return;
     // Portals escape an operational boundary's inert subtree. Only shell

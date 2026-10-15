@@ -1,0 +1,98 @@
+{
+  "phoneShifts": {
+    "title": "Turnet në telefon",
+    "handover": {
+      "received": "U mor",
+      "pending": "Për t'u marrë",
+      "none": "S'ka gjë për dorëzim",
+      "not_counted": "Pa u numëruar"
+    },
+    "phoneDeactivated": "telefon i çaktivizuar",
+    "phoneRemoved": "telefon i hequr",
+    "checkedInAt": "hyri në {{time}}",
+    "unavailable": "S'u kontrolluan dot turnet në telefon. Kontrollo lidhjen dhe provo prapë.",
+    "retry": "Provo prapë"
+  },
+  "modals": {
+    "zReport": {
+      "phoneShifts": {
+        "checking": "Po kontrollohen turnet në telefon…",
+        "openDescription": "Turne në telefon ende të hapura: {{count}}. Dita nuk mbyllet derisa të mbyllet secili.",
+        "noneOpen": "S'ka asnjë turn të hapur në telefon.",
+        "closeAction": "Mbylle në telefon, ose te Stafi në këtë arkë",
+        "pendingReturnsTitle": "Kesh nga telefonat për t'u marrë",
+        "pendingReturnsDescription": "Arka telefonash të mbyllura, keshin e të cilave kjo arkë s'e ka marrë ende. Merre këtu; deri atëherë mbeten në listë, edhe ditën tjetër.",
+        "returnLine": "{{staff}} · {{phone}} · për t'u marrë {{amount}}",
+        "refusedOpen": "Dita nuk u mbyll: ka ende turne të hapura në telefon: {{shifts}}. Mbyll secilin në telefon, ose te Stafi në këtë arkë.",
+        "refusedOpenUnnamed": "Dita nuk u mbyll: një turn në telefon është ende i hapur. Mbylle në telefon, ose te Stafi në këtë arkë.",
+        "refusedUnavailable": "Dita nuk u mbyll: s'u kontrolluan dot turnet në telefon. Kontrollo lidhjen dhe provo prapë.",
+        "countedCash": "Keshi i numëruar"
+      }
+    },
+    "staffShift": {
+      "phoneShifts": {
+        "openBlocker": "Mbyll turnet në telefon para se ta mbyllësh këtë turn: {{shifts}}. Mbylli në telefon, ose këtu te përzgjedhja e stafit.",
+        "shiftEntry": "{{name}} ({{role}}, {{phone}})",
+        "receiveBlocker": "Merr keshin e këtyre arkave të telefonit te përzgjedhja e stafit para se ta mbyllësh këtë turn: {{tills}}.",
+        "tillEntry": "{{name}} ({{phone}}, {{amount}})",
+        "managerSettles": "Këtë arkë s'mund ta marrësh këtu. E rregullon një menaxher.",
+        "openHelper": "Ende hapur në telefon. Secili e mban Z-në derisa të mbyllet.",
+        "closeHere": "Mbyll turnin këtu",
+        "lastChecked": "S'ka lidhje. Turnet në telefon siç ishin në kontrollin e fundit, në {{time}}.",
+        "lastCheckedBlocker": "S'ka lidhje. Sipas kontrollit të fundit, në {{time}}: {{reasons}}",
+        "lastSeenStale": "Ky telefon ishte online për herë të fundit në {{time}}. Porositë ose pagesat që s'i ka dërguar nuk janë në këto shifra.",
+        "lastSeenUnknown": "S'dihet kur u lidh për herë të fundit ky telefon. Porositë ose pagesat që s'i ka dërguar mund të mungojnë në këto shifra.",
+        "closeWithoutHandover": {
+          "action": "Mbylle pa dorëzim",
+          "explain": "Turni mbyllet pa kesh: këtij sirtari s'i shtohet asgjë. Paratë e tij i rregullon një menaxher.",
+          "reason": "Arsyeja",
+          "reasonHint": "E detyrueshme, deri në {{max}} karaktere.",
+          "closed": "Turni i {{name}} u mbyll pa dorëzim. Këtij sirtari s'iu shtua asgjë.",
+          "closedNotCounted": "Turni i {{name}} u mbyll pa dorëzim dhe keshi i tij u shënua si i panumëruar. Këtij sirtari s'iu shtua asgjë; paratë i rregullon një menaxher.",
+          "alreadyClosed": "Turni i {{name}} ishte mbyllur tashmë. Këtij sirtari s'iu shtua asgjë.",
+          "errors": {
+            "reasonRequired": "Shkruaj një arsye, deri në 500 karaktere.",
+            "pinRequired": "Një menaxher fut PIN-in e vet.",
+            "wrongPin": "Me këtë PIN s'mund të miratohet. Një menaxher me të drejtë anulimi porosish fut PIN-in e vet.",
+            "notStaff": "Ky PIN s'i përket asnjë punonjësi aktiv të këtij biznesi, ndaj s'mund ta miratojë.",
+            "mainOnly": "Vetëm arka kryesore e këtij telefoni mund t'ia mbyllë turnet.",
+            "offline": "S'ka lidhje. Turni mbyllet vetëm online: kontrollo lidhjen dhe provo prapë.",
+            "failed": "Turni s'u mbyll dot. S'ndryshoi asgjë; provo prapë.",
+            "approvalRequired": "Ky menaxher s'mund ta miratojë mbylljen e një turni pa dorëzim."
+          }
+        },
+        "needsCashier": "Merret këtu sapo të hyjë në turn një arkëtar."
+      }
+    }
+  },
+  "notices": {
+    "phoneShift": {
+      "closed": "{{name}} mbylli turnin në {{phone}}",
+      "closedByMain": "Turni i {{name}} në {{phone}} u mbyll nga arka",
+      "summary": "Porosi: {{orders}} · Shitje: {{sales}}",
+      "cashToReceive": "Kesh për t'u marrë: {{amount}}",
+      "receivedAmount": "U mor nga arka: {{amount}}",
+      "received": "U mor nga arka",
+      "openStaff": "Turnet e stafit"
+    }
+  },
+  "recovery": {
+    "messages": {
+      "phoneShiftRemoteCheckoutRequired": "Ky turn është në telefon. Mbylle në telefon, ose te Stafi në këtë arkë, ku i numërohet keshi."
+    },
+    "issues": {
+      "zReportHeldForPhoneShifts": {
+        "title": "Z-ja pret turnet në telefon",
+        "summary": "Serveri e mban këtë Z derisa të mbyllen këto turne në telefon: {{shifts}}.",
+        "summaryUnnamed": "Serveri e mban këtë Z derisa të mbyllen turnet e hapura në telefon.",
+        "guidance": "Mbylli në telefon, ose te Stafi në këtë arkë. Pastaj Z-ja niset vetë; s'humbet asgjë."
+      }
+    }
+  },
+  "sync": {
+    "blockerReasons": {
+      "zReportUnitShiftsOpen": "Z-ja pret: ka ende turne të hapura në telefon: {{shifts}}. Mbylli në telefon, ose te Stafi në këtë arkë; pastaj Z-ja niset vetë.",
+      "zReportUnitShiftsOpenUnnamed": "Z-ja pret: një turn në telefon është ende i hapur. Mbylle në telefon, ose te Stafi në këtë arkë; pastaj Z-ja niset vetë."
+    }
+  }
+}

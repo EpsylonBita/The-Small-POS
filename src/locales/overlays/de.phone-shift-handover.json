@@ -1,0 +1,98 @@
+{
+  "phoneShifts": {
+    "title": "Handy-Schichten",
+    "handover": {
+      "received": "Übernommen",
+      "pending": "Noch zu übernehmen",
+      "none": "Nichts zu übergeben",
+      "not_counted": "Nicht gezählt"
+    },
+    "phoneDeactivated": "Handy deaktiviert",
+    "phoneRemoved": "Handy entfernt",
+    "checkedInAt": "eingecheckt {{time}}",
+    "unavailable": "Die Handy-Schichten konnten nicht geprüft werden. Verbindung prüfen und erneut versuchen.",
+    "retry": "Erneut versuchen"
+  },
+  "modals": {
+    "zReport": {
+      "phoneShifts": {
+        "checking": "Handy-Schichten werden geprüft…",
+        "openDescription": "Noch offene Handy-Schichten: {{count}}. Der Tag kann erst abgeschlossen werden, wenn jede geschlossen ist.",
+        "noneOpen": "Keine Handy-Schicht ist offen.",
+        "closeAction": "Auf dem Handy schließen oder unter Personal an dieser Kasse",
+        "pendingReturnsTitle": "Bargeld von Handys zu übernehmen",
+        "pendingReturnsDescription": "Geschlossene Handy-Kassen, deren Bargeld diese Kasse noch nicht übernommen hat. Hier übernehmen; bis dahin bleiben sie aufgeführt, auch am nächsten Tag.",
+        "returnLine": "{{staff}} · {{phone}} · zu übernehmen {{amount}}",
+        "refusedOpen": "Der Tag wurde nicht abgeschlossen: Handy-Schichten sind noch offen: {{shifts}}. Jede auf dem Handy schließen oder unter Personal an dieser Kasse.",
+        "refusedOpenUnnamed": "Der Tag wurde nicht abgeschlossen: Eine Handy-Schicht ist noch offen. Auf dem Handy schließen oder unter Personal an dieser Kasse.",
+        "refusedUnavailable": "Der Tag wurde nicht abgeschlossen: Die Handy-Schichten konnten nicht geprüft werden. Verbindung prüfen und erneut versuchen.",
+        "countedCash": "Gezähltes Bargeld"
+      }
+    },
+    "staffShift": {
+      "phoneShifts": {
+        "openBlocker": "Schließen Sie die Handy-Schichten, bevor Sie diese Schicht schließen: {{shifts}}. Schließen Sie sie auf dem Handy oder hier in der Personalauswahl.",
+        "shiftEntry": "{{name}} ({{role}}, {{phone}})",
+        "receiveBlocker": "Nehmen Sie das Bargeld dieser Handy-Kassen in der Personalauswahl an, bevor Sie diese Schicht schließen: {{tills}}.",
+        "tillEntry": "{{name}} ({{phone}}, {{amount}})",
+        "managerSettles": "Diese Kasse kann hier nicht angenommen werden. Ein Manager rechnet sie ab.",
+        "openHelper": "Noch auf einem Handy offen. Jede hält den Z-Abschluss auf, bis sie geschlossen ist.",
+        "closeHere": "Schicht hier schließen",
+        "lastChecked": "Keine Verbindung. Handy-Schichten wie bei der letzten Prüfung um {{time}}.",
+        "lastCheckedBlocker": "Keine Verbindung. Stand der letzten Prüfung um {{time}}: {{reasons}}",
+        "lastSeenStale": "Dieses Handy war zuletzt um {{time}} online. Bestellungen oder Zahlungen, die es noch nicht gesendet hat, fehlen in diesen Zahlen.",
+        "lastSeenUnknown": "Wann dieses Handy zuletzt verbunden war, ist unbekannt. Bestellungen oder Zahlungen, die es noch nicht gesendet hat, können in diesen Zahlen fehlen.",
+        "closeWithoutHandover": {
+          "action": "Ohne Übergabe schließen",
+          "explain": "Die Schicht wird ohne Bargeld geschlossen: Dieser Kassenlade wird nichts gutgeschrieben. Eine Führungskraft rechnet ihr Geld ab.",
+          "reason": "Grund",
+          "reasonHint": "Pflichtfeld, höchstens {{max}} Zeichen.",
+          "closed": "Die Schicht von {{name}} wurde ohne Übergabe geschlossen. Dieser Kassenlade wurde nichts gutgeschrieben.",
+          "closedNotCounted": "Die Schicht von {{name}} wurde ohne Übergabe geschlossen, ihr Bargeld ist als nicht gezählt markiert. Dieser Kassenlade wurde nichts gutgeschrieben; eine Führungskraft rechnet ihr Geld ab.",
+          "alreadyClosed": "Die Schicht von {{name}} war bereits geschlossen. Dieser Kassenlade wurde nichts gutgeschrieben.",
+          "errors": {
+            "reasonRequired": "Geben Sie einen Grund ein, höchstens 500 Zeichen.",
+            "pinRequired": "Eine Führungskraft gibt ihre eigene PIN ein.",
+            "wrongPin": "Mit dieser PIN kann es nicht genehmigt werden. Eine Führungskraft mit dem Recht, Bestellungen zu stornieren, gibt ihre eigene PIN ein.",
+            "notStaff": "Diese PIN gehört zu keiner aktiven Person im Personal dieses Betriebs, daher kann sie es nicht genehmigen.",
+            "mainOnly": "Nur die Hauptkasse, zu der dieses Handy gehört, kann seine Schichten schließen.",
+            "offline": "Keine Verbindung. Die Schicht kann nur online geschlossen werden: Prüfen Sie die Verbindung und versuchen Sie es erneut.",
+            "failed": "Die Schicht konnte nicht geschlossen werden. Es wurde nichts geändert; versuchen Sie es erneut.",
+            "approvalRequired": "Diese Führungskraft kann das Schließen einer Schicht ohne Übergabe nicht freigeben."
+          }
+        },
+        "needsCashier": "Wird hier übernommen, sobald jemand an der Kasse eingecheckt ist."
+      }
+    }
+  },
+  "notices": {
+    "phoneShift": {
+      "closed": "{{name}} hat die Schicht auf {{phone}} beendet",
+      "closedByMain": "Die Schicht von {{name}} auf {{phone}} wurde an der Kasse beendet",
+      "summary": "Bestellungen: {{orders}} · Umsatz: {{sales}}",
+      "cashToReceive": "Bargeld zu übernehmen: {{amount}}",
+      "receivedAmount": "Von der Kasse übernommen: {{amount}}",
+      "received": "Von der Kasse übernommen",
+      "openStaff": "Personalschichten"
+    }
+  },
+  "recovery": {
+    "messages": {
+      "phoneShiftRemoteCheckoutRequired": "Diese Schicht läuft auf einem Handy. Schließen Sie sie auf dem Handy oder unter Personal an dieser Kasse, wo ihr Bargeld gezählt wird."
+    },
+    "issues": {
+      "zReportHeldForPhoneShifts": {
+        "title": "Z-Bericht wartet auf Handy-Schichten",
+        "summary": "Der Server hält diesen Z-Bericht zurück, bis diese Handy-Schichten geschlossen sind: {{shifts}}.",
+        "summaryUnnamed": "Der Server hält diesen Z-Bericht zurück, bis die offenen Handy-Schichten geschlossen sind.",
+        "guidance": "Schließen Sie sie auf dem Handy oder unter Personal an dieser Kasse. Der Z-Bericht wird danach von selbst gesendet; nichts geht verloren."
+      }
+    }
+  },
+  "sync": {
+    "blockerReasons": {
+      "zReportUnitShiftsOpen": "Der Z-Bericht wartet: Handy-Schichten sind noch offen: {{shifts}}. Schließen Sie sie auf dem Handy oder unter Personal an dieser Kasse; der Z-Bericht wird danach von selbst gesendet.",
+      "zReportUnitShiftsOpenUnnamed": "Der Z-Bericht wartet: Eine Handy-Schicht ist noch offen. Schließen Sie sie auf dem Handy oder unter Personal an dieser Kasse; der Z-Bericht wird danach von selbst gesendet."
+    }
+  }
+}

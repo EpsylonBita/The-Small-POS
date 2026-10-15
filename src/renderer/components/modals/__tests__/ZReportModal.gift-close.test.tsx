@@ -6,6 +6,7 @@ import { formatCurrency } from '../../../utils/format';
 import { GIFT_CLOSE_LABELS } from '../../../utils/zReport';
 
 const mocks = vi.hoisted(() => {
+  const noPhoneShifts = { success: true, open_shifts: [], closed_shifts: [], pending_returns: [], terminals: [] };
   const listeners = new Map<string, Set<() => void>>();
   // Stable `t`: the modal's load effect depends on it. Interpolates {{name}} like i18next.
   const translate = (key: string, fallbackOrOptions?: unknown): string => {
@@ -31,6 +32,8 @@ const mocks = vi.hoisted(() => {
         submitZReport: vi.fn(),
         resolvePaymentBlocker: vi.fn(),
       },
+      // A Main without open phone shifts (founder rule 13/10/2026).
+      shifts: { unitReadiness: vi.fn(async () => ({ success: true, data: noPhoneShifts })) },
       auth: { logout: vi.fn(async () => ({ success: true })) },
     },
     clearShift: vi.fn(),

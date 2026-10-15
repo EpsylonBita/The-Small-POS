@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { formatUnitShiftsQueueReason } from '../../lib/unit-shifts-queue-reason';
 import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { getSyncQueueBridge } from '../services/SyncQueueBridge';
 import type { SyncQueueItem } from '../../../../shared/pos/sync-queue-types';
@@ -496,7 +497,8 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
 
                         <div className="space-y-3">
                           {group.items.map((item) => {
-                            const queueError = item.errorMessage;
+                            // A Z held for open phone shifts reads in the store's language (review 14/10/2026).
+                            const queueError = formatUnitShiftsQueueReason(item.errorMessage, t) ?? item.errorMessage;
                             const isDeferred = item.normalizedStatus === 'deferred';
 
                             return (

@@ -614,7 +614,14 @@ export const RecoveryCenterPanel: React.FC<RecoveryCenterPanelProps> = ({
         }),
       );
       await persistLogEntry(false, null, errorMessage);
-      const friendlyMessage = t('recovery.messages.actionFailed');
+      // The server never force-closes a phone shift (founder rule
+      // 13/10/2026): say where to close it instead of a generic failure.
+      const friendlyMessage = errorMessage.includes('PHONE_SHIFT_REMOTE_CHECKOUT_REQUIRED')
+        ? t('recovery.messages.phoneShiftRemoteCheckoutRequired', {
+          defaultValue:
+            'This shift is on a phone. Close it on the phone, or from Staff on this register, where its cash is counted.',
+        })
+        : t('recovery.messages.actionFailed');
       setActionFeedback(friendlyMessage);
       toast.error(friendlyMessage);
     } finally {

@@ -21363,6 +21363,38 @@ async fn sync_z_report_items(
                 synced += 1;
                 info!(z_report_id = %entity_id, "Z-report synced to admin");
             }
+            Err(e) if crate::unit_shift_readiness::error_message_reports_unit_shifts_open(&e) => {
+                // Founder rule 13/10/2026: the server holds the Z while a
+                // phone shift of the unit is open. The row waits without
+                // spending its retry budget and goes through once the phones
+                // close (the parity queue does the same).
+                let reason = crate::unit_shift_readiness::wait_reason_from_error_message(&e);
+                warn!(
+                    z_report_id = %entity_id,
+                    "Queued Z held by the server: phone shifts of this register are still open"
+                );
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue
+                         SET status = 'pending',
+                             last_error = ?1,
+                             next_retry_at = datetime('now', ?2),
+                             updated_at = datetime('now')
+                         WHERE id = ?3",
+                        params![
+                            reason,
+                            format!("+{} seconds", sync_queue::Z_REPORT_UNIT_SHIFTS_RETRY_SECS),
+                            id
+                        ],
+                    );
+                    let _ = conn.execute(
+                        "UPDATE z_reports
+                         SET sync_state = 'pending', sync_last_error = ?1, updated_at = datetime('now')
+                         WHERE id = ?2",
+                        params![reason, entity_id],
+                    );
+                }
+            }
             Err(e) => {
                 warn!(z_report_id = %entity_id, error = %e, "Z-report sync failed");
                 if let Ok(conn) = db.conn.lock() {
@@ -34537,6 +34569,124 @@ mod tests {
             0,
             "the settlement covers the order and no till money is counted on it"
         );
+    }
+
+    /// Founder rule 13/10/2026, legacy queue: a Z the server holds for open
+    /// phone shifts (`409 Z_REPORT_UNIT_SHIFTS_OPEN`) waits without spending
+    /// its retry budget, past every retry it has, and goes through once the
+    /// phones close.
+    #[tokio::test]
+    async fn a_legacy_queued_z_held_for_phone_shifts_waits_and_never_fails() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([(
+            "terminal_id",
+            CLOSEOUT_TEST_TERMINAL_ID,
+        )]);
+        let db = test_db();
+        seed_closeout_terminal_context(&db);
+        let branch_id = "11111111-1111-1111-1111-111111111111";
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+            conn.execute(
+                "INSERT INTO z_reports
+                   (id, shift_id, terminal_id, branch_id, report_date,
+                    generated_at, sync_state, created_at, updated_at)
+                 VALUES ('z-legacy-held', 'shift-legacy', ?1, ?2, '2026-10-14',
+                         datetime('now'), 'pending', datetime('now'), datetime('now'))",
+                params![CLOSEOUT_TEST_TERMINAL_ID, branch_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue
+                   (entity_type, entity_id, operation, payload,
+                    idempotency_key, status, retry_count, max_retries, created_at)
+                 VALUES ('z_report', 'z-legacy-held', 'insert', ?1,
+                         'z_report:z-legacy-held', 'pending', 0, 5, datetime('now'))",
+                params![serde_json::json!({
+                    "terminal_id": CLOSEOUT_TEST_TERMINAL_ID,
+                    "branch_id": branch_id,
+                    "report_date": "2026-10-14",
+                    "report_data": {},
+                })
+                .to_string()],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        }
+        let refusal = r#"{"success":false,"code":"Z_REPORT_UNIT_SHIFTS_OPEN","error":"Close the phone shifts before the Z: Maria (waiter, Phone 1)","open_shifts":[{"id":"phone-shift-1","staff_name":"Maria","role_type":"waiter","terminal_id":"phone-1","terminal_name":"Phone 1"}]}"#;
+        let refusals = 7;
+        let mut responses = vec![(409, refusal.to_string()); refusals];
+        responses.push((200, r#"{"success":true}"#.to_string()));
+        let (server_url, served) = spawn_status_sequence_server(responses);
+
+        for _ in 0..refusals {
+            let synced = dispatch_pending_z_reports_for_test(
+                &server_url,
+                "api-key",
+                CLOSEOUT_TEST_TERMINAL_ID,
+                branch_id,
+                &db,
+            )
+            .await;
+            assert_eq!(synced, 0);
+            let conn = db.conn.lock().unwrap();
+            let (status, retry_count, last_error, waits): (String, i64, Option<String>, bool) =
+                conn.query_row(
+                    "SELECT status, retry_count, last_error,
+                            julianday(next_retry_at) > julianday('now', '+50 seconds')
+                     FROM sync_queue WHERE entity_id = 'z-legacy-held'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "pending", "never failed, past max_retries = 5");
+            assert_eq!(retry_count, 0, "waiting never spends the retry budget");
+            assert!(waits, "asks again after a minute");
+            assert_eq!(
+                last_error.as_deref(),
+                Some("Z_REPORT_UNIT_SHIFTS_OPEN: Maria (Phone 1)")
+            );
+            let (sync_state, z_error): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT sync_state, sync_last_error FROM z_reports WHERE id = 'z-legacy-held'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(sync_state, "pending");
+            assert_eq!(z_error, last_error);
+        }
+
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                sync_queue::wake_z_reports_waiting_for_unit_shifts(&conn).unwrap(),
+                1,
+                "the Z's readiness check sends it at once"
+            );
+        }
+        let synced = dispatch_pending_z_reports_for_test(
+            &server_url,
+            "api-key",
+            CLOSEOUT_TEST_TERMINAL_ID,
+            branch_id,
+            &db,
+        )
+        .await;
+        assert_eq!(synced, 1, "the phones closed: the Z goes through");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            refusals + 1
+        );
+        let conn = db.conn.lock().unwrap();
+        let sync_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM z_reports WHERE id = 'z-legacy-held'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sync_state, "applied");
     }
 
     /// A scripted HTTP server: one `(status, body)` per request, in order,

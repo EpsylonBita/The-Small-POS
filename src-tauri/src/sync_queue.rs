@@ -8535,6 +8535,124 @@ pub fn mark_module_required(
     Ok(())
 }
 
+/// How long a queued Z refused for open phone shifts waits before it asks
+/// the server again.
+pub(crate) const Z_REPORT_UNIT_SHIFTS_RETRY_SECS: i64 = 60;
+
+/// Park a queued Z the server refused with `409 Z_REPORT_UNIT_SHIFTS_OPEN`
+/// (founder rule 13/10/2026: no Z while a phone shift of the unit is open).
+///
+/// Neither a conflict nor a failure: the Z is right, the phones are not
+/// closed yet, and it must reach the server once they are. Like
+/// [`mark_module_required`] it never spends `attempts`, so the retry budget
+/// never parks it as `failed`; it asks again every
+/// [`Z_REPORT_UNIT_SHIFTS_RETRY_SECS`] (or at once when the Z's own readiness
+/// check sees no open phone shift: [`wake_z_reports_waiting_for_unit_shifts`]).
+/// `error_message` carries the server's sentence naming the shifts, which is
+/// what Sync health and the Z's closeout blockers show for this row.
+pub(crate) fn mark_waiting_for_unit_shifts(
+    conn: &Connection,
+    item_id: &str,
+    record_id: &str,
+    reason: &str,
+    expected_generation: i64,
+) -> Result<(), String> {
+    let now = Utc::now();
+    let next_retry = now + ChronoDuration::seconds(Z_REPORT_UNIT_SHIFTS_RETRY_SECS);
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 last_attempt = ?2,
+                 next_retry_at = ?3
+             WHERE id = ?4 AND claim_generation = ?5",
+            params![
+                reason,
+                now.to_rfc3339(),
+                next_retry.to_rfc3339(),
+                item_id,
+                expected_generation,
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark_waiting_for_unit_shifts: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item_id,
+            expected_generation,
+            "mark_waiting_for_unit_shifts no-op: claim_generation mismatch"
+        );
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE z_reports
+         SET sync_state = 'pending', sync_last_error = ?1, updated_at = ?2
+         WHERE id = ?3 AND COALESCE(sync_state, '') <> 'applied'",
+        params![reason, now.to_rfc3339(), record_id],
+    )
+    .map_err(|e| format!("sync_queue mark z-report waiting for unit shifts: {e}"))?;
+    Ok(())
+}
+
+/// The queued Z rows that wait for phone shifts, by their stored reason.
+pub(crate) fn z_reports_waiting_for_unit_shifts(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT error_message
+             FROM parity_sync_queue
+             WHERE table_name = 'z_reports'
+               AND status IN ('pending', 'processing')
+               AND error_message LIKE ?1
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare z-reports waiting for unit shifts: {e}"))?;
+    let reasons = statement
+        .query_map(
+            params![format!(
+                "{}%",
+                crate::unit_shift_readiness::Z_REPORT_UNIT_SHIFTS_OPEN
+            )],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("query z-reports waiting for unit shifts: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read z-reports waiting for unit shifts: {e}"))?;
+    Ok(reasons)
+}
+
+/// Send the queued Z rows that wait for phone shifts on the next pass instead
+/// of at their next recheck: the Z's own readiness check just saw no open
+/// phone shift, and its drain must not wait a minute for them.
+pub(crate) fn wake_z_reports_waiting_for_unit_shifts(conn: &Connection) -> Result<usize, String> {
+    let pattern = format!(
+        "{}%",
+        crate::unit_shift_readiness::Z_REPORT_UNIT_SHIFTS_OPEN
+    );
+    let parity = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET next_retry_at = NULL
+             WHERE table_name = 'z_reports'
+               AND status = 'pending'
+               AND next_retry_at IS NOT NULL
+               AND error_message LIKE ?1",
+            params![pattern],
+        )
+        .map_err(|e| format!("wake parity z-reports waiting for unit shifts: {e}"))?;
+    let legacy = conn
+        .execute(
+            "UPDATE sync_queue
+             SET next_retry_at = NULL
+             WHERE entity_type = 'z_report'
+               AND status = 'pending'
+               AND next_retry_at IS NOT NULL
+               AND last_error LIKE ?1",
+            params![pattern],
+        )
+        .map_err(|e| format!("wake legacy z-reports waiting for unit shifts: {e}"))?;
+    Ok(parity + legacy)
+}
+
 /// Retry cadence of a retained gift-card financial opening item.
 const FINANCIAL_OPENING_RETRY_SECS: i64 = 30;
 
@@ -15455,6 +15573,45 @@ where
                     telemetry.record_error(&item, "failed", PARITY_ITEM_REJECTED, Some(status));
                     errors.push(safe_sync_error(&item, PARITY_ITEM_REJECTED, Some(status)));
                     shift_conflicts.extend(shift_conflict_notice(&item, response_json.as_ref()));
+                } else if item.table_name == "z_reports"
+                    && crate::unit_shift_readiness::response_reports_unit_shifts_open(
+                        status,
+                        &response_body,
+                    )
+                {
+                    // Founder rule 13/10/2026: the server holds the Z while a
+                    // phone shift of the unit is open, naming it. The Z is not
+                    // wrong and the local day may already be closed here: the
+                    // row waits (never a conflict, never failed by the retry
+                    // budget) and goes through once the phones close.
+                    let reason = crate::unit_shift_readiness::wait_reason_from_body(&response_body);
+                    let marked = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            mark_waiting_for_unit_shifts(
+                                db,
+                                &item.id,
+                                &item.record_id,
+                                &reason,
+                                item.claim_generation,
+                            )
+                        })?
+                    };
+                    if marked.is_some() {
+                        telemetry.record_deferred(
+                            &item,
+                            crate::unit_shift_readiness::Z_REPORT_UNIT_SHIFTS_OPEN,
+                        );
+                        errors.push(safe_sync_error(
+                            &item,
+                            crate::unit_shift_readiness::Z_REPORT_UNIT_SHIFTS_OPEN,
+                            Some(status),
+                        ));
+                        warn!(
+                            retry_secs = Z_REPORT_UNIT_SHIFTS_RETRY_SECS,
+                            "Queued Z held by the server: phone shifts of this register are still open"
+                        );
+                    }
                 } else if is_remote_handover_frozen_response(status, &response_body) {
                     // The server refused a write against a shift whose money a
                     // remote close froze. A retry can never succeed and the
@@ -19970,6 +20127,224 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(status, "completed");
+        }
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    const UNIT_SHIFTS_OPEN_REFUSAL: &str = r#"{"success":false,"code":"Z_REPORT_UNIT_SHIFTS_OPEN","error":"Close the phone shifts before the Z: Maria (waiter, Phone 1)","open_shifts":[{"id":"phone-shift-1","staff_name":"Maria","role_type":"waiter","terminal_id":"phone-1","terminal_name":"Phone 1"}]}"#;
+
+    /// A stored Z queued for the server, as `ensure_z_report_sync_queue_row`
+    /// queues it.
+    fn seed_queued_z_report(conn: &Connection, z_report_id: &str) -> String {
+        seed_terminal_context(conn);
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, status, created_at, updated_at
+             )
+             VALUES ('shift-z-unit', 'staff-z', 'Staff Z', 'cashier', ?1, ?2,
+                datetime('now'), 'closed', datetime('now'), datetime('now'))",
+            params![TEST_BRANCH_ID, TEST_TERMINAL_ID],
+        )
+        .expect("seed shift");
+        conn.execute(
+            "INSERT INTO z_reports (
+                id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                sync_state, created_at, updated_at
+             )
+             VALUES (?1, 'shift-z-unit', ?2, ?3, '2026-10-14',
+                datetime('now'), 'pending', datetime('now'), datetime('now'))",
+            params![z_report_id, TEST_BRANCH_ID, TEST_TERMINAL_ID],
+        )
+        .expect("seed z report");
+        enqueue_payload_item(
+            conn,
+            "z_reports",
+            z_report_id,
+            "INSERT",
+            &json!({
+                "terminal_id": TEST_TERMINAL_ID,
+                "branch_id": TEST_BRANCH_ID,
+                "report_date": "2026-10-14",
+                "report_data": { "periodEnd": "2026-10-14T23:00:00Z" },
+            }),
+            Some(1),
+            Some("z_report"),
+            Some("manual"),
+            Some(1),
+        )
+        .expect("queue the z report")
+    }
+
+    fn queued_z_row(
+        conn: &Connection,
+        queue_id: &str,
+    ) -> (String, i64, Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT status, attempts, error_message, next_retry_at
+             FROM parity_sync_queue WHERE id = ?1",
+            params![queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("queued z row")
+    }
+
+    /// Founder rule 13/10/2026: the server holds a Z while a phone shift of
+    /// the unit is open (`409 Z_REPORT_UNIT_SHIFTS_OPEN`), only for a Main
+    /// that declares it can take that answer. The queued Z is neither a
+    /// conflict nor a failure: it waits a minute at a time, without spending
+    /// its retry budget, with the server's sentence naming the shifts, and
+    /// goes through once the phones close.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_z_held_for_open_phone_shifts_waits_and_never_parks() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        let queue_id = seed_queued_z_report(&conn, "z-unit-held");
+        let conn = std::sync::Mutex::new(conn);
+        let refusals = usize::try_from(MAX_RETRY_ATTEMPTS).unwrap() + 2;
+        let mut responses: Vec<MockResponse> = (0..refusals)
+            .map(|_| MockResponse::json(409, UNIT_SHIFTS_OPEN_REFUSAL))
+            .collect();
+        responses.push(MockResponse::json(200, r#"{"success":true}"#));
+        let (base_url, mut requests, server) = spawn_mock_http_server(responses).await;
+
+        let before = Utc::now();
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(
+            (
+                result.processed,
+                result.failed,
+                result.conflicts,
+                result.dead_lettered
+            ),
+            (0, 0, 0, 0),
+            "a held Z is neither a failure nor a conflict"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.error == "Z_REPORT_UNIT_SHIFTS_OPEN"),
+            "the pass reports why the Z waits: {:?}",
+            result.errors
+        );
+        let request = requests.recv().await.expect("captured z submission");
+        assert_eq!(
+            request.request_line,
+            "POST /api/pos/z-report/submit HTTP/1.1"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-pos-capabilities")
+                .map(String::as_str),
+            Some("unit-shifts-z-gate-v1"),
+            "the Main declares it can take the refusal"
+        );
+
+        {
+            let db = conn.lock().expect("lock db");
+            let (status, attempts, reason, next_retry) = queued_z_row(&db, &queue_id);
+            assert_eq!(status, "pending");
+            assert_eq!(attempts, 0, "waiting never spends the retry budget");
+            assert_eq!(
+                reason.as_deref(),
+                Some("Z_REPORT_UNIT_SHIFTS_OPEN: Maria (Phone 1)")
+            );
+            let next_retry = chrono::DateTime::parse_from_rfc3339(&next_retry.expect("backoff"))
+                .expect("rfc3339 backoff")
+                .with_timezone(&Utc);
+            let wait = (next_retry - before).num_seconds();
+            assert!(
+                (Z_REPORT_UNIT_SHIFTS_RETRY_SECS - 2..=Z_REPORT_UNIT_SHIFTS_RETRY_SECS + 2)
+                    .contains(&wait),
+                "asks again after a minute, waited {wait}s"
+            );
+            let (sync_state, last_error): (String, Option<String>) = db
+                .query_row(
+                    "SELECT sync_state, sync_last_error FROM z_reports WHERE id = 'z-unit-held'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(sync_state, "pending");
+            assert_eq!(last_error, reason);
+            assert_eq!(
+                z_reports_waiting_for_unit_shifts(&db).unwrap(),
+                vec![reason.unwrap()]
+            );
+        }
+
+        // Refused again and again, past the whole retry budget: still waiting.
+        for _ in 1..refusals {
+            {
+                let db = conn.lock().expect("lock db");
+                assert_eq!(wake_z_reports_waiting_for_unit_shifts(&db).unwrap(), 1);
+            }
+            let result = process_queue(&conn, &base_url, "api-key")
+                .await
+                .expect("process queue");
+            assert_eq!((result.failed, result.conflicts), (0, 0));
+            requests.recv().await.expect("captured z submission");
+            let db = conn.lock().expect("lock db");
+            let (status, attempts, _, _) = queued_z_row(&db, &queue_id);
+            assert_eq!((status.as_str(), attempts), ("pending", 0));
+        }
+
+        // The phones closed: the Z goes through.
+        {
+            let db = conn.lock().expect("lock db");
+            assert_eq!(wake_z_reports_waiting_for_unit_shifts(&db).unwrap(), 1);
+        }
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(result.processed, 1);
+        {
+            let db = conn.lock().expect("lock db");
+            let sync_state: String = db
+                .query_row(
+                    "SELECT sync_state FROM z_reports WHERE id = 'z-unit-held'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(sync_state, "applied");
+            assert!(z_reports_waiting_for_unit_shifts(&db).unwrap().is_empty());
+        }
+
+        clear_terminal_identity();
+        server.await.expect("mock server task");
+    }
+
+    /// Any other 409 on a Z keeps today's handling: a conflict for review.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn another_z_409_keeps_the_conflict_handling() {
+        clear_terminal_identity();
+        let conn = test_connection();
+        let queue_id = seed_queued_z_report(&conn, "z-other-409");
+        let conn = std::sync::Mutex::new(conn);
+        let (base_url, _requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            409,
+            r#"{"success":false,"code":"Z_REPORT_WINDOW_CONFLICT","error":"Another Z covers this window"}"#,
+        )])
+        .await;
+
+        let result = process_queue(&conn, &base_url, "api-key")
+            .await
+            .expect("process queue");
+        assert_eq!(result.conflicts, 1);
+        {
+            let db = conn.lock().expect("lock db");
+            let (status, _, _, _) = queued_z_row(&db, &queue_id);
+            assert_eq!(status, "conflict");
+            assert_eq!(wake_z_reports_waiting_for_unit_shifts(&db).unwrap(), 0);
         }
 
         clear_terminal_identity();

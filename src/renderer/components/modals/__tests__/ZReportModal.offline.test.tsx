@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // Z_REPORT_OFFLINE, and the checklist reads the till's own connection.
 
 const mock = vi.hoisted(() => {
+  const noPhoneShifts = { success: true, open_shifts: [], closed_shifts: [], pending_returns: [], terminals: [] };
   const generateZReport = vi.fn();
   const submitZReport = vi.fn();
   const getNetworkStatus = vi.fn();
@@ -22,6 +23,8 @@ const mock = vi.hoisted(() => {
       resolvePaymentBlocker: vi.fn(),
     },
     sync: { getNetworkStatus },
+    // A Main without open phone shifts (founder rule 13/10/2026).
+    shifts: { unitReadiness: vi.fn(async () => ({ success: true, data: noPhoneShifts })) },
     auth: { logout: vi.fn() },
   };
   const features = {

@@ -95,6 +95,9 @@ function makeBridge() {
     staffSchedule: { list: vi.fn(async () => ({ success: true, data: { staff: members } })) },
     shifts: {
       pendingCashReturns: vi.fn(async () => ({ success: true, requires_receipt_check: false, active_waiter_count: 0, returns: [] })),
+      // These close-gate cases pin the legacy remote-checkout gate: a server without
+      // the unit readiness endpoint (404) falls back to it unchanged (founder 13/10/2026).
+      unitReadiness: vi.fn(async () => ({ success: false, status: 404, error: 'Not found' })),
       getActive: vi.fn(async () => null), getActiveForBranch: vi.fn(async () => []), getCheckInEligibility: vi.fn(async () => ({ requiresCashierFirst: false })),
       getActiveCashierByTerminal: vi.fn(async () => ({ id: 'ordinary-cashier' })), open: vi.fn(), getById: vi.fn(async () => null),
       getSummary: vi.fn(async () => ({ success: true, data: summary(123.45) })), getExpenses: vi.fn(async () => []),

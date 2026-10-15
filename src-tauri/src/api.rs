@@ -33,10 +33,26 @@ const POS_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const POS_CAPABILITIES_HEADER: &str = "x-pos-capabilities";
 pub(crate) const POS_CAPABILITIES: &str = "platform-held-refusal-v1";
 
+/// The capability this Main declares on `POST /api/pos/z-report/submit`.
+///
+/// `unit-shifts-z-gate-v1` (founder rule 13/10/2026: phones hand over to the
+/// Main, and no Z runs while a phone shift of the unit is open): the server
+/// may refuse the Z with `409 Z_REPORT_UNIT_SHIFTS_OPEN`, naming the open
+/// phone shifts, and this terminal keeps its queued Z waiting until they
+/// close instead of parking it as a conflict. A till that does not declare it
+/// is never refused for phone shifts.
+pub(crate) const UNIT_SHIFTS_Z_GATE_CAPABILITY: &str = "unit-shifts-z-gate-v1";
+
 /// The capabilities to declare on one request, if it is one that reads them.
 pub(crate) fn pos_capabilities_for(method: &str, path: &str) -> Option<&'static str> {
-    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
-    (method.eq_ignore_ascii_case("POST") && path == "/api/pos/payments").then_some(POS_CAPABILITIES)
+    if !method.eq_ignore_ascii_case("POST") {
+        return None;
+    }
+    match path.split('?').next().unwrap_or(path).trim_end_matches('/') {
+        "/api/pos/payments" => Some(POS_CAPABILITIES),
+        "/api/pos/z-report/submit" => Some(UNIT_SHIFTS_Z_GATE_CAPABILITY),
+        _ => None,
+    }
 }
 
 /// Shared reqwest::Client — holds a connection pool, TLS session cache,
@@ -1095,6 +1111,38 @@ mod tests {
             ("GET", "/api/pos/payments"),
             ("POST", "/api/pos/payments/adjustments"),
             ("PATCH", "/api/pos/orders"),
+        ] {
+            assert_eq!(pos_capabilities_for(method, path), None, "{method} {path}");
+        }
+    }
+
+    /// Founder rule 13/10/2026: a Main's Z submission declares that it takes
+    /// `409 Z_REPORT_UNIT_SHIFTS_OPEN`; payments keep exactly their own token
+    /// and no other request carries the Z one.
+    #[test]
+    fn z_submissions_declare_the_unit_shifts_z_gate_capability() {
+        for (method, path) in [
+            ("POST", "/api/pos/z-report/submit"),
+            ("post", "/api/pos/z-report/submit/"),
+            ("POST", "/api/pos/z-report/submit?source=queue"),
+        ] {
+            assert_eq!(
+                pos_capabilities_for(method, path),
+                Some("unit-shifts-z-gate-v1"),
+                "{method} {path}"
+            );
+        }
+        assert_eq!(
+            pos_capabilities_for("POST", "/api/pos/payments"),
+            Some("platform-held-refusal-v1"),
+            "payments keep exactly their own capability"
+        );
+        for (method, path) in [
+            ("GET", "/api/pos/z-report/submit"),
+            ("GET", "/api/pos/z-report"),
+            ("POST", "/api/pos/z-report"),
+            ("GET", "/api/pos/shifts/unit-readiness"),
+            ("POST", "/api/pos/shifts/remote-checkout"),
         ] {
             assert_eq!(pos_capabilities_for(method, path), None, "{method} {path}");
         }

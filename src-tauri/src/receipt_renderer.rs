@@ -771,6 +771,38 @@ pub struct ZReportStaffEntry {
     pub tips_received: f64,
 }
 
+/// One phone shift of the unit in the Z staff section (founder rule
+/// 13/10/2026: phones hand over to the Main), from the stored Z's
+/// `phoneShifts`. A figure the Z did not record is `None` and prints no row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZReportPhoneShiftEntry {
+    pub name: String,
+    pub role: String,
+    /// The phone's name, else its terminal id.
+    pub phone: String,
+    #[serde(default)]
+    pub check_in: Option<String>,
+    #[serde(default)]
+    pub check_out: Option<String>,
+    #[serde(default)]
+    pub order_count: Option<i64>,
+    #[serde(default)]
+    pub sales_total: Option<f64>,
+    #[serde(default)]
+    pub cash_sales: Option<f64>,
+    #[serde(default)]
+    pub card_sales: Option<f64>,
+    #[serde(default)]
+    pub counted_cash: Option<f64>,
+    #[serde(default)]
+    pub expected_cash: Option<f64>,
+    #[serde(default)]
+    pub cash_variance: Option<f64>,
+    /// `received`, `pending`, `none` or `not_counted`.
+    #[serde(default)]
+    pub handover: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ZReportExpenseEntry {
     pub reason: String,
@@ -914,6 +946,10 @@ pub struct ZReportDoc {
     pub platform_lines: Vec<ZReportPlatformEntry>,
     #[serde(default)]
     pub staff_reports: Vec<ZReportStaffEntry>,
+    /// The unit's phone shifts that closed inside the window, printed after
+    /// the local staff. Empty on a Z stored before 1.4.131.
+    #[serde(default)]
+    pub phone_shifts: Vec<ZReportPhoneShiftEntry>,
     #[serde(default)]
     pub gift_liability_cash_cents: i64,
     #[serde(default)]
@@ -1189,6 +1225,13 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "COMPLETED" => "ΟΛΟΚΛΗΡΩΘΗΚΕ",
             "CANCELED" => "ΑΚΥΡΩΘΗΚΕ",
             "TEST ORDER" => "ΔΟΚΙΜΗ TEST",
+            "PHONE SHIFTS" => "ΒΑΡΔΙΕΣ ΚΙΝΗΤΩΝ",
+            "Mobile" => "Κινητό",
+            "Handover" => "Παράδοση",
+            "Handed over" => "Παραδόθηκε",
+            "To receive" => "Προς παραλαβή",
+            "Nothing to hand over" => "Τίποτα για παράδοση",
+            "Not counted" => "Χωρίς καταμέτρηση",
             _ => key,
         },
         "de" => match key {
@@ -1357,6 +1400,13 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "COMPLETED" => "ABGESCHLOSSEN",
             "CANCELED" => "STORNIERT",
             "TEST ORDER" => "TESTBESTELLUNG",
+            "PHONE SHIFTS" => "HANDY-SCHICHTEN",
+            "Mobile" => "Handy",
+            "Handover" => "Übergabe",
+            "Handed over" => "Übergeben",
+            "To receive" => "Noch zu übernehmen",
+            "Nothing to hand over" => "Nichts zu übergeben",
+            "Not counted" => "Nicht gezählt",
             _ => key,
         },
         "fr" => match key {
@@ -1526,6 +1576,13 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "COMPLETED" => "TERMINÉE",
             "CANCELED" => "ANNULÉE",
             "TEST ORDER" => "COMMANDE TEST",
+            "PHONE SHIFTS" => "SERVICES TELEPHONE",
+            "Mobile" => "Telephone",
+            "Handover" => "Remise",
+            "Handed over" => "Remis",
+            "To receive" => "A recevoir",
+            "Nothing to hand over" => "Rien a remettre",
+            "Not counted" => "Non compte",
             _ => key,
         },
         "it" => match key {
@@ -1692,6 +1749,13 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "COMPLETED" => "COMPLETATO",
             "CANCELED" => "ANNULLATO",
             "TEST ORDER" => "ORDINE DI PROVA",
+            "PHONE SHIFTS" => "TURNI TELEFONI",
+            "Mobile" => "Telefono",
+            "Handover" => "Consegna",
+            "Handed over" => "Consegnato",
+            "To receive" => "Da ricevere",
+            "Nothing to hand over" => "Niente da consegnare",
+            "Not counted" => "Non contato",
             _ => key,
         },
         // Albanian. Written with real `ë`/`ç`: raster receipts draw them as-is,
@@ -1864,6 +1928,13 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "COMPLETED" => "PËRFUNDOI",
             "CANCELED" => "U ANULUA",
             "TEST ORDER" => "POROSI PROVË",
+            "PHONE SHIFTS" => "TURNET NË TELEFON",
+            "Mobile" => "Telefoni",
+            "Handover" => "Dorëzimi",
+            "Handed over" => "U dorëzua",
+            "To receive" => "Për t'u marrë",
+            "Nothing to hand over" => "S'ka gjë për dorëzim",
+            "Not counted" => "Pa u numëruar",
             _ => key,
         },
         _ => key,
@@ -1884,6 +1955,92 @@ fn z_report_staff_payment_total(staff: &ZReportStaffEntry) -> f64 {
     } else {
         staff.total_amount
     }
+}
+
+/// The printed handover state of a phone shift (founder rule 13/10/2026).
+fn z_report_phone_handover_label(lang: &str, handover: &str) -> &'static str {
+    receipt_label(
+        lang,
+        match handover {
+            "received" => "Handed over",
+            "pending" => "To receive",
+            "none" => "Nothing to hand over",
+            _ => "Not counted",
+        },
+    )
+}
+
+/// One phone shift of the Z staff section: its title (`name (role)`) and its
+/// label/value rows, shared by the three renderers. No zero line prints
+/// (coordinator review 14/10/2026): the phone and the handover state always
+/// print; the orders, sales, cash, card, expected cash and the signed
+/// variance only when they are not zero (a method the phone did not take
+/// prints no row). The counted cash prints when not zero, and also as 0.00
+/// when cash was expected, so the shortfall shows.
+fn z_report_phone_shift_rows(
+    lang: &str,
+    shift: &ZReportPhoneShiftEntry,
+    money: &dyn Fn(f64) -> String,
+) -> (String, Vec<(String, String)>) {
+    let title = format!("{} ({})", shift.name, receipt_role_text(lang, &shift.role));
+    let mut rows = Vec::new();
+    if !shift.phone.trim().is_empty() {
+        rows.push((
+            receipt_label(lang, "Mobile").to_string(),
+            shift.phone.clone(),
+        ));
+    }
+    if let Some(count) = shift.order_count.filter(|count| *count > 0) {
+        rows.push((receipt_label(lang, "Orders").to_string(), count.to_string()));
+    }
+    for (label_key, amount) in [
+        ("Sales", shift.sales_total),
+        ("Cash", shift.cash_sales),
+        ("Card", shift.card_sales),
+    ] {
+        if let Some(amount) = amount.filter(|amount| has_print_money(*amount)) {
+            rows.push((receipt_label(lang, label_key).to_string(), money(amount)));
+        }
+    }
+    let expected = shift
+        .expected_cash
+        .filter(|amount| has_print_money(*amount));
+    if let Some(counted) = shift.counted_cash.filter(|amount| {
+        has_print_money(*amount) || expected.is_some_and(|expected| expected > 0.0)
+    }) {
+        rows.push((
+            receipt_label(lang, "Counted Cash").to_string(),
+            money(counted),
+        ));
+    }
+    if let Some(expected) = expected {
+        rows.push((receipt_label(lang, "Expected").to_string(), money(expected)));
+    }
+    if let Some(variance) = shift
+        .cash_variance
+        .filter(|amount| has_print_money(*amount))
+    {
+        rows.push((
+            receipt_label(lang, "Variance").to_string(),
+            signed_money(variance, money),
+        ));
+    }
+    rows.push((
+        receipt_label(lang, "Handover").to_string(),
+        z_report_phone_handover_label(lang, &shift.handover).to_string(),
+    ));
+    (title, rows)
+}
+
+/// `HH:MM - HH:MM` of a phone shift, as the local staff print it.
+fn z_report_phone_shift_time_range(shift: &ZReportPhoneShiftEntry) -> String {
+    let at = |value: &Option<String>| {
+        value
+            .as_deref()
+            .and_then(format_time_hm_local)
+            .unwrap_or_else(|| "--:--".to_string())
+    };
+    format!("{} - {}", at(&shift.check_in), at(&shift.check_out))
 }
 
 fn z_report_staff_payment_detail_label(lang: &str, payment: &ZReportStaffPaymentEntry) -> String {
@@ -5563,6 +5720,31 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             "<div class=\"line\"><span>{}</span><span>{}</span></div>",
                             esc(receipt_label(lang, "Tips Received")),
                             money(staff.tips_received),
+                        ));
+                    }
+                }
+                body.push_str("</div>");
+            }
+
+            // Phone shifts of the unit, after the local staff (founder rule
+            // 13/10/2026: phones hand over to the Main).
+            if !doc.phone_shifts.is_empty() {
+                body.push_str(&format!(
+                    "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                    esc(receipt_label(lang, "PHONE SHIFTS"))
+                ));
+                for shift in &doc.phone_shifts {
+                    let (title, rows) = z_report_phone_shift_rows(lang, shift, &money);
+                    body.push_str(&format!(
+                        "<div><strong>{}</strong></div><div>{}</div>",
+                        esc(&title),
+                        esc(&z_report_phone_shift_time_range(shift)),
+                    ));
+                    for (label, value) in rows {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(&label),
+                            esc(&value),
                         ));
                     }
                 }
@@ -9455,6 +9637,28 @@ fn render_classic_non_customer_raster_exact_ttf(
                     );
                 }
             }
+            // --- Phone shifts of the unit (founder rule 13/10/2026) ---
+            if !doc.phone_shifts.is_empty() {
+                canvas.draw_rule();
+                canvas.draw_text_line(
+                    receipt_label(lang, "PHONE SHIFTS"),
+                    BitmapAlign::Center,
+                    preset.section_style,
+                );
+                let phone_money = |amount: f64| money_with_currency_locale(amount, &cur, comma);
+                for shift in &doc.phone_shifts {
+                    let (title, rows) = z_report_phone_shift_rows(lang, shift, &phone_money);
+                    canvas.draw_text_line(&title, BitmapAlign::Left, preset.section_style);
+                    canvas.draw_text_line(
+                        &format!("  {}", z_report_phone_shift_time_range(shift)),
+                        BitmapAlign::Left,
+                        preset.item_style,
+                    );
+                    for (label, value) in rows {
+                        canvas.draw_pair(&format!("  {label}:"), &value, preset.item_style);
+                    }
+                }
+            }
 
             // --- Expense analysis, including detailed staff payments ---
             if sections.expenses {
@@ -11957,6 +12161,29 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         &money_locale(z_report_staff_payment_total(staff), comma),
                         width,
                     );
+                }
+            }
+
+            // --- Phone shifts of the unit (founder rule 13/10/2026) ---
+            if !doc.phone_shifts.is_empty() {
+                emit_rule(&mut builder, width, '-');
+                builder
+                    .center()
+                    .bold(true)
+                    .text(receipt_label(lang, "PHONE SHIFTS"))
+                    .lf()
+                    .bold(false)
+                    .left();
+                let phone_money = |amount: f64| money_locale(amount, comma);
+                for shift in &doc.phone_shifts {
+                    let (title, rows) = z_report_phone_shift_rows(lang, shift, &phone_money);
+                    builder.bold(true).text(&title).lf().bold(false);
+                    builder
+                        .text(&format!("  {}", z_report_phone_shift_time_range(shift)))
+                        .lf();
+                    for (label, value) in rows {
+                        emit_pair(&mut builder, &label, &value, width);
+                    }
                 }
             }
 
@@ -17534,6 +17761,192 @@ mod tests {
         let mut noise = tomikro_z_report();
         noise.tax_total = 0.004;
         assert_eq!(height(noise), height(tomikro_z_report()));
+    }
+
+    fn z_with_phone_shifts() -> ZReportDoc {
+        let mut z = tomikro_z_report();
+        z.phone_shifts = vec![
+            ZReportPhoneShiftEntry {
+                name: "Maria".into(),
+                role: "waiter".into(),
+                phone: "Phone 1".into(),
+                check_in: Some("2026-10-12T09:00:00Z".into()),
+                check_out: Some("2026-10-12T17:00:00Z".into()),
+                order_count: Some(6),
+                sales_total: Some(97.40),
+                cash_sales: Some(42.50),
+                card_sales: Some(54.90),
+                counted_cash: Some(40.00),
+                expected_cash: Some(42.50),
+                cash_variance: Some(-2.50),
+                handover: "pending".into(),
+            },
+            ZReportPhoneShiftEntry {
+                name: "Eleni".into(),
+                role: "driver".into(),
+                phone: "Phone 2".into(),
+                order_count: Some(0),
+                sales_total: Some(0.0),
+                card_sales: Some(0.0),
+                handover: "none".into(),
+                ..ZReportPhoneShiftEntry::default()
+            },
+        ];
+        z
+    }
+
+    /// Founder rule 13/10/2026 (phones hand over to the Main): the Z staff
+    /// section prints the unit's phone shifts after the local staff, each
+    /// with its phone, orders, the money it took, its count and its handover
+    /// state, in the app language, on every render. A Z without phone shifts
+    /// prints exactly as before.
+    #[test]
+    fn z_prints_the_phone_shifts_after_the_local_staff() {
+        let cfg = slip_cfg("en", "€");
+        for output in html_and_text(&ReceiptDocument::ZReport(z_with_phone_shifts()), &cfg) {
+            let at = |label: &str| {
+                output
+                    .find(label)
+                    .unwrap_or_else(|| panic!("missing {label:?} in:\n{output}"))
+            };
+            assert!(at("STAFF") < at("PHONE SHIFTS"));
+            assert!(at("PHONE SHIFTS") < at("Maria (") && at("Maria (") < at("Eleni ("));
+            assert!(at("Eleni (") < at("EXPENSES"));
+            let maria = slice_between(&output, "Maria (", "Eleni (");
+            for present in [
+                "Phone 1",
+                "6",
+                "97.40",
+                "42.50",
+                "54.90",
+                "Counted Cash",
+                "40.00",
+                "Expected",
+                "Variance",
+                "-",
+                "2.50",
+                "To receive",
+            ] {
+                assert!(maria.contains(present), "missing {present:?} in:\n{maria}");
+            }
+            let eleni = slice_between(&output, "Eleni (", "EXPENSES");
+            assert!(
+                eleni.contains("Phone 2") && eleni.contains("Nothing to hand over"),
+                "{eleni}"
+            );
+            for absent in [
+                "Orders",
+                "Sales",
+                "Card",
+                "Counted Cash",
+                "Expected",
+                "Variance",
+            ] {
+                assert!(
+                    !eleni.contains(absent),
+                    "no zero line prints: {absent:?} in:\n{eleni}"
+                );
+            }
+            assert!(
+                line_with(maria, "Variance").contains("-2.50"),
+                "signed short: {output}"
+            );
+        }
+
+        // Cash was expected and none was counted: the counted 0.00 prints, so
+        // the shortfall shows, with the signed variance.
+        let mut short = tomikro_z_report();
+        short.phone_shifts = vec![ZReportPhoneShiftEntry {
+            name: "Kostas".into(),
+            role: "driver".into(),
+            phone: "Phone 3".into(),
+            counted_cash: Some(0.0),
+            expected_cash: Some(30.0),
+            cash_variance: Some(-30.0),
+            handover: "not_counted".into(),
+            ..ZReportPhoneShiftEntry::default()
+        }];
+        for output in html_and_text(&ReceiptDocument::ZReport(short), &cfg) {
+            let kostas = slice_between(&output, "Kostas (", "EXPENSES");
+            assert!(
+                line_with(kostas, "Counted Cash").contains("0.00"),
+                "{kostas}"
+            );
+            assert!(line_with(kostas, "Expected").contains("30.00"), "{kostas}");
+            assert!(line_with(kostas, "Variance").contains("-30.00"), "{kostas}");
+            assert!(
+                kostas.contains("--:-- - --:--"),
+                "the time range prints: {kostas}"
+            );
+        }
+        for output in html_and_text(&ReceiptDocument::ZReport(tomikro_z_report()), &cfg) {
+            assert!(!output.contains("PHONE SHIFTS"), "{output}");
+        }
+
+        let greek = render_html(
+            &ReceiptDocument::ZReport(z_with_phone_shifts()),
+            &slip_cfg("el", "€"),
+        );
+        for label in [
+            "PHONE SHIFTS",
+            "Mobile",
+            "Handover",
+            "To receive",
+            "Nothing to hand over",
+        ] {
+            assert!(
+                greek.contains(receipt_label("el", label)),
+                "{label} in:\n{greek}"
+            );
+        }
+
+        let raster_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..slip_cfg("en", "€")
+        };
+        let height = |doc: ZReportDoc| {
+            render_classic_non_customer_raster_exact_ttf(
+                &ReceiptDocument::ZReport(doc),
+                &raster_cfg,
+            )
+            .expect("raster render")
+            .height()
+        };
+        assert!(height(z_with_phone_shifts()) > height(tomikro_z_report()));
+    }
+
+    #[test]
+    fn phone_shift_print_labels_are_translated_for_every_receipt_language() {
+        let keys = [
+            "PHONE SHIFTS",
+            "Mobile",
+            "Handover",
+            "Handed over",
+            "To receive",
+            "Nothing to hand over",
+            "Not counted",
+        ];
+        for lang in ["el", "de", "fr", "it", "sq"] {
+            for key in keys {
+                let translated = receipt_label(lang, key);
+                assert!(!translated.trim().is_empty(), "{lang}: {key} is empty");
+                assert_ne!(translated, key, "{lang}: {key} is untranslated");
+            }
+        }
+        assert_eq!(
+            z_report_phone_handover_label("el", "received"),
+            "Παραδόθηκε"
+        );
+        assert_eq!(z_report_phone_handover_label("en", "pending"), "To receive");
+        assert_eq!(
+            z_report_phone_handover_label("en", "not_counted"),
+            "Not counted"
+        );
+        assert_eq!(
+            z_report_phone_handover_label("en", "unknown"),
+            "Not counted"
+        );
     }
 
     #[test]

@@ -3,8 +3,31 @@ import { CashierRecovery } from '../../contexts/cashier-gate-context';
 import { recordedFolioCurrency } from '../../utils/folio-currency';
 import { submitSatelliteHandover } from '../../utils/satellite-handover';
 import { readPendingWaiterReturns, type PendingWaiterReturn } from '../../utils/pending-waiter-returns';
+import {
+  REMOTE_HANDOVER_RETRY,
+  isNonCashPhoneRole,
+  phoneLastSeenIsStale,
+  readReleasedPhoneTills,
+  readUnitShiftReadinessRemembered,
+  tillsToReceive,
+  unitHasPhones,
+  unitIsQuiet,
+  unitShiftCashToReceive,
+  unitShiftPhoneLabel,
+  unitShiftPhoneState,
+  unitShiftStaffLabel,
+  type RememberedUnitReadiness,
+  type UnitClosedShift,
+  type UnitReadiness,
+  type UnitReadinessResult,
+  type UnitShift,
+} from '../../utils/unit-shift-readiness';
 import { satelliteHandoverMessage } from '../../utils/satelliteHandoverText';
 import { SatelliteHandoverReleasePanel } from './SatelliteHandoverReleasePanel';
+import {
+  CloseWithoutHandoverPanel,
+  type CloseWithoutHandoverOutcome,
+} from './staff-shift/CloseWithoutHandoverPanel';
 import React, { useState, useEffect, useRef } from 'react';
 import { roundMoney } from '@shared/utils/money';
 import { toast } from 'react-hot-toast';
@@ -685,6 +708,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   // terminal and live totals. Closing them from here lands with the
   // remote-checkout flow; until then tapping explains where the shift runs.
   const [satelliteShiftsByStaffId, setSatelliteShiftsByStaffId] = useState<Map<string, any>>(new Map());
+  // Phone shifts of this Main's unit (founder 13/10/2026: phones always hand
+  // over to the Main). `null` until the server answers; `unsupported` (an old
+  // server, or a till that is not a Main) keeps the legacy list and gate.
+  const [unitReadiness, setUnitReadiness] = useState<UnitReadinessResult | null>(null);
+  // The last good readiness read (coordinator review 14/10/2026): kept when a
+  // later read fails, else the one this terminal remembers, so an offline
+  // open or Refresh never replaces it with "unavailable".
+  const [unitReadinessLastGood, setUnitReadinessLastGood] = useState<RememberedUnitReadiness | null>(null);
+  // Phone tills whose only local claim a manager released: a manager settles
+  // them, so they never hold the cashier's close and are not received here.
+  const [releasedPhoneTillIds, setReleasedPhoneTillIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingWaiterReturns, setPendingWaiterReturns] = useState<PendingWaiterReturn[]>([]);
   const [waiterReturnsError, setWaiterReturnsError] = useState(false);
   const waiterReturnsRequired = useRef<boolean | null>(null);
@@ -706,10 +740,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       opening_cash_amount: number;
       expected_cash_amount: number;
     } | null;
+    /**
+     * A closed till's own recorded count (founder decision 15/10/2026: the
+     * Main receives exactly that count, so it is shown, not typed); `null`
+     * for an open shift, whose cash the cashier counts here.
+     */
+    recordedCount?: number | null;
   }>({ loading: false, error: null, figures: null });
   const [satelliteCountedCash, setSatelliteCountedCash] = useState('');
   const [satelliteSubmitting, setSatelliteSubmitting] = useState(false);
   const [satellitePending, setSatellitePending] = useState(false);
+  // The open phone shift's preview or close was refused for good (not
+  // REMOTE_HANDOVER_RETRY): the pane offers "Close without handover".
+  const [satelliteRefusedForGood, setSatelliteRefusedForGood] = useState(false);
   const [satelliteResult, setSatelliteResult] = useState<{
     counted: number;
     expected: number;
@@ -1254,16 +1297,75 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
   const rediscoverGiftClose = () => setGiftDiscoveryNonce((value) => value + 1);
 
+  // Phone-shift readiness reads (coordinator review 14/10/2026): every read is
+  // remembered per terminal when good; a failed one keeps the last good read.
+  const unitReadinessTerminalId = (): string | null => {
+    const configured = getSetting('terminal', 'terminal_id');
+    if (typeof configured === 'string' && configured.trim()) return configured.trim();
+    return getCachedTerminalCredentials().terminalId.trim() || null;
+  };
+  const invokeBridge = (channel: string, ...args: unknown[]): Promise<unknown> =>
+    bridge.invoke(channel, ...args);
+  const newerReadiness = (
+    held: RememberedUnitReadiness | null,
+    candidate: RememberedUnitReadiness | null,
+  ): RememberedUnitReadiness | null => {
+    if (!held) return candidate;
+    if (!candidate) return held;
+    return Date.parse(candidate.checkedAt) >= Date.parse(held.checkedAt) ? candidate : held;
+  };
+  /** The read the Main goes by: a fresh good one, else the last good one (stale). */
+  const lastGoodAfter = (
+    read: { result: UnitReadinessResult; lastGood: RememberedUnitReadiness | null },
+  ): RememberedUnitReadiness | null => {
+    if (read.result.kind === 'ready') return read.lastGood;
+    if (read.result.kind === 'unsupported') return null;
+    return newerReadiness(unitReadinessLastGood, read.lastGood);
+  };
+  const applyUnitReadinessRead = (
+    read: { result: UnitReadinessResult; lastGood: RememberedUnitReadiness | null },
+  ) => {
+    setUnitReadiness(read.result);
+    if (read.result.kind === 'ready') {
+      setUnitReadinessLastGood(read.lastGood);
+    } else if (read.result.kind === 'unsupported') {
+      setUnitReadinessLastGood(null);
+    } else {
+      setUnitReadinessLastGood(held => newerReadiness(held, read.lastGood));
+    }
+  };
+
+  // A new open or terminal scope starts from nothing; a Refresh keeps what is
+  // shown until its answer arrives, so a failed Refresh never blanks it.
   useEffect(() => {
     waiterReturnsRequired.current = null;
     setPendingWaiterReturns([]);
     setWaiterReturnsError(false);
+    setUnitReadiness(null);
+    setUnitReadinessLastGood(null);
+    setReleasedPhoneTillIds(new Set());
+  }, [giftOpenKey, isMobileWaiter]);
+
+  useEffect(() => {
     if (!isOpen || isMobileWaiter) return;
     let current = true;
-    void readPendingWaiterReturns(bridge.shifts).then(result => {
+    // Founder 13/10/2026: the Main's phone-shift list comes from the unit
+    // readiness answer; only a server without it (or a non-Main till) keeps
+    // the legacy remote-checkout list.
+    void Promise.all([
+      readUnitShiftReadinessRemembered(bridge.shifts, unitReadinessTerminalId()),
+      readReleasedPhoneTills(invokeBridge),
+    ]).then(([read, released]) => {
       if (!current) return;
-      waiterReturnsRequired.current = result.required;
-      setPendingWaiterReturns(result.returns);
+      setReleasedPhoneTillIds(released);
+      applyUnitReadinessRead(read);
+      if (read.result.kind !== 'unsupported') return;
+      return readPendingWaiterReturns(bridge.shifts).then(result => {
+        if (!current) return;
+        waiterReturnsRequired.current = result.required;
+        setPendingWaiterReturns(result.returns);
+        setWaiterReturnsError(false);
+      });
     }).catch(() => { if (current) setWaiterReturnsError(true); });
     return () => { current = false; };
   }, [giftOpenKey, isMobileWaiter, waiterReturnsReload]);
@@ -1594,6 +1696,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setSatelliteCountedCash('');
       setSatelliteSubmitting(false);
       setSatelliteResult(null);
+      setSatelliteRefusedForGood(false);
       setShowExpenseForm(false);
       setClosingCash('');
       setDriverActualCash('');
@@ -2367,7 +2470,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
-  const handleStaffSelect = async (staffMember: StaffMember, closedReturn?: PendingWaiterReturn) => {
+  const handleStaffSelect = async (staffMember: StaffMember, phoneShift?: { id: string; [key: string]: unknown }) => {
     // Retire the previous selection before any asynchronous work for the new cashier.
     giftEpoch.current += 1;
     setGiftRecoveryTarget(null);
@@ -2381,20 +2484,34 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     // Satellite shift: enter the remote-checkout pane — the main register
     // reviews the server-computed figures and receives the cash (v1.4.84).
-    const satelliteShift = closedReturn ? { ...closedReturn, self_closed: true, remote_terminal_name: closedReturn.terminal_id } : satelliteShiftsByStaffId.get(staffMember.id);
+    // `phoneShift` is a till from the awaiting-receipt or phone-shift lists,
+    // already shaped for the pane (founder 13/10/2026).
+    const satelliteShift = phoneShift ?? satelliteShiftsByStaffId.get(staffMember.id);
     if (satelliteShift) {
       setSatelliteCheckout({ shift: satelliteShift, staff: staffMember });
       setSatelliteCountedCash('');
       setSatelliteResult(null);
       setSatellitePending(false);
+      setSatelliteRefusedForGood(false);
       setSatellitePreview({ loading: true, error: null, figures: null });
       void bridge.shifts
         .remoteCheckout({ shiftId: String(satelliteShift.id), action: 'preview' })
         .then((res: any) => {
           const payload = res?.data ?? res;
           if (payload?.success && payload.figures) {
-            setSatellitePreview({ loading: false, error: null, figures: payload.figures });
+            // A closed till is received at exactly its recorded count (the
+            // receipt refuses any other), its float in `figures`, whatever its
+            // role or float (founder decision 15/10/2026). The till's own close
+            // in the preview wins over the list's copy.
+            const recordedCount = satelliteShift.self_closed
+              ? [payload.shift?.closing_cash_amount, (satelliteShift as Record<string, unknown>).closing_cash_amount]
+                .map((value) => (value === null || value === undefined || value === '' ? Number.NaN : Number(value)))
+                .find((value) => Number.isFinite(value) && value >= 0) ?? null
+              : null;
+            if (recordedCount !== null) setSatelliteCountedCash(recordedCount.toFixed(2));
+            setSatellitePreview({ loading: false, error: null, figures: payload.figures, recordedCount });
           } else {
+            setSatelliteRefusedForGood(previewRefusedForGood(payload));
             // The server's refusal in till language, never its raw code.
             setSatellitePreview({
               loading: false,
@@ -3268,7 +3385,57 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       return;
     }
 
-    if (isCashierCheckoutRole && (waiterReturnsRequired.current !== false || waiterReturnsError)) {
+    // Founder 13/10/2026: the Main cashier/manager cannot close while any
+    // phone shift of the unit is open or a closed phone till still waits to
+    // be received here. Asked fresh; a failed read is never "no phone shifts".
+    // Coordinator review 14/10/2026: only a till this Main can receive now and
+    // whose local claim a manager has not released waits; offline, the last
+    // good read decides (no open phone shift and no till to receive passes).
+    let legacyReturnsGate = isCashierCheckoutRole;
+    if (isCashierCheckoutRole) {
+      const guard = captureGiftGuard();
+      const shiftId = String(effectiveShift.id);
+      const [read, released] = await Promise.all([
+        readUnitShiftReadinessRemembered(bridge.shifts, unitReadinessTerminalId()),
+        readReleasedPhoneTills(invokeBridge),
+      ]);
+      if (!(guard() && giftShiftId.current === shiftId)) return;
+      setReleasedPhoneTillIds(released);
+      // A till the server called "not a Main" at open keeps the legacy gate
+      // when the fresh read fails (offline), as it did before 13/10.
+      const keepsLegacy = read.result.kind === 'unavailable' && unitReadiness?.kind === 'unsupported';
+      if (!keepsLegacy) {
+        applyUnitReadinessRead(read);
+      }
+      if (read.result.kind === 'ready') {
+        legacyReturnsGate = false;
+        const blocker = unitCloseBlocker(read.result.readiness, released);
+        if (blocker) {
+          setError(blocker);
+          return;
+        }
+      } else if (read.result.kind === 'unavailable' && !keepsLegacy) {
+        const lastGood = lastGoodAfter(read);
+        if (!lastGood) {
+          setError(t('phoneShifts.unavailable', {
+            defaultValue: 'Phone shifts could not be checked. Check the connection and try again.',
+          }));
+          return;
+        }
+        legacyReturnsGate = false;
+        const blocker = unitCloseBlocker(lastGood.readiness, released);
+        if (blocker) {
+          setError(t('modals.staffShift.phoneShifts.lastCheckedBlocker', {
+            defaultValue: 'No connection. As last checked at {{time}}: {{reasons}}',
+            time: readinessTime(lastGood.checkedAt),
+            reasons: blocker,
+          }));
+          return;
+        }
+      }
+    }
+
+    if (legacyReturnsGate && (waiterReturnsRequired.current !== false || waiterReturnsError)) {
       const guard = captureGiftGuard();
       const shiftId = String(effectiveShift.id);
       const valid = () => guard() && giftShiftId.current === shiftId;
@@ -4421,13 +4588,156 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     };
   })();
 
+  // Phone shifts of this Main's unit (founder 13/10/2026): names for the close
+  // gate and the lists, and the remote-checkout pane opened by shift id.
+  const phoneShiftPhoneText = (shift: UnitShift) => {
+    const phone = unitShiftPhoneLabel(shift);
+    const state = unitShiftPhoneState(shift);
+    if (state === 'deactivated') {
+      return `${phone} · ${t('phoneShifts.phoneDeactivated', { defaultValue: 'phone deactivated' })}`;
+    }
+    if (state === 'removed') {
+      return `${phone} · ${t('phoneShifts.phoneRemoved', { defaultValue: 'phone removed' })}`;
+    }
+    return phone;
+  };
+  const phoneTillAmount = (shift: UnitClosedShift) =>
+    formatCurrency(unitShiftCashToReceive(shift), shift.currency ?? undefined);
+  /** HH:MM of a readiness or heartbeat moment, in the till's language. */
+  const readinessTime = (iso: string) => formatTime(iso, { hour: '2-digit', minute: '2-digit' });
+  /**
+   * What the phone sections show: the fresh read, else (it failed) the last
+   * good one with its time; `null` while loading, for the legacy list
+   * (`unsupported`) or when no good read exists.
+   */
+  const shownUnitReadiness = (): { readiness: UnitReadiness; staleSince: string | null } | null => {
+    if (unitReadiness?.kind === 'ready') return { readiness: unitReadiness.readiness, staleSince: null };
+    if (unitReadiness?.kind === 'unavailable' && unitReadinessLastGood) {
+      return { readiness: unitReadinessLastGood.readiness, staleSince: unitReadinessLastGood.checkedAt };
+    }
+    return null;
+  };
+
+  const unitCloseBlocker = (readiness: UnitReadiness, released: ReadonlySet<string>): string | null => {
+    const reasons: string[] = [];
+    if (readiness.openShifts.length > 0) {
+      reasons.push(t('modals.staffShift.phoneShifts.openBlocker', {
+        defaultValue: 'Close the phone shifts before closing this shift: {{shifts}}. Close them on the phone, or here in staff selection.',
+        shifts: readiness.openShifts.map(shift => t('modals.staffShift.phoneShifts.shiftEntry', {
+          defaultValue: '{{name}} ({{role}}, {{phone}})',
+          name: unitShiftStaffLabel(shift),
+          role: translateRoleName(shift.role_type || 'staff'),
+          phone: phoneShiftPhoneText(shift),
+        })).join(', '),
+      }));
+    }
+    // Only tills this Main can receive now and no manager released wait; any
+    // other pending till is information (a manager settles it).
+    const receivable = tillsToReceive(readiness.pendingReturns, released);
+    if (receivable.length > 0) {
+      reasons.push(t('modals.staffShift.phoneShifts.receiveBlocker', {
+        defaultValue: 'Receive the cash from these phone tills in staff selection before closing this shift: {{tills}}.',
+        tills: receivable.map(till => t('modals.staffShift.phoneShifts.tillEntry', {
+          defaultValue: '{{name}} ({{phone}}, {{amount}})',
+          name: unitShiftStaffLabel(till),
+          phone: phoneShiftPhoneText(till),
+          amount: phoneTillAmount(till),
+        })).join(', '),
+      }));
+    }
+    return reasons.length > 0 ? reasons.join(' ') : null;
+  };
+
+  // The pane needs a staff member; a phone shift of someone the directory
+  // does not list (inactive staff) still gets one, from the server's answer.
+  const phoneShiftStaff = (shift: UnitShift): StaffMember => {
+    const member = availableStaff.find(person => person.id === shift.staff_id);
+    if (member) return member;
+    const name = unitShiftStaffLabel(shift);
+    return {
+      id: shift.staff_id || `phone-shift:${shift.id}`,
+      name,
+      first_name: name,
+      last_name: '',
+      email: '',
+      role_id: '',
+      role_name: shift.role_type || '',
+      role_display_name: '',
+      roles: [],
+      can_login_pos: false,
+      is_active: false,
+    };
+  };
+
+  const receivePhoneTill = (till: UnitClosedShift) => {
+    void handleStaffSelect(phoneShiftStaff(till), {
+      ...till,
+      self_closed: true,
+      remote_terminal_name: unitShiftPhoneLabel(till),
+    });
+  };
+
+  const closePhoneShiftFromMain = (shift: UnitShift) => {
+    void handleStaffSelect(phoneShiftStaff(shift), {
+      id: shift.id,
+      staff_id: shift.staff_id,
+      status: 'active',
+      role_type: shift.role_type || '',
+      terminal_id: shift.terminal_id,
+      remote_terminal_name: unitShiftPhoneLabel(shift),
+      remote: true,
+      check_in_time: shift.check_in_time,
+      opening_cash_amount: shift.opening_cash_amount,
+    });
+  };
+
   const closeSatelliteCheckout = () => {
     setSatelliteCheckout(null);
     setSatellitePreview({ loading: false, error: null, figures: null });
     setSatelliteCountedCash('');
     setSatelliteResult(null);
     setSatellitePending(false);
+    setSatelliteRefusedForGood(false);
     setSelectedStaff(null);
+  };
+
+  // Coordinator review 14/10/2026: a preview the server refused for good (an
+  // HTTP 403/409 with a code other than REMOTE_HANDOVER_RETRY) offers "Close
+  // without handover". A till that is not this phone's Main is refused that
+  // close too, so it is not offered there.
+  const previewRefusedForGood = (payload: unknown): boolean => {
+    if (!payload || typeof payload !== 'object') return false;
+    const answer = payload as { status?: unknown; code?: unknown; error?: unknown };
+    const status = typeof answer.status === 'number' ? answer.status : null;
+    const code = typeof answer.code === 'string' && answer.code
+      ? answer.code
+      : typeof answer.error === 'string' ? answer.error.match(/\bREMOTE_[A-Z0-9_]*[A-Z0-9]/)?.[0] ?? null : null;
+    return (status === 403 || status === 409) && closesWithoutHandoverAfter(code);
+  };
+  const closesWithoutHandoverAfter = (code: string | null): boolean =>
+    code !== null && code !== REMOTE_HANDOVER_RETRY
+      && code !== 'REMOTE_CHECKOUT_MAIN_ONLY' && code !== 'REMOTE_CHECKOUT_NOT_UNIT_CHILD';
+
+  const handleClosedWithoutHandover = (outcome: CloseWithoutHandoverOutcome) => {
+    const name = satelliteCheckout?.staff.name ?? '';
+    closeSatelliteCheckout();
+    setError('');
+    setSuccess(outcome.alreadyClosed
+      ? t('modals.staffShift.phoneShifts.closeWithoutHandover.alreadyClosed', {
+        defaultValue: "{{name}}'s shift was already closed. Nothing was added to this drawer.",
+        name,
+      })
+      : outcome.status === 'closed'
+        ? t('modals.staffShift.phoneShifts.closeWithoutHandover.closed', {
+          defaultValue: "{{name}}'s shift is closed without a handover. Nothing was added to this drawer.",
+          name,
+        })
+        : t('modals.staffShift.phoneShifts.closeWithoutHandover.closedNotCounted', {
+          defaultValue: "{{name}}'s shift is closed without a handover and its cash is marked not counted. Nothing was added to this drawer; a manager settles its money.",
+          name,
+        }));
+    setWaiterReturnsReload(value => value + 1);
+    void loadStaff();
   };
 
   const handleSatelliteRemoteCheckout = async () => {
@@ -4456,13 +4766,167 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setWaiterReturnsReload(value => value + 1);
       void loadStaff();
     } catch (failure) {
-      setError(
-        satelliteHandoverMessage(failure, t)?.text
-          || String((failure as Error)?.message || failure),
-      );
+      const message = satelliteHandoverMessage(failure, t);
+      // Refused for good (never REMOTE_HANDOVER_RETRY): the open phone shift
+      // can still close without a handover, with a manager's PIN.
+      if (message?.refused && closesWithoutHandoverAfter(message.code ?? 'SATELLITE_HANDOVER_REFUSED')) {
+        setSatelliteRefusedForGood(true);
+      }
+      setError(message?.text || String((failure as Error)?.message || failure));
     } finally {
       setSatelliteSubmitting(false);
     }
+  };
+
+  // Founder 13/10/2026: closed phone tills waiting for this Main, and every
+  // open phone shift no staff card reaches (staff no longer active, a removed
+  // phone). Each one holds the Z, so each one can be closed from here.
+  const renderPhoneShiftSections = () => {
+    if (isMobileWaiter) return null;
+    if (!unitReadiness || unitReadiness.kind === 'unsupported') {
+      if (pendingWaiterReturns.length === 0 && !waiterReturnsError) return null;
+      return (
+        <section className={checkInSurfaceClass}>
+          <h4 className="text-xl font-black liquid-glass-modal-text">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
+          {waiterReturnsError && <p role="alert">{t('modals.staffShift.satelliteCheckout.pendingReadFailed')}</p>}
+          <div className="mt-3 flex flex-wrap gap-3">
+            {pendingWaiterReturns.map(row => {
+              const member = availableStaff.find(person => person.id === row.staff_id);
+              return <button key={row.id} type="button" disabled={!member}
+                onClick={() => member && void handleStaffSelect(member, { ...row, self_closed: true, remote_terminal_name: row.terminal_id })}
+                className="rounded-2xl border border-yellow-400 px-5 py-3 text-left font-bold liquid-glass-modal-text">
+                {row.staff_name || member?.name} · {formatCurrency(row.closing_cash_amount, row.currency)}
+                <span className="block text-sm font-normal">{t('modals.staffShift.satelliteCheckout.receive')}</span>
+              </button>;
+            })}
+            <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="rounded-2xl border px-5 py-3">{t('common.refresh')}</button>
+          </div>
+        </section>
+      );
+    }
+    // Coordinator review 14/10/2026: a failed read keeps the last good one,
+    // marked with its time; "unavailable" shows only without any good read.
+    const shown = shownUnitReadiness();
+    if (!shown) {
+      return (
+        <section className={checkInSurfaceClass} data-testid="phone-shifts-unavailable">
+          <h4 className="text-xl font-black liquid-glass-modal-text">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+          <p role="alert" className="mt-2 text-sm font-semibold text-rose-600 dark:text-rose-300">
+            {t('phoneShifts.unavailable', { defaultValue: 'Phone shifts could not be checked. Check the connection and try again.' })}
+          </p>
+          <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="mt-3 rounded-2xl border px-5 py-3 font-semibold liquid-glass-modal-text">
+            {t('phoneShifts.retry', { defaultValue: 'Retry' })}
+          </button>
+        </section>
+      );
+    }
+    // A unit without phones that has nothing open or pending shows nothing.
+    if (!unitHasPhones(shown.readiness) && unitIsQuiet(shown.readiness)) return null;
+    const { pendingReturns, openShifts } = shown.readiness;
+    const receiveHere = new Set(tillsToReceive(pendingReturns, releasedPhoneTillIds).map(till => till.id));
+    const cardedShiftIds = new Set<string>();
+    for (const member of activeCheckInStaff) {
+      const satellite = satelliteShiftsByStaffId.get(member.id);
+      if (satellite?.id) cardedShiftIds.add(String(satellite.id));
+    }
+    const uncardedShifts = openShifts.filter(shift => !cardedShiftIds.has(shift.id));
+    if (!shown.staleSince && pendingReturns.length === 0 && uncardedShifts.length === 0) return null;
+    return (
+      <>
+        {shown.staleSince && (
+          <section className={checkInSurfaceClass} data-testid="phone-shifts-last-checked">
+            <h4 className="text-xl font-black liquid-glass-modal-text">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+            <p role="status" className="mt-2 text-sm font-semibold text-amber-700 dark:text-amber-300">
+              {t('modals.staffShift.phoneShifts.lastChecked', {
+                defaultValue: 'No connection. Phone shifts as last checked at {{time}}.',
+                time: readinessTime(shown.staleSince),
+              })}
+            </p>
+            <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="mt-3 rounded-2xl border px-5 py-3 font-semibold liquid-glass-modal-text">
+              {t('phoneShifts.retry', { defaultValue: 'Retry' })}
+            </button>
+          </section>
+        )}
+        {pendingReturns.length > 0 && (
+          <section className={checkInSurfaceClass} data-testid="phone-tills-awaiting">
+            <h4 className="text-xl font-black liquid-glass-modal-text">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
+            <div className="mt-3 flex flex-wrap gap-3">
+              {pendingReturns.map(till => {
+                const heading = `${unitShiftStaffLabel(till)} · ${phoneTillAmount(till)}`;
+                // Only a till this Main can receive now, and whose local claim
+                // no manager released, keeps the Receive button.
+                if (!receiveHere.has(till.id)) {
+                  return (
+                    <div key={till.id} data-testid={`phone-till-info-${till.id}`}
+                      className="rounded-2xl border border-slate-300/80 px-5 py-3 text-left dark:border-white/15">
+                      <span className="block font-bold liquid-glass-modal-text">{heading}</span>
+                      <span className={`block ${checkInMutedTextClass}`}>{phoneShiftPhoneText(till)}</span>
+                      <span className={`block ${checkInMutedTextClass}`}>
+                        {/* Founder decision 15/10/2026: a till waiting for a
+                            cashier is received here once one is checked in;
+                            only what can never be received is a manager's. */}
+                        {till.settle === 'needs_cashier' && !releasedPhoneTillIds.has(till.id)
+                          ? t('modals.staffShift.phoneShifts.needsCashier', { defaultValue: 'Received here once a cashier is checked in.' })
+                          : t('modals.staffShift.phoneShifts.managerSettles', { defaultValue: "This till can't be received here. A manager settles it." })}
+                      </span>
+                    </div>
+                  );
+                }
+                return (
+                  <button key={till.id} type="button" data-testid={`phone-till-receive-${till.id}`}
+                    onClick={() => receivePhoneTill(till)}
+                    className="rounded-2xl border border-yellow-400 px-5 py-3 text-left font-bold liquid-glass-modal-text">
+                    {heading}
+                    <span className="block text-sm font-normal">{phoneShiftPhoneText(till)}</span>
+                    <span className="block text-sm font-normal">{t('modals.staffShift.satelliteCheckout.receive')}</span>
+                  </button>
+                );
+              })}
+              <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="rounded-2xl border px-5 py-3">{t('common.refresh')}</button>
+            </div>
+          </section>
+        )}
+        {uncardedShifts.length > 0 && (
+          <section className={checkInSurfaceClass} data-testid="phone-shifts-open">
+            <h4 className="text-xl font-black liquid-glass-modal-text">{t('phoneShifts.title', { defaultValue: 'Phone shifts' })}</h4>
+            <p className={`mt-2 ${checkInMutedTextClass}`}>
+              {t('modals.staffShift.phoneShifts.openHelper', { defaultValue: 'Still open on a phone. Each one holds the Z until it is closed.' })}
+            </p>
+            <div className="mt-3 grid gap-3 xl:grid-cols-2">
+              {uncardedShifts.map(shift => (
+                <button key={shift.id} type="button" data-testid={`phone-shift-close-${shift.id}`}
+                  onClick={() => closePhoneShiftFromMain(shift)}
+                  className="w-full rounded-[24px] border border-sky-500/40 p-4 text-left">
+                  <span className="block truncate text-lg font-black liquid-glass-modal-text">{unitShiftStaffLabel(shift)}</span>
+                  <span className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="inline-flex shrink-0 items-center rounded-full border border-white/20 bg-black/45 px-3 py-1 text-xs font-semibold text-white">
+                      {translateRoleName(shift.role_type || 'staff')}
+                    </span>
+                    <span className={`inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-xs font-semibold ${
+                      unitShiftPhoneState(shift) === 'active'
+                        ? 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-200'
+                        : 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-200'
+                    }`}>
+                      {t('modals.staffShift.satelliteTerminalChip', { defaultValue: 'on {{terminal}}', terminal: phoneShiftPhoneText(shift) })}
+                    </span>
+                    {shift.check_in_time ? (
+                      <span className={`inline-flex items-center gap-1.5 text-sm ${checkInMutedTextClass}`}>
+                        <Clock className="h-4 w-4 shrink-0" />
+                        {t('phoneShifts.checkedInAt', { defaultValue: 'checked in {{time}}', time: formatTime(shift.check_in_time) })}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300/80 px-4 py-2.5 text-sm font-semibold liquid-glass-modal-text dark:border-white/15">
+                    {t('modals.staffShift.phoneShifts.closeHere', { defaultValue: 'Close the shift here' })}
+                    <ChevronRight className="h-4 w-4 shrink-0" />
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+      </>
+    );
   };
 
   const renderSatelliteCheckoutView = () => {
@@ -4475,6 +4939,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       figures && Number.isFinite(countedValue)
         ? countedValue - Number(figures.expected_cash_amount || 0)
         : null;
+    // An OPEN phone shift (not a till the phone closed itself).
+    const openPhoneShift = !satelliteCheckout.shift.self_closed;
+    // Coordinator review 14/10/2026: a phone not heard from for over five
+    // minutes may still hold orders or payments the figures do not have. Only
+    // a shift in a readiness answer is checked (an old server sends none).
+    const readinessShift = openPhoneShift
+      ? shownUnitReadiness()?.readiness.openShifts.find(entry => entry.id === String(satelliteCheckout.shift.id)) ?? null
+      : null;
+    const staleLastSeen = readinessShift && phoneLastSeenIsStale(readinessShift.terminal_last_seen_at)
+      ? {
+        at: readinessShift.terminal_last_seen_at && Number.isFinite(Date.parse(readinessShift.terminal_last_seen_at))
+          ? readinessShift.terminal_last_seen_at
+          : null,
+      }
+      : null;
+    const offerCloseWithoutHandover = openPhoneShift && !satelliteResult && !satelliteSubmitting
+      && !satellitePreview.loading
+      && (satelliteRefusedForGood || isNonCashPhoneRole(satelliteCheckout.shift.role_type as string | null | undefined));
     return (
       <div className="space-y-4" data-testid="satellite-checkout-section">
         <div className={checkoutSurfaceClass}>
@@ -4493,6 +4975,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               ? ` · ${formatTime(satelliteCheckout.shift.check_in_time)}`
               : ''}
           </p>
+
+          {staleLastSeen && !satelliteResult && (
+            <p role="status" data-testid="phone-last-seen-warning"
+              className="mt-4 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-800 dark:text-amber-200">
+              {staleLastSeen.at
+                ? t('modals.staffShift.phoneShifts.lastSeenStale', {
+                  defaultValue: 'This phone was last online at {{time}}. Orders or payments it has not sent are not in these figures.',
+                  time: readinessTime(staleLastSeen.at),
+                })
+                : t('modals.staffShift.phoneShifts.lastSeenUnknown', {
+                  defaultValue: "This phone's last connection is unknown. Orders or payments it has not sent may be missing from these figures.",
+                })}
+            </p>
+          )}
 
           {satellitePending && <p role="status" className="mt-4 text-sm text-amber-700 dark:text-amber-300">{t('modals.staffShift.satelliteCheckout.pending')}</p>}
           {figures && !currency && <p role="alert" className="mt-4 text-sm text-rose-500">{t('guestBilling.errors.shiftCurrency')}</p>}
@@ -4527,6 +5023,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <p className="mt-4 text-sm font-semibold text-rose-500">{satellitePreview.error}</p>
           ) : figures ? (
             <>
+              {/* A till the phone closed itself shows its orders and money like
+                  a remote close (founder 13/10/2026). */}
               <div className={`mt-4 grid grid-cols-2 gap-3 ${checkoutInsetSurfaceClass}`}>
                 {[
                   ['orders', t('modals.staffShift.satelliteCheckout.orders', { defaultValue: 'Orders' }), String(figures.total_orders_count)],
@@ -4535,7 +5033,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   ['card', t('modals.staffShift.satelliteCheckout.cardSales', { defaultValue: 'Card sales' }), formatSatelliteMoney(figures.total_card_sales)],
                   ['float', t('modals.staffShift.satelliteCheckout.openingFloat', { defaultValue: 'Opening float' }), formatSatelliteMoney(figures.opening_cash_amount)],
                   ['expected', t('modals.staffShift.satelliteCheckout.expectedCash', { defaultValue: 'Expected cash' }), formatSatelliteMoney(figures.expected_cash_amount)],
-                ].filter(([key]) => !satelliteCheckout.shift.self_closed || key === 'expected' || key === 'float').map(([key, label, value]) => (
+                ].map(([key, label, value]) => (
                   <div key={key as string}>
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                       {label}
@@ -4552,6 +5050,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     name: satelliteCheckout.staff.name,
                   })}
                 </label>
+                {typeof satellitePreview.recordedCount === 'number' ? (
+                  // The till's own count: the receipt takes exactly this.
+                  <p className="mt-2 rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-lg font-bold text-slate-900 dark:border-white/15 dark:bg-black/30 dark:text-white"
+                    data-testid="satellite-recorded-count">
+                    {formatSatelliteMoney(satellitePreview.recordedCount)}
+                  </p>
+                ) : (
                 <CentsMoneyInput
                   aria-label={t('modals.staffShift.satelliteCheckout.countedLabel', {
                     defaultValue: 'Cash received from {{name}}',
@@ -4564,6 +5069,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   className="mt-2 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-lg font-bold text-slate-900 dark:border-white/15 dark:bg-black/30 dark:text-white"
                   data-testid="satellite-counted-cash"
                 />
+                )}
                 {varianceValue !== null ? (
                   <div className="mt-2">
                     <VarianceBadge variance={Math.round(varianceValue * 100) / 100} currency={currency} />
@@ -4586,6 +5092,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               </button>
             </>
           ) : null}
+
+          {/* Coordinator review 14/10/2026: an open phone shift refused for
+              good, or one that counts no cash, closes without a handover. */}
+          {offerCloseWithoutHandover && (
+            <CloseWithoutHandoverPanel
+              key={String(satelliteCheckout.shift.id)}
+              satelliteShiftId={String(satelliteCheckout.shift.id)}
+              onClosed={handleClosedWithoutHandover}
+            />
+          )}
         </div>
       </div>
     );
@@ -6387,6 +6903,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </div>
           )}
 
+          {/* Outside the staff grid: an open phone shift must stay reachable
+              even when the directory lists nobody (founder 13/10/2026). */}
+          {!loading && renderPhoneShiftSections()}
+
           {loading ? (
             <div className={`${checkInSurfaceClass} py-14 text-center`}>
               <div className="inline-block h-12 w-12 animate-spin rounded-full border-4 border-slate-300 border-t-slate-600 dark:border-slate-600 dark:border-t-slate-300" />
@@ -6401,22 +6921,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             </div>
           ) : (
             <div className="grid gap-6 xl:grid-cols-2">
-              {(pendingWaiterReturns.length > 0 || waiterReturnsError) && <section className={`${checkInSurfaceClass} xl:col-span-2`}>
-                <h4 className="text-xl font-black liquid-glass-modal-text">{t('modals.staffShift.satelliteCheckout.awaitingReceipt')}</h4>
-                {waiterReturnsError && <p role="alert">{t('modals.staffShift.satelliteCheckout.pendingReadFailed')}</p>}
-                <div className="mt-3 flex flex-wrap gap-3">
-                  {pendingWaiterReturns.map(row => {
-                    const member = availableStaff.find(person => person.id === row.staff_id);
-                    return <button key={row.id} type="button" disabled={!member}
-                      onClick={() => member && void handleStaffSelect(member, row)}
-                      className="rounded-2xl border border-yellow-400 px-5 py-3 text-left font-bold liquid-glass-modal-text">
-                      {row.staff_name || member?.name} · {formatCurrency(row.closing_cash_amount, row.currency)}
-                      <span className="block text-sm font-normal">{t('modals.staffShift.satelliteCheckout.receive')}</span>
-                    </button>;
-                  })}
-                  <button type="button" onClick={() => setWaiterReturnsReload(value => value + 1)} className="rounded-2xl border px-5 py-3">{t('common.refresh')}</button>
-                </div>
-              </section>}
               <section className={checkInSurfaceClass}>
                 <div className="flex items-start justify-between gap-4">
                   <div>

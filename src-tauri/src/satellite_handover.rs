@@ -41,9 +41,14 @@ pub(crate) const HANDOVER_PENDING: &str = "SATELLITE_HANDOVER_PENDING";
 pub(crate) const HANDOVER_REFUSED: &str = "SATELLITE_HANDOVER_REFUSED";
 /// The recovery log action of a manager's release.
 pub(crate) const RELEASE_ACTION_ID: &str = "satellite_handover_released";
+/// The audit entry of an open phone shift a manager closed from the Main
+/// without its cash handover (coordinator review 14/10/2026).
+pub(crate) const CLOSE_WITHOUT_HANDOVER_ACTION_ID: &str = "phone_shift_closed_without_handover";
+/// The server's own limit on the reason of a close without handover.
+const CLOSE_WITHOUT_HANDOVER_REASON_MAX_CHARS: usize = 500;
 
 const TABLE_COLUMNS: &str = "id TEXT PRIMARY KEY,
-        satellite_shift_id TEXT NOT NULL UNIQUE,
+        satellite_shift_id TEXT NOT NULL,
         branch_id TEXT NOT NULL,
         terminal_id TEXT NOT NULL,
         cashier_shift_id TEXT NOT NULL,
@@ -64,13 +69,62 @@ const TABLE_COLUMNS: &str = "id TEXT PRIMARY KEY,
         released_by TEXT,
         release_audit_id TEXT";
 const RECEIVER_INDEX: &str = "CREATE INDEX IF NOT EXISTS satellite_cash_handovers_receiver ON satellite_cash_handovers(cashier_shift_id,state);";
+/// One live claim per phone shift. A claim a manager released stays as
+/// history, and the Main may claim that shift again with a new identity
+/// (founder rule 13/10/2026: the Main closes every phone shift that holds
+/// cash, so a released claim must not leave the shift unclosable and the Z
+/// held for good). The server refuses a second proof for one shift.
+const LIVE_CLAIM_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS satellite_cash_handovers_one_live_claim ON satellite_cash_handovers(satellite_shift_id) WHERE state <> 'released';";
 
 pub(crate) fn ensure_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS satellite_cash_handovers ({TABLE_COLUMNS}); {RECEIVER_INDEX}"
     ))
     .map_err(|e| format!("satellite handover schema: {e}"))?;
-    upgrade_states(conn)
+    upgrade_states(conn)?;
+    upgrade_live_claim(conn)?;
+    conn.execute_batch(LIVE_CLAIM_INDEX)
+        .map_err(|e| format!("satellite handover live claim index: {e}"))
+}
+
+/// A table that made the phone shift itself unique (before 1.4.131) is
+/// rebuilt once so a released claim can be followed by a new one, every row
+/// kept exactly as it was.
+fn upgrade_live_claim(conn: &Connection) -> Result<(), String> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'satellite_cash_handovers'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("inspect satellite handover schema: {e}"))?;
+    if sql.is_none_or(|sql| !sql.contains("satellite_shift_id TEXT NOT NULL UNIQUE")) {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT satellite_handover_live_claim")
+        .map_err(|e| format!("begin satellite handover live claim: {e}"))?;
+    let columns = "id, satellite_shift_id, branch_id, terminal_id, cashier_shift_id, drawer_id,         currency, opening_cents, counted_cents, closed_by, state, last_error, proof_json, created_at,         applied_at, refusal_code, refusal_status, refused_at, released_at, released_by, release_audit_id";
+    let rebuilt = conn.execute_batch(&format!(
+        "CREATE TABLE satellite_cash_handovers_v3 ({TABLE_COLUMNS});
+         INSERT INTO satellite_cash_handovers_v3 ({columns})
+         SELECT {columns} FROM satellite_cash_handovers;
+         DROP TABLE satellite_cash_handovers;
+         ALTER TABLE satellite_cash_handovers_v3 RENAME TO satellite_cash_handovers;
+         {RECEIVER_INDEX}
+         {LIVE_CLAIM_INDEX}"
+    ));
+    match rebuilt {
+        Ok(()) => conn
+            .execute_batch("RELEASE satellite_handover_live_claim")
+            .map_err(|e| format!("commit satellite handover live claim: {e}")),
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO satellite_handover_live_claim; RELEASE satellite_handover_live_claim",
+            );
+            Err(format!("upgrade satellite handover live claim: {error}"))
+        }
+    }
 }
 
 /// A table created before the refused/released states (schema v96) is
@@ -116,7 +170,7 @@ fn upgrade_states(conn: &Connection) -> Result<(), String> {
 }
 
 fn read(conn: &Connection, source: &str) -> Result<Option<Handover>, String> {
-    conn.query_row("SELECT id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,state,refusal_code FROM satellite_cash_handovers WHERE satellite_shift_id=?1",[source],|row| {
+    conn.query_row("SELECT id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,closed_by,state,refusal_code FROM satellite_cash_handovers WHERE satellite_shift_id=?1 AND state<>'released'",[source],|row| {
         let state: String = row.get(10)?;
         Ok(Handover {
             id:row.get(0)?,source:row.get(1)?,branch:row.get(2)?,terminal:row.get(3)?,cashier:row.get(4)?,drawer:row.get(5)?,currency:row.get(6)?,opening_cents:row.get(7)?,counted_cents:row.get(8)?,closed_by:row.get(9)?,applied:state=="applied",
@@ -305,9 +359,15 @@ fn classify_http_failure(error: &crate::api::AdminFetchError) -> ClaimFailure {
 /// receiving drawer that closed: the server's receipt is immutable, so a
 /// retry would meet the same answer.
 fn classify_proof_failure(error: String) -> ClaimFailure {
+    // A proof without a usable expected or variance (a negative or missing
+    // expected) is the server's immutable receipt too: final, so the claim
+    // can be released instead of holding the cashier's close for good
+    // (re-review 15/10/2026).
     for code in [
         "SATELLITE_HANDOVER_PROOF_MISMATCH",
         "SATELLITE_HANDOVER_VARIANCE_PROOF_MISMATCH",
+        "SATELLITE_HANDOVER_EXPECTED_PROOF_MISSING",
+        "SATELLITE_HANDOVER_VARIANCE_PROOF_MISSING",
         "SATELLITE_HANDOVER_RECEIVER_CHANGED",
     ] {
         if error.starts_with(code) {
@@ -615,6 +675,87 @@ fn required_text(input: &Value, key: &str, code: &str) -> Result<String, String>
         .ok_or_else(|| code.to_string())
 }
 
+/// One manager decision that releases a refused claim (inside the caller's
+/// transaction): what was captured, who approved, how, why and the restore
+/// point taken before it.
+struct ClaimRelease<'a> {
+    handover_id: &'a str,
+    code: Option<String>,
+    manager: &'a str,
+    via: &'static str,
+    note: Option<&'a str>,
+    snapshot_id: &'a str,
+    now: &'a str,
+    audit_id: &'a str,
+}
+
+/// Move a refused claim to `released` and audit it, nothing credited: the
+/// step the release panel and a close without handover share, so both leave
+/// the same trail.
+fn release_refused_claim(conn: &Connection, release: &ClaimRelease<'_>) -> Result<(), String> {
+    let captured: Value = conn
+        .query_row(
+            "SELECT json_object('handoverId', id, 'satelliteShiftId', satellite_shift_id,
+                 'branchId', branch_id, 'terminalId', terminal_id, 'cashierShiftId', cashier_shift_id,
+                 'drawerId', drawer_id, 'currency', currency, 'openingCents', opening_cents,
+                 'countedCents', counted_cents, 'closedBy', closed_by, 'refusalCode', refusal_code,
+                 'refusalStatus', refusal_status, 'refusedAt', refused_at, 'lastError', last_error,
+                 'capturedAt', created_at)
+             FROM satellite_cash_handovers WHERE id = ?1",
+            [release.handover_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("read the satellite handover to release: {e}"))
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))?;
+    let cashier_shift = captured
+        .get("cashierShiftId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let changed = conn
+        .execute(
+            "UPDATE satellite_cash_handovers
+                SET state = 'released', released_at = ?1, released_by = ?2, release_audit_id = ?3
+              WHERE id = ?4 AND state = 'refused'",
+            params![
+                release.now,
+                release.manager,
+                release.audit_id,
+                release.handover_id
+            ],
+        )
+        .map_err(|e| format!("release the satellite handover: {e}"))?;
+    if changed != 1 {
+        return Err("SATELLITE_HANDOVER_RELEASE_CONFLICT".to_string());
+    }
+    let evidence = json!({"version":1,"handover":captured,"drawerCredited":false,
+        "approvedBy":release.manager,"via":release.via,"note":release.note,
+        "snapshotId":release.snapshot_id,"releasedAt":release.now});
+    conn.execute(
+        "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
+             shift_id, snapshot_point_id, success, message, actor_staff_id, payload_json, created_at)
+         VALUES (?1, ?2, ?3, 'satellite_cash_handover', ?4, ?5, ?6, 1,
+             'Refused satellite cash handover released as a close blocker; no drawer was credited',
+             ?7, ?8, ?9)",
+        params![
+            release.audit_id,
+            RELEASE_ACTION_ID,
+            release
+                .code
+                .clone()
+                .unwrap_or_else(|| HANDOVER_REFUSED.to_string()),
+            release.handover_id,
+            cashier_shift,
+            release.snapshot_id,
+            release.manager,
+            evidence.to_string(),
+            release.now
+        ],
+    )
+    .map_err(|e| format!("audit the satellite handover release: {e}"))?;
+    Ok(())
+}
+
 /// A manager releases a refused satellite handover so the receiving
 /// cashier's close (and the day's Z) can go on. Nothing is credited to any
 /// drawer and the captured claim is kept as it was: only its state moves
@@ -696,53 +837,19 @@ pub(crate) fn release(
                 "handoverId":handover_id,"cashierShiftId":cashier_shift}),
             );
         };
-        let captured: Value = conn
-            .query_row(
-                "SELECT json_object('handoverId', id, 'satelliteShiftId', satellite_shift_id,
-                     'branchId', branch_id, 'terminalId', terminal_id, 'cashierShiftId', cashier_shift_id,
-                     'drawerId', drawer_id, 'currency', currency, 'openingCents', opening_cents,
-                     'countedCents', counted_cents, 'closedBy', closed_by, 'refusalCode', refusal_code,
-                     'refusalStatus', refusal_status, 'refusedAt', refused_at, 'lastError', last_error,
-                     'capturedAt', created_at)
-                 FROM satellite_cash_handovers WHERE id = ?1",
-                [&handover_id],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(|e| format!("read the satellite handover to release: {e}"))
-            .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))?;
-        let changed = conn
-            .execute(
-                "UPDATE satellite_cash_handovers
-                    SET state = 'released', released_at = ?1, released_by = ?2, release_audit_id = ?3
-                  WHERE id = ?4 AND state = 'refused'",
-                params![now, manager, audit_id, handover_id],
-            )
-            .map_err(|e| format!("release the satellite handover: {e}"))?;
-        if changed != 1 {
-            return Err("SATELLITE_HANDOVER_RELEASE_CONFLICT".to_string());
-        }
-        let evidence = json!({"version":1,"handover":captured,"drawerCredited":false,
-            "approvedBy":manager,"via":approver.via,"note":note,"snapshotId":snapshot.id,
-            "releasedAt":now});
-        conn.execute(
-            "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
-                 shift_id, snapshot_point_id, success, message, actor_staff_id, payload_json, created_at)
-             VALUES (?1, ?2, ?3, 'satellite_cash_handover', ?4, ?5, ?6, 1,
-                 'Refused satellite cash handover released as a close blocker; no drawer was credited',
-                 ?7, ?8, ?9)",
-            params![
-                audit_id,
-                RELEASE_ACTION_ID,
-                code.unwrap_or_else(|| HANDOVER_REFUSED.to_string()),
-                handover_id,
-                cashier_shift,
-                snapshot.id,
-                manager,
-                evidence.to_string(),
-                now
-            ],
-        )
-        .map_err(|e| format!("audit the satellite handover release: {e}"))?;
+        release_refused_claim(
+            &conn,
+            &ClaimRelease {
+                handover_id: &handover_id,
+                code,
+                manager: &manager,
+                via: approver.via,
+                note: note.as_deref(),
+                snapshot_id: &snapshot.id,
+                now: &now,
+                audit_id: &audit_id,
+            },
+        )?;
         Ok(
             json!({"success":true,"released":true,"alreadyReleased":false,
             "handoverId":handover_id,"cashierShiftId":cashier_shift,"auditId":audit_id,
@@ -762,10 +869,268 @@ pub(crate) fn release(
     }
 }
 
+/// The phone shifts whose only local claim a manager released (coordinator
+/// review 14/10/2026): a till the server still calls receivable no longer
+/// holds the cashier's close once its claim was released. A new claim of that
+/// shift (pending, refused or applied) makes it count again.
+pub(crate) fn released_sources(conn: &Connection) -> Result<Vec<String>, String> {
+    ensure_schema(conn)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT released.satellite_shift_id
+             FROM satellite_cash_handovers released
+             WHERE released.state = 'released'
+               AND NOT EXISTS (
+                   SELECT 1 FROM satellite_cash_handovers live
+                   WHERE live.satellite_shift_id = released.satellite_shift_id
+                     AND live.state <> 'released'
+               )
+             ORDER BY released.satellite_shift_id",
+        )
+        .map_err(|e| format!("prepare released satellite handovers: {e}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("read released satellite handovers: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read a released satellite handover: {e}"))
+}
+
+/// What the operator reads when the server refuses a close without handover:
+/// its own code for the refusals the screen explains, `PHONE_SHIFT_CLOSE_OFFLINE`
+/// without a connection, `PHONE_SHIFT_CLOSE_FAILED` otherwise.
+fn close_without_handover_failure(error: &crate::api::AdminFetchError) -> String {
+    if error.is_transport_failure() {
+        return "PHONE_SHIFT_CLOSE_OFFLINE".to_string();
+    }
+    match error.code() {
+        // `REMOTE_HANDOVER_APPROVAL_REQUIRED`: the server checks the
+        // approver's own `pos.orders.cancel` right too (re-review 15/10/2026).
+        Some(
+            code @ ("REMOTE_CHECKOUT_MAIN_ONLY"
+            | "REMOTE_CHECKOUT_NOT_UNIT_CHILD"
+            | "REMOTE_HANDOVER_RECEIVER_MISMATCH"
+            | "REMOTE_HANDOVER_APPROVAL_REQUIRED"),
+        ) => code.to_string(),
+        _ => {
+            tracing::warn!(error = %error, "Close without handover refused by the server");
+            "PHONE_SHIFT_CLOSE_FAILED".to_string()
+        }
+    }
+}
+
+/// A manager closes an open phone shift from the Main WITHOUT its cash
+/// handover (coordinator review 14/10/2026), when the remote checkout can
+/// never take it (refused for good) or the shift has no cash role. The server
+/// closes a cash-free shift as `closed` with nothing to hand over, and any
+/// other as `abandoned` with its cash untouched ("not counted"): a manager
+/// settles that money. Nothing is credited to any drawer here and no claim is
+/// captured. A manager's own PIN with the order-cancel right approves it, as
+/// for the release of a refused claim; the audit entry names the manager, the
+/// reason and the server's answer.
+async fn close_without_handover_at(
+    db: &DbState,
+    auth_state: &crate::auth::AuthState,
+    input: &Value,
+    admin_url: Option<(&str, &str)>,
+) -> Result<Value, crate::auth::GuardedCommandError> {
+    let shift_id = required_text(
+        input,
+        "satelliteShiftId",
+        "SATELLITE_HANDOVER_SOURCE_REQUIRED",
+    )?;
+    let reason = input
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| {
+            !reason.is_empty() && reason.chars().count() <= CLOSE_WITHOUT_HANDOVER_REASON_MAX_CHARS
+        })
+        .map(ToString::to_string)
+        .ok_or("PHONE_SHIFT_CLOSE_REASON_REQUIRED")?;
+    let pin = required_text(
+        input,
+        "managerPin",
+        "SATELLITE_HANDOVER_MANAGER_PIN_REQUIRED",
+    )?;
+    crate::auth::confirm_privileged_action(
+        Some(json!({"pin": pin, "scope": "cash_drawer_control", "approval": "void_orders"})),
+        db,
+        auth_state,
+    )?;
+    let approver = crate::auth::authorize_money_action(
+        crate::auth::MoneyApproval::VoidOrders,
+        db,
+        auth_state,
+    )?;
+    let manager = approver
+        .manager_staff_id
+        .ok_or("SATELLITE_HANDOVER_MANAGER_APPROVAL_REQUIRED")?;
+
+    let body = json!({
+        "shift_id": shift_id,
+        "action": "close_without_handover",
+        "approved_by": manager,
+        "reason": reason,
+    });
+    let answer = match admin_url {
+        Some((admin_url, api_key)) => {
+            crate::api::fetch_from_admin_detailed(
+                admin_url,
+                api_key,
+                "/api/pos/shifts/remote-checkout",
+                "POST",
+                Some(body),
+            )
+            .await
+        }
+        None => {
+            let (admin_url, api_key) = crate::resolve_admin_endpoint(Some(db))
+                .await
+                .map_err(|_| "PHONE_SHIFT_CLOSE_FAILED".to_string())?;
+            crate::api::fetch_from_admin_detailed(
+                &admin_url,
+                &api_key,
+                "/api/pos/shifts/remote-checkout",
+                "POST",
+                Some(body),
+            )
+            .await
+        }
+    }
+    .map_err(|error| close_without_handover_failure(&error))?;
+
+    let shift = answer.get("shift").cloned().unwrap_or(Value::Null);
+    let status = shift.get("status").and_then(Value::as_str).unwrap_or("");
+    if answer.get("success").and_then(Value::as_bool) != Some(true)
+        || shift.get("id").and_then(Value::as_str) != Some(shift_id.as_str())
+        || !matches!(status, "closed" | "abandoned")
+    {
+        tracing::warn!(answer = %answer, "Close without handover: unexpected server answer");
+        return Err("PHONE_SHIFT_CLOSE_FAILED".into());
+    }
+    let already_closed = answer
+        .get("already_closed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let shift_view = json!({
+        "id": shift_id,
+        "status": status,
+        "check_out_time": shift.get("check_out_time").cloned().unwrap_or(Value::Null),
+    });
+
+    // The shift is closed on the server now. A claim of it the server
+    // refused for good would still hold the receiving cashier's close: it is
+    // released in the same step, under this approval and with the release
+    // panel's own trail (coordinator review 14/10/2026). A pending claim may
+    // still prove and stays as it is.
+    let refused_claim: Option<(String, Option<String>)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_schema(&conn)?;
+        conn.query_row(
+            "SELECT id, refusal_code FROM satellite_cash_handovers
+             WHERE satellite_shift_id = ?1 AND state = 'refused'",
+            [&shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("read the refused claim of the closed phone shift: {e}"))?
+    };
+    let snapshot = if refused_claim.is_some() {
+        Some(crate::recovery::create_pre_recovery_action_snapshot(db)?)
+    } else {
+        None
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let audit_id = uuid::Uuid::new_v4().to_string();
+    let release_audit_id = refused_claim
+        .as_ref()
+        .map(|_| uuid::Uuid::new_v4().to_string());
+    let evidence = json!({
+        "version": 1,
+        "satelliteShiftId": shift_id,
+        "reason": reason,
+        "approvedBy": manager,
+        "via": approver.via,
+        "drawerCredited": false,
+        "alreadyClosed": already_closed,
+        "shift": shift_view,
+        "releasedClaim": refused_claim.as_ref().map(|(id, _)| id.clone()),
+        "releaseAuditId": release_audit_id,
+        "closedAt": now,
+    });
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin close without handover audit: {e}"))?;
+    let written = (|| -> Result<(), String> {
+        if let (Some((handover_id, code)), Some(snapshot), Some(release_audit_id)) =
+            (&refused_claim, &snapshot, &release_audit_id)
+        {
+            release_refused_claim(
+                &conn,
+                &ClaimRelease {
+                    handover_id,
+                    code: code.clone(),
+                    manager: &manager,
+                    via: approver.via,
+                    note: Some(&reason),
+                    snapshot_id: &snapshot.id,
+                    now: &now,
+                    audit_id: release_audit_id,
+                },
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO recovery_action_log (id, action_id, issue_code, entity_type, entity_id,
+                 shift_id, snapshot_point_id, success, message, actor_staff_id, payload_json, created_at)
+             VALUES (?1, ?2, 'PHONE_SHIFT_CLOSE_WITHOUT_HANDOVER', 'staff_shift', ?3, ?3, ?4, 1,
+                 'Phone shift closed from the main register without its cash handover; no drawer was credited',
+                 ?5, ?6, ?7)",
+            params![
+                audit_id,
+                CLOSE_WITHOUT_HANDOVER_ACTION_ID,
+                shift_id,
+                snapshot.as_ref().map(|snapshot| snapshot.id.clone()),
+                manager,
+                evidence.to_string(),
+                now
+            ],
+        )
+        .map_err(|e| format!("audit the close without handover: {e}"))?;
+        Ok(())
+    })();
+    match written {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("commit close without handover audit: {e}"))?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error.into());
+        }
+    }
+    drop(conn);
+    tracing::info!(
+        shift_status = %status,
+        already_closed,
+        "Phone shift closed from the main register without its cash handover"
+    );
+    Ok(json!({
+        "success": true,
+        "closedWithoutHandover": true,
+        "alreadyClosed": already_closed,
+        "shift": shift_view,
+        "auditId": audit_id,
+        "releasedHandoverId": refused_claim.map(|(id, _)| id),
+    }))
+}
+
 /// The shift screen's satellite handover recovery: `list` the handovers that
-/// hold a cashier's close, or `release` a refused one (manager).
+/// hold a cashier's close, `release` a refused one (manager),
+/// `released_sources` (the phone shifts whose claim was released) and
+/// `close_without_handover` (manager, an open phone shift the remote checkout
+/// cannot take).
 #[tauri::command]
-pub fn shift_satellite_handover_recovery(
+pub async fn shift_satellite_handover_recovery(
     arg0: Option<Value>,
     db: tauri::State<'_, DbState>,
     auth_state: tauri::State<'_, crate::auth::AuthState>,
@@ -781,9 +1146,17 @@ pub fn shift_satellite_handover_recovery(
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             Ok(json!({"success": true, "handovers": blocking_handovers(&conn, &shift)?}))
         }
+        Some("released_sources") => {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            Ok(json!({"success": true, "satelliteShiftIds": released_sources(&conn)?}))
+        }
         Some("release") => {
             let _lease = crate::repairs::acquire_terminal_binding_lease()?;
             release(&db, &auth_state, &input)
+        }
+        Some("close_without_handover") => {
+            let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+            close_without_handover_at(&db, &auth_state, &input, None).await
         }
         _ => Err("SATELLITE_HANDOVER_RECOVERY_ACTION_INVALID".into()),
     }
@@ -1142,6 +1515,423 @@ mod tests {
         assert_eq!(again["alreadyReleased"], true);
     }
 
+    /// One scripted answer per request; the request bodies are kept.
+    fn spawn_status_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&bodies);
+        std::thread::spawn(move || {
+            for (stream, (status, body)) in listener.incoming().zip(responses) {
+                let Ok(mut stream) = stream else { break };
+                let mut buffer = vec![0u8; 32 * 1024];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let request_body = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body.to_string())
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(request_body);
+                let response = format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), bodies)
+    }
+
+    /// Coordinator review 14/10/2026: an open phone shift the remote checkout
+    /// can never take closes from the Main without its cash, on a manager's
+    /// own PIN and a reason. The server gets the manager as `approved_by`;
+    /// nothing is credited and no claim is captured; the audit names the
+    /// manager, the reason and the server's answer. Typed refusals reach the
+    /// screen by their code.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn satellite_handover_close_without_handover_is_a_managers_audited_decision() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        {
+            let conn = td.state.conn.lock().unwrap();
+            seed_rows(&conn);
+        }
+        let auth = manager_on_duty(&td);
+        let closed = json!({"success": true, "already_closed": false,
+            "shift": {"id": SOURCE, "status": "abandoned", "check_out_time": "2026-10-14T21:00:00Z"}})
+        .to_string();
+        let (url, bodies) = spawn_status_server(vec![
+            (200, closed),
+            (
+                409,
+                r#"{"success":false,"code":"REMOTE_HANDOVER_RECEIVER_MISMATCH","error":"Approver is not an active staff member"}"#.to_string(),
+            ),
+            (403, r#"{"success":false,"code":"REMOTE_CHECKOUT_NOT_UNIT_CHILD","error":"Not a phone of this register"}"#.to_string()),
+            (
+                403,
+                r#"{"success":false,"code":"REMOTE_HANDOVER_APPROVAL_REQUIRED","error":"The approver cannot cancel orders"}"#.to_string(),
+            ),
+            (500, "upstream exploded".to_string()),
+        ]);
+        let input = |pin: Option<&str>, reason: &str| {
+            let mut input = json!({"action": "close_without_handover", "satelliteShiftId": SOURCE,
+                "reason": reason});
+            if let Some(pin) = pin {
+                input["managerPin"] = json!(pin);
+            }
+            input
+        };
+        let endpoint = Some((url.as_str(), "plain-api-key"));
+        let error = |result: Result<Value, crate::auth::GuardedCommandError>| {
+            format!("{:?}", result.unwrap_err())
+        };
+
+        // Nothing reaches the server without a reason or a manager's own PIN.
+        assert!(error(
+            close_without_handover_at(&td.state, &auth, &input(Some("2468"), "  "), endpoint).await
+        )
+        .contains("PHONE_SHIFT_CLOSE_REASON_REQUIRED"));
+        assert!(error(
+            close_without_handover_at(
+                &td.state,
+                &auth,
+                &input(Some("2468"), &"x".repeat(501)),
+                endpoint
+            )
+            .await
+        )
+        .contains("PHONE_SHIFT_CLOSE_REASON_REQUIRED"));
+        assert!(error(
+            close_without_handover_at(&td.state, &auth, &input(None, "Phone lost"), endpoint).await
+        )
+        .contains("SATELLITE_HANDOVER_MANAGER_PIN_REQUIRED"));
+        assert!(close_without_handover_at(
+            &td.state,
+            &auth,
+            &input(Some("1357"), "Phone lost"),
+            endpoint
+        )
+        .await
+        .is_err());
+        assert!(bodies.lock().unwrap().is_empty());
+
+        let done = close_without_handover_at(
+            &td.state,
+            &auth,
+            &input(Some("2468"), " Phone lost "),
+            endpoint,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done["closedWithoutHandover"], true, "{done}");
+        assert_eq!(done["alreadyClosed"], false);
+        assert_eq!(done["shift"]["status"], "abandoned");
+        let sent: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+        assert_eq!(
+            sent,
+            json!({"shift_id": SOURCE, "action": "close_without_handover",
+                "approved_by": "staff-manager", "reason": "Phone lost"})
+        );
+        {
+            let conn = td.state.conn.lock().unwrap();
+            assert_eq!(totals(&conn), (0, 0), "no drawer is credited");
+            let claims: i64 = conn
+                .query_row("SELECT COUNT(*) FROM satellite_cash_handovers", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(claims, 0, "no cash claim is captured");
+            let (actor, entity, payload): (Option<String>, String, String) = conn
+                .query_row(
+                    "SELECT actor_staff_id, entity_id, payload_json FROM recovery_action_log WHERE action_id = ?1",
+                    [CLOSE_WITHOUT_HANDOVER_ACTION_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(actor.as_deref(), Some("staff-manager"));
+            assert_eq!(entity, SOURCE);
+            let payload: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["drawerCredited"], false);
+            assert_eq!(payload["reason"], "Phone lost");
+            assert_eq!(payload["shift"]["status"], "abandoned");
+        }
+
+        for expected in [
+            "REMOTE_HANDOVER_RECEIVER_MISMATCH",
+            "REMOTE_CHECKOUT_NOT_UNIT_CHILD",
+            "REMOTE_HANDOVER_APPROVAL_REQUIRED",
+            "PHONE_SHIFT_CLOSE_FAILED",
+        ] {
+            let refused = close_without_handover_at(
+                &td.state,
+                &auth,
+                &input(Some("2468"), "Phone lost"),
+                endpoint,
+            )
+            .await;
+            assert!(error(refused).contains(expected), "{expected}");
+        }
+        let audits: i64 = td
+            .state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM recovery_action_log WHERE action_id = ?1",
+                [CLOSE_WITHOUT_HANDOVER_ACTION_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audits, 1, "a refused close writes no audit entry");
+        assert!(
+            close_without_handover_failure(&crate::api::AdminFetchError::transport("offline"))
+                .contains("PHONE_SHIFT_CLOSE_OFFLINE")
+        );
+    }
+
+    /// Coordinator review 14/10/2026: closing a phone shift without its
+    /// handover also releases that shift's refused claim, under the same
+    /// approval and with the release panel's trail, so the receiving cashier's
+    /// close does not wait for a second manager action. A pending claim stays.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn satellite_handover_close_without_handover_releases_the_refused_claim_only() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        let refused = {
+            let conn = td.state.conn.lock().unwrap();
+            seed_rows(&conn);
+            let intent = capture(&conn, &payload()).unwrap();
+            mark_refused(
+                &conn,
+                &intent,
+                "ROLE_UNSUPPORTED",
+                Some(409),
+                "ROLE_UNSUPPORTED (HTTP 409)",
+            )
+            .unwrap();
+            assert!(ensure_receiver_can_close(&conn, CASHIER).is_err());
+            intent
+        };
+        let auth = manager_on_duty(&td);
+        let answer = |id: &str| {
+            json!({"success": true, "already_closed": true,
+                "shift": {"id": id, "status": "abandoned", "check_out_time": "2026-10-14T21:00:00Z"}})
+            .to_string()
+        };
+        let other = "33333333-3333-4333-8333-333333333333";
+        let (url, _bodies) = spawn_status_server(vec![(200, answer(SOURCE)), (200, answer(other))]);
+        let endpoint = Some((url.as_str(), "plain-api-key"));
+
+        let done = close_without_handover_at(
+            &td.state,
+            &auth,
+            &json!({"action": "close_without_handover", "satelliteShiftId": SOURCE,
+                "managerPin": "2468", "reason": "Driver left with the phone"}),
+            endpoint,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done["releasedHandoverId"], json!(refused.id));
+        {
+            let conn = td.state.conn.lock().unwrap();
+            assert_eq!(state(&conn).0, "released");
+            ensure_receiver_can_close(&conn, CASHIER).unwrap();
+            assert_eq!(totals(&conn), (0, 0), "no drawer is credited");
+            let (actor, note, release_snapshot): (Option<String>, String, Option<String>) = conn
+                .query_row(
+                    "SELECT actor_staff_id, json_extract(payload_json, '$.note'), snapshot_point_id
+                     FROM recovery_action_log WHERE action_id = ?1",
+                    [RELEASE_ACTION_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(actor.as_deref(), Some("staff-manager"));
+            assert_eq!(note, "Driver left with the phone");
+            assert!(release_snapshot.is_some_and(|id| !id.is_empty()));
+            let released_by: Option<String> = conn
+                .query_row(
+                    "SELECT released_by FROM satellite_cash_handovers WHERE id = ?1",
+                    [&refused.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(released_by.as_deref(), Some("staff-manager"));
+            // A pending claim of another phone shift stays as it is.
+            let mut pending_payload = payload();
+            pending_payload["satelliteShiftId"] = json!(other);
+            capture(&conn, &pending_payload).unwrap();
+        }
+        let second = close_without_handover_at(
+            &td.state,
+            &auth,
+            &json!({"action": "close_without_handover", "satelliteShiftId": other,
+                "managerPin": "2468", "reason": "Phone lost"}),
+            endpoint,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second["releasedHandoverId"], Value::Null);
+        let conn = td.state.conn.lock().unwrap();
+        let pending: String = conn
+            .query_row(
+                "SELECT state FROM satellite_cash_handovers WHERE satellite_shift_id = ?1",
+                [other],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, "pending", "a pending claim may still prove");
+    }
+
+    /// Founder decision 15/10/2026, the Main always receives: a closed driver
+    /// till with a float is received at its own float and count, a count of 0
+    /// included. The claim carries both, the proof must match them, and the
+    /// drawer is credited once (given += float, returned += count).
+    #[test]
+    fn satellite_handover_receives_a_closed_driver_float_till_at_its_float_and_a_zero_count() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        let conn = td.state.conn.lock().unwrap();
+        seed_rows(&conn);
+        let mut till = payload();
+        till["openingCash"] = json!(20.0);
+        till["countedCash"] = json!(0.0);
+        let intent = capture(&conn, &till).unwrap();
+        assert_eq!((intent.opening_cents, intent.counted_cents), (2000, 0));
+        assert_eq!(request(&intent)["counted_cash_cents"], 0);
+
+        let mut confirmation = proof(&intent);
+        confirmation["handover"]["expected_cash_cents"] = json!(2000);
+        confirmation["handover"]["cash_variance_cents"] = json!(-2000);
+        // A proof that names another float never credits this claim.
+        let mut other_float = confirmation.clone();
+        other_float["handover"]["opening_cash_cents"] = json!(0);
+        assert!(apply_proof(&conn, &intent, &other_float)
+            .unwrap_err()
+            .starts_with("SATELLITE_HANDOVER_PROOF_MISMATCH_opening_cash_cents"));
+        assert_eq!(totals(&conn), (0, 0));
+
+        apply_proof(&conn, &intent, &confirmation).unwrap();
+        apply_proof(&conn, &intent, &confirmation).unwrap();
+        assert_eq!(
+            totals(&conn),
+            (2000, 0),
+            "credited once: the float given, nothing returned"
+        );
+        assert!(read(&conn, SOURCE).unwrap().unwrap().applied);
+        ensure_receiver_can_close(&conn, CASHIER).unwrap();
+    }
+
+    /// Re-review 15/10/2026: a proof whose expected cash is negative (or
+    /// missing) can never credit the claim. It is a final refusal, never left
+    /// pending, and a manager's release then lets the cashier close.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn satellite_handover_a_proof_without_a_usable_expected_is_refused_and_releasable() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        let intent = {
+            let conn = td.state.conn.lock().unwrap();
+            seed_rows(&conn);
+            capture(&conn, &payload()).unwrap()
+        };
+        let mut negative = proof(&intent);
+        negative["handover"]["expected_cash_cents"] = json!(-500);
+        negative["handover"]["cash_variance_cents"] = json!(intent.counted_cents + 500);
+        let server = crate::tests::fake_http::MockServer::new(negative.to_string());
+        let first = send(&td.state, &intent, &server.url, "plain-api-key")
+            .await
+            .unwrap();
+        assert_eq!(first["refused"], true, "{first}");
+        {
+            let conn = td.state.conn.lock().unwrap();
+            assert_eq!(
+                state(&conn),
+                (
+                    "refused".to_string(),
+                    Some("SATELLITE_HANDOVER_EXPECTED_PROOF_MISSING".to_string())
+                )
+            );
+            assert_eq!(totals(&conn), (0, 0), "nothing is credited");
+            assert!(ensure_receiver_can_close(&conn, CASHIER)
+                .unwrap_err()
+                .starts_with(
+                    "SATELLITE_HANDOVER_REFUSED: SATELLITE_HANDOVER_EXPECTED_PROOF_MISSING"
+                ));
+        }
+        // Never resent.
+        recover_pending(&td.state, &server.url, "plain-api-key")
+            .await
+            .unwrap();
+        assert_eq!(server.count(), 1);
+
+        let auth = manager_on_duty(&td);
+        let released = release(
+            &td.state,
+            &auth,
+            &json!({"action": "release", "handoverId": intent.id,
+                "cashierShiftId": CASHIER, "managerPin": "2468"}),
+        )
+        .unwrap();
+        assert_eq!(released["released"], true, "{released}");
+        let conn = td.state.conn.lock().unwrap();
+        ensure_receiver_can_close(&conn, CASHIER).unwrap();
+        assert_eq!(totals(&conn), (0, 0));
+
+        // A missing expected is the same final refusal.
+        assert!(matches!(
+            classify_proof_failure("SATELLITE_HANDOVER_EXPECTED_PROOF_MISSING".to_string()),
+            ClaimFailure::Refused { .. }
+        ));
+        assert!(matches!(
+            classify_proof_failure("database is locked".to_string()),
+            ClaimFailure::Retry(_)
+        ));
+    }
+
+    /// Coordinator review 14/10/2026: only a phone shift whose claims were all
+    /// released is listed; a new live claim makes it count again.
+    #[test]
+    fn satellite_handover_released_sources_lists_only_shifts_without_a_live_claim() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        for (id, source, state) in [
+            ("h1", "released-only", "released"),
+            ("h2", "released-then-claimed", "released"),
+            ("h3", "released-then-claimed", "pending"),
+            ("h4", "refused", "refused"),
+            ("h5", "applied", "applied"),
+        ] {
+            conn.execute(
+                "INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,state,created_at)
+                 VALUES (?1,?2,'b1','main','c1','d1','CHF',0,1000,?3,'2026-10-14T20:00:00Z')",
+                params![id, source, state],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            released_sources(&conn).unwrap(),
+            vec!["released-only".to_string()]
+        );
+    }
+
     /// Schema v96 tables only allowed pending/applied: rebuilt once, every
     /// captured row kept.
     #[test]
@@ -1179,5 +1969,96 @@ mod tests {
         assert!(ensure_receiver_can_close(&conn, "c1")
             .unwrap_err()
             .starts_with("SATELLITE_HANDOVER_REFUSED: X"));
+    }
+
+    /// Founder rule 13/10/2026: the Main closes every phone shift that holds
+    /// cash, so a claim a manager released must not leave that shift
+    /// unclosable (and the Z held for good). The released claim stays as
+    /// history and the Main claims the shift again with a new identity; only
+    /// one claim is ever live.
+    #[test]
+    fn satellite_handover_a_released_claim_can_be_followed_by_a_new_one() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "main"),
+            ("branch_id", "b1"),
+        ]);
+        let td = crate::tests::harness::TestDb::open();
+        let conn = td.state.conn.lock().unwrap();
+        seed_rows(&conn);
+        let first = capture(&conn, &payload()).unwrap();
+        // While a claim is live, the same press finds it again.
+        assert_eq!(capture(&conn, &payload()).unwrap().id, first.id);
+        mark_refused(
+            &conn,
+            &first,
+            "REMOTE_HANDOVER_RECEIVER_MISMATCH",
+            Some(409),
+            "REMOTE_HANDOVER_RECEIVER_MISMATCH (HTTP 409)",
+        )
+        .unwrap();
+        assert_eq!(capture(&conn, &payload()).unwrap().id, first.id);
+        conn.execute(
+            "UPDATE satellite_cash_handovers SET state='released', released_at='2026-10-14T20:00:00Z' WHERE id=?1",
+            [&first.id],
+        )
+        .unwrap();
+
+        let second = capture(&conn, &payload()).unwrap();
+        assert_ne!(second.id, first.id, "a new identity after the release");
+        assert_eq!(second.state, "pending");
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id, state FROM satellite_cash_handovers WHERE satellite_shift_id=?1 ORDER BY created_at, state")
+            .unwrap()
+            .query_map([SOURCE], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "the released claim stays as history");
+        assert!(rows.contains(&(first.id.clone(), "released".to_string())));
+        assert!(rows.contains(&(second.id.clone(), "pending".to_string())));
+        // Never two live claims for one phone shift.
+        assert!(conn
+            .execute(
+                "INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,created_at)
+                 VALUES ('dup',?1,'b1','main','c1','d1','CHF',0,0,'2026-10-14T20:00:00Z')",
+                [SOURCE],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn satellite_handover_table_unique_per_shift_is_rebuilt_once_keeping_its_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE satellite_cash_handovers ({});
+             INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,state,refusal_code,released_at,created_at)
+             VALUES ('h1','s1','b1','main','c1','d1','CHF',2000,5525,'released','X','2026-10-14T19:00:00Z','2026-10-14T18:00:00Z');",
+            TABLE_COLUMNS.replace("satellite_shift_id TEXT NOT NULL,", "satellite_shift_id TEXT NOT NULL UNIQUE,")
+        ))
+        .unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+        let kept: (String, i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT state, counted_cents, refusal_code, released_at FROM satellite_cash_handovers WHERE id='h1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (
+                "released".to_string(),
+                5525,
+                Some("X".to_string()),
+                Some("2026-10-14T19:00:00Z".to_string())
+            )
+        );
+        conn.execute(
+            "INSERT INTO satellite_cash_handovers(id,satellite_shift_id,branch_id,terminal_id,cashier_shift_id,drawer_id,currency,opening_cents,counted_cents,created_at)
+             VALUES ('h2','s1','b1','main','c2','d2','CHF',0,1000,'2026-10-14T20:00:00Z')",
+            [],
+        )
+        .expect("a new claim after the released one");
     }
 }

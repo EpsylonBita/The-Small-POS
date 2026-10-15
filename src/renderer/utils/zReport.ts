@@ -3,6 +3,8 @@ import type {
   ZReportData,
   ZReportGiftCloseBlocker,
   ZReportGiftCloseOriginal,
+  ZReportPhoneShift,
+  ZReportPhoneShiftHandover,
 } from '../types/reports';
 
 export type ZReportStaffReport = NonNullable<ZReportData['staffReports']>[number];
@@ -51,12 +53,75 @@ export function normalizeZReportData(report: ZReportData | null | undefined): ZR
     }
     : undefined;
 
-  return {
+  const normalized: ZReportData = {
     ...report,
     period: normalizedPeriod,
     periodStart: period.start,
     periodEnd: period.end,
   };
+  // Absent stays absent: it means the Z skipped the phone shift check.
+  if ('phoneShifts' in report) {
+    normalized.phoneShifts = normalizeZReportPhoneShifts(report.phoneShifts);
+  }
+  return normalized;
+}
+
+const PHONE_SHIFT_HANDOVERS: readonly ZReportPhoneShiftHandover[] = ['received', 'pending', 'none', 'not_counted'];
+const PHONE_SHIFT_AMOUNTS = [
+  'salesTotal',
+  'cashSales',
+  'cardSales',
+  'openingCash',
+  'countedCash',
+  'expectedCash',
+  'cashVariance',
+] as const;
+
+function optionalFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The phone shifts a committed Z stored (founder rule 13/10/2026). An entry
+ * without a shift id is dropped; an amount reads its `_cents` twin first, and
+ * an invalid one is null (shown as a dash), never 0.
+ */
+export function normalizeZReportPhoneShifts(value: unknown): ZReportPhoneShift[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const shifts: ZReportPhoneShift[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const staffShiftId = readText(entry, 'staffShiftId');
+    if (!staffShiftId) continue;
+    const shift: ZReportPhoneShift = {
+      staffShiftId,
+      staffId: readText(entry, 'staffId'),
+      staffName: readText(entry, 'staffName'),
+      role: readText(entry, 'role'),
+      terminalId: readText(entry, 'terminalId'),
+      terminalName: readText(entry, 'terminalName'),
+      terminalActive: typeof entry.terminalActive === 'boolean'
+        ? entry.terminalActive
+        : entry.terminalActive === null ? null : undefined,
+      checkIn: readText(entry, 'checkIn'),
+      checkOut: readText(entry, 'checkOut'),
+      status: entry.status === 'abandoned' ? 'abandoned' : entry.status === 'closed' ? 'closed' : null,
+      currency: readText(entry, 'currency'),
+      ordersCount: optionalFiniteNumber(entry.ordersCount),
+      handover: PHONE_SHIFT_HANDOVERS.includes(entry.handover as ZReportPhoneShiftHandover)
+        ? entry.handover as ZReportPhoneShiftHandover
+        : null,
+      closedBy: entry.closedBy === 'main' ? 'main' : entry.closedBy === 'phone' ? 'phone' : null,
+      receivedAt: readText(entry, 'receivedAt'),
+    };
+    for (const key of PHONE_SHIFT_AMOUNTS) {
+      const cents = readCents(entry, key);
+      shift[key] = cents === null ? null : cents / 100;
+      shift[`${key}_cents` as const] = cents;
+    }
+    shifts.push(shift);
+  }
+  return shifts;
 }
 
 export function resolveShiftEarnedTotal(staff?: Partial<ZReportStaffReport> | null): number {

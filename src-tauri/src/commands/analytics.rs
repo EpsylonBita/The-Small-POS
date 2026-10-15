@@ -1827,6 +1827,102 @@ async fn closeout_drain_failed_offline(error: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The phone-shift check of a Z submission (founder rule 13/10/2026).
+/// `Ok(Ok(closed))` proceeds with the unit's closed phone shifts (`None` when
+/// the check does not apply: a server without the endpoint, or a till that is
+/// not a Main); `Ok(Err(refusal))` is the typed refusal the renderer names.
+async fn check_unit_phone_shifts(
+    db: &db::DbState,
+    payload: &serde_json::Value,
+) -> Result<Result<Option<Vec<serde_json::Value>>, serde_json::Value>, String> {
+    let window = zreport::unit_shift_check_window(db, payload)?;
+    let outcome =
+        crate::unit_shift_readiness::fetch_unit_readiness(db, window.since.as_deref()).await;
+    Ok(unit_phone_shift_gate(
+        outcome,
+        window.frozen_cutoff.as_deref(),
+    ))
+}
+
+/// Open phone shifts (of this Z's window) stop the Z, named; a check that
+/// cannot be made stops it too, because the local day must not close without
+/// it. Only a 404 or a till that is not a Main proceed unchecked.
+fn unit_phone_shift_gate(
+    outcome: crate::unit_shift_readiness::UnitReadinessOutcome,
+    frozen_cutoff: Option<&str>,
+) -> Result<Option<Vec<serde_json::Value>>, serde_json::Value> {
+    use crate::unit_shift_readiness::{
+        open_shifts_holding_z, z_unit_shifts_open_response, z_unit_shifts_unavailable_response,
+        UnitReadinessOutcome,
+    };
+    match outcome {
+        UnitReadinessOutcome::Ready(readiness) => {
+            let holding = open_shifts_holding_z(&readiness.open_shifts, frozen_cutoff);
+            if holding.is_empty() {
+                Ok(Some(readiness.closed_shifts))
+            } else {
+                warn!(
+                    open_phone_shifts = holding.len(),
+                    "Z refused: phone shifts of this register are still open"
+                );
+                Err(z_unit_shifts_open_response(&holding))
+            }
+        }
+        UnitReadinessOutcome::Skipped(reason) => {
+            info!(
+                reason,
+                "Phone-shift check skipped: the server has no readiness for this terminal"
+            );
+            Ok(None)
+        }
+        UnitReadinessOutcome::Unavailable(detail) => {
+            Err(z_unit_shifts_unavailable_response(&detail))
+        }
+    }
+}
+
+/// The server held the queued Z (`409 Z_REPORT_UNIT_SHIFTS_OPEN`): a phone
+/// checked in between the check above and the cutoff. The prepared Z stays
+/// queued and the day open; the refusal names the shifts from a fresh read
+/// (the server's own sentence when that read fails).
+async fn queued_z_held_for_phone_shifts(
+    db: &db::DbState,
+    payload: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    use crate::unit_shift_readiness::{
+        fetch_unit_readiness, open_shifts_holding_z, z_unit_shifts_open_response,
+        UnitReadinessOutcome, Z_REPORT_UNIT_SHIFTS_OPEN,
+    };
+    let held = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::sync_queue::z_reports_waiting_for_unit_shifts(&conn)?
+    };
+    let Some(server_reason) = held.first() else {
+        return Ok(None);
+    };
+    let window = zreport::unit_shift_check_window(db, payload)?;
+    let open_shifts = match fetch_unit_readiness(db, window.since.as_deref()).await {
+        UnitReadinessOutcome::Ready(readiness) => {
+            open_shifts_holding_z(&readiness.open_shifts, window.frozen_cutoff.as_deref())
+        }
+        _ => Vec::new(),
+    };
+    let mut refusal = z_unit_shifts_open_response(&open_shifts);
+    if open_shifts.is_empty() {
+        // The queue keeps the code and the names the server's refusal gave.
+        let sentence = server_reason
+            .strip_prefix(Z_REPORT_UNIT_SHIFTS_OPEN)
+            .map(|rest| rest.trim_start_matches(':').trim())
+            .filter(|names| !names.is_empty())
+            .map_or_else(
+                || "Close the phone shifts before the Z.".to_string(),
+                |names| format!("Close the phone shifts before the Z: {names}"),
+            );
+        refusal["error"] = serde_json::Value::String(sentence);
+    }
+    Ok(Some(refusal))
+}
+
 /// The Z submission itself. `stage` names the step reached, for the attempt
 /// record.
 async fn submit_z_report_through_stages(
@@ -1867,6 +1963,39 @@ async fn submit_z_report_through_stages(
         },
         "Pre-closeout sync drain finished"
     );
+
+    // Founder rule 13/10/2026: phones hand over to the Main, and no Z runs
+    // while a phone shift of the unit is open. Those shifts live only on the
+    // server, so this asks it, after the drain (the Z needs the server anyway)
+    // and before anything is prepared, so a refusal leaves the day open.
+    *stage = crate::unit_shift_readiness::UNIT_SHIFTS_STAGE;
+    let closed_phone_shifts = match check_unit_phone_shifts(db, payload).await? {
+        Ok(closed_phone_shifts) => closed_phone_shifts,
+        Err(refusal) => return Ok(refusal),
+    };
+    // A queued Z the server held for phone shifts goes out now, not at its
+    // next recheck: none is open any more.
+    let woken = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::sync_queue::wake_z_reports_waiting_for_unit_shifts(&conn)?
+    };
+    if woken > 0 {
+        match crate::sync::force_sync_until_closeout_stable(db, sync_state, app).await {
+            Ok(_) => {}
+            Err(error) if closeout_drain_failed_offline(&error).await => {
+                warn!(error = %error, "Z refused: the server cannot be reached");
+                return Ok(z_report_offline_response(
+                    crate::unit_shift_readiness::UNIT_SHIFTS_STAGE,
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Cannot close day: pre-Z-report sync failed: {error}"
+                ))
+            }
+        }
+    }
+
     *stage = "sync_blocked";
     if let Some(response) =
         crate::sync::build_sync_closeout_blocked_response_for_stage(db, "pre-Z-report sync")?
@@ -1915,7 +2044,11 @@ async fn submit_z_report_through_stages(
     }
 
     *stage = "prepare";
-    let prepared = match zreport::prepare_z_report_submission(db, payload) {
+    let prepared = match zreport::prepare_z_report_submission_with_phone_shifts(
+        db,
+        payload,
+        closed_phone_shifts.as_deref(),
+    ) {
         Ok(prepared) => prepared,
         Err(error) => {
             let blockers = zreport::unsettled_payment_blockers(db, payload)?;
@@ -1953,6 +2086,10 @@ async fn submit_z_report_through_stages(
         },
         "Post-submission sync drain finished"
     );
+    if let Some(response) = queued_z_held_for_phone_shifts(db, payload).await? {
+        *stage = crate::unit_shift_readiness::UNIT_SHIFTS_STAGE;
+        return Ok(response);
+    }
     if let Some(response) =
         crate::sync::build_sync_closeout_blocked_response_for_stage(db, "Z-report submission")?
     {
@@ -2115,7 +2252,7 @@ mod dto_tests {
         let refresh = position("crate::fiscal::status::refresh_from_stored_credentials()");
         let drain = position("crate::sync::force_sync_until_closeout_stable(");
         let guard = position("zreport::fiscal_close_blocked_response(db, payload)");
-        let prepare = position("zreport::prepare_z_report_submission(db, payload)");
+        let prepare = position("zreport::prepare_z_report_submission_with_phone_shifts(");
         assert!(refresh < drain, "the verdict is refreshed before the drain");
         assert!(
             drain < guard,
@@ -2133,6 +2270,102 @@ mod dto_tests {
         let preview = source_slice(source, "pub async fn report_generate_z_report(");
         assert!(preview.contains("zreport::fiscal_queue_blockers_for_closeout(&db, &payload)"));
         assert!(preview.contains("\"fiscalQueue\""));
+    }
+
+    /// Founder rule 13/10/2026: the phone-shift check runs after the pre-Z
+    /// drain (the Z needs the server anyway) and before anything is prepared,
+    /// so a refusal leaves the day open; the prepared Z carries the closed
+    /// phone shifts; a Z the server then holds for phone shifts is named
+    /// before the generic sync gate and before the day is finalized.
+    #[test]
+    fn the_z_checks_the_phone_shifts_after_the_drain_and_before_preparing() {
+        let source = include_str!("analytics.rs");
+        let stages = source_slice(source, "async fn submit_z_report_through_stages(");
+        let position = |marker: &str| {
+            stages
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker} in the Z submission"))
+        };
+        let drain = position("crate::sync::force_sync_until_closeout_stable(");
+        let check = position("check_unit_phone_shifts(db, payload)");
+        let wake = position("wake_z_reports_waiting_for_unit_shifts(");
+        let sync_gate =
+            position("build_sync_closeout_blocked_response_for_stage(db, \"pre-Z-report sync\")");
+        let prepare = position("zreport::prepare_z_report_submission_with_phone_shifts(");
+        let held = position("queued_z_held_for_phone_shifts(db, payload)");
+        let submission_gate =
+            position("build_sync_closeout_blocked_response_for_stage(db, \"Z-report submission\")");
+        let finalize = position("zreport::finalize_prepared_z_report_submission(");
+        assert!(drain < check, "the drain runs first");
+        assert!(
+            check < wake && wake < sync_gate,
+            "a held Z is woken before the sync gate"
+        );
+        assert!(sync_gate < prepare);
+        assert!(prepare < held && held < submission_gate && submission_gate < finalize);
+        assert!(stages.contains("closed_phone_shifts.as_deref()"));
+    }
+
+    fn open_phone_shift(id: &str, check_in: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "staff_name": "Maria",
+            "role_type": "waiter",
+            "terminal_id": "phone-1",
+            "terminal_name": "Phone 1",
+            "check_in_time": check_in,
+        })
+    }
+
+    #[test]
+    fn open_phone_shifts_stop_the_z_named_and_an_unchecked_day_never_closes() {
+        use crate::unit_shift_readiness::{UnitReadiness, UnitReadinessOutcome};
+        let closed = vec![serde_json::json!({ "id": "closed-1", "terminal_id": "phone-2" })];
+
+        let refusal = unit_phone_shift_gate(
+            UnitReadinessOutcome::Ready(UnitReadiness {
+                open_shifts: vec![open_phone_shift("open-1", "2026-10-14T08:00:00Z")],
+                closed_shifts: closed.clone(),
+            }),
+            None,
+        )
+        .expect_err("an open phone shift stops the Z");
+        assert_eq!(refusal["errorCode"], "Z_REPORT_UNIT_SHIFTS_OPEN");
+        assert_eq!(refusal["stage"], "unit_shifts");
+        assert_eq!(refusal["openShifts"][0]["id"], "open-1");
+        let attempt = zreport::closeout_attempt_from_result(
+            "unit_shifts",
+            &Ok(refusal.clone()),
+            "2026-10-14T20:00:00Z",
+        );
+        assert_eq!(
+            attempt.code, "Z_REPORT_UNIT_SHIFTS_OPEN",
+            "the attempt record names it"
+        );
+
+        // An issued Z (frozen at 23:00) is not held by the next day's phone shift.
+        let proceed = unit_phone_shift_gate(
+            UnitReadinessOutcome::Ready(UnitReadiness {
+                open_shifts: vec![open_phone_shift("next-day", "2026-10-15T07:00:00Z")],
+                closed_shifts: closed.clone(),
+            }),
+            Some("2026-10-14T23:00:00Z"),
+        )
+        .expect("the next day's shift does not hold an issued Z");
+        assert_eq!(proceed, Some(closed));
+
+        let unavailable = unit_phone_shift_gate(
+            UnitReadinessOutcome::Unavailable("Cannot reach admin dashboard".to_string()),
+            None,
+        )
+        .expect_err("a check that cannot be made stops the Z");
+        assert_eq!(unavailable["errorCode"], "Z_REPORT_UNIT_SHIFTS_UNAVAILABLE");
+
+        assert_eq!(
+            unit_phone_shift_gate(UnitReadinessOutcome::Skipped("not_found"), None)
+                .expect("a server without readiness proceeds"),
+            None
+        );
     }
 
     fn driver_earning_test_conn() -> rusqlite::Connection {
@@ -3074,10 +3307,11 @@ mod dto_tests {
             stages
                 .matches("closeout_drain_failed_offline(&error).await")
                 .count(),
-            2,
-            "the pre-Z and the post-submission drains both recognize an offline till"
+            3,
+            "the pre-Z drain, the drain of a Z the phones held and the post-submission drain all recognize an offline till"
         );
         assert!(stages.contains("z_report_offline_response(\"pre_z_sync\")"));
+        assert!(stages.contains("crate::unit_shift_readiness::UNIT_SHIFTS_STAGE,"));
         assert!(stages.contains("z_report_offline_response(\"post_submission_sync\")"));
     }
 }

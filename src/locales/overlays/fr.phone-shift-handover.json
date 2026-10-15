@@ -1,0 +1,98 @@
+{
+  "phoneShifts": {
+    "title": "Services sur téléphone",
+    "handover": {
+      "received": "Reçu",
+      "pending": "À recevoir",
+      "none": "Rien à remettre",
+      "not_counted": "Non compté"
+    },
+    "phoneDeactivated": "téléphone désactivé",
+    "phoneRemoved": "téléphone supprimé",
+    "checkedInAt": "arrivé à {{time}}",
+    "unavailable": "Impossible de vérifier les services sur téléphone. Vérifiez la connexion et réessayez.",
+    "retry": "Réessayer"
+  },
+  "modals": {
+    "zReport": {
+      "phoneShifts": {
+        "checking": "Vérification des services sur téléphone…",
+        "openDescription": "Services sur téléphone encore ouverts : {{count}}. La journée ne peut pas être clôturée tant que chacun n'est pas fermé.",
+        "noneOpen": "Aucun service sur téléphone n'est ouvert.",
+        "closeAction": "Fermez-le sur le téléphone, ou depuis Personnel sur cette caisse",
+        "pendingReturnsTitle": "Espèces des téléphones à recevoir",
+        "pendingReturnsDescription": "Caisses de téléphones fermées dont cette caisse n'a pas encore reçu les espèces. Recevez-les ici ; d'ici là, elles restent listées, même le lendemain.",
+        "returnLine": "{{staff}} · {{phone}} · à recevoir {{amount}}",
+        "refusedOpen": "La journée n'a pas été clôturée : des services sur téléphone sont encore ouverts : {{shifts}}. Fermez chacun sur le téléphone, ou depuis Personnel sur cette caisse.",
+        "refusedOpenUnnamed": "La journée n'a pas été clôturée : un service sur téléphone est encore ouvert. Fermez-le sur le téléphone, ou depuis Personnel sur cette caisse.",
+        "refusedUnavailable": "La journée n'a pas été clôturée : impossible de vérifier les services sur téléphone. Vérifiez la connexion et réessayez.",
+        "countedCash": "Espèces comptées"
+      }
+    },
+    "staffShift": {
+      "phoneShifts": {
+        "openBlocker": "Clôturez les services sur téléphone avant de clôturer ce service : {{shifts}}. Clôturez-les sur le téléphone, ou ici depuis la sélection du personnel.",
+        "shiftEntry": "{{name}} ({{role}}, {{phone}})",
+        "receiveBlocker": "Recevez les espèces de ces caisses de téléphone depuis la sélection du personnel avant de clôturer ce service : {{tills}}.",
+        "tillEntry": "{{name}} ({{phone}}, {{amount}})",
+        "managerSettles": "Cette caisse ne peut pas être reçue ici. Un responsable la règle.",
+        "openHelper": "Encore ouverts sur un téléphone. Chacun bloque le Z jusqu'à sa clôture.",
+        "closeHere": "Clôturer le service ici",
+        "lastChecked": "Pas de connexion. Services sur téléphone tels qu'au dernier contrôle, à {{time}}.",
+        "lastCheckedBlocker": "Pas de connexion. D'après le dernier contrôle, à {{time}} : {{reasons}}",
+        "lastSeenStale": "Ce téléphone était en ligne pour la dernière fois à {{time}}. Les commandes ou paiements qu'il n'a pas envoyés ne figurent pas dans ces chiffres.",
+        "lastSeenUnknown": "On ne sait pas quand ce téléphone s'est connecté pour la dernière fois. Des commandes ou paiements qu'il n'a pas envoyés peuvent manquer dans ces chiffres.",
+        "closeWithoutHandover": {
+          "action": "Clôturer sans remise",
+          "explain": "Le service est clôturé sans espèces : rien n'est ajouté à ce tiroir-caisse. Un responsable règle son argent.",
+          "reason": "Motif",
+          "reasonHint": "Obligatoire, {{max}} caractères au maximum.",
+          "closed": "Le service de {{name}} est clôturé sans remise. Rien n'a été ajouté à ce tiroir-caisse.",
+          "closedNotCounted": "Le service de {{name}} est clôturé sans remise et ses espèces sont marquées comme non comptées. Rien n'a été ajouté à ce tiroir-caisse ; un responsable règle son argent.",
+          "alreadyClosed": "Le service de {{name}} était déjà clôturé. Rien n'a été ajouté à ce tiroir-caisse.",
+          "errors": {
+            "reasonRequired": "Saisissez un motif, 500 caractères au maximum.",
+            "pinRequired": "Un responsable saisit son propre PIN.",
+            "wrongPin": "Ce PIN ne permet pas de l'approuver. Un responsable autorisé à annuler des commandes saisit son propre PIN.",
+            "notStaff": "Ce PIN n'appartient à aucun membre actif du personnel de cet établissement, il ne peut donc pas l'approuver.",
+            "mainOnly": "Seule la caisse principale de ce téléphone peut clôturer ses services.",
+            "offline": "Pas de connexion. Le service ne se clôture qu'en ligne : vérifiez la connexion et réessayez.",
+            "failed": "Le service n'a pas pu être clôturé. Rien n'a changé ; réessayez.",
+            "approvalRequired": "Ce responsable ne peut pas approuver la clôture d'un service sans remise."
+          }
+        },
+        "needsCashier": "Reçu ici dès qu'un caissier a pris son service."
+      }
+    }
+  },
+  "notices": {
+    "phoneShift": {
+      "closed": "{{name}} a terminé son service sur {{phone}}",
+      "closedByMain": "Le service de {{name}} sur {{phone}} a été clôturé à la caisse",
+      "summary": "Commandes : {{orders}} · Ventes : {{sales}}",
+      "cashToReceive": "Espèces à récupérer : {{amount}}",
+      "receivedAmount": "Reçu par la caisse : {{amount}}",
+      "received": "Reçu par la caisse",
+      "openStaff": "Services du personnel"
+    }
+  },
+  "recovery": {
+    "messages": {
+      "phoneShiftRemoteCheckoutRequired": "Ce service est sur un téléphone. Clôturez-le sur le téléphone, ou depuis Personnel sur cette caisse, où son argent est compté."
+    },
+    "issues": {
+      "zReportHeldForPhoneShifts": {
+        "title": "Z en attente des services sur téléphone",
+        "summary": "Le serveur retient ce Z jusqu'à la clôture de ces services sur téléphone : {{shifts}}.",
+        "summaryUnnamed": "Le serveur retient ce Z jusqu'à la clôture des services ouverts sur téléphone.",
+        "guidance": "Clôturez-les sur le téléphone, ou depuis Personnel sur cette caisse. Le Z part ensuite tout seul ; rien n'est perdu."
+      }
+    }
+  },
+  "sync": {
+    "blockerReasons": {
+      "zReportUnitShiftsOpen": "Le Z attend : des services sur téléphone sont encore ouverts : {{shifts}}. Clôturez-les sur le téléphone, ou depuis Personnel sur cette caisse ; le Z part ensuite tout seul.",
+      "zReportUnitShiftsOpenUnnamed": "Le Z attend : un service sur téléphone est encore ouvert. Clôturez-le sur le téléphone, ou depuis Personnel sur cette caisse ; le Z part ensuite tout seul."
+    }
+  }
+}

@@ -100,6 +100,7 @@ mod table_close_recovery;
 mod table_manual_cancellation;
 mod table_session_cache;
 mod terminal_helpers;
+mod unit_shift_readiness;
 mod unsaved_payments;
 mod windows_spooler;
 mod zreport;

@@ -7045,6 +7045,48 @@ fn z_report_staff_payment_entries(
     aggregate_entries
 }
 
+/// The stored Z's phone staff section (`phoneShifts`, founder rule
+/// 13/10/2026). A figure the Z did not record stays `None`.
+fn z_report_phone_shift_entries(report: &Value) -> Vec<receipt_renderer::ZReportPhoneShiftEntry> {
+    let text = |shift: &Value, key: &str| {
+        shift
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    let amount = |shift: &Value, key: &str| shift.get(key).and_then(Value::as_f64);
+    report
+        .get("phoneShifts")
+        .and_then(Value::as_array)
+        .map(|shifts| {
+            shifts
+                .iter()
+                .map(|shift| receipt_renderer::ZReportPhoneShiftEntry {
+                    name: text(shift, "staffName")
+                        .or_else(|| text(shift, "staffId"))
+                        .unwrap_or_else(|| "—".to_string()),
+                    role: text(shift, "role").unwrap_or_else(|| "staff".to_string()),
+                    phone: text(shift, "terminalName")
+                        .or_else(|| text(shift, "terminalId"))
+                        .unwrap_or_default(),
+                    check_in: text(shift, "checkIn"),
+                    check_out: text(shift, "checkOut"),
+                    order_count: shift.get("ordersCount").and_then(Value::as_i64),
+                    sales_total: amount(shift, "salesTotal"),
+                    cash_sales: amount(shift, "cashSales"),
+                    card_sales: amount(shift, "cardSales"),
+                    counted_cash: amount(shift, "countedCash"),
+                    expected_cash: amount(shift, "expectedCash"),
+                    cash_variance: amount(shift, "cashVariance"),
+                    handover: text(shift, "handover").unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &str) -> ZReportDoc {
     let report_date = text_from_paths(payload, &["/date", "/reportDate", "/report_date"])
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
@@ -7300,6 +7342,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         expense_lines: z_report_expense_entries(payload),
         platform_lines: z_report_platform_entries(payload),
         staff_payment_lines,
+        phone_shifts: z_report_phone_shift_entries(payload),
         staff_reports: payload
             .get("staffReports")
             .and_then(Value::as_array)
@@ -7597,6 +7640,7 @@ fn build_z_report_doc_with_conn(
         expense_lines: z_report_expense_entries(&rj),
         platform_lines: z_report_platform_entries(&rj),
         staff_payment_lines,
+        phone_shifts: z_report_phone_shift_entries(&rj),
         staff_reports: rj
             .get("staffReports")
             .and_then(Value::as_array)
@@ -11122,6 +11166,66 @@ mod tests {
         let preview = build_z_report_doc_from_payload(&db, &frozen, "preview");
         assert_eq!(preview.twint_sales, doc.twint_sales);
         assert_eq!(preview.twint_plugin_enabled, doc.twint_plugin_enabled);
+    }
+
+    /// Founder rule 13/10/2026: a stored Z's `phoneShifts` reach the print
+    /// (stored reprint and payload preview alike); a figure the Z did not
+    /// record stays empty, and a Z without them prints no phone shift.
+    #[test]
+    fn stored_z_phone_shifts_reach_the_print() {
+        let db = test_db();
+        let stored = serde_json::json!({
+            "staffReports": [],
+            "phoneShifts": [
+                {
+                    "staffShiftId": "phone-shift-1",
+                    "staffName": "Maria",
+                    "role": "waiter",
+                    "terminalName": "Phone 1",
+                    "terminalId": "phone-1",
+                    "checkIn": "2026-10-14T09:00:00Z",
+                    "checkOut": "2026-10-14T17:00:00Z",
+                    "ordersCount": 6,
+                    "salesTotal": 97.4,
+                    "cashSales": 42.5,
+                    "cardSales": 54.9,
+                    "countedCash": 42.5,
+                    "handover": "pending"
+                },
+                { "staffShiftId": "phone-shift-2", "terminalId": "phone-2", "handover": "none" }
+            ]
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,status,check_in_time,created_at,updated_at) VALUES('shift','staff','cashier','closed','2026-10-14T08:00:00Z','now','now')",[]).unwrap();
+            conn.execute("INSERT INTO z_reports(id,shift_id,branch_id,terminal_id,report_date,generated_at,report_json,created_at,updated_at) VALUES('z-phones','shift','branch','term','2026-10-14','2026-10-14T23:00:00Z',?1,'now','now')",params![stored.to_string()]).unwrap();
+        }
+        let doc = build_z_report_doc(&db, "z-phones").unwrap();
+        assert_eq!(doc.phone_shifts.len(), 2);
+        let maria = &doc.phone_shifts[0];
+        assert_eq!(
+            (
+                maria.name.as_str(),
+                maria.role.as_str(),
+                maria.phone.as_str()
+            ),
+            ("Maria", "waiter", "Phone 1")
+        );
+        assert_eq!(maria.order_count, Some(6));
+        assert_eq!(maria.sales_total, Some(97.4));
+        assert_eq!(maria.counted_cash, Some(42.5));
+        assert_eq!(maria.handover, "pending");
+        let sparse = &doc.phone_shifts[1];
+        assert_eq!(
+            (sparse.name.as_str(), sparse.phone.as_str()),
+            ("—", "phone-2")
+        );
+        assert_eq!((sparse.order_count, sparse.sales_total), (None, None));
+
+        let preview = build_z_report_doc_from_payload(&db, &stored, "preview");
+        assert_eq!(preview.phone_shifts.len(), 2);
+        let without = build_z_report_doc_from_payload(&db, &serde_json::json!({}), "preview");
+        assert!(without.phone_shifts.is_empty());
     }
 
     /// Stored Z snapshots in, visible lines out: the export (shared Jest

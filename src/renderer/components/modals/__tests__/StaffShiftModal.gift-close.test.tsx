@@ -98,6 +98,8 @@ function makeBridge() {
     staffSchedule: { list: vi.fn(async () => ({ success: true, data: { staff: members } })) },
     shifts: {
       pendingCashReturns: vi.fn(async () => ({ success: true, requires_receipt_check: false, active_waiter_count: 0, returns: [] })),
+      // Founder 13/10/2026: the Main's close asks the unit readiness first; no phone shifts here.
+      unitReadiness: vi.fn(async () => ({ success: true, data: { success: true, open_shifts: [], closed_shifts: [], pending_returns: [], terminals: [] } })),
       getActive: vi.fn(async () => null), getActiveForBranch: vi.fn(async () => []), getCheckInEligibility: vi.fn(async () => ({ requiresCashierFirst: false })),
       getActiveCashierByTerminal: vi.fn(async () => ({ id: 'ordinary-cashier' })), open: vi.fn(), getById: vi.fn(async () => null),
       getSummary: vi.fn(async () => ({ success: true, data: summary(123.45) })), getExpenses: vi.fn(async () => []),

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GlobalCashierGate, CashierOperationalBoundary } from '../GlobalCashierGate';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { CashierRecovery } from '../../contexts/cashier-gate-context';
+import { PHONE_SHIFT_STAFF_OPEN_EVENT } from '../../hooks/usePhoneShiftNotices';
 vi.mock('../../pages/NewOrderPage', () => ({ default: Draft }));
 vi.mock('../ui/PageLoadMotion', () => ({ default: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
 const model = vi.hoisted(() => ({ blocked: false, resolving: false, disposed: vi.fn(), collect: vi.fn() }));
@@ -191,6 +192,28 @@ describe('GlobalCashierGate', () => {
     model.blocked = false;
     rerender(host());
     expect(screen.getByLabelText('cart draft')).toHaveValue('unsaved direct-route order');
+  });
+
+  it('opens the staff modal from the phone-shift notice, also through the locked-day fence', () => {
+    model.blocked = true;
+    const { unmount } = render(<>
+      {/* The notice's toast root is a recovery surface (PhoneShiftNoticeManager). */}
+      <div data-cashier-recovery="true">
+        <button onClick={() => window.dispatchEvent(new CustomEvent(PHONE_SHIFT_STAFF_OPEN_EVENT))}>Staff shifts</button>
+      </div>
+      <GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>
+    </>);
+    expect(screen.queryByRole('dialog', { name: 'cashier check-in' })).toBeNull();
+    fireEvent.click(screen.getByText('Staff shifts'));
+    expect(screen.getByRole('dialog', { name: 'cashier check-in' })).toBeVisible();
+    unmount();
+    expect(() => act(() => { window.dispatchEvent(new CustomEvent(PHONE_SHIFT_STAFF_OPEN_EVENT)); })).not.toThrow();
+  });
+
+  it('opens the staff modal from the phone-shift notice while the cashier day is open', () => {
+    render(<GlobalCashierGate onLogout={() => {}} onOpenSettings={() => {}}><CashierOperationalBoundary><Draft /></CashierOperationalBoundary></GlobalCashierGate>);
+    act(() => { window.dispatchEvent(new CustomEvent(PHONE_SHIFT_STAFF_OPEN_EVENT)); });
+    expect(screen.getByRole('dialog', { name: 'cashier check-in' })).toBeVisible();
   });
 
 });

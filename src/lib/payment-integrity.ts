@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 
 import { formatFiscalCloseBlockedError } from "./fiscal-closeout";
+import { formatUnitShiftsQueueReason } from "./unit-shifts-queue-reason";
 import type {
   PaymentIntegrityErrorPayload,
   ReviewPaymentSummary,
@@ -599,6 +600,13 @@ export function getLocalizedSyncBlockerReason(
   blocker: Pick<SyncBlockerDetail, "blockerReason" | "entityType" | "queueStatus" | "lastError">,
   t: TFunction,
 ): string {
+  // A Z the server holds for open phone shifts: the operator's sentence with
+  // the names, never the stored code (review 14/10/2026).
+  const heldZ = formatUnitShiftsQueueReason(blocker.blockerReason, t)
+    ?? formatUnitShiftsQueueReason(blocker.lastError, t);
+  if (heldZ) {
+    return heldZ;
+  }
   return t(`sync.blockerReasons.${blocker.blockerReason}`, {
     defaultValue:
       blocker.lastError || blocker.blockerReason || blocker.queueStatus || blocker.entityType,

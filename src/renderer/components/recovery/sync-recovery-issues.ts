@@ -10,6 +10,7 @@ import type {
   UnsettledPaymentBlocker,
 } from '../../../lib';
 import type { SyncQueueItem } from '../../../../../shared/pos/sync-queue-types';
+import { unitShiftsQueueReasonNames } from '../../../lib/unit-shifts-queue-reason';
 
 /**
  * Turns one payment blocker into the operator's own language.
@@ -589,7 +590,16 @@ const buildInvalidOrdersIssue = (
 const buildSyncBlockerIssues = (
   systemHealth: DiagnosticsSystemHealth,
 ): RecoveryIssue[] => {
-  return (systemHealth.syncBlockerDetails ?? []).map((blocker) => ({
+  return (systemHealth.syncBlockerDetails ?? []).map((blocker) => {
+    const heldZNames = unitShiftsQueueReasonNames(blocker.blockerReason)
+      ?? unitShiftsQueueReasonNames(blocker.lastError);
+    if (heldZNames !== null) {
+      return {
+        ...zReportHeldForPhoneShiftsIssue(`sync-blocker-${blocker.queueId}`, heldZNames, blocker.entityId),
+        queueId: blocker.queueId,
+      };
+    }
+    return ({
     id: `sync-blocker-${blocker.queueId}`,
     code: blocker.blockerReason || 'sync_blocker',
     severity: 'error',
@@ -611,7 +621,8 @@ const buildSyncBlockerIssues = (
     paymentId: blocker.paymentId ?? null,
     adjustmentId: blocker.adjustmentId ?? null,
     queueId: blocker.queueId,
-  }));
+  });
+  });
 };
 
 const buildMissingCredentialIssue = (
@@ -1542,6 +1553,48 @@ const buildDuplicateCustomerConflictIssues = (
   return { suppressedRows, issues: [issue] };
 };
 
+/// A queued Z the server holds while phone shifts of the unit are open
+/// (founder rule 13/10/2026). The native queue keeps it pending, stores the
+/// code and the shifts' names, and sends it by itself once they close: the
+/// operator reads which phone shifts to close, never the stored code
+/// (review 14/10/2026).
+const isZReportHeldForPhoneShiftsRow = (item: SyncQueueItem): boolean =>
+  item.tableName === 'z_reports' && unitShiftsQueueReasonNames(item.errorMessage) !== null;
+
+const zReportHeldForPhoneShiftsIssue = (
+  id: string,
+  names: string,
+  entityId: string,
+): RecoveryIssue => ({
+  id,
+  code: 'z_report_held_for_phone_shifts',
+  severity: 'error',
+  status: 'blocking',
+  entityType: 'z_report',
+  entityId,
+  titleKey: 'recovery.issues.zReportHeldForPhoneShifts.title',
+  summaryKey: names
+    ? 'recovery.issues.zReportHeldForPhoneShifts.summary'
+    : 'recovery.issues.zReportHeldForPhoneShifts.summaryUnnamed',
+  guidanceKey: 'recovery.issues.zReportHeldForPhoneShifts.guidance',
+  actions: [createRetrySyncAction()],
+  params: { shifts: names },
+});
+
+const buildZReportHeldForPhoneShiftsIssues = (
+  parityItems: SyncQueueItem[],
+): { issues: RecoveryIssue[]; suppressedRows: Set<string> } => {
+  const rows = parityItems.filter(isZReportHeldForPhoneShiftsRow);
+  return {
+    suppressedRows: new Set(rows.map((item) => `${item.tableName}:${item.recordId}`)),
+    issues: rows.map((item) => zReportHeldForPhoneShiftsIssue(
+      `z-report-held-for-phone-shifts-${item.id}`,
+      unitShiftsQueueReasonNames(item.errorMessage) ?? '',
+      item.recordId,
+    )),
+  };
+};
+
 /// The server's machine code for a money write against a shift whose figures
 /// a remote close froze (the native replay stores the conflict as
 /// `SERVER_CONFLICT_REMOTE_HANDOVER_SNAPSHOT_FROZEN: <sentence>`).
@@ -2149,6 +2202,10 @@ export function buildSyncRecoveryIssues({
   for (const suppressedRow of legacyEditReviewResult.suppressedRows) {
     suppressedLegacyFinancialRows.add(suppressedRow);
   }
+  const zReportHeldResult = buildZReportHeldForPhoneShiftsIssues(parityItems);
+  for (const suppressedRow of zReportHeldResult.suppressedRows) {
+    suppressedLegacyFinancialRows.add(suppressedRow);
+  }
   // After the specific customer recipes: whatever customer-directory row they
   // did not cover gets the general non-blocking customer card.
   const customerDirectoryFailureResult = buildCustomerDirectoryFailureIssues(
@@ -2168,6 +2225,7 @@ export function buildSyncRecoveryIssues({
     duplicateCustomerConflictResult.issues.length > 0 ||
     remoteHandoverFrozenResult.issues.length > 0 ||
     legacyEditReviewResult.issues.length > 0 ||
+    zReportHeldResult.issues.length > 0 ||
     customerDirectoryFailureResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth, localizePaymentBlocker)) {
@@ -2213,6 +2271,17 @@ export function buildSyncRecoveryIssues({
   }
   for (const issue of legacyEditReviewResult.issues) {
     pushIssue(issues, issue);
+  }
+  // The closeout blocker of the same held Z already names it.
+  const heldZBlockerEntities = new Set(
+    (systemHealth.syncBlockerDetails ?? [])
+      .filter((blocker) => unitShiftsQueueReasonNames(blocker.blockerReason) !== null)
+      .map((blocker) => blocker.entityId),
+  );
+  for (const issue of zReportHeldResult.issues) {
+    if (!heldZBlockerEntities.has(issue.entityId)) {
+      pushIssue(issues, issue);
+    }
   }
   for (const issue of customerDirectoryFailureResult.issues) {
     pushIssue(issues, issue);

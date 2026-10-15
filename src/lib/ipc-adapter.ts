@@ -154,6 +154,8 @@ export interface IpcResult<T = unknown> {
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
   status?: number;
+  /** The admin application's bounded machine code on a refusal, never its text. */
+  code?: string;
 }
 
 export interface OrderApprovalResult extends IpcResult {
@@ -2131,6 +2133,8 @@ export interface PlatformBridge {
     open(params: OpenShiftParams): Promise<IpcResult>;
     close(params: CloseShiftParams): Promise<IpcResult>;
     pendingCashReturns(): Promise<any>;
+    /** This Main's phone shifts (founder rule 13/10/2026); never cached natively. */
+    unitReadiness(since?: string | null): Promise<AdminApiBridgeResponse<unknown>>;
     remoteCheckout(params: {
       shiftId: string;
       action: "preview" | "close";
@@ -3402,6 +3406,7 @@ export class TauriBridge implements PlatformBridge {
         success: false,
         error: result?.error || "Failed to fetch from admin API",
         status: result?.status,
+        ...(typeof result?.code === "string" ? { code: result.code } : {}),
       };
     }
 
@@ -3914,6 +3919,12 @@ export class TauriBridge implements PlatformBridge {
     open: (p: OpenShiftParams) => this.inv("shift:open", p),
     close: (p: CloseShiftParams) => this.inv("shift:close", p),
     pendingCashReturns: () => this.adminFetch("/api/pos/shifts/remote-checkout"),
+    // Phones hand over to the Main (founder rule 13/10/2026): this Main's
+    // open, closed and unreceived phone shifts. Never cached natively.
+    unitReadiness: (since?: string | null) =>
+      this.adminFetch(
+        `/api/pos/shifts/unit-readiness${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+      ),
     // Satellite remote checkout (v1.4.84): server close via admin API, then
     // the local drawer credit so the received cash enters day math here.
     remoteCheckout: (p: {

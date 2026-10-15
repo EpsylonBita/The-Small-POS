@@ -566,6 +566,10 @@ fn is_cacheable_admin_get(method: &str, path: &str) -> bool {
         // (ManualCardAdmissionService refuses a cached one): caching it would
         // only store a stale answer nothing may use (review 06/10/2026).
         && route != "/api/pos/payments/manual-admission"
+        // A Main's phone shifts gate its Z and its cashier's close (founder
+        // rule 13/10/2026): a cached answer could show "no phone shift open"
+        // while one is, and let either through offline.
+        && route != "/api/pos/shifts/unit-readiness"
         // This response is personal to a verified staff session. Its durable
         // journal belongs to the service inbox; a terminal-wide GET cache must
         // never substitute another actor's snapshot or retain authorization.
@@ -1868,6 +1872,20 @@ mod dto_tests {
             );
         }
         assert!(is_cacheable_admin_get("GET", "/api/pos/gift-cardsets"));
+    }
+
+    #[test]
+    fn phone_shift_readiness_is_never_offline_cacheable() {
+        for path in [
+            "/api/pos/shifts/unit-readiness",
+            "/api/pos/shifts/unit-readiness/",
+            "/api/pos/shifts/unit-readiness?since=2026-10-14T06%3A00%3A00.000Z",
+        ] {
+            assert!(
+                !is_cacheable_admin_get("GET", path),
+                "{path} must stay live"
+            );
+        }
     }
 
     #[test]

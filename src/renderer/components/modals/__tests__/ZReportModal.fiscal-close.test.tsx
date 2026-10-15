@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // confirming and reads it in the store's configured language.
 
 const mock = vi.hoisted(() => {
+  const noPhoneShifts = { success: true, open_shifts: [], closed_shifts: [], pending_returns: [], terminals: [] };
   const generateZReport = vi.fn();
   const submitZReport = vi.fn();
   // One bridge object, as the real `getBridge()` singleton: the modal's
@@ -23,6 +24,8 @@ const mock = vi.hoisted(() => {
       printZReport: vi.fn(),
       resolvePaymentBlocker: vi.fn(),
     },
+    // A Main without open phone shifts (founder rule 13/10/2026).
+    shifts: { unitReadiness: vi.fn(async () => ({ success: true, data: noPhoneShifts })) },
     auth: { logout: vi.fn() },
   };
   const clearShift = vi.fn();
