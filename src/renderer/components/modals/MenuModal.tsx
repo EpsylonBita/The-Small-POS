@@ -545,6 +545,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const editOriginalOrderRef = useRef<Record<string, any> | null>(null);
   const editExpectedVersionRef = useRef<number | undefined>(undefined);
   const [draftRecoveryBusy, setDraftRecoveryBusy] = useState(false);
+  const draftRecoveryInFlight = useRef(false);
   // Fix 4 (06/10/2026): a confirmed correction the till proved was never
   // applied (its journal is refused and nothing carries its event) can be
   // prepared again under a new event that replaces it, or closed by a manager
@@ -576,6 +577,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [menuCatalogError, setMenuCatalogError] = useState<string | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const editSubmissionInFlight = useRef(false);
+  const [isSavingCheckout, setIsSavingCheckout] = useState(false);
+  const checkoutSaveInFlight = useRef(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [isLocalProcessing, setIsLocalProcessing] = useState(false);
   const effectiveProcessing = isProcessingOrder || isLocalProcessing;
@@ -2475,6 +2478,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   }, [isOpen, draftPersistence.status, draftSnapshotSignature]);
 
   const recoverSavedCheckout = async () => {
+    if (draftRecoveryInFlight.current || isLocalProcessing) return;
+    draftRecoveryInFlight.current = true;
     setDraftRecoveryBusy(true);
     try {
       let proof = await draftPersistence.inspect();
@@ -2582,7 +2587,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       await draftPersistence.clear(true);
       onClose();
     } catch { toast.error(t('modals.menu.draftRecoveryUnavailable', { defaultValue: 'The original checkout could not be verified. Its saved cart remains protected.' })); }
-    finally { setDraftRecoveryBusy(false); }
+    finally { draftRecoveryInFlight.current = false; setDraftRecoveryBusy(false); }
   };
 
   // Re-quote: keep the cart, renew the draft identity and let the next save
@@ -2628,13 +2633,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handleCheckout = async () => {
-    if (draftPersistence.status !== 'ready' || draftPersistence.isPending() || editSubmissionInFlight.current) return;
+    if (draftPersistence.status !== 'ready' || draftPersistence.isPending() || editSubmissionInFlight.current ||
+      checkoutSaveInFlight.current) return;
     const ownsEditSubmission = Boolean(editMode && editOrderId && onEditComplete);
     // Fence close and repeated Save before the first persistence/preflight await.
     // The picker can wait without its parent editor losing the draft owner.
     if (ownsEditSubmission) { editSubmissionInFlight.current = true; setIsSavingEdit(true); }
     try {
-    try { await draftPersistence.persist(draftSnapshot); } catch { draftPersistence.failedSave(); return; }
+    // An explicit checkout waits out a brief native binding refusal (about
+    // 10 s) and shows "Saving…" meanwhile; a repeated press is ignored.
+    checkoutSaveInFlight.current = true;
+    setIsSavingCheckout(true);
+    try { await draftPersistence.persist(draftSnapshot, { retryPrewriteRefusal: true }); }
+    catch (cause) { draftPersistence.failedSave(cause); return; }
+    finally { checkoutSaveInFlight.current = false; setIsSavingCheckout(false); }
     if (cartItems.length === 0) {
       return;
     }
@@ -3189,7 +3201,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 ? t('modals.menu.editDraftPending', { defaultValue: 'Your original change is saved for recovery. Check its result before making another change.' })
                 : t('modals.menu.draftPending', { defaultValue: 'The original checkout is retained. Confirm its result before starting another payment.' }))
               : t('modals.menu.draftLoading', { defaultValue: 'Loading the saved cart…' }))}
-            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit} onClick={recoverSavedCheckout} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit || isLocalProcessing} onClick={recoverSavedCheckout} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
               {t('modals.menu.draftRecover', { defaultValue: 'Check original checkout' })}
             </button>}
             {draftPersistence.isPending() && <button
@@ -3269,7 +3281,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                     }
               }
               editMode={editMode}
-              isSaving={isSavingEdit}
+              isSaving={isSavingEdit || isSavingCheckout}
               submissionBlocked={draftPersistence.status !== 'ready' || draftPersistence.isPending()}
               orderType={orderType}
               minimumOrderAmount={effectiveMinimumOrderAmount}

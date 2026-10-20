@@ -775,4 +775,55 @@ describe('table check workflow ownership', () => {
     expect(screen.getByRole('button',{name:'Transfer'})).toBeDisabled();
     expect(mocks.post).not.toHaveBeenCalled();
   });
+
+  // TablesPage keeps one check view mounted from table to table, as Android's
+  // screens do. Android 1.0.29 showed, paid and cancelled the previous table's
+  // check after the next table's read failed or the previous read came late.
+  const otherSessionId = '33333333-3333-4333-8333-333333333333';
+  const t3: any = { ...t1, id: 'T03', tableNumber: 'T03', tableSessionId: otherSessionId, currentOrderId: 'other-order' };
+  const otherSession = { ...makeSession(otherSessionId, 'T03', 1), active_order_id: 'other-order',
+    order: { id: 'other-order', version: 1, table_session_id: otherSessionId, table_id: 'T03', table_display_number: 'T03', total_amount: 4,
+      order_items: [{ id: 'line-9', menu_item_id: 'menu-9', name: 'Lemonade', quantity: 1, unit_price: 4, total_price: 4 }] },
+    items: [{ order_item_id: 'line-9', quantity: 1, status: 'open' }],
+    balance: { order_total: 4, paid_total: 0, outstanding_balance: 4 } };
+  const openTable = (table: any, onClose = props.onClose) =>
+    <TableCheckManagerModal {...props} tables={[t1, t2, t3]} isOpen={!!table} table={table} onClose={onClose} />;
+
+  it('shows only the load error, and no money action, when the next table cannot be read', async () => {
+    mocks.get.mockImplementation(async (url: string) => url.includes(sourceId)
+      ? { success: true, data: { success: true, session: makeSession(sourceId, 'T01', 3) } }
+      : { success: false, error: 'Network request failed' });
+    const { rerender } = render(openTable(t1));
+    await waitFor(() => expect(screen.getByText('Coffee')).toBeInTheDocument());
+    rerender(openTable(null));
+    rerender(openTable(t3));
+    await waitFor(() => expect(screen.getByText('Failed to load table check')).toBeInTheDocument());
+    expect(screen.getByText('Table #T03 Check')).toBeInTheDocument();
+    expect(screen.queryByText('Coffee')).toBeNull();
+    for (const action of ['Pay', 'Add Items', 'Move', 'Merge']) {
+      expect(screen.queryByRole('button', { name: action })).toBeNull();
+    }
+    expect(mocks.recordPayment).not.toHaveBeenCalled();
+    expect(mocks.patch).not.toHaveBeenCalled();
+  });
+
+  it.each(['open', 'closed'])('keeps the next table when the previous table answers late (%s)', async status => {
+    const onClose = vi.fn();
+    let answerFirst!: () => void;
+    mocks.get.mockImplementation((url: string) => url.includes(sourceId)
+      ? new Promise(resolve => { answerFirst = () => resolve({ success: true, data: { success: true,
+        session: { ...makeSession(sourceId, 'T01', 3), status, snapshot_revision: 2 } } }); })
+      : Promise.resolve({ success: true, data: { success: true, session: otherSession } }));
+    const { rerender } = render(openTable(t1, onClose));
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(expect.stringContaining(sourceId)));
+    rerender(openTable(null, onClose));
+    rerender(openTable(t3, onClose));
+    await waitFor(() => expect(screen.getByText('Lemonade')).toBeInTheDocument());
+    await act(async () => { answerFirst(); await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(screen.getByText('Lemonade')).toBeInTheDocument();
+    expect(screen.getByText('Table #T03 Check')).toBeInTheDocument();
+    expect(screen.queryByText('Coffee')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mocks.patch).not.toHaveBeenCalled();
+  });
 });

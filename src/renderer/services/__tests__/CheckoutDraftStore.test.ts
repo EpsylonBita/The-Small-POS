@@ -36,6 +36,70 @@ const cart = () => ({ ...createCheckoutDraft(), cartItems: [{ id: 'item', quanti
     selectedCustomer: { id: 'customer', name: 'Alex' }, editExpectedVersion: 8 },
   state: { manualDiscountMode: 'amount', manualDiscountValue: 2, notes: 'birthday' } });
 describe('CheckoutDraftStore durable identity', () => {
+  it('accepts equal frozen JSON with native key order but rejects changed nested values and array order', async () => {
+    let stored: any = null; let generation = 0;
+    const native = vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_put') {
+        stored = JSON.parse(JSON.stringify(input.draft, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+          ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value));
+        generation++;
+      }
+      return { success: true, scope, generation, draft: stored };
+    });
+    const frozen = { ...cart(), phase: 'checkout_pending' as const,
+      cartItems: [{ id: 'first', quantity: 1 }, { id: 'second', quantity: 2 }],
+      submission: { paymentData: { method: 'card', amount: 8 } } };
+    const owner = new CheckoutDraftStore(scope, native);
+    await owner.save(frozen);
+    expect(await owner.save(frozen)).toEqual(frozen);
+    await expect(owner.save({ ...frozen, submission: { paymentData: { method: 'card', amount: 9 } } })).rejects.toThrow('AWAITING_RECONCILIATION');
+    await expect(owner.save({ ...frozen, cartItems: [...frozen.cartItems].reverse() })).rejects.toThrow('AWAITING_RECONCILIATION');
+    expect(native.mock.calls.filter(call => call[0] === 'checkout_draft_put')).toHaveLength(2);
+    expect(await owner.load()).toEqual(frozen);
+  });
+
+  it('recovers a committed freeze with a lost reply from complete SQLite readback without rewriting it', async () => {
+    const file = fixture();
+    const { transport } = database(file);
+    let loseReply = true;
+    const native = vi.fn(async (command: string, input: any) => {
+      const reply = await transport(command, input);
+      if (command === 'checkout_draft_put' && loseReply) { loseReply = false; throw new Error('IPC_REPLY_LOST'); }
+      // Match Rust/serde's object-key reordering at the native boundary.
+      return JSON.parse(JSON.stringify(reply, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value));
+    });
+    const owner = new CheckoutDraftStore(scope, native);
+    const frozen = { ...cart(), phase: 'checkout_pending' as const, submission: { paymentData: { method: 'card', amount: 8 } } };
+    await expect(owner.save(frozen)).rejects.toThrow('IPC_REPLY_LOST');
+    expect(await owner.retryFrozenSave(frozen, () => true)).toEqual(frozen);
+    expect(native.mock.calls.filter(call => call[0] === 'checkout_draft_put')).toHaveLength(1);
+    expect(await new CheckoutDraftStore(scope, database(file).transport).load()).toEqual(frozen);
+  });
+
+  it.each(['identity', 'payload', 'generation', 'deleted'] as const)('never overwrites changed %s while recovering a failed freeze', async change => {
+    const { transport } = database(fixture());
+    const owner = new CheckoutDraftStore(scope, transport);
+    const original = cart();
+    await owner.save(original);
+    const frozen = { ...original, phase: 'checkout_pending' as const, submission: { paymentData: { method: 'cash', amount: 8 } } };
+    const other = new CheckoutDraftStore(scope, transport);
+    await other.load();
+    if (change === 'deleted') await other.clear(original.draftId);
+    else await other.save(change === 'identity' ? cart() : change === 'payload' ? { ...frozen, state: { changed: true } } : original);
+    const authoritative = await other.load();
+    await expect(owner.retryFrozenSave(frozen, () => true)).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+    expect(await new CheckoutDraftStore(scope, transport).load()).toEqual(authoritative);
+  });
+
+  it('never retries storage after the renderer owner has gone away', async () => {
+    const native = vi.fn(async () => ({ success: true, scope, generation: 0, draft: null }));
+    const owner = new CheckoutDraftStore(scope, native);
+    await owner.load();
+    await expect(owner.retryFrozenSave({ ...cart(), phase: 'checkout_pending' }, () => false)).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+    expect(native).toHaveBeenCalledTimes(1);
+  });
+
   it('closes a new cart before its first autosave and fences a late save', async () => {
     const { transport } = database(fixture());
     const owner = new CheckoutDraftStore(scope, transport);

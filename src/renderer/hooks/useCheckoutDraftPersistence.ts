@@ -1,6 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createCheckoutDraft, getCheckoutDraftStore, type CheckoutDraft, type CheckoutDraftStore } from '../services/CheckoutDraftStore';
 
+// Native refuses with this exact code on the binding lease, before touching
+// SQLite, while a terminal binding decision drains. Tomikro's windows lasted
+// 0.1–3 s (18–19/10/2026), so retry for about 10 s with the same body and CAS.
+const PREWRITE_SCOPE_RETRY_DELAYS_MS = [100, 250, 500, 1000, 2000, 3000, 3000] as const;
+
+function isPrewriteScopeRefusal(cause: unknown): boolean {
+  const code = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : null;
+  return code === 'REPAIR_SCOPE_TRANSITION_PENDING';
+}
+
+async function retryPrewriteScopeRefusal(write: () => Promise<unknown>, isCurrent: () => boolean): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    try {
+      await write();
+      return;
+    } catch (cause) {
+      if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      if (!isPrewriteScopeRefusal(cause) || attempt >= PREWRITE_SCOPE_RETRY_DELAYS_MS.length) throw cause;
+      await new Promise(resolve => setTimeout(resolve, PREWRITE_SCOPE_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
 /** Hydration is explicit: an empty first render must never overwrite a saved cart. */
 export function useCheckoutDraftPersistence(enabled: boolean) {
   const [status, setStatus] = useState<'loading' | 'loaded' | 'ready' | 'error' | 'invalidated'>('loading');
@@ -11,11 +35,15 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
   const active = useRef(false);
   const lastSaved = useRef('');
   const epoch = useRef(0);
+  const pendingSave = useRef(false);
+  const freezeInFlight = useRef<CheckoutDraft | null>(null);
+  const persistRequest = useRef(0);
 
   useEffect(() => {
     if (!enabled) { active.current = false; return; }
     const generation = ++epoch.current;
     active.current = false;
+    pendingSave.current = false;
     setStatus('loading');
     setError(null);
     void getCheckoutDraftStore().then(async owner => {
@@ -52,14 +80,26 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
 
   const markHydrated = useCallback(() => { active.current = true; setStatus('ready'); }, []);
 
-  const persist = useCallback(async (snapshot: Pick<CheckoutDraft, 'cartItems' | 'context' | 'state'>) => {
+  const persist = useCallback(async (snapshot: Pick<CheckoutDraft, 'cartItems' | 'context' | 'state'>,
+    options: { retryPrewriteRefusal?: boolean } = {}) => {
     if (!active.current || !store.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
     if (current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+    const owner = store.current;
+    const generation = epoch.current;
+    const request = ++persistRequest.current;
     const draft = { ...current.current, ...snapshot };
     const signature = JSON.stringify(draft);
     if (signature !== lastSaved.current) {
-      try { await store.current.save(draft); }
+      // Only an explicit checkout waits out a binding refusal. A newer save of
+      // the cart supersedes it, so an older snapshot is never written over it.
+      const isCurrent = () => request === persistRequest.current && generation === epoch.current &&
+        active.current && owner === store.current && current.current.phase === 'editing';
+      try {
+        if (options.retryPrewriteRefusal) await retryPrewriteScopeRefusal(() => owner.save(draft), isCurrent);
+        else await owner.save(draft);
+      }
       catch (cause) {
+        if (generation !== epoch.current || owner !== store.current) throw new Error('CHECKOUT_DRAFT_CHANGED');
         if (String(cause).includes('CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED')) {
           active.current = false;
           setError('draftTargetCancelled');
@@ -67,6 +107,9 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
         }
         throw cause;
       }
+      if (generation !== epoch.current || !active.current || owner !== store.current) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      // An autosave queued before freeze must not clear its failure or replace its preimage.
+      if ((current.current as CheckoutDraft).phase === 'checkout_pending') return draft.checkoutRequestId;
       if (current.current.phase === 'editing') current.current = draft;
       lastSaved.current = signature;
     }
@@ -76,12 +119,24 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
 
   const freeze = useCallback(async (snapshot: Pick<CheckoutDraft, 'cartItems' | 'context' | 'state'>, submission: Record<string, any>) => {
     if (!active.current || !store.current || current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
-    const draft: CheckoutDraft = { ...current.current, ...snapshot, phase: 'checkout_pending', submission };
+    const draft: CheckoutDraft = JSON.parse(JSON.stringify({ ...current.current, ...snapshot, phase: 'checkout_pending', submission }));
+    const owner = store.current;
+    const generation = epoch.current;
+    const isCurrent = () => generation === epoch.current && active.current && owner === store.current && current.current === draft;
     // Freeze before the native await so a concurrent autosave cannot change its preimage.
     current.current = draft;
+    pendingSave.current = true;
+    freezeInFlight.current = draft;
     setRestored(draft);
-    try { await store.current.save(draft); }
-    catch (cause) { setError('draftSaveFailed'); throw cause; }
+    try {
+      // Nothing has dispatched payment work: retain this invocation's original
+      // snapshot/CAS while the brief binding transition drains.
+      await retryPrewriteScopeRefusal(() => owner.save(draft), isCurrent);
+    }
+    catch (cause) { if (isCurrent()) setError('draftSaveFailed'); throw cause; }
+    finally { if (freezeInFlight.current === draft) freezeInFlight.current = null; }
+    if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    pendingSave.current = false;
     lastSaved.current = JSON.stringify(draft);
     setError(null);
     return draft.checkoutRequestId;
@@ -98,7 +153,9 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
   }, []);
 
   const failedSave = useCallback((cause?: unknown) => {
-    if (String(cause).includes('CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED')) return;
+    // An explicit no-cause call also reports a failed controlled hydration.
+    if ((cause !== undefined && !active.current) || String(cause).includes('CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED') ||
+      String(cause).includes('CHECKOUT_DRAFT_CHANGED') || current.current.phase === 'checkout_pending') return;
     setError('draftSaveFailed');
   }, []);
 
@@ -164,9 +221,27 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     /** A renewed refused correction: it supersedes an attempt the native journal still holds. */
     supersedesEdit: () => typeof current.current.context?.supersedesEditEvent === 'string' &&
       current.current.context.supersedesEditEvent.length > 0,
-    inspect: () => {
+    inspect: async () => {
       if (!store.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
-      return store.current.inspect(current.current.checkoutRequestId);
+      const owner = store.current;
+      const generation = epoch.current;
+      const draft = current.current;
+      // Recovery cannot race this same invocation's pending write/backoff and
+      // dispatch the original callback before freeze itself acknowledges it.
+      if (freezeInFlight.current === draft) throw new Error('CHECKOUT_DRAFT_SAVE_IN_PROGRESS');
+      const isCurrent = () => generation === epoch.current && owner === store.current && current.current === draft;
+      if (pendingSave.current) {
+        if (!active.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+        try { await owner.retryFrozenSave(draft, () => isCurrent() && active.current); }
+        catch (cause) { if (isCurrent()) setError('draftSaveFailed'); throw cause; }
+        if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
+        pendingSave.current = false;
+        lastSaved.current = JSON.stringify(draft);
+        setError(null);
+      }
+      const proof = await owner.inspect(draft.checkoutRequestId);
+      if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      return proof;
     },
   };
 }

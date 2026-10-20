@@ -1436,10 +1436,17 @@ pub(crate) struct RepairAccessReconciliation {
     scope_epoch: u64,
     disabled: bool,
     identity_changed: bool,
+    /// A repeated "disabled" answer for an already settled disabled scope:
+    /// nothing was blocked, purged or republished.
+    unchanged: bool,
     access_decision_generation: u64,
 }
 
 impl RepairAccessReconciliation {
+    pub(crate) fn is_unchanged(&self) -> bool {
+        self.unchanged
+    }
+
     pub(crate) fn is_disabled(&self) -> bool {
         self.disabled
     }
@@ -1514,6 +1521,12 @@ pub(crate) fn latch_authoritative_access_pending(
     let _transition = transition_mutex()
         .lock()
         .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE".to_string())?;
+    // A terminal without Repairs has nothing to withdraw. Left closed, a 401,
+    // 429 or malformed modules answer refused checkout until the next good
+    // modules fetch, which can be hours away (there is no periodic fetch).
+    if settled_disabled_scope_current(decision) {
+        return Ok(());
+    }
     let (mutex, condition) = lifecycle();
     let mut state = mutex
         .lock()
@@ -1539,10 +1552,101 @@ pub(crate) fn latch_authoritative_access_pending(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Barrier closures by access decisions in this test thread.
+    static ACCESS_BARRIER_CLOSURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn access_barrier_closures_for_test() -> usize {
+    ACCESS_BARRIER_CLOSURES.with(|count| count.get())
+}
+
+fn note_access_barrier_closure() {
+    #[cfg(test)]
+    ACCESS_BARRIER_CLOSURES.with(|count| count.set(count.get() + 1));
+}
+
+/// A terminal without Repairs whose last authoritative decision already purged
+/// repair state and published a settled disabled scope. Repeating the same
+/// "disabled" answer changes nothing, so it must not close the barrier that
+/// every identity-bound POS write takes first. Tomikro 18–19/10/2026: routine
+/// modules syncs re-ran the full revoke, and checkout drafts were refused for
+/// seconds at a time until a restart. Any doubt takes the full path.
+fn settled_disabled_scope_unchanged(
+    scope: &RepairScopeState,
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    decision: RepairAccessDecision,
+) -> bool {
+    if !scope_matches_identity(scope, organization_id, branch_id, terminal_id)
+        || scope.transition_pending
+        || scope.reset_pending
+        || scope.pending_purpose.is_some()
+        || scope.offline_terminal_token.is_some()
+        || scope.offline_sequence_lease_start.is_some()
+        || scope.offline_sequence_lease_end.is_some()
+        || scope.settings_cache.is_some()
+    {
+        return false;
+    }
+    // A revoke deletes these; any one present (or unreadable) means the last
+    // revoke did not finish, or Repairs was granted since.
+    for key in [
+        crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
+        crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1,
+        crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,
+    ] {
+        if !matches!(crate::storage::get_credential_strict(key), Ok(None)) {
+            return false;
+        }
+    }
+    let identity = (
+        organization_id.to_string(),
+        branch_id.to_string(),
+        terminal_id.to_string(),
+    );
+    if !matches!(runtime_scope_identity_from_keyring(), Ok(runtime) if runtime == identity) {
+        return false;
+    }
+    let Ok(state) = lifecycle().0.lock() else {
+        return false;
+    };
+    // A process starts at epoch 0, and every transition publishes a non-zero
+    // epoch, so 0 means nothing has run since start. Requiring the scope's
+    // epoch there made the first modules sync after every restart re-run the
+    // full revoke and move the binding generation under an in-flight parity
+    // sync (TERMINAL_REBIND_PENDING in Tomikro's bundle after a restart).
+    require_current_access_decision(&state, decision).is_ok()
+        && !state.blocked
+        && !state.reset_latched
+        && !state.maintenance_failed
+        && (state.epoch == scope.scope_epoch || state.epoch == 0)
+}
+
+/// The durable scope is a settled disabled scope for the keyring identity, so
+/// this terminal has no Repairs and nothing is pending. A refused, failed or
+/// malformed modules answer then has no repair access to withdraw: it denies
+/// Repairs only and must leave ordinary POS writes admitted.
+fn settled_disabled_scope_current(decision: RepairAccessDecision) -> bool {
+    let Ok(Some(scope)) = load_scope_raw() else {
+        return false;
+    };
+    let (organization, branch, terminal) = (
+        scope.organization_id.clone(),
+        scope.branch_id.clone(),
+        scope.terminal_id.clone(),
+    );
+    settled_disabled_scope_unchanged(&scope, &organization, &branch, &terminal, decision)
+}
+
 fn block_access_reconciliation(
     scope: Option<&mut RepairScopeState>,
     decision: RepairAccessDecision,
 ) -> Result<(), String> {
+    note_access_barrier_closure();
     let (mutex, condition) = lifecycle();
     let mut state = mutex
         .lock()
@@ -1571,6 +1675,7 @@ fn block_access_reconciliation(
 }
 
 fn block_access_decision_in_memory(decision: RepairAccessDecision) -> Result<(), String> {
+    note_access_barrier_closure();
     let (mutex, condition) = lifecycle();
     let mut state = mutex
         .lock()
@@ -2961,6 +3066,29 @@ fn begin_authoritative_access_reconciliation_inner(
     let identity_changed = prior.as_ref().map_or(true, |scope| {
         !scope_matches_identity(scope, organization_id, branch_id, terminal_id)
     });
+    if !enabled && !identity_changed && recovery.is_none() {
+        if let Some(scope) = prior.as_ref().filter(|scope| {
+            settled_disabled_scope_unchanged(
+                scope,
+                organization_id,
+                branch_id,
+                terminal_id,
+                decision,
+            )
+        }) {
+            return Ok(RepairAccessReconciliation {
+                organization_id: organization_id.to_string(),
+                branch_id: branch_id.to_string(),
+                terminal_id: terminal_id.to_string(),
+                scope_token: scope.scope_token.clone(),
+                scope_epoch: scope.scope_epoch,
+                disabled: true,
+                identity_changed: false,
+                unchanged: true,
+                access_decision_generation: decision.generation,
+            });
+        }
+    }
     #[cfg(unix)]
     if identity_changed {
         if let Some(scope) = prior.as_ref() {
@@ -3200,6 +3328,7 @@ fn begin_authoritative_access_reconciliation_inner(
         scope_epoch: candidate.scope_epoch,
         disabled: !enabled,
         identity_changed,
+        unchanged: false,
         access_decision_generation: decision.generation,
     };
     if enabled {
@@ -3289,10 +3418,21 @@ pub(crate) fn latch_startup_access_pending() -> Result<RepairAccessDecision, Str
         .lock()
         .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE".to_string())?;
     let (mutex, condition) = lifecycle();
+    let decision = {
+        let mut state = mutex
+            .lock()
+            .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
+        next_access_decision(&mut state)?
+    };
+    // The new decision still supersedes every older modules answer. Without
+    // Repairs there is no access to suspend, so a failed sign-out cleanup
+    // must not refuse ordinary POS writes until the next modules fetch.
+    if settled_disabled_scope_current(decision) {
+        return Ok(decision);
+    }
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    let decision = next_access_decision(&mut state)?;
     state.blocked = true;
     condition.notify_all();
     Ok(decision)
@@ -3305,6 +3445,27 @@ pub(crate) fn retain_verified_access_after_network_failure(
     let _transition = transition_mutex()
         .lock()
         .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE".to_string())?;
+    // A settled disabled scope has no repair access to retain: answer as the
+    // blocked path below does, without closing the barrier for a network blip.
+    if let Some(scope) = load_scope_raw().ok().flatten() {
+        let (organization, branch, terminal) = (
+            scope.organization_id.clone(),
+            scope.branch_id.clone(),
+            scope.terminal_id.clone(),
+        );
+        if settled_disabled_scope_unchanged(&scope, &organization, &branch, &terminal, decision) {
+            let runtime = {
+                let connection = db
+                    .conn
+                    .lock()
+                    .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
+                runtime_scope_identity(&connection).ok()
+            };
+            if runtime == Some((organization, branch, terminal)) {
+                return Err("REPAIR_MODULE_REQUIRED".to_string());
+            }
+        }
+    }
     // Drain active native operations before SQLite is acquired. This keeps
     // the same global lock order as authoritative enable/revoke processing.
     block_access_decision_in_memory(decision)?;
@@ -11936,6 +12097,279 @@ mod tests {
                 )
                 .expect("count generic order control"),
             1
+        );
+        reset_test_lifecycle();
+    }
+
+    fn settled_revoke(
+        database: &crate::tests::harness::TestDb,
+        initial: &RepairScopeState,
+    ) -> RepairScopeState {
+        {
+            let connection = database.state.conn.lock().expect("lock repair database");
+            persist_runtime_identity(
+                &connection,
+                &initial.organization_id,
+                &initial.branch_id,
+                &initial.terminal_id,
+            )
+            .expect("persist runtime identity");
+        }
+        let decision = start_authoritative_access_decision().expect("start first revoke");
+        let revoked = begin_authoritative_access_reconciliation(
+            &database.state,
+            &initial.organization_id,
+            &initial.branch_id,
+            &initial.terminal_id,
+            false,
+            decision,
+        )
+        .expect("first revoke runs in full");
+        assert!(revoked.is_disabled() && !revoked.is_unchanged());
+        load_scope_raw()
+            .expect("read settled scope")
+            .expect("settled disabled scope")
+    }
+
+    fn seed_probe_repair_row(database: &crate::tests::harness::TestDb, scope: &RepairScopeState) {
+        let connection = database.state.conn.lock().expect("lock repair database");
+        connection
+            .execute(
+                "INSERT INTO repair_cache (
+                     organization_id, branch_id, terminal_id, repair_id, scope_generation,
+                     display_number, status, authoritative_status, priority, intake_mode,
+                     authoritative_version, optimistic_version, dirty, has_conflict,
+                     needs_refetch, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'R-OFF-A19F-000099', 'received',
+                           'received', 'normal', 'standard', 0, 0, 0, 0, 0,
+                           datetime('now'), datetime('now'))",
+                params![
+                    scope.organization_id,
+                    scope.branch_id,
+                    scope.terminal_id,
+                    TEST_REPAIR_ID,
+                    scope.scope_epoch as i64
+                ],
+            )
+            .expect("seed probe that a second purge would delete");
+    }
+
+    fn probe_rows(database: &crate::tests::harness::TestDb) -> i64 {
+        let connection = database.state.conn.lock().expect("lock repair database");
+        connection
+            .query_row("SELECT COUNT(*) FROM repair_cache", [], |row| row.get(0))
+            .expect("count probe rows")
+    }
+
+    #[test]
+    fn a_repeated_disabled_answer_never_closes_the_barrier_or_purges_again() {
+        let _serial = test_state_lock();
+        reset_test_lifecycle();
+        let initial = scope();
+        let _keyring = install_native_state(&initial);
+        let database = crate::tests::harness::TestDb::open();
+        let settled = settled_revoke(&database, &initial);
+        seed_probe_repair_row(&database, &settled);
+        let closures = access_barrier_closures_for_test();
+
+        // Tomikro 18–19/10/2026: every routine modules sync repeated this answer.
+        let decision = start_authoritative_access_decision().expect("start repeated answer");
+        let repeated = begin_authoritative_access_reconciliation(
+            &database.state,
+            &initial.organization_id,
+            &initial.branch_id,
+            &initial.terminal_id,
+            false,
+            decision,
+        )
+        .expect("repeated disabled answer");
+        assert!(repeated.is_disabled() && repeated.is_unchanged());
+        assert_eq!(
+            access_barrier_closures_for_test(),
+            closures,
+            "a repeated disabled answer closed the barrier"
+        );
+        let after = load_scope_raw().unwrap().unwrap();
+        assert_eq!(after.scope_token, settled.scope_token);
+        assert_eq!(after.scope_epoch, settled.scope_epoch);
+        assert_eq!(probe_rows(&database), 1, "a repeated answer purged again");
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
+
+        // A network failure answers the same, also without closing the barrier.
+        let decision = start_authoritative_access_decision().expect("start offline answer");
+        assert_eq!(
+            retain_verified_access_after_network_failure(&database.state, decision).unwrap_err(),
+            "REPAIR_MODULE_REQUIRED"
+        );
+        assert_eq!(access_barrier_closures_for_test(), closures);
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
+        reset_test_lifecycle();
+    }
+
+    #[test]
+    fn a_disabled_answer_runs_the_full_revoke_again_once_repairs_state_reappears() {
+        let _serial = test_state_lock();
+        reset_test_lifecycle();
+        let initial = scope();
+        let _keyring = install_native_state(&initial);
+        let database = crate::tests::harness::TestDb::open();
+        let settled = settled_revoke(&database, &initial);
+        seed_probe_repair_row(&database, &settled);
+        // Repairs was granted since: the entitlement exists again.
+        crate::storage::set_credential(crate::storage::KEY_REPAIR_ENTITLEMENT_V1, "{}")
+            .expect("restore an entitlement");
+        let closures = access_barrier_closures_for_test();
+
+        let decision = start_authoritative_access_decision().expect("start revoke");
+        let revoked = begin_authoritative_access_reconciliation(
+            &database.state,
+            &initial.organization_id,
+            &initial.branch_id,
+            &initial.terminal_id,
+            false,
+            decision,
+        )
+        .expect("full revoke");
+        assert!(revoked.is_disabled() && !revoked.is_unchanged());
+        assert_eq!(access_barrier_closures_for_test(), closures + 1);
+        assert_eq!(
+            load_scope_raw().unwrap().unwrap().scope_epoch,
+            settled.scope_epoch + 1
+        );
+        assert_eq!(
+            probe_rows(&database),
+            0,
+            "the full revoke purges repair state"
+        );
+        assert!(
+            crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_ENTITLEMENT_V1)
+                .expect("read entitlement")
+                .is_none()
+        );
+
+        // A blocked barrier (an earlier decision still open) also takes the full path.
+        let decision = start_authoritative_access_decision().expect("start latched answer");
+        block_access_decision_in_memory(decision).expect("leave the barrier closed");
+        let closures = access_barrier_closures_for_test();
+        let decision = start_authoritative_access_decision().expect("start next answer");
+        let answered = begin_authoritative_access_reconciliation(
+            &database.state,
+            &initial.organization_id,
+            &initial.branch_id,
+            &initial.terminal_id,
+            false,
+            decision,
+        )
+        .expect("full revoke releases the barrier");
+        assert!(!answered.is_unchanged());
+        assert_eq!(access_barrier_closures_for_test(), closures + 1);
+        drop(acquire_terminal_binding_lease().expect("released after the full revoke"));
+        reset_test_lifecycle();
+    }
+
+    #[test]
+    fn the_first_disabled_answer_after_a_restart_is_also_a_no_op() {
+        let _serial = test_state_lock();
+        reset_test_lifecycle();
+        let initial = scope();
+        let _keyring = install_native_state(&initial);
+        let database = crate::tests::harness::TestDb::open();
+        let settled = settled_revoke(&database, &initial);
+        seed_probe_repair_row(&database, &settled);
+        // A restart: the lifecycle starts over at epoch 0, durable state stays.
+        reset_test_lifecycle();
+        let generation = acquire_terminal_binding_lease()
+            .expect("admitted after the restart")
+            .generation();
+        let closures = access_barrier_closures_for_test();
+
+        let decision = start_authoritative_access_decision().expect("start first answer");
+        let answered = begin_authoritative_access_reconciliation(
+            &database.state,
+            &initial.organization_id,
+            &initial.branch_id,
+            &initial.terminal_id,
+            false,
+            decision,
+        )
+        .expect("first disabled answer after the restart");
+        assert!(answered.is_disabled() && answered.is_unchanged());
+        assert_eq!(
+            access_barrier_closures_for_test(),
+            closures,
+            "the first answer after a restart re-ran the full revoke"
+        );
+        assert_eq!(probe_rows(&database), 1, "the first answer purged again");
+        assert_eq!(
+            load_scope_raw().unwrap().unwrap().scope_epoch,
+            settled.scope_epoch
+        );
+        assert_eq!(
+            acquire_terminal_binding_lease()
+                .expect("ordinary POS writes stay admitted")
+                .generation(),
+            generation,
+            "an in-flight parity sync must keep its binding generation"
+        );
+
+        // The network-failure answer after a restart is a no-op as well.
+        let decision = start_authoritative_access_decision().expect("start offline answer");
+        assert_eq!(
+            retain_verified_access_after_network_failure(&database.state, decision).unwrap_err(),
+            "REPAIR_MODULE_REQUIRED"
+        );
+        assert_eq!(access_barrier_closures_for_test(), closures);
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
+        reset_test_lifecycle();
+    }
+
+    // A 401/403, a 429 or any other 4xx, a malformed or mismatched modules
+    // answer, and a failed sign-out cleanup all latch. Without Repairs they
+    // used to refuse checkout until the next good modules fetch.
+    #[test]
+    fn refused_or_failed_answers_leave_a_terminal_without_repairs_open() {
+        let _serial = test_state_lock();
+        reset_test_lifecycle();
+        let initial = scope();
+        let _keyring = install_native_state(&initial);
+        let database = crate::tests::harness::TestDb::open();
+        let settled = settled_revoke(&database, &initial);
+
+        let refused = start_authoritative_access_decision().expect("start refused answer");
+        latch_authoritative_access_pending(refused).expect("refused modules answer");
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
+        assert_eq!(
+            acquire_transport_lease().unwrap_err().code(),
+            "REPAIR_MODULE_REQUIRED"
+        );
+
+        latch_startup_access_pending().expect("failed sign-out cleanup");
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
+        // The sign-out decision still supersedes the older modules answer.
+        assert_eq!(
+            latch_authoritative_access_pending(refused).unwrap_err(),
+            "REPAIR_ACCESS_DECISION_STALE"
+        );
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
+        let after = load_scope_raw().unwrap().unwrap();
+        assert_eq!(after.scope_token, settled.scope_token);
+        assert_eq!(after.scope_epoch, settled.scope_epoch);
+        assert!(!after.transition_pending && after.pending_purpose.is_none());
+
+        // Once Repairs state reappears, the same latch closes the barrier again.
+        crate::storage::set_credential(crate::storage::KEY_REPAIR_ENTITLEMENT_V1, "{}")
+            .expect("restore an entitlement");
+        let refused = start_authoritative_access_decision().expect("start refused answer");
+        latch_authoritative_access_pending(refused).expect("refused modules answer");
+        assert_eq!(
+            acquire_terminal_binding_lease().unwrap_err(),
+            "REPAIR_SCOPE_TRANSITION_PENDING"
+        );
+        reset_test_lifecycle();
+        latch_startup_access_pending().expect("failed sign-out cleanup");
+        assert_eq!(
+            acquire_terminal_binding_lease().unwrap_err(),
+            "REPAIR_SCOPE_TRANSITION_PENDING"
         );
         reset_test_lifecycle();
     }

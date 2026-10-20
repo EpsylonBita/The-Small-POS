@@ -62,6 +62,7 @@ top-level shapes as the Android bundle):
 - `sync_errors.json`: recent sync failures
 - `printer_diagnostics.json`: printer profiles and print-job state
 - `health_view.json`: what the operator saw in the Health view when the export was started there, or `{ "status": "not_collected" }`
+- `runtime_logs.json`: a projection of the newest log lines, never raw logs. It holds the newest 50 events per severity, each with any allow-listed native `errorCode` (for example `TERMINAL_REBIND_PENDING`). Beside them, a 48-hour per-hour count of every warning, error and coded line (`history`), with per-file read coverage. See [POS diagnostics evidence](../docs/operations/pos-diagnostics-evidence.md#native-error-codes-and-the-48-hour-history)
 
 A collector that fails writes `{ "status": "unavailable", "error": ... }` and
 the rest of the bundle still ships; an empty value never stands in for

@@ -115,13 +115,16 @@ vi.mock('../../../../lib', async (importOriginal) => ({
 }));
 
 import { StaffShiftModal } from '../StaffShiftModal';
+import { configureSlowRunnerWaits, SLOW_RUNNER_TEST_TIMEOUT_MS } from '../../../test/slow-runner';
+
+configureSlowRunnerWaits();
 
 const baseProps = {
   onClose: vi.fn(),
   mode: 'checkin' as const,
 };
 
-describe('StaffShiftModal closed-state mount gating', () => {
+describe('StaffShiftModal closed-state mount gating', { timeout: SLOW_RUNNER_TEST_TIMEOUT_MS }, () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();

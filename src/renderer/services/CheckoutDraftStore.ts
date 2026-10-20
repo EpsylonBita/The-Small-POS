@@ -44,6 +44,10 @@ export class LegacyShiftCurrencyConfirmationRequired extends Error {
 }
 const nativeTransport: DraftTransport = (command, input) => getBridge().invoke(command, input);
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+// Native JSON object key order is not the renderer's insertion order.
+const draftSignature = (value: unknown): string => JSON.stringify(value, (_key, item) =>
+  item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 
 export function validateCheckoutDraft(value: unknown): asserts value is CheckoutDraft {
   const draft = value as CheckoutDraft;
@@ -66,11 +70,15 @@ export class CheckoutDraftStore {
 
   constructor(private scope: CheckoutDraftScope, private readonly transport: DraftTransport = nativeTransport) {}
 
-  private accept(reply: CheckoutDraftReply): CheckoutDraft | null {
+  private validateReply(reply: CheckoutDraftReply): void {
     if (!reply?.success || !Number.isSafeInteger(reply.generation) || reply.generation < 0 ||
       reply.scope?.organizationId !== this.scope.organizationId || reply.scope?.branchId !== this.scope.branchId ||
       !reply.scope?.terminalId) throw new Error('CHECKOUT_DRAFT_STORAGE_UNAVAILABLE');
     if (reply.draft) validateCheckoutDraft(reply.draft);
+  }
+
+  private accept(reply: CheckoutDraftReply): CheckoutDraft | null {
+    this.validateReply(reply);
     this.invalidation = !reply.draft && reply.invalidation?.reason === 'edit_target_cancelled' ? reply.invalidation : undefined;
     this.scope = { ...reply.scope };
     this.generation = reply.generation;
@@ -99,13 +107,49 @@ export class CheckoutDraftStore {
       await this.load();
       if (this.retired.has(snapshot.draftId)) throw new Error('CHECKOUT_DRAFT_CHANGED');
       if (this.retiredCheckouts.has(snapshot.checkoutRequestId)) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
-      if (this.draft?.phase === 'checkout_pending' && JSON.stringify(this.draft) !== JSON.stringify(snapshot)) {
+      if (this.draft?.phase === 'checkout_pending' && draftSignature(this.draft) !== draftSignature(snapshot)) {
         throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
       }
       const reply = await this.transport('checkout_draft_put', {
         ...this.scope, expectedGeneration: this.generation, draft: snapshot,
       });
       const result = this.accept(reply);
+      this.loaded = Promise.resolve(result);
+      return result;
+    });
+  }
+
+  /** Explicit recovery of a failed freeze, including a committed write whose ACK was lost. */
+  retryFrozenSave(draft: CheckoutDraft, isCurrent: () => boolean): Promise<CheckoutDraft> {
+    validateCheckoutDraft(draft);
+    const snapshot = copy(draft);
+    if (snapshot.phase !== 'checkout_pending') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+    return this.ordered(async () => {
+      await this.load();
+      if (!isCurrent() || this.retired.has(snapshot.draftId) || this.retiredCheckouts.has(snapshot.checkoutRequestId)) {
+        throw new Error('CHECKOUT_DRAFT_CHANGED');
+      }
+      const reply: CheckoutDraftReply = await this.transport('checkout_draft_get', this.scope);
+      this.validateReply(reply);
+      if (!isCurrent() || reply.scope.terminalId !== this.scope.terminalId || reply.invalidation ||
+        reply.generation < this.generation!) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      if (draftSignature(reply.draft) === draftSignature(snapshot)) {
+        // Fresh complete scoped readback proves this exact frozen request is durable.
+        const result = this.accept(reply)!;
+        this.loaded = Promise.resolve(result);
+        return result;
+      }
+      if (reply.generation !== this.generation || draftSignature(reply.draft) !== draftSignature(this.draft) ||
+        (reply.draft && (reply.draft.phase !== 'editing' || reply.draft.draftId !== snapshot.draftId ||
+          reply.draft.checkoutRequestId !== snapshot.checkoutRequestId))) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      const saved: CheckoutDraftReply = await this.transport('checkout_draft_put', {
+        ...this.scope, expectedGeneration: this.generation, draft: snapshot,
+      });
+      this.validateReply(saved);
+      if (!isCurrent() || saved.scope.terminalId !== this.scope.terminalId ||
+        saved.generation !== reply.generation + 1 ||
+        draftSignature(saved.draft) !== draftSignature(snapshot)) throw new Error('CHECKOUT_DRAFT_CHANGED');
+      const result = this.accept(saved)!;
       this.loaded = Promise.resolve(result);
       return result;
     });

@@ -39,6 +39,9 @@ import { StaffShiftModal } from '../StaffShiftModal';
 import { parseOpeningCents } from '../../../lib/financial-opening';
 import { getSecureSessionSync, setSecureSession, __resetForTesting } from '../../../lib/secure-session-cache';
 import { setBridge, resetBridge } from '../../../../lib/ipc-adapter';
+import { configureSlowRunnerWaits, SLOW_RUNNER_TEST_TIMEOUT_MS } from '../../../test/slow-runner';
+
+configureSlowRunnerWaits();
 
 const bridge = fixture.bridge;
 const props = { isOpen: true, onClose: fixture.onClose, mode: 'checkin' as const };
@@ -88,7 +91,7 @@ function unpublished() {
   expect(fixture.refreshActiveShift).not.toHaveBeenCalled();
 }
 
-describe('StaffShiftModal native financial opening', () => {
+describe('StaffShiftModal native financial opening', { timeout: SLOW_RUNNER_TEST_TIMEOUT_MS }, () => {
   beforeEach(async () => {
     vi.resetAllMocks(); nativeOriginal = undefined;
     fixture.scope.organizationId = '10000000-0000-4000-8000-000000000001';

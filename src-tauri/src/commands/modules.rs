@@ -493,7 +493,8 @@ pub async fn modules_fetch_from_admin(
                     }
                 }
             };
-            if pending.is_disabled()
+            // An unchanged settled revoke republished nothing: no scope reset.
+            if (pending.is_disabled() && !pending.is_unchanged())
                 || (pending.identity_changed() && repair_access_state == "enabled")
             {
                 let reason = if pending.is_disabled() {

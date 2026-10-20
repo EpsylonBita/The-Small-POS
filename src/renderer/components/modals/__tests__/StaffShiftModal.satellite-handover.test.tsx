@@ -37,6 +37,9 @@ vi.mock('../../ui/pos-glass-components', async (original) => ({ ...(await origin
 import { StaffShiftModal } from '../StaffShiftModal';
 import { setSecureSession, __resetForTesting } from '../../../lib/secure-session-cache';
 import { setBridge, resetBridge } from '../../../../lib/ipc-adapter';
+import { configureSlowRunnerWaits, SLOW_RUNNER_TEST_TIMEOUT_MS } from '../../../test/slow-runner';
+
+configureSlowRunnerWaits();
 
 const SHIFT_ID = '50000000-0000-4000-8000-000000000001';
 const OTHER_SHIFT_ID = '50000000-0000-4000-8000-000000000002';
@@ -190,7 +193,7 @@ async function closeOrdinaryWithZeroCash() {
   await waitFor(() => expect(bridge.shifts.close).toHaveBeenCalledTimes(1));
 }
 
-describe('StaffShiftModal close held by a satellite cash handover', () => {
+describe('StaffShiftModal close held by a satellite cash handover', { timeout: SLOW_RUNNER_TEST_TIMEOUT_MS }, () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     fixture.scope.organizationId = '10000000-0000-4000-8000-000000000001';

@@ -37,6 +37,9 @@ vi.mock('../../ui/pos-glass-components', async (original) => ({ ...(await origin
 import { StaffShiftModal } from '../StaffShiftModal';
 import { setSecureSession, __resetForTesting } from '../../../lib/secure-session-cache';
 import { setBridge, resetBridge } from '../../../../lib/ipc-adapter';
+import { configureSlowRunnerWaits, SLOW_RUNNER_TEST_TIMEOUT_MS } from '../../../test/slow-runner';
+
+configureSlowRunnerWaits();
 
 const SHIFT_ID = '50000000-0000-4000-8000-000000000001';
 const OTHER_SHIFT_ID = '50000000-0000-4000-8000-000000000002';
@@ -152,7 +155,7 @@ async function recoveryState(state: string) {
   await waitFor(() => expect(screen.getByTestId('gift-close-recovery')).toHaveAttribute('data-state', state));
 }
 
-describe('StaffShiftModal gift-bound close', () => {
+describe('StaffShiftModal gift-bound close', { timeout: SLOW_RUNNER_TEST_TIMEOUT_MS }, () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     fixture.scope.organizationId = '10000000-0000-4000-8000-000000000001';
@@ -206,10 +209,18 @@ describe('StaffShiftModal gift-bound close', () => {
     expect(document.body.textContent).not.toContain('SECRET-BODY');
 
     bridge.shiftFinancialClosing.listPending.mockResolvedValue({ success: true, closings: [closing()], truncated: false });
+    // The reopened panel shows the listed original at once, then reads it back
+    // with Retry disabled; a click before that read settles is dropped, which
+    // failed this test on a loaded runner on 06/10/2026. Settle the read first.
+    const reopenRead = deferred();
+    bridge.shiftFinancialClosing.status.mockImplementationOnce(() => reopenRead.promise);
     view.rerender(<StaffShiftModal {...props} isOpen={false} />);
     view.rerender(<StaffShiftModal {...props} />);
     await recoveryState('pending');
     expect(screen.getByTestId('gift-close-recovery')).toHaveAttribute('data-closing-key', CLOSING_KEY);
+    await waitFor(() => expect(screen.getByTestId('gift-close-retry')).toBeDisabled());
+    await act(async () => { reopenRead.resolve({ success: true, closing: closing() }); await reopenRead.promise; });
+    expect(screen.getByTestId('gift-close-retry')).toBeEnabled();
     fireEvent.click(screen.getByTestId('gift-close-retry'));
     await waitFor(() => expect(screen.getByTestId('gift-close-notice')).toHaveAttribute('data-tone', 'info'));
     expect(bridge.shiftFinancialClosing.retry).toHaveBeenCalledWith({ closingKey: CLOSING_KEY, staffId: fixture.staffId });

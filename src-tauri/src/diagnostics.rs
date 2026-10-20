@@ -3430,6 +3430,61 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Tomikro 19/10: the refusal reached the bundle as `sync_error` only.
+    #[test]
+    fn diagnostics_bundle_keeps_a_listed_native_code_and_nothing_else_of_the_line() {
+        let dir = std::env::temp_dir().join(format!("diag_logs_codes_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).unwrap();
+        let logs = dir.join("isolated-runtime-logs");
+        fs::create_dir(&logs).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::minutes(1))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        fs::write(
+            logs.join("pos.2026-10-19"),
+            format!(
+                "{at} WARN the_small_pos_lib::sync: Parity sync failed: TERMINAL_REBIND_PENDING customer=Maria Papadopoulou phone=6912345678 maria@example.com C:\\Users\\private-note\n"
+            ),
+        )
+        .unwrap();
+        let path = export_diagnostics_bundle_with_log_dir(
+            &db,
+            &dir,
+            DiagnosticsExportOptions::default(),
+            None,
+            &logs,
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
+        let events = read_zip_json(&mut zip, "runtime_logs.json");
+        assert_eq!(
+            events["events"]["warn"],
+            json!([{"timestamp": at, "level": "warn", "component": "sync",
+                "eventCode": "sync_error", "errorCode": "TERMINAL_REBIND_PENDING"}])
+        );
+        assert_eq!(
+            events["history"]["rows"],
+            json!([{"component": "sync", "code": "TERMINAL_REBIND_PENDING", "count": 1,
+                "firstAt": at, "lastAt": at, "hours": {format!("{}:00:00Z", &at[..13]): 1}}])
+        );
+        assert_eq!(events["coverage"]["files"][0]["status"], "complete");
+        let text = events.to_string();
+        for marker in [
+            "Maria",
+            "Papadopoulou",
+            "6912345678",
+            "maria@example.com",
+            "private-note",
+            "customer",
+        ] {
+            assert!(!text.contains(marker), "{marker} leaked");
+        }
+        drop(zip);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn printer_diagnostics_export_safe_attempt_evidence_without_print_content() {
         let dir = std::env::temp_dir().join(format!("diag_printing_{}", uuid::Uuid::new_v4()));

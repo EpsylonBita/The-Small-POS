@@ -292,24 +292,119 @@ fn check_admission(conn: &Connection, input: &Value) -> Result<Value, String> {
 
 #[tauri::command]
 pub fn checkout_draft_get(arg0: Value, db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::with_full_sync(&conn, |conn| load(conn, &arg0))
+    get(&db, &arg0)
 }
 #[tauri::command]
 pub fn checkout_draft_put(arg0: Value, db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::with_full_sync(&conn, |conn| write(conn, &arg0, false))
+    put(&db, &arg0)
+}
+
+#[derive(Clone, Copy)]
+enum DraftOperation {
+    Save,
+    Read,
+    Delete,
+}
+
+// These fixed codes survive the redacted support-log projection, which accepts
+// `checkout_<save|read|delete>_<class>` (shared/pos/health/runtime-log-events).
+// Never log the native error text or the draft: either can contain customer data.
+fn failure_class(error: &str) -> &'static str {
+    match error {
+        "REPAIR_SCOPE_TRANSITION_PENDING" => "scope_transition",
+        "REPAIR_RESET_PENDING" => "reset_pending",
+        "REPAIR_STAGING_MAINTENANCE_FAILED" => "maintenance_pending",
+        "CHECKOUT_DRAFT_SCOPE_CHANGED" | "CHECKOUT_DRAFT_SCOPE_REQUIRED" => "scope_changed",
+        "CHECKOUT_DRAFT_VERSION_CHANGED" | "CHECKOUT_REQUEST_ID_CHANGED" => "version_changed",
+        "CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED" => "target_cancelled",
+        "CHECKOUT_DRAFT_SECRET_FORBIDDEN"
+        | "CHECKOUT_DRAFT_TOO_LARGE"
+        | "CHECKOUT_DRAFT_REQUIRED"
+        | "CHECKOUT_DRAFT_INVALID"
+        | "CHECKOUT_DRAFT_GENERATION_REQUIRED"
+        | "CHECKOUT_DRAFT_VERSION_EXHAUSTED" => "invalid",
+        "database is locked" | "database table is locked" => "storage_busy",
+        "database or disk is full" => "storage_full",
+        "attempt to write a readonly database" => "storage_readonly",
+        "disk I/O error" => "storage_io",
+        _ => "unclassified",
+    }
+}
+
+fn failure_event(operation: DraftOperation, error: &str) -> String {
+    let operation = match operation {
+        DraftOperation::Save => "save",
+        DraftOperation::Read => "read",
+        DraftOperation::Delete => "delete",
+    };
+    format!("checkout_{operation}_{}", failure_class(error))
+}
+
+fn save_failure_event(error: &str) -> String {
+    failure_event(DraftOperation::Save, error)
+}
+
+/// Read, save and delete all refuse first on the binding lease. Each rejection
+/// gets one fixed-code warning so a support bundle can name the refusal.
+fn logged(
+    operation: DraftOperation,
+    phase: Option<&'static str>,
+    run: impl FnOnce() -> Result<Value, String>,
+) -> Result<Value, String> {
+    let result = run();
+    if let Err(error) = &result {
+        let event_code = failure_event(operation, error);
+        match phase {
+            Some(phase) => tracing::warn!(
+                event_code = event_code.as_str(),
+                draft_phase = phase,
+                "Checkout persistence failed"
+            ),
+            None => tracing::warn!(
+                event_code = event_code.as_str(),
+                "Checkout persistence failed"
+            ),
+        }
+    }
+    result
+}
+
+fn get(db: &db::DbState, input: &Value) -> Result<Value, String> {
+    logged(DraftOperation::Read, None, || {
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::with_full_sync(&conn, |conn| load(conn, input))
+    })
+}
+
+fn put(db: &db::DbState, input: &Value) -> Result<Value, String> {
+    let phase = match input["draft"]["phase"].as_str() {
+        Some("editing") => "editing",
+        Some("checkout_pending") => "checkout_pending",
+        _ => "invalid",
+    };
+    logged(DraftOperation::Save, Some(phase), || {
+        // This exact lease refusal precedes every write. The live renderer may
+        // briefly retry it with the same request; other failures are ambiguous.
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::with_full_sync(&conn, |conn| write(conn, input, false))
+    })
+}
+
+fn delete(db: &db::DbState, input: &Value) -> Result<Value, String> {
+    logged(DraftOperation::Delete, None, || {
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::with_full_sync(&conn, |conn| write(conn, input, true))
+    })
 }
 #[tauri::command]
 pub fn checkout_draft_delete(
     arg0: Value,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::with_full_sync(&conn, |conn| write(conn, &arg0, true))
+    delete(&db, &arg0)
 }
 
 /// A missing row, cancelled/error response, or returned flag is never a refusal proof.
@@ -581,6 +676,137 @@ pub fn checkout_draft_inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkout_save_transition_gate_rejects_before_writing_the_frozen_request() {
+        let isolation = crate::repairs::isolate_lifecycle_for_test();
+        let db = crate::tests::harness::TestDb::open();
+        let mut input = seed(&db.state.conn.lock().unwrap());
+        input["draft"]["phase"] = json!("checkout_pending");
+        crate::repairs::latch_startup_access_pending().unwrap();
+
+        assert_eq!(
+            put(&db.state, &input).unwrap_err(),
+            "REPAIR_SCOPE_TRANSITION_PENDING"
+        );
+        let before = load(&db.state.conn.lock().unwrap(), &input).unwrap();
+        assert_eq!(before["generation"], 0);
+        assert!(before["draft"].is_null());
+
+        // Simulate the authority owner releasing its gate. The original body
+        // and CAS can now commit exactly once; a duplicate still cannot write.
+        isolation.reset();
+        let saved = put(&db.state, &input).unwrap();
+        assert_eq!(saved["generation"], 1);
+        assert_eq!(saved["draft"], input["draft"]);
+        assert_eq!(
+            put(&db.state, &input).unwrap_err(),
+            "CHECKOUT_DRAFT_VERSION_CHANGED"
+        );
+        assert_eq!(load(&db.state.conn.lock().unwrap(), &input).unwrap(), saved);
+        let conn = db.state.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM orders", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn checkout_save_failure_evidence_is_fixed_and_does_not_expose_native_errors() {
+        for (error, expected) in [
+            (
+                "REPAIR_SCOPE_TRANSITION_PENDING",
+                "checkout_save_scope_transition",
+            ),
+            ("REPAIR_RESET_PENDING", "checkout_save_reset_pending"),
+            (
+                "REPAIR_STAGING_MAINTENANCE_FAILED",
+                "checkout_save_maintenance_pending",
+            ),
+            (
+                "CHECKOUT_DRAFT_SCOPE_CHANGED",
+                "checkout_save_scope_changed",
+            ),
+            (
+                "CHECKOUT_DRAFT_VERSION_CHANGED",
+                "checkout_save_version_changed",
+            ),
+            ("CHECKOUT_DRAFT_SECRET_FORBIDDEN", "checkout_save_invalid"),
+            ("database is locked", "checkout_save_storage_busy"),
+            ("database or disk is full", "checkout_save_storage_full"),
+            (
+                "attempt to write a readonly database",
+                "checkout_save_storage_readonly",
+            ),
+            ("disk I/O error", "checkout_save_storage_io"),
+            (
+                "REPAIR_SCOPE_TRANSITION_PENDING customer PII_CANARY SECRET_CANARY",
+                "checkout_save_unclassified",
+            ),
+            (
+                "arbitrary native error PII_CANARY SECRET_CANARY",
+                "checkout_save_unclassified",
+            ),
+        ] {
+            assert_eq!(save_failure_event(error), expected);
+        }
+    }
+
+    #[test]
+    fn checkout_read_and_delete_refusals_get_their_own_fixed_codes() {
+        for (operation, error, expected) in [
+            (
+                DraftOperation::Read,
+                "REPAIR_SCOPE_TRANSITION_PENDING",
+                "checkout_read_scope_transition",
+            ),
+            (
+                DraftOperation::Read,
+                "database is locked",
+                "checkout_read_storage_busy",
+            ),
+            (
+                DraftOperation::Delete,
+                "REPAIR_STAGING_MAINTENANCE_FAILED",
+                "checkout_delete_maintenance_pending",
+            ),
+            (
+                DraftOperation::Delete,
+                "CHECKOUT_DRAFT_VERSION_CHANGED",
+                "checkout_delete_version_changed",
+            ),
+            (
+                DraftOperation::Read,
+                "arbitrary native error PII_CANARY",
+                "checkout_read_unclassified",
+            ),
+        ] {
+            assert_eq!(failure_event(operation, error), expected);
+        }
+
+        // The lease refusal precedes the read and the delete as it does the save.
+        let _isolation = crate::repairs::isolate_lifecycle_for_test();
+        let db = crate::tests::harness::TestDb::open();
+        let input = seed(&db.state.conn.lock().unwrap());
+        crate::repairs::latch_startup_access_pending().unwrap();
+        assert_eq!(
+            get(&db.state, &input).unwrap_err(),
+            "REPAIR_SCOPE_TRANSITION_PENDING"
+        );
+        assert_eq!(
+            delete(&db.state, &input).unwrap_err(),
+            "REPAIR_SCOPE_TRANSITION_PENDING"
+        );
+    }
+
     fn cancelled_editor_fixture(conn: &Connection) -> Value {
         let mut input = seed(conn);
         conn.execute("INSERT INTO orders(id,organization_id,branch_id,items,total_amount,status,created_at,updated_at) VALUES('cancelled-target','org','branch','[]',10.5,'pending','now','now')", []).unwrap();
