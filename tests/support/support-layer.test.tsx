@@ -1981,12 +1981,19 @@ test('guest billing folio actions target the existing POS folio routes', () => {
 
 test('GuestBillingView wires Add Charge / Payment / Checkout buttons to the folio endpoints', () => {
   const source = readGuestBillingViewSource();
+  const settlementService = readFileSync(path.join(process.cwd(), 'src/renderer/services/HotelSettlementService.ts'), 'utf8');
 
-  // Buttons post through the shared endpoint builders over the POS API bridge.
-  assert.match(source, /folioChargesEndpoint\(/);
-  assert.match(source, /folioPaymentsEndpoint\(/);
+  // Add Charge goes through the idempotent hotel charge helper, which posts to
+  // the shared charges endpoint builder.
+  assert.match(source, /postHotelCharge<FolioMutationResponse>\(folio\.id, body\)/);
+  assert.match(settlementService, /posApiPost<T>\(folioChargesEndpoint\(folioId\), next\)/);
+  // A payment is a folio settlement order (real tender, receipt, Z), never a
+  // bare folio payment row (vertical readiness 2026-10-20).
+  assert.match(source, /setSettlementRequest\(\{ folioId: folio\.id, amountCents:/);
+  assert.match(source, /<HotelSettlementModal/);
+  assert.doesNotMatch(source, /folioPaymentsEndpoint\(/);
   assert.match(source, /folioCheckoutEndpoint\(/);
-  assert.match(source, /posApiPost/);
+  assert.match(source, /posApiFetch/);
   // Checkout uses the close_paid resolution and steers outstanding balances
   // to Add Payment via the dual-transport 409 parser.
   assert.match(source, /resolution: 'close_paid'/);
@@ -2071,7 +2078,10 @@ test('RoomsView uses the room-stay endpoints for folio check-in and checkout', (
   assert.match(checkinSource, /\/pos\/rooms\/\$\{encodeURIComponent\(room\.id\)\}\/checkin/);
   assert.match(source, /\/pos\/rooms\/\$\{encodeURIComponent\(room\.id\)\}\/checkout/);
   assert.match(source, /parseFolioCheckoutOutstanding\(/);
-  assert.match(source, /folioPaymentsEndpoint\(/);
+  // Checkout payment opens the folio settlement, not the bare payments route.
+  assert.match(source, /setSettlementRequest\(\{ folioId: checkoutPaymentData\.folioId/);
+  assert.match(source, /<HotelSettlementModal/);
+  assert.doesNotMatch(source, /folioPaymentsEndpoint\(/);
 });
 
 test('room arrival without guest billing records occupancy and never invents a paid receipt', () => {
@@ -2101,7 +2111,7 @@ test('RoomsView renders effective status, active folio balance, and posts Add Ch
   assert.match(source, /getRoomEffectiveStatus\(room\)/);
   assert.match(source, /room\.activeFolio\?\.guestName/);
   assert.match(source, /room\.activeFolio\.balanceCents \/ 100/);
-  assert.match(source, /folioChargesEndpoint\(/);
+  assert.match(source, /postHotelCharge<\{ success\?: boolean; error\?: string \}>\(\s*folioChargeData\.folioId/);
   assert.doesNotMatch(source, /console\.log\('Add charge'\)/);
 });
 

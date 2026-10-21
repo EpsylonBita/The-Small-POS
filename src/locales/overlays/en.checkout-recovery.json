@@ -12,6 +12,8 @@
       "draftRecoveryUnavailable": "The original checkout could not be verified. Its saved cart remains protected.",
       "draftPending": "The original checkout is retained. Confirm its result before starting another payment.",
       "draftLoading": "Loading the saved cart…",
+      "twintRecoveryPaid": "Customer paid – complete original receipt",
+      "twintRecoveryNotPaid": "Not paid – cancel checkout",
       "draftRecover": "Check original checkout",
       "draftRecovered": "The original order has been restored.",
       "draftExistingTable": "This table already has an active check. Open that check to add items.",

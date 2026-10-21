@@ -126,7 +126,7 @@ test('COUPON_ERROR_FALLBACKS stay in lock-step with the en.json values', () => {
 test('MenuModal localizes the coupon validation reason via resolveCouponErrorKey', () => {
   assert.match(
     menuModalSource,
-    /import \{ resolveCouponErrorKey, COUPON_ERROR_FALLBACKS \} from '\.\.\/\.\.\/utils\/couponErrors';/,
+    /import \{ [^}]*resolveCouponErrorKey, COUPON_ERROR_FALLBACKS \} from '\.\.\/\.\.\/utils\/couponErrors';/,
   );
   assert.match(menuModalSource, /const reasonKey = resolveCouponErrorKey\(couponPayload\?\.error\)/);
   assert.match(menuModalSource, /setCouponError\(t\(reasonKey, COUPON_ERROR_FALLBACKS\[reasonKey\]\)\)/);

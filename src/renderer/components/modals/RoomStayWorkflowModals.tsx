@@ -20,11 +20,12 @@ import toast from 'react-hot-toast';
 import { BedDouble, CalendarPlus, UserCheck, User, Phone, Mail, CreditCard } from 'lucide-react';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCurrency } from '../../utils/format';
-import { toLocalDateString, addLocalDays } from '../../utils/date';
+import { useHotelClock } from '../../hooks/useHotelClock';
 import { posApiFetch } from '../../utils/api-helpers';
 import { offlineRoomCheckin } from '../../services/offline-mutations';
 import { reservationsService, type Reservation } from '../../services/ReservationsService';
-import { roomStayNights, roomWorkflowError } from '../../utils/room-workflow';
+import { roomStayNights, roomWorkflowError, addHotelCalendarDays } from '../../utils/room-workflow';
+import { getStoreCurrency } from '../../utils/store-currency';
 import { useModules } from '../../contexts/module-context';
 import { getRoomEffectiveStatus, type Room, type RoomStatus } from '../../services/RoomsService';
 
@@ -67,6 +68,9 @@ export const deriveRoomFloors = (rooms: Room[]): number[] =>
 interface RoomCheckinApiResponse {
   success: boolean;
   error?: string;
+  folio?: { currency?: string };
+  stayCharge?: { nightlyRate?: number; nightlyRate_cents?: number };
+  accommodationTax?: Array<{ id: string; description: string; quantity: number; total: number; total_cents: number }>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -306,19 +310,21 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
   const { isModuleEnabled } = useModules();
   const hasGuestBilling = isModuleEnabled('guest_billing' as any);
   const hasReservations = isModuleEnabled('reservations' as any);
+  const { timeZone, clock } = useHotelClock();
 
   const [name, setName] = useState(() => roomGuestName(room) || '');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [idNumber, setIdNumber] = useState('');
   const [nights, setNights] = useState(1);
+  const [guestCount, setGuestCount] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const [requestId] = useState(generateClientRequestId);
   const bookingRef = useRef<Reservation | null>(initialReservation || null);
   const [booking, setBooking] = useState<Reservation | null>(initialReservation || null);
   const requiresPhone = hasReservations && !booking;
-  const [loadingBooking, setLoadingBooking] = useState(hasReservations);
+  const [loadingBooking, setLoadingBooking] = useState(hasReservations || Boolean(initialReservation));
   const [failure, setFailure] = useState('');
   const hydrateBooking = (value: Reservation | null) => {
     bookingRef.current = value;
@@ -326,21 +332,22 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
     if (value) {
       setName(value.customerName); setPhone(value.customerPhone); setEmail(value.customerEmail || '');
       setNights(roomStayNights(value.checkInDate || '', value.checkOutDate || '') || 1);
+      setGuestCount(value.partySize || 1);
     }
   };
   useEffect(() => {
     let disposed = false;
-    if (!hasReservations) { setLoadingBooking(false); return; }
+    if (!hasReservations && !initialReservation) { setLoadingBooking(false); return; }
     reservationsService.setContext(branchId, organizationId);
     setLoadingBooking(true);
     const load = initialReservation
       ? Promise.resolve(initialReservation)
-      : reservationsService.getActiveRoomReservation(room.id, toLocalDateString());
+      : Promise.resolve().then(() => reservationsService.getActiveRoomReservation(room.id, clock().date));
     void load.then((value) => { if (!disposed) hydrateBooking(value); })
       .catch((error) => { if (!disposed) setFailure(roomWorkflowError(error, t)); })
       .finally(() => { if (!disposed) setLoadingBooking(false); });
     return () => { disposed = true; };
-  }, [room.id, branchId, organizationId, hasReservations, initialReservation, t]);
+  }, [room.id, branchId, organizationId, hasReservations, initialReservation, t, timeZone]);
 
   const totalAmount = useMemo(
     () => (room.ratePerNight || 0) * Math.max(1, nights),
@@ -363,9 +370,9 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
     setFailure('');
     try {
       const now = new Date();
-      const checkInDate = bookingRef.current?.checkInDate || toLocalDateString(now);
-      const checkOutDate = bookingRef.current?.checkOutDate || toLocalDateString(addLocalDays(now, Math.max(1, nights)));
-      const reservationTime = now.toTimeString().slice(0, 5);
+      const checkInDate = bookingRef.current?.checkInDate || clock(now).date;
+      const checkOutDate = bookingRef.current?.checkOutDate || addHotelCalendarDays(checkInDate, Math.max(1, nights));
+      const reservationTime = bookingRef.current?.reservationTime || clock(now).time;
       // Resolve connectivity at submit time so a mid-session change is honoured.
       const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
 
@@ -380,7 +387,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
           guestEmail: email || null,
           checkInDate,
           checkOutDate,
-          partySize: room.capacity || 1,
+          partySize: bookingRef.current?.partySize || guestCount,
           notes: idNumber ? `Guest ID: ${idNumber}` : null,
           clientRequestId: bookingRef.current?.id || requestId,
           expectedReservationId: bookingRef.current?.id || null,
@@ -392,8 +399,30 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
             { method: 'POST', body: JSON.stringify(request) },
           );
           if (!response.success || response.data?.success === false) {
-            throw new Error(response.error || response.data?.error || 'Failed to check in room');
+            if (response.code === 'ROOM_RESERVATION_DATES_MISMATCH' || response.error?.includes('ROOM_RESERVATION_DATES_MISMATCH')) {
+              const supplied = (response.errorBody as { reservation?: { id: string; check_in_date: string; check_out_date: string; customer_name: string; customer_phone?: string; party_size?: number; status: string } } | undefined)?.reservation;
+              // Older server conflict snapshots omit party_size. Read the booking
+              // rather than replacing its guest count with a walk-in default.
+              reservationsService.setContext(branchId, organizationId);
+              const covering = supplied && Number.isInteger(supplied.party_size) && (supplied.party_size ?? 0) > 0 ? {
+                id: supplied.id, roomId: room.id, customerName: supplied.customer_name,
+                customerPhone: supplied.customer_phone ?? '', customerEmail: null,
+                checkInDate: supplied.check_in_date, checkOutDate: supplied.check_out_date,
+                status: supplied.status, reservationNumber: '', reservationTime: reservationTime,
+                partySize: supplied.party_size,
+              } as Reservation : await reservationsService.getActiveRoomReservation(room.id, checkInDate);
+              if (covering) hydrateBooking(covering);
+              setFailure(t('hotelMoney.errors.ROOM_RESERVATION_DATES_MISMATCH'));
+              return;
+            }
+            throw new Error(response.code || response.error || response.data?.error || 'Failed to check in room');
           }
+          const currency = response.data?.folio?.currency ?? getStoreCurrency();
+          const rate = response.data?.stayCharge?.nightlyRate_cents;
+          const nightlyRate = rate != null ? rate / 100 : response.data?.stayCharge?.nightlyRate;
+          const lines = [nightlyRate != null ? t('hotelMoney.nightlyRate', { amount: formatCurrency(nightlyRate, currency) }) : '',
+            ...(response.data?.accommodationTax ?? []).map(line => `${line.description}: ${formatCurrency(line.total_cents / 100, currency)}`)].filter(Boolean);
+          if (lines.length) toast.success(lines.join('\n'), { duration: 10000 });
         } else {
           await offlineRoomCheckin({ roomId: room.id, organizationId, branchId, ...request });
           toast.success(t('roomsView.toasts.checkinQueued', { defaultValue: 'Check-in queued for sync' }));
@@ -411,7 +440,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
         if (!current) {
           current = await reservationsService.createReservation({
             reservationType: 'room', customerName: name.trim(), customerPhone: phone.trim(),
-            customerEmail: email || undefined, partySize: room.capacity || 1,
+            customerEmail: email || undefined, partySize: guestCount,
             reservationDate: checkInDate, reservationTime, roomId: room.id,
             roomNumber: room.roomNumber, checkInDate, checkOutDate,
             notes: idNumber ? `ID: ${idNumber}` : undefined,
@@ -483,6 +512,22 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
         </div>
 
         <div>
+          <label htmlFor="arrival-guest-count" className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
+            {t('hotelDeskArrival.guestCount')}
+          </label>
+          <input
+            id="arrival-guest-count"
+            type="number"
+            disabled={Boolean(booking)}
+            min={1}
+            step={1}
+            value={guestCount}
+            onChange={(e) => setGuestCount(Math.max(1, parseInt(e.target.value, 10) || 1))}
+            className={fieldClass}
+          />
+        </div>
+
+        <div>
           <label className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
             {t('roomsView.numberOfNights', { defaultValue: 'Number of Nights' })}
           </label>
@@ -545,20 +590,24 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
   const { t } = useTranslation();
   const { isModuleEnabled } = useModules();
   const hasReservations = isModuleEnabled('reservations' as any);
+  const { timeZone, clock } = useHotelClock();
 
   const defaults = useMemo(() => {
-    const base = new Date();
-    return {
-      checkInDate: toLocalDateString(base),
-      checkOutDate: toLocalDateString(addLocalDays(base, 1)),
-    };
-  }, []);
+    if (!timeZone) return { checkInDate: '', checkOutDate: '' };
+    const date = clock().date;
+    return { checkInDate: date, checkOutDate: addHotelCalendarDays(date, 1) };
+  }, [timeZone]);
 
   const [name, setName] = useState(() => reservation?.customerName || roomGuestName(room) || '');
   const [phone, setPhone] = useState(reservation?.customerPhone || '');
+  const [guestCount, setGuestCount] = useState(reservation?.partySize || 1);
   const [checkInDate, setCheckInDate] = useState(reservation?.checkInDate || defaults.checkInDate);
   const [checkOutDate, setCheckOutDate] = useState(reservation?.checkOutDate || defaults.checkOutDate);
   const [notes, setNotes] = useState(reservation?.notes || '');
+  useEffect(() => {
+    if (defaults.checkInDate) setCheckInDate(current => current || defaults.checkInDate);
+    if (defaults.checkOutDate) setCheckOutDate(current => current || defaults.checkOutDate);
+  }, [defaults]);
   const [selectedRoomId, setSelectedRoomId] = useState(room.id);
   const selectedRoom = rooms?.find((item) => item.id === selectedRoomId) || room;
   const nights = roomStayNights(checkInDate, checkOutDate);
@@ -587,7 +636,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
       const input = {
         customerName: name,
         customerPhone: phone || '',
-        partySize: reservation?.partySize || selectedRoom.capacity || 2,
+        partySize: guestCount,
         reservationDate: checkInDate,
         reservationTime: reservation?.reservationTime?.slice(0, 5) || '14:00',
         roomId: selectedRoom.id,
@@ -642,6 +691,14 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
             onChange={setPhone}
             required
           />
+        </div>
+
+        <div>
+          <label htmlFor="reservation-guest-count" className="liquid-glass-modal-text-muted mb-1.5 block text-sm font-medium">
+            {t('hotelDeskArrival.guestCount')}
+          </label>
+          <input id="reservation-guest-count" type="number" min={1} step={1} value={guestCount}
+            onChange={(e) => setGuestCount(Math.max(1, parseInt(e.target.value, 10) || 1))} className={fieldClass} />
         </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

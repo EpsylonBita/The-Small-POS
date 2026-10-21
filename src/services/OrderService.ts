@@ -947,6 +947,7 @@ export class OrderService {
             ? recordedFolioCurrency(initialPayment?.currency ?? orderDataAny.currency) ?? getStoreCurrency()
             : getStoreCurrency(),
           roomId: normalizedRoomId,
+          folioId: normalizeText(orderDataAny.folio_id) || normalizeText(orderDataAny.folioId) || null,
         }) : null;
 
       const frozenOrderCurrency = roomChargeCurrency?.currency ?? orderDataAny.currency ?? normalizedInitialPayment?.currency ?? getStoreCurrency();
@@ -1002,6 +1003,7 @@ export class OrderService {
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
         paymentMethod: orderData.paymentMethod ?? orderData.payment_method,
         roomId: normalizedRoomId,
+        folio_id: (roomChargeCurrency?.metadata.room_charge as any)?.folio_id ?? orderDataAny.folio_id ?? null,
         room_id: normalizedRoomId,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
         initialPayment: roomChargeCurrency ? undefined : normalizedInitialPayment,
@@ -1228,6 +1230,7 @@ export class OrderService {
         organization_id: organizationId || orderDataAny.organization_id,
         items: normalizedItems.map((item: any) => {
           return {
+            retail_variant_id: item.retail_variant_id ?? null,
             menu_item_id:
               typeof item.menu_item_id === 'string' && uuidRegex.test(item.menu_item_id.trim())
                 ? item.menu_item_id.trim()
@@ -1305,6 +1308,7 @@ export class OrderService {
         initialPayment: isRoomChargeOrder ? null : normalizedInitialPayment,
         initial_payment: isRoomChargeOrder ? null : normalizedInitialPayment,
         ...tableMetadata,
+        folio_id: isRoomChargeOrder ? (roomChargeCurrency?.metadata.room_charge as any)?.folio_id ?? orderDataAny.folio_id ?? null : null,
         room_id: isRoomChargeOrder ? normalizedRoomId : null,
         currency: frozenOrderCurrency,
 

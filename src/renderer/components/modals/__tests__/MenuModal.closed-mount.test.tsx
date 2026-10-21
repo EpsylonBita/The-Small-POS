@@ -1,7 +1,9 @@
+import { useKdsLiveDraftSync } from '../../../hooks/useKdsLiveDraftSync';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCheckoutRequestId } from '../../../hooks/useCheckoutRequestId';
+import { serviceSaleLine } from '../../../pages/verticals/salon/salon-sale';
 
 // Render-instrumentation probe for the shared modal shell. The mock preserves
 // the REAL LiquidGlassModal behavior while recording each render's isOpen.
@@ -96,6 +98,8 @@ vi.mock('../../../hooks/useAcquiredModules', async (importOriginal) => {
     useAcquiredModules: () => value,
   };
 });
+
+vi.mock('../../../pages/verticals/salon/SalonCatalogPicker', () => ({ SalonCatalogPicker: () => <div data-testid="salon-catalog" /> }));
 
 vi.mock('../../../hooks/useKdsLiveDraftSync', () => ({
   useKdsLiveDraftSync: vi.fn(),
@@ -210,9 +214,10 @@ vi.mock('../../menu/ComboChoiceModal', () => ({
   ComboChoiceModal: () => null,
 }));
 vi.mock('../PaymentModal', () => ({
-  PaymentModal: ({ isOpen, onPaymentComplete, onSplitPayment, onClose }: any) => isOpen ? (
+  PaymentModal: ({ isOpen, orderTotal, onPaymentComplete, onBeforePayment, onSplitPayment, onClose }: any) => isOpen ? (
     <div>
-      <button onClick={() => onPaymentComplete({ method: 'cash', amount: 6 })}>Pay cash</button>
+      <button onClick={async () => { const data = { method: 'cash', amount: orderTotal }; if (await onBeforePayment(data)) await onPaymentComplete(data); }}>Pay exact total {orderTotal}</button>
+      <button onClick={async () => { const data = { method: 'cash', amount: 6 }; if (await onBeforePayment(data)) await onPaymentComplete(data); }}>Pay cash</button>
       <button onClick={() => onSplitPayment(null)}>Split payment</button>
       <button onClick={onClose}>Back to menu</button>
     </div>
@@ -646,5 +651,35 @@ describe('MenuModal explicit immutable replay after crash before dispatch', () =
     await waitFor(() => expect(screen.getByText('Checkout')).not.toBeDisabled());
     expect(complete).not.toHaveBeenCalled(); expect(draftStorage.draft.cartItems).toEqual(editor().cartItems);
     expect(restore).toHaveBeenCalledWith(expect.objectContaining({ checkoutRequestId: 'renewed-request', checkoutPhase: 'editing' }), { previousCheckoutRequestId: 'card-request' });
+  });
+});
+
+
+describe('salon checkout draft recovery', () => {
+  afterEach(cleanup);
+  it('offers and submits a 31.00 tender for a 25.00 net service', async () => {
+    draftStorage.draft = null;
+    const complete = vi.fn(async (_data: any) => true);
+    const item = serviceSaleLine({ id: '10000000-0000-4000-8000-000000000001', name: 'Net service',
+      price: 25, vatCategoryCode: 'gr_standard_24', priceIncludesVat: false } as any);
+    render(<MenuModal {...baseProps} isOpen salonMode initialCartItems={[item]} onOrderComplete={complete} />);
+    await screen.findByText(/Net service.*1 = 31/);
+    fireEvent.click(screen.getByRole('button', { name: 'Checkout' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Pay exact total 31', hidden: true }));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    expect(complete.mock.calls[0][0]).toMatchObject({ total: 31, paymentData: { amount: 31 },
+      items: [expect.objectContaining({ service_id: item.service_id, price: 31, price_includes_vat: true })] });
+  });
+  it('restores the service catalog, service identity and no-kitchen mode without requiring a new appointment checkout', async () => {
+    draftStorage.draft = { schemaVersion: 1, draftId: 'salon-cart', checkoutRequestId: 'original-salon-request', phase: 'editing',
+      cartItems: [{ id: 'service-line', service_id: 'service-1', appointment_id: 'appointment-1', name: 'Haircut', quantity: 1, price: 25, totalPrice: 25, customizations: [] }],
+      context: { salonMode: true, orderType: 'pickup', editMode: false, selectedCustomer: null, selectedAddress: null }, state: {} };
+    render(<MenuModal {...baseProps} isOpen />);
+    await screen.findByText(/Haircut.*1 = 25/);
+    expect(screen.getByTestId('salon-catalog')).toBeInTheDocument();
+    expect(screen.queryByTestId('menu-item-grid')).toBeNull();
+    expect(vi.mocked(useKdsLiveDraftSync).mock.calls.at(-1)?.[0].enabled).toBe(false);
+    expect(draftStorage.draft.cartItems[0]).toMatchObject({ service_id: 'service-1', appointment_id: 'appointment-1' });
+    expect(draftStorage.draft.context.salonMode).toBe(true);
   });
 });

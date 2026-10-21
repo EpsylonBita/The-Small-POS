@@ -16,7 +16,7 @@ export function commonFolioCurrency(folios: ReadonlyArray<{ currency?: string | 
  */
 export function freezeRoomChargeCurrency(input: {
   metadata?: unknown; currency?: unknown; storeCurrency: string | null;
-  roomId: string | null;
+  roomId: string | null; folioId?: string | null;
 }): { currency: string; metadata: Record<string, unknown> } {
   const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
     ? input.metadata as Record<string, unknown> : {};
@@ -28,11 +28,12 @@ export function freezeRoomChargeCurrency(input: {
   if (retained) {
     if (explicit && explicit !== retained) throw new Error('FOLIO_CURRENCY_MISMATCH');
     if (prior?.room_id && prior.room_id !== input.roomId) throw new Error('FOLIO_ROOM_MISMATCH');
+    if (input.folioId && prior?.folio_id !== input.folioId) throw new Error('FOLIO_MISMATCH');
     return { currency: retained, metadata };
   }
   if (!input.storeCurrency) throw new Error('FOLIO_CURRENCY_UNAVAILABLE');
   if (input.currency != null && explicit !== input.storeCurrency) throw new Error('FOLIO_CURRENCY_MISMATCH');
   return { currency: input.storeCurrency, metadata: {
-    ...metadata, room_charge: { currency: input.storeCurrency, room_id: input.roomId },
+    ...metadata, room_charge: { currency: input.storeCurrency, room_id: input.roomId, ...(input.folioId ? { folio_id: input.folioId } : {}) },
   } };
 }

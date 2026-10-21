@@ -1,11 +1,13 @@
 //! Scoped cart recovery. A deleted draft keeps a CAS tombstone so a late save
 //! cannot resurrect an accepted or discarded checkout. Recovery never collects.
 use crate::{
+    database_lock::run_blocking_command,
     db,
     table_session_cache::{self, Scope},
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use tauri::Manager;
 
 fn scope(conn: &Connection, input: &Value) -> Result<Scope, String> {
     let current = table_session_cache::current_scope(conn)?;
@@ -226,14 +228,23 @@ pub(crate) fn write(conn: &Connection, input: &Value, deleting: bool) -> Result<
     Ok(reply)
 }
 
+// Every draft command runs on Tokio's blocking pool, never the window thread
+// or a runtime worker: a wait for the connection must not freeze the till or
+// stall the runtime (Tomikro 20/10/2026, see database_lock.rs).
 #[tauri::command]
-pub fn checkout_draft_check_admission(
+pub async fn checkout_draft_check_admission(
     arg0: Value,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|error| error.to_string())?;
-    check_admission(&conn, &arg0)
+    run_blocking_command("checkout_draft_check_admission", move || {
+        let db = app.state::<db::DbState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db
+            .lock_traced("checkout_draft_check_admission")
+            .map_err(|error| error.to_string())?;
+        check_admission(&conn, &arg0)
+    })
+    .await
 }
 
 fn check_admission(conn: &Connection, input: &Value) -> Result<Value, String> {
@@ -291,12 +302,20 @@ fn check_admission(conn: &Connection, input: &Value) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn checkout_draft_get(arg0: Value, db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    get(&db, &arg0)
+pub async fn checkout_draft_get(arg0: Value, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("checkout_draft_get", move || {
+        let db = app.state::<db::DbState>();
+        get(&db, &arg0)
+    })
+    .await
 }
 #[tauri::command]
-pub fn checkout_draft_put(arg0: Value, db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    put(&db, &arg0)
+pub async fn checkout_draft_put(arg0: Value, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("checkout_draft_put", move || {
+        let db = app.state::<db::DbState>();
+        put(&db, &arg0)
+    })
+    .await
 }
 
 #[derive(Clone, Copy)]
@@ -372,7 +391,9 @@ fn logged(
 fn get(db: &db::DbState, input: &Value) -> Result<Value, String> {
     logged(DraftOperation::Read, None, || {
         let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("checkout_draft_get")
+            .map_err(|e| e.to_string())?;
         db::with_full_sync(&conn, |conn| load(conn, input))
     })
 }
@@ -387,7 +408,9 @@ fn put(db: &db::DbState, input: &Value) -> Result<Value, String> {
         // This exact lease refusal precedes every write. The live renderer may
         // briefly retry it with the same request; other failures are ambiguous.
         let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("checkout_draft_put")
+            .map_err(|e| e.to_string())?;
         db::with_full_sync(&conn, |conn| write(conn, input, false))
     })
 }
@@ -395,16 +418,19 @@ fn put(db: &db::DbState, input: &Value) -> Result<Value, String> {
 fn delete(db: &db::DbState, input: &Value) -> Result<Value, String> {
     logged(DraftOperation::Delete, None, || {
         let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("checkout_draft_delete")
+            .map_err(|e| e.to_string())?;
         db::with_full_sync(&conn, |conn| write(conn, input, true))
     })
 }
 #[tauri::command]
-pub fn checkout_draft_delete(
-    arg0: Value,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    delete(&db, &arg0)
+pub async fn checkout_draft_delete(arg0: Value, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("checkout_draft_delete", move || {
+        let db = app.state::<db::DbState>();
+        delete(&db, &arg0)
+    })
+    .await
 }
 
 /// A missing row, cancelled/error response, or returned flag is never a refusal proof.
@@ -567,13 +593,19 @@ pub(crate) fn resume_declined(conn: &Connection, input: &Value) -> Result<Value,
 }
 
 #[tauri::command]
-pub fn checkout_draft_resume_declined(
+pub async fn checkout_draft_resume_declined(
     arg0: Value,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|error| error.to_string())?;
-    db::with_full_sync(&conn, |conn| resume_declined(conn, &arg0))
+    run_blocking_command("checkout_draft_resume_declined", move || {
+        let db = app.state::<db::DbState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db
+            .lock_traced("checkout_draft_resume_declined")
+            .map_err(|error| error.to_string())?;
+        db::with_full_sync(&conn, |conn| resume_declined(conn, &arg0))
+    })
+    .await
 }
 
 pub(crate) fn inspect(conn: &Connection, input: &Value) -> Result<Value, String> {
@@ -664,13 +696,16 @@ pub(crate) fn inspect(conn: &Connection, input: &Value) -> Result<Value, String>
     )
 }
 #[tauri::command]
-pub fn checkout_draft_inspect(
-    arg0: Value,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    inspect(&conn, &arg0)
+pub async fn checkout_draft_inspect(arg0: Value, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("checkout_draft_inspect", move || {
+        let db = app.state::<db::DbState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db
+            .lock_traced("checkout_draft_inspect")
+            .map_err(|e| e.to_string())?;
+        inspect(&conn, &arg0)
+    })
+    .await
 }
 
 #[cfg(test)]

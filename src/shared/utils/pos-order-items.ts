@@ -68,6 +68,8 @@ export const isManualPosOrderItem = (item: Record<string, any>): boolean =>
 export const hasValidSyncedPosMenuItemId = (item: {
   menu_item_id?: unknown;
   menuItemId?: unknown;
+  service_id?: unknown;
+  serviceId?: unknown;
   is_manual?: unknown;
   isManual?: unknown;
 }): boolean => {
@@ -75,6 +77,8 @@ export const hasValidSyncedPosMenuItemId = (item: {
     return true;
   }
 
+  const serviceId = normalizeOptionalString(item.service_id) || normalizeOptionalString(item.serviceId);
+  if (serviceId) return POS_ORDER_ITEM_UUID_REGEX.test(serviceId) && !item.menu_item_id && !item.menuItemId;
   const candidate =
     normalizeOptionalString(item.menu_item_id) ||
     normalizeOptionalString(item.menuItemId);
@@ -85,7 +89,9 @@ export const hasValidSyncedPosMenuItemId = (item: {
 export const normalizePosOrderItem = (item: Record<string, any>) => {
   const rawMenuItemId = getRawPosOrderMenuItemId(item);
   const isManual = isManualPosOrderItem(item);
-  const normalizedMenuItemId = isManual ? null : rawMenuItemId;
+  const serviceId = normalizeOptionalString(item.service_id) || normalizeOptionalString(item.serviceId);
+  const appointmentId = normalizeOptionalString(item.appointment_id) || normalizeOptionalString(item.appointmentId);
+  const normalizedMenuItemId = isManual || serviceId ? null : rawMenuItemId;
   // Weighed/measured retail goods carry fractional quantities (0.35 kg), so
   // round to the DB precision (NUMERIC(10,3)) instead of forcing integers.
   // Menu items keep sending integers and are unaffected.
@@ -180,6 +186,8 @@ export const normalizePosOrderItem = (item: Record<string, any>) => {
   return {
     ...item,
     id: localLineId,
+    service_id: serviceId,
+    appointment_id: appointmentId,
     menu_item_id: normalizedMenuItemId,
     menuItemId: normalizedMenuItemId,
     name,

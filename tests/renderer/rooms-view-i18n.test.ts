@@ -81,7 +81,8 @@ test('RoomsView routes its app-owned strings through i18n', () => {
   assert.match(roomSources, /t\('roomsView\.createReservation'/);
   assert.match(roomSources, /t\('roomsView\.actions\.checkin'/);
   assert.match(roomSources, /t\('roomsView\.toasts\.checkinSuccess'/);
-  assert.match(roomSources, /roomsView\.paymentMethods\.\$\{method\}/);
+  assert.match(roomSources, /HotelSettlementModal/);
+  assert.doesNotMatch(viewSource, /folioPaymentsEndpoint/);
   assert.match(roomSources, /roomsView\.chargeTypes\.\$\{type\}/);
 
   // No leftover hardcoded literals for the high-visibility controls.

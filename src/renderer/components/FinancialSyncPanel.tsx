@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { getBridge, offEvent, onEvent } from '../../lib';
@@ -178,6 +178,9 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   const [items, setItems] = useState<SyncQueueItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
+  const [incomingCount, setIncomingCount] = useState(0);
+  const [incomingReadFailed, setIncomingReadFailed] = useState(false);
+  const incomingRetryInFlight = useRef(false);
 
   const loadItems = async () => {
     setLoading(true);
@@ -187,6 +190,13 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
         moduleType: 'financial',
       });
       setItems(Array.isArray(queueItems) ? queueItems : []);
+      if (typeof bridge.sync.getStatus === 'function') {
+        try {
+          const status=await bridge.sync.getStatus();
+          setIncomingCount(status.unresolvedRemotePayments ?? 0);
+          setIncomingReadFailed(false);
+        } catch { setIncomingReadFailed(true); }
+      }
     } catch (err) {
       console.error('Failed to load financial sync items', err);
       setItems([]);
@@ -304,6 +314,21 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     }
   };
 
+  const handleRetryIncoming = async () => {
+    if (incomingRetryInFlight.current) return;
+    incomingRetryInFlight.current = true;
+    setProcessing('incoming');
+    try {
+      const snapshot=await bridge.recovery.createPreActionSnapshot();
+      if (!snapshot?.id) throw new Error('Recovery snapshot was not confirmed');
+      await bridge.sync.retryAllFailedFinancial({ incomingOnly: true });
+      await loadItems();
+      onRefresh();
+    } catch (error) {
+      console.error('Failed to resume canonical payment downloads',error);
+    } finally { incomingRetryInFlight.current = false; setProcessing(null); }
+  };
+
   const handleRepairOrphanedAdjustments = async () => {
     setProcessing('repair-orphaned');
     try {
@@ -370,11 +395,20 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
           </div>
 
           <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5 sm:px-6">
+            {incomingReadFailed && <p role="alert">{t('sync.financial.queueDetailsUnavailableHint')}</p>}
+            {incomingCount>0 && (
+              <div role="status" className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <p>{t('sync.financial.incomingRecovery',{count:incomingCount})}</p>
+                <button onClick={handleRetryIncoming} disabled={!!processing} className="liquid-glass-modal-button mt-3">
+                  {t('sync.financial.incomingRetry')}
+                </button>
+              </div>
+            )}
             {loading ? (
               <div className="flex h-40 items-center justify-center">
                 <div className="h-10 w-10 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
               </div>
-            ) : !hasQueueDetails && !hasActionableSummary ? (
+            ) : !hasQueueDetails && !hasActionableSummary && incomingCount===0 && !incomingReadFailed ? (
               <div className="py-14 text-center">
                 <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-green-500/20">
                   <svg
@@ -398,7 +432,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                   {t('sync.financial.noFailedItems')}
                 </p>
               </div>
-            ) : !hasQueueDetails ? (
+            ) : !hasQueueDetails && (incomingReadFailed || (incomingCount>0 && actionableSummaryCount<=incomingCount)) ? null : !hasQueueDetails ? (
               <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5">
                 <div className="mb-2 text-sm font-bold text-amber-700 dark:text-amber-300">
                   {t('sync.financial.queueDetailsUnavailable', {

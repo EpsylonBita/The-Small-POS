@@ -116,7 +116,14 @@ pub fn build_fiscal_receipt_input(
     // A partial settlement must never reduce the invoice to the paid amount.
     // Keep actual payments separate so adapter validation can detect a mismatch.
     let order_vat = order_vat_for_receipt(conn, &header);
-    let lines = build_lines(order_vat.as_ref());
+    let source_items: Vec<Value> = serde_json::from_str(&header.items_json).unwrap_or_default();
+    let folio_lines = folio_fiscal_lines(conn, order_id)?;
+    let lines = folio_lines
+        .clone()
+        .unwrap_or_else(|| build_lines(order_vat.as_ref(), &source_items));
+    if folio_lines.as_ref().is_some_and(Vec::is_empty) {
+        return Err("FOLIO_SETTLEMENT_NO_REVENUE".into());
+    }
     let (net_cents, tax_cents, gross_cents) = match order_vat.as_ref() {
         Some(_) => lines
             .iter()
@@ -133,7 +140,11 @@ pub fn build_fiscal_receipt_input(
             (gross, 0, gross)
         }
     };
-    let expected_gross_cents = (header.total_cents - header.tip_cents).max(0);
+    let expected_gross_cents = if folio_lines.is_some() {
+        gross_cents
+    } else {
+        (header.total_cents - header.tip_cents).max(0)
+    };
     if gross_cents != expected_gross_cents {
         tracing::warn!(
             order_id = %order_id,
@@ -148,6 +159,22 @@ pub fn build_fiscal_receipt_input(
         header.tip_cents - carried_tip_cents,
     );
 
+    if folio_lines.is_some() && header.total_cents > 0 {
+        // Allocate actual tenders to revenue proportionally; never invent money.
+        // Cumulative rounding conserves cents for mixed and partial payments.
+        let mut prior = 0i64;
+        let mut allocated = 0i64;
+        for payment in &mut payments {
+            prior += payment.amount_cents;
+            let target = ((prior as i128 * gross_cents as i128 + header.total_cents as i128 / 2)
+                / header.total_cents as i128) as i64;
+            payment.amount_cents = target - allocated;
+            allocated = target;
+        }
+        // A tiny original tender can fund no revenue after rounding. AADE
+        // requires positive tenders; omission does not change the allocated sum.
+        payments.retain(|payment| payment.amount_cents > 0);
+    }
     let payments_json = build_payments_json(&payments);
     let vat_breakdown = build_vat_breakdown(&lines);
 
@@ -198,6 +225,56 @@ pub fn build_fiscal_receipt_input(
     });
 
     Ok(payload)
+}
+
+/// The server's immutable fiscal snapshot contains revenue only, including the
+/// exempt accommodation fee. Missing snapshots fail closed, never recompute VAT.
+pub(crate) fn folio_fiscal_lines(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Option<Vec<Value>>, String> {
+    // Compatibility with minimal schemas used by older receipt tests.
+    if !conn
+        .prepare("PRAGMA table_info(orders)")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .any(|name| name.ok().as_deref() == Some("order_context"))
+    {
+        return Ok(None);
+    }
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT COALESCE(order_context,''),ghost_metadata FROM orders WHERE id=?1",
+            [order_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((context, metadata)) = row else {
+        return Ok(None);
+    };
+    if context != "folio_settlement" {
+        return Ok(None);
+    }
+    let metadata: Value = serde_json::from_str(metadata.as_deref().unwrap_or("{}"))
+        .map_err(|_| "FOLIO_SETTLEMENT_SNAPSHOT_REQUIRED")?;
+    let snapshot = metadata
+        .pointer("/folio_settlement/fiscal_line_snapshot")
+        .and_then(Value::as_array)
+        .ok_or("FOLIO_SETTLEMENT_SNAPSHOT_REQUIRED")?;
+    snapshot.iter().map(|line| {
+        let cents=|key:&str| line.get(key).and_then(Value::as_f64).map(|n|Cents::round_half_even(n).as_i64()).ok_or("FOLIO_SETTLEMENT_SNAPSHOT_INVALID");
+        let gross=cents("grossAmount")?;
+        let net=cents("netAmount")?;
+        let vat=cents("vatAmount")?;
+        if gross!=net+vat {return Err("FOLIO_SETTLEMENT_SNAPSHOT_INVALID".to_string())}
+        Ok(json!({"lineId":line["id"],"description":line["description"],"quantity":line["quantity"],
+            "unitPriceCents":cents("grossUnitPrice")?,"netCents":net,"vatCents":vat,"grossCents":gross,
+            "rateBasisPoints":rate_basis_points(line.get("vatRate").and_then(Value::as_f64).unwrap_or(0.0)),
+            "metadata":{"fiscalization_gr":greek_line_facts(rate_basis_points(line.get("vatRate").and_then(Value::as_f64).unwrap_or(0.0)),line.get("taxExemptionReason").and_then(Value::as_str),line.get("fiscalDocumentProfile").and_then(Value::as_str),None),
+              "taxExemptionReason":line["taxExemptionReason"]}}))
+    }).collect::<Result<Vec<_>,String>>().map(Some)
 }
 
 /// The id the server knows this local order by, for its fiscal receipt:
@@ -318,14 +395,43 @@ fn parse_issued_at(raw: &str) -> Option<DateTime<Utc>> {
 /// discount and delivery fee as the create request sends them, with the
 /// branch VAT settings the till holds. `None` when the order has no lines.
 fn order_vat_for_receipt(conn: &Connection, header: &OrderHeader) -> Option<GreeceOrderVatResult> {
+    // The generic order-create normalizer currently drops the four per-line
+    // fiscal fields. Preserve them here, while retaining its monetary input
+    // normalization (quantity, unit-price aliases and total-price fallback).
+    // This is receipt construction only; order replay remains with its owner.
+    let source_items: Vec<Value> = serde_json::from_str(&header.items_json).ok()?;
+    let items: Vec<Value> = source_items.iter().map(|item| {
+        let number = |keys: &[&str]| keys.iter().find_map(|key| item.get(*key).and_then(|value| value.as_f64().or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))));
+        let text = |keys: &[&str]| keys.iter().find_map(|key| item.get(*key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()));
+        // Match order replay's NUMERIC(10,3) quantity, including weighed goods.
+        let quantity = number(&["quantity"]).filter(|n| n.is_finite() && *n > 0.0).unwrap_or(1.0);
+        let quantity = ((quantity * 1000.0).round() / 1000.0).max(0.001);
+        let total = number(&["total_price", "totalPrice"]).unwrap_or(0.0).max(0.0);
+        let unit_price = number(&["unit_price", "unitPrice", "price"])
+            .unwrap_or_else(|| if total > 0.0 { total / quantity } else { 0.0 }).max(0.0);
+        let price_includes_vat = ["price_includes_vat", "priceIncludesVat"].iter().find_map(|key| item.get(*key).and_then(Value::as_bool));
+        json!({
+            "menu_item_id": text(&["menu_item_id", "menuItemId"]).filter(|id| uuid::Uuid::parse_str(id).is_ok()),
+            "name": text(&["name", "menu_item_name", "menuItemName"]),
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "vat_category_code": text(&["vat_category_code", "vatCategoryCode"]),
+            "price_includes_vat": price_includes_vat,
+            "tax_exemption_reason": text(&["tax_exemption_reason", "taxExemptionReason"]),
+            "fiscal_document_profile": text(&["fiscal_document_profile", "fiscalDocumentProfile"]),
+            "line_role": text(&["line_role", "lineRole"]),
+        })
+    }).collect();
     let order = json!({
-        "items": header.items_json,
+        "items": items,
         "discount_amount": header.discount_amount,
         "discount_percentage": header.discount_percentage,
         "delivery_fee": header.delivery_fee,
     });
     let settings = super::greece_vat::branch_vat_settings(conn);
-    crate::sync_queue::order_json_vat(&order, &settings).ok()
+    Some(super::greece_vat::calculate_order_vat_from_order_body(
+        &order, &settings,
+    ))
 }
 
 /// The completed tenders as the receipt reads them.
@@ -439,7 +545,7 @@ fn rate_basis_points(rate_percent: f64) -> i64 {
 /// per-line checks). The tip is outside VAT and is no line. Line ids are the
 /// computation's (menu item, `manual-item-N`, `delivery-fee`), made unique
 /// when one product appears on two lines.
-fn build_lines(order_vat: Option<&GreeceOrderVatResult>) -> Vec<Value> {
+fn build_lines(order_vat: Option<&GreeceOrderVatResult>, source_items: &[Value]) -> Vec<Value> {
     let Some(order_vat) = order_vat else {
         return Vec::new();
     };
@@ -480,9 +586,43 @@ fn build_lines(order_vat: Option<&GreeceOrderVatResult>) -> Vec<Value> {
                 "vatCents": line.vat_cents,
                 "grossCents": line.gross_cents,
                 "rateBasisPoints": rate_basis_points(line.vat_rate),
+                "metadata": { "fiscalization_gr": greek_line_facts(
+                    rate_basis_points(line.vat_rate),
+                    line.tax_exemption_reason.as_deref(),
+                    line.fiscal_document_profile.as_deref(),
+                    source_items.get(index).and_then(|item| item.get("service_id").and_then(Value::as_str).or_else(|| item.get("serviceId").and_then(Value::as_str))),
+                ) },
             })
         })
         .collect()
+}
+
+/// The current AADE adapter accepts per-line categories for supported positive-sale
+/// document types (11.1, 11.2, 1.1). Do not change the document type here.
+/// Free-text/legal article reasons have no numeric mapping in GreeceVatService;
+/// only an explicit AADE category string (1..31) can be carried without guessing.
+fn greek_line_facts(
+    rate_bps: i64,
+    exemption: Option<&str>,
+    profile: Option<&str>,
+    service_id: Option<&str>,
+) -> Value {
+    let service = service_id.is_some_and(|id| !id.trim().is_empty())
+        || matches!(
+            profile.map(str::trim),
+            Some("service" | "services" | "service_fee")
+        );
+    let mut facts = json!({"incomeClassificationCategory": if service { "category1_3" } else { "category1_1" }});
+    if rate_bps == 0 {
+        if let Some(reason) = exemption.map(str::trim) {
+            if let Ok(code) = reason.parse::<u8>() {
+                if (1..=31).contains(&code) && reason == code.to_string() {
+                    facts["vatExemptionCategory"] = json!(code);
+                }
+            }
+        }
+    }
+    facts
 }
 
 fn build_payments_json(payments: &[PaymentRow]) -> Vec<Value> {
@@ -673,6 +813,46 @@ fn extract_business_day(issued_at: &str) -> String {
 #[cfg(test)]
 mod audit_1_tests {
     use super::*;
+
+    #[test]
+    fn receipt_lines_carry_service_identity_and_explicit_exemption_from_order_items() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        for unit_price in [json!(5.0), json!("5.00")] {
+            let items = json!([{"service_id":"svc-1", "name":"Haircut", "quantity":1, "unit_price":unit_price,
+                "vat_category_code":"gr_exempt", "tax_exemption_reason":"1"}]);
+            conn.execute(
+                "UPDATE orders SET items=?1, tax_amount=0 WHERE id='ord-1'",
+                params![items.to_string()],
+            )
+            .unwrap();
+            let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+            assert_eq!(payload["lines"][0]["grossCents"], 500);
+            assert_eq!(
+                payload["lines"][0]["metadata"]["fiscalization_gr"],
+                json!({"incomeClassificationCategory":"category1_3", "vatExemptionCategory":1})
+            );
+        }
+    }
+
+    #[test]
+    fn greek_line_facts_match_mobile_parity_fixture() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("__fixtures__/gr-line-facts.json")).unwrap();
+        for case in cases {
+            assert_eq!(
+                greek_line_facts(
+                    case["rateBasisPoints"].as_i64().unwrap(),
+                    case["taxExemptionReason"].as_str(),
+                    case["fiscalDocumentProfile"].as_str(),
+                    case["serviceId"].as_str()
+                ),
+                case["expected"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
 
     #[test]
     fn fiscal_document_currency_preserves_unpaid_order_snapshot_and_reconciles_ledger() {
@@ -1578,6 +1758,154 @@ mod audit_1_tests {
         }
         // None defaults to Other.
         assert_eq!(map_to_cis_payment_code(None), "O");
+    }
+
+    #[test]
+    fn weighed_lines_keep_replay_quantity_and_balance_the_payment_ledger() {
+        for (items, expected_quantities, expected_gross) in [
+            (
+                json!([{"name":"Apples","quantity":0.35,"unit_price":10,"total_price":3.5}]),
+                vec![0.35],
+                vec![350],
+            ),
+            (
+                json!([{"name":"Apples","quantity":0.35,"unit_price":10,"total_price":3.5},
+                    {"name":"Bottle","quantity":2,"unit_price":2.5,"total_price":5}]),
+                vec![0.35, 2.0],
+                vec![350, 500],
+            ),
+            (
+                json!([{"name":"Bulk","quantity":"1.23456","unitPrice":10,"totalPrice":12.35},
+                    {"name":"Small portion","quantity":0.125,"total_price":1.25}]),
+                vec![1.235, 0.125],
+                vec![1235, 125],
+            ),
+        ] {
+            let conn = make_test_db();
+            seed_simple_order(&conn);
+            let gross: i64 = expected_gross.iter().sum();
+            conn.execute(
+                "UPDATE orders SET items=?1,total_amount_cents=?2 WHERE id='ord-1'",
+                params![items.to_string(), gross],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE order_payments SET amount_cents=?1 WHERE id='pay-1'",
+                [gross],
+            )
+            .unwrap();
+            let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+            for (index, quantity) in expected_quantities.iter().enumerate() {
+                assert_eq!(
+                    payload["lines"][index]["quantity"].as_f64().unwrap(),
+                    *quantity
+                );
+                assert_eq!(payload["lines"][index]["grossCents"], expected_gross[index]);
+            }
+            assert_eq!(payload["lines"][0]["unitPriceCents"], 1000);
+            assert_eq!(payload["totals"]["grossCents"], gross);
+            assert_eq!(payload["payments"][0]["amountCents"], gross);
+            assert_eq!(
+                payload["totals"]["netCents"].as_i64().unwrap()
+                    + payload["totals"]["vatCents"].as_i64().unwrap(),
+                gross
+            );
+        }
+    }
+
+    #[test]
+    fn hotel_revenue_allocates_mixed_tenders_proportionally_including_partial_payments() {
+        for (cash, card, expected_cash, expected_card) in [
+            (7500, 7500, 5000, 5000),
+            (3750, 3750, 2500, 2500),
+            (1, 14999, 1, 9999),
+        ] {
+            let conn = make_test_db();
+            seed_simple_order(&conn);
+            conn.execute_batch("ALTER TABLE orders ADD COLUMN order_context TEXT; ALTER TABLE orders ADD COLUMN ghost_metadata TEXT;").unwrap();
+            let snapshot = json!({"folio_settlement":{"fiscal_line_snapshot":[{
+                "id":"stay", "description":"Stay", "quantity":1, "grossAmount":100,
+                "netAmount":100, "vatAmount":0, "grossUnitPrice":100, "vatRate":0,
+                "taxExemptionReason":"27", "fiscalDocumentProfile":"service"
+            }]}});
+            conn.execute("UPDATE orders SET total_amount=150,total_amount_cents=15000,order_context='folio_settlement',ghost_metadata=?1 WHERE id='ord-1'", [snapshot.to_string()]).unwrap();
+            conn.execute(
+                "UPDATE order_payments SET amount_cents=?1 WHERE id='pay-1'",
+                [cash],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,created_at) VALUES('card','ord-1','card',?1,?2,'completed','2026-05-25T10:00:03Z')", params![card as f64 / 100.0, card]).unwrap();
+            let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+            assert_eq!(payload["totals"]["grossCents"], 10000);
+            assert_eq!(payload["payments"][0]["method"], "cash");
+            assert_eq!(payload["payments"][0]["amountCents"], expected_cash);
+            assert_eq!(payload["payments"][1]["method"], "card");
+            assert_eq!(payload["payments"][1]["amountCents"], expected_card);
+            // Allocation is fiscal presentation only; the actual ledger is untouched.
+            assert_eq!(
+                conn.query_row("SELECT SUM(amount_cents) FROM order_payments", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+                cash + card
+            );
+        }
+    }
+
+    #[test]
+    fn hotel_zero_rounded_tender_is_omitted_and_revenue_cents_are_conserved() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN order_context TEXT; ALTER TABLE orders ADD COLUMN ghost_metadata TEXT;").unwrap();
+        let snapshot = json!({"folio_settlement":{"fiscal_line_snapshot":[{
+            "id":"revenue", "description":"Revenue", "quantity":1, "grossAmount":10,
+            "netAmount":10, "vatAmount":0, "grossUnitPrice":10, "vatRate":0,
+            "taxExemptionReason":"27", "fiscalDocumentProfile":"service"
+        }]}});
+        conn.execute("UPDATE orders SET total_amount=100,total_amount_cents=10000,order_context='folio_settlement',ghost_metadata=?1 WHERE id='ord-1'", [snapshot.to_string()]).unwrap();
+        conn.execute(
+            "UPDATE order_payments SET amount=0.01,amount_cents=1 WHERE id='pay-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,status,created_at) VALUES('card','ord-1','card',99.99,9999,'completed','2026-05-25T10:00:03Z')", []).unwrap();
+        let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+        assert_eq!(payload["totals"]["grossCents"], 1000);
+        assert_eq!(payload["payments"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["payments"][0]["method"], "card");
+        assert_eq!(payload["payments"][0]["amountCents"], 1000);
+        assert_eq!(
+            conn.query_row("SELECT SUM(amount_cents) FROM order_payments", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            10000
+        );
+    }
+
+    #[test]
+    fn deposit_receipt_preserves_role_and_excludes_it_from_order_discount() {
+        for role_key in ["line_role", "lineRole"] {
+            let conn = make_test_db();
+            seed_simple_order(&conn);
+            let mut items = json!([
+                {"name":"Goods 13", "quantity":1,"unit_price":10,"vat_category_code":"gr_reduced_13"},
+                {"name":"Goods 24", "quantity":1,"unit_price":10,"vat_category_code":"gr_standard_24"},
+                {"name":"Deposit", "quantity":1,"unit_price":2,"vat_category_code":"gr_reduced_13"}
+            ]);
+            items[2][role_key] = json!("deposit");
+            conn.execute("UPDATE orders SET items=?1,total_amount=20,total_amount_cents=2000,discount_amount=2,discount_amount_cents=200 WHERE id='ord-1'", [items.to_string()]).unwrap();
+            conn.execute(
+                "UPDATE order_payments SET amount=20,amount_cents=2000 WHERE id='pay-1'",
+                [],
+            )
+            .unwrap();
+            let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-1").unwrap();
+            assert_eq!(payload["totals"]["grossCents"], 2000);
+            assert_eq!(payload["totals"]["vatCents"], 301);
+            assert_eq!(payload["lines"][2]["grossCents"], 200);
+            assert_eq!(payload["payments"][0]["amountCents"], 2000);
+        }
     }
 
     #[test]

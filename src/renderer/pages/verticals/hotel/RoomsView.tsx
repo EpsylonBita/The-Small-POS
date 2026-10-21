@@ -1,3 +1,6 @@
+import { HotelSettlementModal } from './HotelSettlementModal';
+import { HotelVatField } from './HotelVatField';
+import { hotelErrorCode, postHotelCharge, printHotelFolio } from '../../../services/HotelSettlementService';
 import { canChargeFolio, recordedFolioCurrency } from '../../../utils/folio-currency';
 import { getStoreCurrency } from '../../../utils/store-currency';
 /**
@@ -16,14 +19,12 @@ import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useRooms } from '../../../hooks/useRooms';
 import { formatCurrency } from '../../../utils/format';
-import { toLocalDateString } from '../../../utils/date';
+import { useHotelClock } from '../../../hooks/useHotelClock';
 import { roomWorkflowError } from '../../../utils/room-workflow';
 import { reservationsService } from '../../../services/ReservationsService';
 import { RoomCheckinModal, RoomReservationModal, RoomStaySelectorModal } from '../../../components/modals/RoomStayWorkflowModals';
 import { posApiFetch, posApiPost } from '../../../utils/api-helpers';
 import {
-  folioChargesEndpoint,
-  folioPaymentsEndpoint,
   parseFolioCheckoutOutstanding,
   type FolioChargeType,
   type FolioPaymentMethod,
@@ -64,6 +65,8 @@ interface CheckoutPaymentData {
 }
 
 interface FolioChargeData {
+  clientRequestId: string;
+  vatCategoryCode: string;
   room: Room;
   folioId: string;
   chargeType: FolioChargeType;
@@ -152,6 +155,8 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   
   const [checkinData, setCheckinData] = useState({ roomId: '' });
   const [reservationData, setReservationData] = useState({ roomId: '' });
+  const { clock } = useHotelClock();
+  const [settlementRequest, setSettlementRequest] = useState<{ folioId: string; amountCents: number; room: Room } | null>(null);
   const [checkoutPaymentData, setCheckoutPaymentData] = useState<CheckoutPaymentData | null>(null);
   const [folioChargeData, setFolioChargeData] = useState<FolioChargeData | null>(null);
 
@@ -281,14 +286,14 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
   }, [hubPresetSignal, hubPreset]);
 
   const completeCheckoutLocally = async (room: Room): Promise<boolean> => {
-    if (hasGuestBilling && room.activeFolio) {
+    if (hasGuestBilling || getRoomEffectiveStatus(room) === 'occupied') {
       toast.error(t('roomsView.toasts.folioCheckoutOffline', { defaultValue: 'Folio checkout requires an online connection' }));
       return false;
     }
 
     if (hasReservations) {
       reservationsService.setContext(branchId || '', effectiveOrgId || '');
-      const reservation = await reservationsService.getActiveRoomReservation(room.id, toLocalDateString());
+      const reservation = await reservationsService.getActiveRoomReservation(room.id, clock().date);
       if (reservation?.status === 'seated') {
         await reservationsService.updateStatus(reservation.id, 'completed');
         await refetch();
@@ -317,7 +322,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
       {
         method: 'POST',
         body: JSON.stringify({
-          checkOutDate: toLocalDateString(),
+          checkOutDate: clock().date,
           resolution: 'close_paid',
         }),
       },
@@ -388,28 +393,8 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
       return;
     }
 
-    try {
-      const response = await posApiPost<{ success?: boolean; error?: string }>(
-        folioPaymentsEndpoint(checkoutPaymentData.folioId),
-        {
-          amount,
-          paymentMethod: checkoutPaymentData.paymentMethod,
-          currency,
-          reference: checkoutPaymentData.reference || null,
-          notes: checkoutPaymentData.notes || null,
-        },
-      );
-
-      if (!response.success || response.data?.success === false) {
-        throw new Error(response.error || response.data?.error || 'Failed to post payment');
-      }
-
-      toast.success(t('roomsView.toasts.paymentPosted', { defaultValue: 'Payment posted' }));
-      await submitRoomCheckout(checkoutPaymentData.room);
-    } catch (error) {
-      console.error('Failed to post checkout payment:', error);
-      toast.error(error instanceof Error ? error.message : t('roomsView.toasts.paymentFailed', { defaultValue: 'Failed to post payment' }));
-    }
+    setSettlementRequest({ folioId: checkoutPaymentData.folioId, amountCents: Math.round(amount * 100), room: checkoutPaymentData.room });
+    setModalType('none');
   };
 
   const openFolioChargeModal = (room: Room) => {
@@ -425,7 +410,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
     setFolioChargeData({
       room,
       folioId: room.activeFolio.id,
-      chargeType: 'other',
+      chargeType: 'other', clientRequestId: crypto.randomUUID(), vatCategoryCode: '',
       description: `Room ${room.roomNumber} charge`,
       amount: '',
       quantity: '1',
@@ -450,16 +435,18 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
       toast.error(t('roomsView.toasts.invalidChargeAmount', { defaultValue: 'Enter a valid charge amount' }));
       return;
     }
-    if (!Number.isFinite(quantity) || quantity <= 0) {
+    if (!folioChargeData.vatCategoryCode) { toast.error(t('hotelMoney.chooseVat')); return; }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
       toast.error(t('roomsView.toasts.invalidQuantity', { defaultValue: 'Enter a valid quantity' }));
       return;
     }
 
     try {
-      const response = await posApiPost<{ success?: boolean; error?: string }>(
-        folioChargesEndpoint(folioChargeData.folioId),
+      const response = await postHotelCharge<{ success?: boolean; error?: string }>(
+        folioChargeData.folioId,
         {
           chargeType: folioChargeData.chargeType,
+          clientRequestId: folioChargeData.clientRequestId, vatCategoryCode: folioChargeData.vatCategoryCode,
           currency,
           description: folioChargeData.description.trim(),
           amount,
@@ -478,7 +465,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
       await refetch();
     } catch (error) {
       console.error('Failed to add folio charge:', error);
-      toast.error(error instanceof Error ? error.message : t('roomsView.toasts.chargeFailed', { defaultValue: 'Failed to add charge' }));
+      toast.error(t(`hotelMoney.errors.${hotelErrorCode(error)}`));
     }
   };
 
@@ -748,6 +735,14 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
         </Modal>
       )}
 
+      {settlementRequest && <HotelSettlementModal folioId={settlementRequest.folioId} amountCents={settlementRequest.amountCents}
+        onClose={() => { setSettlementRequest(null); void refetch(); }} onCollected={async () => {
+          const room = settlementRequest.room; setSettlementRequest(null);
+          try {
+            await getBridge().sync.force();
+            await submitRoomCheckout(room);
+          } catch (error) { toast.error(roomWorkflowError(error, t)); await refetch(); }
+        }} />}
       {modalType === 'checkoutPayment' && checkoutPaymentData && (
         <Modal
           title={t('roomsView.settleRoomTitle', { number: checkoutPaymentData.room.roomNumber, defaultValue: 'Settle Room {{number}}' })}
@@ -772,35 +767,6 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               onChange={(value) => setCheckoutPaymentData(prev => prev ? { ...prev, amount: value } : prev)}
               isDark={isDark}
               required
-            />
-
-            <div>
-              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                {t('roomsView.paymentMethod', { defaultValue: 'Payment Method' })}
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                {(['cash', 'card', 'bank_transfer', 'other'] as FolioPaymentMethod[]).map(method => (
-                  <button
-                    key={method}
-                    onClick={() => setCheckoutPaymentData(prev => prev ? { ...prev, paymentMethod: method } : prev)}
-                    className={`py-2.5 px-3 rounded-xl text-sm font-medium capitalize transition-all ${
-                      checkoutPaymentData.paymentMethod === method
-                        ? 'bg-emerald-500 text-white'
-                        : isDark ? 'bg-gray-700 text-gray-300 active:bg-gray-600' : 'bg-gray-100 text-gray-600 active:bg-gray-200'
-                    }`}
-                  >
-                    {t(`roomsView.paymentMethods.${method}`, { defaultValue: method.replace('_', ' ') })}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <InputField
-              icon={<Receipt className="w-4 h-4" />}
-              label={t('roomsView.reference', { defaultValue: 'Reference' })}
-              value={checkoutPaymentData.reference}
-              onChange={(value) => setCheckoutPaymentData(prev => prev ? { ...prev, reference: value } : prev)}
-              isDark={isDark}
             />
 
             <div className="flex gap-3 pt-2">
@@ -852,6 +818,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               </div>
             </div>
 
+            <HotelVatField value={folioChargeData.vatCategoryCode} onChange={vatCategoryCode => setFolioChargeData(prev => prev ? { ...prev, vatCategoryCode } : prev)} />
             <InputField
               icon={<Receipt className="w-4 h-4" />}
               label={t('roomsView.description', { defaultValue: 'Description' })}

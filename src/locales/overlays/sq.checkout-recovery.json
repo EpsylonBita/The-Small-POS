@@ -12,6 +12,8 @@
       "draftRecoveryUnavailable": "Përfundimi fillestar nuk mund të verifikohet. Shporta e ruajtur mbetet e mbrojtur.",
       "draftPending": "Përfundimi fillestar është mbajtur. Konfirmoni rezultatin para se të nisni një pagesë tjetër.",
       "draftLoading": "Duke ngarkuar shportën e ruajtur…",
+      "twintRecoveryPaid": "Klienti pagoi – përfundo faturën fillestare",
+      "twintRecoveryNotPaid": "Nuk është paguar – anulo pagesën",
       "draftRecover": "Kontrollo përfundimin fillestar",
       "draftRecovered": "Porosia fillestare u rikthye.",
       "draftExistingTable": "Kjo tavolinë ka tashmë një faturë të hapur. Hapeni për të shtuar artikuj.",

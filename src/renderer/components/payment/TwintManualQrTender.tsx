@@ -7,8 +7,8 @@ import { formatCurrency } from '../../utils/format';
 import { getBridge } from '../../../lib';
 import { liveExternalPresentation } from '../../services/ExternalDisplayOwnership';
 
-export function TwintManualQrTender({ configuration, amount, externalEnabled, onConfirm, onCancel }: {
-  configuration: TwintManualConfiguration; amount: number; externalEnabled: boolean;
+export function TwintManualQrTender({ configuration, amount, externalEnabled, onConfirm, onCancel, idempotencyKey }: {
+  configuration: TwintManualConfiguration; amount: number; externalEnabled: boolean; idempotencyKey?: string;
   onConfirm: (action: TwintConfirmationAction, idempotencyKey: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
@@ -16,7 +16,7 @@ export function TwintManualQrTender({ configuration, amount, externalEnabled, on
   const [busy, setBusy] = useState(false);
   const [external, setExternal] = useState(false);
   const [error, setError] = useState(false);
-  const original = useRef({ scope: configuration.scope, amount, key: crypto.randomUUID() });
+  const original = useRef({ scope: configuration.scope, amount, key: idempotencyKey ?? crypto.randomUUID() });
   const active = useRef(true);
   const sending = useRef(false);
   const originalAction = useRef<TwintConfirmationAction | null>(null);

@@ -24,6 +24,9 @@ import {
   type RoomChargeContext,
 } from './PaymentModal';
 import type { Product, ProductFilters, BarcodeScanResult } from '../../services/ProductCatalogService';
+import { RetailSaleError, scannedRetailLine, scaleQuantity, variantBlocked } from '../../utils/retail-sale';
+import { useScale } from '../../hooks/useScale';
+import toast from 'react-hot-toast';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
@@ -94,6 +97,7 @@ interface CartItem extends Product {
   /** Scale-scanned lines (embedded weight/price barcodes) keep their own line
       and never merge with plain adds. */
   scaleScanned?: boolean;
+  retail_variant_id?: string;
   is_offer_reward?: boolean;
   auto_added_by_offer?: boolean;
   offer_id?: string;
@@ -170,6 +174,14 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [barcodeInput, setBarcodeInput] = useState('');
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [variantPicker, setVariantPicker] = useState<Product | null>(null);
+  // No stock policy exists in the current terminal contract. Respect the
+  // explicit retail setting when supplied; otherwise retain overselling.
+  const [blockOverselling, setBlockOverselling] = useState(false);
+  const [scaleSettings, setScaleSettings] = useState<{ scale_port?: string; scale_baud_rate?: number; scale_protocol?: string }>({});
+  const [scaleEnabled, setScaleEnabled] = useState(false);
+  const scale = useScale(isOpen && scaleEnabled, scaleSettings);
+  const [readingScale, setReadingScale] = useState(false);
   // Raw text drafts for the sold-by-measure quantity inputs, keyed by lineId.
   // Keystrokes only edit the draft; the parsed value commits on blur/Enter.
   const [measuredQuantityDrafts, setMeasuredQuantityDrafts] = useState<Record<string, string>>({});
@@ -194,6 +206,23 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   // Debounce search term to avoid excessive API calls (300ms delay)
   const debouncedSearchTerm = useDebounce(searchTerm, 300);
   const bridge = getBridge();
+  useEffect(() => {
+    if (!isOpen) { setVariantPicker(null); return; }
+    let disposed = false;
+    void bridge.settings.getLocal().then((value: any) => {
+      if (disposed) return;
+      const setting = (group: string, key: string) => value?.[group]?.[key] ?? value?.[`${group}.${key}`];
+      const enabled = (value: unknown) => value === true || value === 'true' || value === 1 || value === '1';
+      setBlockOverselling(enabled(setting('retail', 'block_overselling')));
+      setScaleEnabled(enabled(setting('scale', 'enabled') ?? setting('hardware', 'scale_enabled')));
+      setScaleSettings({
+        scale_port: setting('scale', 'port') ?? setting('hardware', 'scale_port'),
+        scale_baud_rate: Number(setting('scale', 'baud_rate') ?? setting('hardware', 'scale_baud_rate')) || 9600,
+        scale_protocol: setting('scale', 'protocol') ?? setting('hardware', 'scale_protocol'),
+      });
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, [isOpen]);
   useEffect(() => {
     if (!isOpen || orderType !== 'delivery' || hasDeliveryPro) {return}
     manualDeliveryFeeEditedRef.current = false;
@@ -440,7 +469,21 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   }, [t]);
 
   // Add to cart function (defined before barcode handlers)
-  const addToCart = useCallback((product: Product) => {
+  const addToCart = useCallback((product: Product, retailVariantId: string | null = null) => {
+    if (cashierLockedRef.current) return;
+    if (!retailVariantId && product.variants?.some(variant => variant.isActive)) {
+      setVariantPicker(product);
+      return;
+    }
+    let line: ReturnType<typeof scannedRetailLine>;
+    try {
+      line = scannedRetailLine({ product, variantId: retailVariantId, embedded: null });
+    } catch (error) {
+      toast.error(t(`productCatalog.retailReadiness.${error instanceof RetailSaleError ? error.code : 'variantUnavailable'}`));
+      return;
+    }
+    const variant = product.variants?.find(value => value.id === retailVariantId);
+    if (variant && variantBlocked(variant, blockOverselling)) return;
     if (!passesAgeCheck(product)) {
       return;
     }
@@ -450,6 +493,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       // price: scale-scanned and price-overridden lines always stay distinct.
       const existing = prev.find(item =>
         item.id === product.id
+        && (item.retail_variant_id ?? null) === retailVariantId
         && item.is_offer_reward !== true
         && item.scaleScanned !== true
         && item.originalUnitPrice === undefined
@@ -461,36 +505,33 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             : item
         );
       }
-      return [...prev, { ...product, lineId, cartQuantity: 1 }];
+      return [...prev, { ...line, lineId }];
     });
-  }, [passesAgeCheck]);
+    setVariantPicker(null);
+  }, [passesAgeCheck, blockOverselling, t]);
 
   // Add a scanned product, applying scale/embedded-value data: a weight label
-  // sets the line quantity (price stays per-unit); a price label fixes the
-  // line total (quantity 1, price = embedded total). Non-scale scans behave
+  // sets the line quantity; a price label derives the measured quantity and
+  // fixes the line total. Non-scale scans behave
   // like a normal add.
   const addScannedToCart = useCallback((scan: BarcodeScanResult) => {
-    const { product, embedded } = scan;
+    if (cashierLockedRef.current) return;
+    const { product, embedded, variantId } = scan;
     if (!embedded) {
-      addToCart(product);
+      addToCart(product, variantId);
       return;
     }
     if (!passesAgeCheck(product)) {
       return;
     }
     const lineId = nextCartLineId(product.id);
-    setCartItems(prev => {
-      if (embedded.value_type === 'weight' && embedded.weight && embedded.weight > 0) {
-        const qty = Math.round(embedded.weight * 1000) / 1000;
-        return [...prev, { ...product, lineId, scaleScanned: true, cartQuantity: qty }];
-      }
-      if (embedded.value_type === 'price' && embedded.price && embedded.price >= 0) {
-        // The scale printed the final line price; ring one line at that price.
-        return [...prev, { ...product, lineId, scaleScanned: true, price: embedded.price, originalUnitPrice: product.price, cartQuantity: 1 }];
-      }
-      return [...prev, { ...product, lineId, scaleScanned: true, cartQuantity: 1 }];
-    });
-  }, [addToCart, passesAgeCheck]);
+    try {
+      const line = scannedRetailLine(scan);
+      setCartItems(prev => [...prev, { ...line, lineId }]);
+    } catch (error) {
+      toast.error(t(`productCatalog.retailReadiness.${error instanceof RetailSaleError ? error.code : 'invalidScaleLabel'}`));
+    }
+  }, [addToCart, passesAgeCheck, t]);
 
   // Handle barcode scan from input field
   const handleBarcodeScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -555,9 +596,21 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     }
     setCartItems(prev => prev.map(item =>
       item.lineId === lineId && item.is_offer_reward !== true
-        ? { ...item, cartQuantity: Math.round(parsed * 1000) / 1000 }
+        ? { ...item, price: item.originalUnitPrice ?? item.price, originalUnitPrice: undefined, cartQuantity: Math.max(0.001, Math.round(parsed * 1000) / 1000) }
         : item
     ));
+  };
+
+  const readScaleIntoLine = async (item: CartItem) => {
+    if (cashierLockedRef.current || readingScale) return;
+    setReadingScale(true);
+    try {
+      const reading = await scale.readWeight();
+      const quantity = scaleQuantity(reading, item.unitOfMeasure);
+      if (!cashierLockedRef.current) commitMeasuredQuantity(item.lineId, String(quantity));
+    } catch {
+      toast.error(t('productCatalog.retailReadiness.scaleNotReady'));
+    } finally { setReadingScale(false); }
   };
 
   const removeFromCart = (lineId: string) => {
@@ -813,10 +866,15 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         id: itemId,
         menu_item_id: itemId,
         product_id: itemId,
+        // Explicit retail identity: the native menu-cache admission skips
+        // retail lines (the server owns their org/branch validation).
+        retail_product_id: itemId,
+        retail_variant_id: item.retail_variant_id ?? null,
         product_name: item.name,
         name: item.name,
         quantity: item.cartQuantity,
         price: item.price,
+        original_unit_price: item.originalUnitPrice,
         // Per-product Greek VAT category — the fiscal pipeline falls back to
         // the org default when null, so 6%/13% goods must carry their code.
         vat_category_code: item.vatCategoryCode ?? null,
@@ -836,6 +894,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         menu_item_id: null,
         product_id: null,
         is_manual: true,
+        line_role: 'deposit',
         product_name: t('productCatalog.depositLineName', { name: item.name, defaultValue: 'Deposit — {{name}}' }),
         name: t('productCatalog.depositLineName', { name: item.name, defaultValue: 'Deposit — {{name}}' }),
         quantity: item.cartQuantity,
@@ -1076,6 +1135,12 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                             className="w-20 px-2 py-1 rounded bg-white/10 text-white text-center focus:outline-none focus:ring-1 focus:ring-white/40"
                           />
                           <span className="text-white/60 text-sm">{item.unitOfMeasure}</span>
+                          {['kg', 'g', 'lb', 'oz'].includes(item.unitOfMeasure.toLowerCase()) && (
+                            <button type="button" disabled={readingScale} onClick={() => void readScaleIntoLine(item)}
+                              className="rounded-2xl px-2 py-1 bg-white/10 text-white text-sm disabled:opacity-40">
+                              {t('productCatalog.retailReadiness.readScale')}
+                            </button>
+                          )}
                         </div>
                       ) : (
                       <div className="flex items-center gap-2">
@@ -1217,6 +1282,20 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               }
             </button>
           </div>
+        </div>
+      </LiquidGlassModal>
+      <LiquidGlassModal isOpen={Boolean(variantPicker)} onClose={() => setVariantPicker(null)}
+        title={t('productCatalog.retailReadiness.chooseVariant', { name: variantPicker?.name })}>
+        <div className="flex flex-col gap-2">
+          {variantPicker?.variants?.filter(variant => variant.isActive).map(variant => (
+            <button key={variant.id} type="button"
+              disabled={variantBlocked(variant, blockOverselling)}
+              onClick={() => addToCart(variantPicker, variant.id)}
+              className="rounded-2xl p-3 bg-white/10 text-white text-left disabled:opacity-40">
+              <span>{variant.name} · {formatCurrency(variantPicker.price + variant.priceAdjustment)}</span>
+              <span className="block text-sm opacity-70">{t('productCatalog.retailReadiness.stock', { quantity: variant.quantity })}</span>
+            </button>
+          ))}
         </div>
       </LiquidGlassModal>
       {/* Payment Modal */}

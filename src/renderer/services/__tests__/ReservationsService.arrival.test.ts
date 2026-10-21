@@ -28,3 +28,12 @@ it('refuses terminal reservations and does not treat a failed lookup as an avail
   bridge.reservations.list.mockResolvedValue({ success: false, error: 'offline' });
   await expect(reservationsService.getActiveRoomReservation('room-101', '2026-09-08')).rejects.toThrow('offline');
 });
+
+it('seats a restaurant booking only with the canonical session acknowledgement', async () => {
+  bridge.reservations.update.mockResolvedValue({ success:true,data:{success:true,session_id:'session-1',
+    reservation:{id:'table-booking',organization_id:'org',branch_id:'branch',table_id:'table-1',party_size:4,customer_name:'Guest',status:'seated'}} });
+  await expect(reservationsService.seatReservation('table-booking')).resolves.toMatchObject({tableSessionId:'session-1',partySize:4,status:'seated'});
+  expect(bridge.reservations.update).toHaveBeenCalledWith('table-booking',expect.objectContaining({status:'seated'}));
+  bridge.reservations.update.mockResolvedValue(response({id:'table-booking',status:'seated'}));
+  await expect(reservationsService.seatReservation('table-booking')).rejects.toThrow('RESERVATION_SEAT_ACK_MISSING');
+});

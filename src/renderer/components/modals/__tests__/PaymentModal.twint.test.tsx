@@ -60,6 +60,27 @@ const orderScope={organizationId:'org',terminalId:'terminal'};
 const existingOrder={orderId:'existing-order',scope:orderScope} as any;
 const canClaim=()=>{const claim=claimOrdinaryCollectionOwner(orderScope,'existing-order');if(claim.claimed)releaseOrdinaryOwnerBeforeSend(claim.owner);return claim.claimed;};
 describe('PaymentModal distinct manual TWINT tender',()=>{
+ it('refuses checkout discounts before admitting or showing a TWINT QR',async()=>{
+  const before=vi.fn(async()=>false);const complete=vi.fn();
+  render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={12.35} onBeforePayment={before} onPaymentComplete={complete} allowTips={false}/>);
+  fireEvent.click(await screen.findByRole('button',{name:'TWINT'}));
+  await waitFor(()=>expect(before).toHaveBeenCalledOnce());
+  expect(qrMocks.admit).not.toHaveBeenCalled();
+  expect(screen.queryByAltText('Official shop TWINT QR')).not.toBeInTheDocument();
+  expect(complete).not.toHaveBeenCalled();
+ });
+ it('keeps the admitted amount and key when parent props change while the QR is visible',async()=>{
+  const before=vi.fn(async(_payment:any)=>true);const complete=vi.fn(async()=>true);const close=vi.fn();
+  const view=render(<PaymentModal isOpen onClose={close} orderTotal={12.35} onBeforePayment={before} onPaymentComplete={complete} allowTips={false}/>);
+  fireEvent.click(await screen.findByRole('button',{name:'TWINT'}));
+  await screen.findByAltText('Official shop TWINT QR');
+  const admitted=before.mock.calls[0][0];
+  view.rerender(<PaymentModal isOpen onClose={close} orderTotal={15} onBeforePayment={before} onPaymentComplete={complete} allowTips={false}/>);
+  fireEvent.click(screen.getByRole('button',{name:'Confirm payment received'}));
+  await waitFor(()=>expect(complete).toHaveBeenCalledOnce());
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({amount:12.35,idempotencyKey:admitted.idempotencyKey}));
+  expect(before).toHaveBeenCalledOnce();
+ });
  afterEach(()=>{cleanup();qrMocks.admit.mockClear();toastMocks.error.mockClear();});
  it.each([['Confirm payment received','confirm'],['Skip — confirm receipt','skip']])('records %s explicitly as TWINT with no provider transaction',async(label,action)=>{
   const onPaymentComplete=vi.fn().mockResolvedValue(true);

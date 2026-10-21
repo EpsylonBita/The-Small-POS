@@ -146,6 +146,7 @@ pub fn resolve_greece_vat_category(
 /// One `FiscalTaxLineInput`.
 #[derive(Debug, Clone, Default)]
 pub struct FiscalTaxLineInput {
+    pub line_role: Option<String>,
     pub id: Option<String>,
     pub description: Option<String>,
     pub quantity: Option<f64>,
@@ -304,9 +305,8 @@ pub fn calculate_greece_fiscal_breakdown(
                 tax_exemption_reason: line.tax_exemption_reason.clone(),
                 fiscal_document_profile: line.fiscal_document_profile.clone(),
                 original_gross_cents,
-                participates_in_discount_allocation: line
-                    .participates_in_discount_allocation
-                    .unwrap_or(
+                participates_in_discount_allocation: line.line_role.as_deref() != Some("deposit")
+                    && line.participates_in_discount_allocation.unwrap_or(
                         vat_rate > 0.0 || vat_category_code == POS_RECEIPT_ZERO_VAT_CATEGORY,
                     ),
             }
@@ -427,6 +427,7 @@ pub fn calculate_greece_fiscal_breakdown(
 /// One item of `GreeceOrderVatInput`.
 #[derive(Debug, Clone, Default)]
 pub struct GreeceOrderVatItem {
+    pub line_role: Option<String>,
     pub menu_item_id: Option<String>,
     pub name: Option<String>,
     pub quantity: f64,
@@ -509,6 +510,7 @@ pub fn build_greece_order_tax_lines(input: &GreeceOrderVatInput) -> Vec<FiscalTa
                 .filter(|id| !id.is_empty())
                 .cloned();
             FiscalTaxLineInput {
+                line_role: item.line_role.clone(),
                 id: Some(
                     menu_item_id
                         .clone()
@@ -537,6 +539,7 @@ pub fn build_greece_order_tax_lines(input: &GreeceOrderVatInput) -> Vec<FiscalTa
 
     if delivery_fee > 0.0 {
         lines.push(FiscalTaxLineInput {
+            line_role: None,
             id: Some("delivery-fee".to_string()),
             description: Some("Delivery Fee".to_string()),
             quantity: Some(1.0),
@@ -551,6 +554,7 @@ pub fn build_greece_order_tax_lines(input: &GreeceOrderVatInput) -> Vec<FiscalTa
     }
     if service_fee > 0.0 {
         lines.push(FiscalTaxLineInput {
+            line_role: None,
             id: Some("service-fee".to_string()),
             description: Some("Service Fee".to_string()),
             quantity: Some(1.0),
@@ -565,6 +569,7 @@ pub fn build_greece_order_tax_lines(input: &GreeceOrderVatInput) -> Vec<FiscalTa
     }
     if tip_amount > 0.0 {
         lines.push(FiscalTaxLineInput {
+            line_role: None,
             id: Some("tip".to_string()),
             description: Some("Tip".to_string()),
             quantity: Some(1.0),
@@ -583,10 +588,14 @@ pub fn build_greece_order_tax_lines(input: &GreeceOrderVatInput) -> Vec<FiscalTa
 /// `calculateGreeceOrderVat`.
 pub fn calculate_greece_order_vat(input: &GreeceOrderVatInput) -> GreeceOrderVatResult {
     let (_, region) = input.settings.normalized();
-    // The server caps the order discount at the items' subtotal before the
+    // The server caps the order discount at the non-deposit subtotal before the
     // breakdown caps it again at the lines that can carry it.
     let mut subtotal = 0.0_f64;
-    for item in &input.items {
+    for item in input
+        .items
+        .iter()
+        .filter(|item| item.line_role.as_deref() != Some("deposit"))
+    {
         subtotal += item.quantity * item.unit_price;
     }
     let subtotal = f64::max(0.0, subtotal);
@@ -710,6 +719,7 @@ pub fn calculate_order_vat_from_order_body(
             items
                 .iter()
                 .map(|item| GreeceOrderVatItem {
+                    line_role: body_text(item, "line_role"),
                     menu_item_id: body_text(item, "menu_item_id"),
                     name: body_text(item, "name"),
                     quantity: item.get("quantity").and_then(Value::as_f64).unwrap_or(1.0),
@@ -725,8 +735,13 @@ pub fn calculate_order_vat_from_order_body(
                 .collect()
         })
         .unwrap_or_default();
+    // A percentage or capped discount is derived from the goods only: deposit
+    // lines never carry an order discount (server and shared calculator).
     let mut subtotal = 0.0_f64;
-    for item in &items {
+    for item in items
+        .iter()
+        .filter(|item| item.line_role.as_deref() != Some("deposit"))
+    {
         subtotal += item.quantity * item.unit_price;
     }
     let subtotal = f64::max(0.0, subtotal);
@@ -874,6 +889,44 @@ mod tests {
     const ORDER_VAT_VECTORS: &str =
         include_str!("../../../../shared/services/__fixtures__/greece-order-vat-vectors.json");
 
+    #[test]
+    fn percentage_discount_base_excludes_deposits_like_the_server() {
+        // Round-3 re-audit: 10 % of the goods (EUR 20), never of the deposit too.
+        let body = json!({"items":[
+            {"name":"Goods 13", "quantity":1,"unit_price":10,"vat_category_code":"gr_reduced_13"},
+            {"name":"Goods 24", "quantity":1,"unit_price":10,"vat_category_code":"gr_standard_24"},
+            {"name":"Deposit", "quantity":1,"unit_price":2,"vat_category_code":"gr_reduced_13","line_role":"deposit"}
+        ],"manual_discount_mode":"percentage","manual_discount_value":10});
+        let result = calculate_order_vat_from_order_body(&body, &GreeceVatSettings::default());
+        assert_eq!(result.breakdown.total_discount_cents, 200);
+        assert_eq!(result.breakdown.total_gross_cents, 2000);
+        assert_eq!(result.tax_amount_cents, 301);
+    }
+
+    #[test]
+    fn deposits_never_share_order_discounts_even_when_allocation_is_explicitly_enabled() {
+        let body = json!({"items":[
+            {"name":"Goods 13", "quantity":1,"unit_price":10,"vat_category_code":"gr_reduced_13"},
+            {"name":"Goods 24", "quantity":1,"unit_price":10,"vat_category_code":"gr_standard_24"},
+            {"name":"Deposit", "quantity":1,"unit_price":2,"vat_category_code":"gr_reduced_13","line_role":"deposit"}
+        ],"discount_amount":2});
+        let result = calculate_order_vat_from_order_body(&body, &GreeceVatSettings::default());
+        assert_eq!(result.breakdown.total_gross_cents, 2000);
+        assert_eq!(result.tax_amount_cents, 301);
+        assert_eq!(result.breakdown.lines[2].discount_cents, 0);
+        assert_eq!(result.breakdown.lines[2].gross_cents, 200);
+
+        let lines = [FiscalTaxLineInput {
+            unit_price: 2.0,
+            line_role: Some("deposit".into()),
+            participates_in_discount_allocation: Some(true),
+            ..Default::default()
+        }];
+        let deposit =
+            calculate_greece_fiscal_breakdown(&lines, Some(2.0), VatRegionProfile::Mainland);
+        assert_eq!(deposit.total_discount_cents, 0);
+    }
+
     fn vector_input(input: &Value) -> GreeceOrderVatInput {
         let text =
             |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
@@ -887,6 +940,7 @@ mod tests {
                 .expect("vector items")
                 .iter()
                 .map(|item| GreeceOrderVatItem {
+                    line_role: text(item, "lineRole"),
                     menu_item_id: text(item, "menuItemId"),
                     name: text(item, "name"),
                     quantity: item["quantity"].as_f64().expect("vector quantity"),

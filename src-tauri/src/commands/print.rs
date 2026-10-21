@@ -3518,6 +3518,19 @@ pub async fn printer_submit_job(
         .unwrap_or_else(|| format!("entity-{}", uuid::Uuid::new_v4()));
     let printer_profile_id = value_str(&payload, &["printerProfileId", "printer_profile_id"]);
 
+    if entity_type == "folio_statement" {
+        let statement = payload
+            .get("document")
+            .ok_or("Folio statement document required")?;
+        return print::enqueue_print_job_with_payload(
+            &db,
+            &entity_type,
+            &entity_id,
+            printer_profile_id.as_deref(),
+            Some(statement),
+            &app,
+        );
+    }
     let allowed = matches!(
         entity_type.as_str(),
         "order_receipt" | "kitchen_ticket" | "z_report" | "shift_checkout"
@@ -4502,6 +4515,7 @@ pub async fn label_print_batch(
 fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
     let now = Utc::now().format("%Y-%m-%d %H:%M").to_string();
     receipt_renderer::OrderReceiptDoc {
+        currency: None,
         order_id: "preview-000".to_string(),
         order_number: "ORD-0042".to_string(),
         order_type: "dine_in".to_string(),

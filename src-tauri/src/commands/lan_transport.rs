@@ -1,5 +1,7 @@
+use crate::database_lock::run_blocking_command;
 use crate::lan_transport::{self, LanTransportState};
 use serde_json::Value;
+use tauri::Manager;
 
 #[tauri::command]
 pub async fn lan_transport_start(
@@ -24,9 +26,15 @@ pub async fn lan_transport_stop(
 ) -> Result<Value, String> {
     lan_transport::disable(&app, &state).await
 }
+// On the blocking pool, never the window thread or a runtime worker: it takes
+// the receiver's std mutex (Tomikro 20/10/2026, see database_lock.rs).
 #[tauri::command]
-pub fn lan_transport_status(state: tauri::State<'_, LanTransportState>) -> Result<Value, String> {
-    lan_transport::status(&state)
+pub async fn lan_transport_status(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("lan_transport_status", move || {
+        let state = app.state::<LanTransportState>();
+        lan_transport::status(&state)
+    })
+    .await
 }
 fn child(arg0: &Option<Value>) -> Result<&str, String> {
     arg0.as_ref()

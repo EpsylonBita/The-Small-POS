@@ -31,3 +31,10 @@ describe('immutable folio and order currency', () => {
     expect(() => freezeRoomChargeCurrency({ roomId: 'room2', storeCurrency: 'CHF', metadata: { room_charge: { currency: 'CHF', room_id: 'room1' } } })).toThrow('FOLIO_ROOM_MISMATCH')
   })
 })
+
+it('pins an offline room charge to the original folio, never a later guest', () => {
+ const original=freezeRoomChargeCurrency({roomId:'room1',folioId:'guest-a',storeCurrency:'CHF'});
+ expect(original.metadata.room_charge).toEqual({room_id:'room1',folio_id:'guest-a',currency:'CHF'});
+ expect(freezeRoomChargeCurrency({metadata:original.metadata,roomId:'room1',folioId:'guest-a',storeCurrency:null})).toEqual(original);
+ expect(()=>freezeRoomChargeCurrency({metadata:original.metadata,roomId:'room1',folioId:'guest-b',storeCurrency:'CHF'})).toThrow('FOLIO_MISMATCH');
+});

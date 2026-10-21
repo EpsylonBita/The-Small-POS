@@ -5,8 +5,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
+use crate::database_lock::run_blocking_command;
 use crate::money::Cents;
 use crate::{
     can_transition_locally, db, fetch_supabase_rows, normalize_status_for_storage, order_ownership,
@@ -15,39 +16,52 @@ use crate::{
 };
 
 /// Apply authoritative table/check identity and persist its scoped server ledger.
+/// Both table snapshot commands run on the blocking pool, never the window
+/// thread or a runtime worker (Tomikro 20/10/2026, see database_lock.rs).
 #[tauri::command]
-pub fn orders_apply_table_session_snapshot(
+pub async fn orders_apply_table_session_snapshot(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = arg0.ok_or("Missing table session snapshot")?;
-    let result = {
-        let conn = db.conn.lock().map_err(|error| error.to_string())?;
-        let result = crate::sync_queue::apply_table_session_snapshot(&conn, &payload)?;
-        if let Some(session) = payload.get("session") {
-            // Missing proof prevents offline use; it must not discard an online
-            // response or replace it with a reconstructed parent-order check.
-            if let Err(error) = crate::table_session_cache::save(&conn, session) {
-                tracing::warn!(error = %error, "Scoped table check could not be cached");
+    run_blocking_command("orders_apply_table_session_snapshot", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing table session snapshot")?;
+        let result = {
+            let conn = db
+                .lock_traced("orders_apply_table_session_snapshot")
+                .map_err(|error| error.to_string())?;
+            let result = crate::sync_queue::apply_table_session_snapshot(&conn, &payload)?;
+            if let Some(session) = payload.get("session") {
+                // Missing proof prevents offline use; it must not discard an online
+                // response or replace it with a reconstructed parent-order check.
+                if let Err(error) = crate::table_session_cache::save(&conn, session) {
+                    tracing::warn!(error = %error, "Scoped table check could not be cached");
+                }
             }
+            result
+        };
+        if result.get("applied").and_then(Value::as_bool) == Some(true) {
+            let _ = app.emit("order_realtime_update", &result);
         }
-        result
-    };
-    if result.get("applied").and_then(Value::as_bool) == Some(true) {
-        let _ = app.emit("order_realtime_update", &result);
-    }
-    Ok(result)
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn orders_get_table_session_snapshot(
+pub async fn orders_get_table_session_snapshot(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let request = arg0.ok_or("Missing table cache request")?;
-    let conn = db.conn.lock().map_err(|error| error.to_string())?;
-    crate::table_session_cache::load(&conn, &request)
+    run_blocking_command("orders_get_table_session_snapshot", move || {
+        let db = app.state::<db::DbState>();
+        let request = arg0.ok_or("Missing table cache request")?;
+        let conn = db
+            .lock_traced("orders_get_table_session_snapshot")
+            .map_err(|error| error.to_string())?;
+        crate::table_session_cache::load(&conn, &request)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -761,6 +775,9 @@ fn ensure_renderer_order_is_not_repair_settlement(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<(), String> {
+    if conn.query_row("SELECT EXISTS(SELECT 1 FROM orders WHERE (id=?1 OR supabase_id=?1) AND order_context='folio_settlement')",[order_id],|r|r.get::<_,bool>(0)).map_err(|e|e.to_string())? {
+        return Err("FOLIO_SETTLEMENT_IMMUTABLE".into());
+    }
     let is_repair_settlement = conn
         .query_row(
             "SELECT lower(trim(COALESCE(order_context, ''))) = 'repair_settlement'
@@ -7568,6 +7585,24 @@ pub async fn order_save_from_remote(
         }
     }
 
+    if crate::hotel_folio::is_settlement(&order_data) {
+        let local_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            crate::hotel_folio::import(&conn, &order_data)?
+        };
+        if order_data.get("status").and_then(Value::as_str) != Some("cancelled") {
+            // The import label never stands in for money. Resume restores the
+            // canonical receipts through the existing ledger mirror owner.
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                sync::repair_local_payment_mirrors_for_orders(&db, &[local_id.clone()]),
+            )
+            .await
+            .map_err(|_| "PAYMENT_MIRROR_PENDING".to_string())?
+            .map_err(|_| "PAYMENT_MIRROR_PENDING".to_string())?;
+        }
+        return Ok(serde_json::json!({"success":true,"orderId":local_id}));
+    }
     let existing_local_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let existing_local_id =
@@ -17106,6 +17141,40 @@ mod paid_edit_ledger_tests {
             "pending",
             "an explicit void is a real change and is pushed"
         );
+    }
+
+    #[test]
+    fn imported_customer_refund_matches_local_master_edit_snapshot() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let mut snapshots = Vec::new();
+        for (order, payment, imported) in [
+            ("local-return-edit", "local-edit-payment", 0),
+            ("import-return-edit", "import-edit-payment", 1),
+        ] {
+            seed_order(&conn, order, 10.0, "paid", None);
+            insert_completed_payment(&conn, payment, order, "cash", 10.0);
+            conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,imported_remote,created_at,updated_at) VALUES(?1,?2,?3,'refund',6,600,'customer return',?4,'now','now')",rusqlite::params![format!("{payment}-return"),payment,order,imported]).unwrap();
+            payments::recompute_order_payment_state(&conn, order, "now", payment).unwrap();
+            let proof = capture_proven_payment_coverage(&conn, order).unwrap();
+            let snapshot =
+                refresh_order_payment_snapshot_with_coverage(&conn, order, "now", &proof).unwrap();
+            assert_eq!(proof.missing_cents, 0);
+            assert_eq!(snapshot.status, "partially_paid");
+            assert_eq!(snapshot.effective_paid, 4.0);
+            assert_eq!(
+                payments::load_order_payment_balance_snapshot(&conn, order)
+                    .unwrap()
+                    .outstanding_amount,
+                6.0
+            );
+            snapshots.push((
+                snapshot.status,
+                snapshot.ledger_paid,
+                snapshot.effective_paid,
+            ));
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
     }
 
     #[test]

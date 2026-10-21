@@ -154,6 +154,8 @@ export interface IpcResult<T = unknown> {
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
   status?: number;
+  /** Native provenance: a fallback list cannot prove absence of remote rows. */
+  meta?: { source?: string; offlineFallback?: boolean };
   /** The admin application's bounded machine code on a refusal, never its text. */
   code?: string;
 }
@@ -433,6 +435,10 @@ export interface AppointmentBridgeListParams {
 
 export interface ReservationBridgeListParams {
   date?: string;
+  date_from?: string;
+  date_to?: string;
+  room_id?: string;
+  kind?: 'all' | 'table' | 'room';
   status?: string;
   search?: string;
   table_id?: string;
@@ -967,6 +973,8 @@ export interface PickupToDeliveryConversionParams {
 // -- Sync --------------------------------------------------------------------
 
 export interface SyncStatus {
+  unresolvedRemotePayments?: number;
+  unresolvedRemotePaymentsPaused?: number;
   /** Native queue ownership signal; it is not proof that an order is synced. */
   syncInProgress?: boolean;
   isOnline: boolean;
@@ -1950,7 +1958,7 @@ export interface PlatformBridge {
     getFinancialStats(): Promise<any>;
     getFailedFinancialItems(limit?: number): Promise<SyncFinancialQueueItem[]>;
     retryFinancialItem(syncId: number | string): Promise<IpcResult>;
-    retryAllFailedFinancial(): Promise<IpcResult>;
+    retryAllFailedFinancial(options?: { incomingOnly?: boolean }): Promise<IpcResult>;
     getUnsyncedFinancialSummary(): Promise<any>;
     validateFinancialIntegrity(): Promise<SyncFinancialIntegrityResponse>;
     requeueOrphanedFinancial(): Promise<IpcResult>;
@@ -2552,7 +2560,9 @@ export interface PlatformBridge {
       customerId: string;
       points: number;
       orderId?: string;
+      checkoutReservation?: boolean;
     }): Promise<IpcResult>;
+    releaseRedemption(opts: { orderId: string }): Promise<IpcResult>;
     getTransactions(customerId: string): Promise<IpcResult>;
   };
 
@@ -3147,6 +3157,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "loyalty:lookup-card": "loyalty.lookupByCard",
   "loyalty:earn": "loyalty.earnPoints",
   "loyalty:redeem": "loyalty.redeemPoints",
+  "loyalty:release-redemption": "loyalty.releaseRedemption",
   "loyalty:transactions": "loyalty.getTransactions",
 
   // Gift card checkout
@@ -3323,6 +3334,7 @@ export class TauriBridge implements PlatformBridge {
     "loyalty:lookup-card": "loyalty_lookup_by_card",
     "loyalty:earn": "loyalty_earn_points",
     "loyalty:redeem": "loyalty_redeem_points",
+    "loyalty:release-redemption": "loyalty_release_redemption",
     "loyalty:transactions": "loyalty_get_transactions",
     "callerid:test": "callerid_test_connection",
   };
@@ -3414,6 +3426,7 @@ export class TauriBridge implements PlatformBridge {
       success: true,
       data: (result?.data ?? result) as T,
       status: result?.status,
+      ...(result?.meta && typeof result.meta === 'object' ? { meta: result.meta } : {}),
     };
   }
 
@@ -3726,7 +3739,7 @@ export class TauriBridge implements PlatformBridge {
       ),
     retryFinancialItem: (id: number | string) =>
       this.inv("sync:retry-financial-item", id),
-    retryAllFailedFinancial: () => this.inv("sync:retry-all-failed-financial"),
+    retryAllFailedFinancial: (options?: { incomingOnly?: boolean }) => this.inv("sync:retry-all-failed-financial", options),
     getUnsyncedFinancialSummary: () =>
       this.inv("sync:get-unsynced-financial-summary"),
     validateFinancialIntegrity: () =>
@@ -3851,15 +3864,12 @@ export class TauriBridge implements PlatformBridge {
     get: (reservationId: string) =>
       this.adminFetch(`/api/pos/reservations/${reservationId}`),
     create: (payload: Record<string, unknown>) =>
-      this.adminFetch("/api/pos/reservations", {
-        method: "POST",
-        body: payload,
-      }),
+      this.invoke('offline:reservation-create', payload),
     update: (reservationId: string, payload: Record<string, unknown>) =>
-      this.adminFetch(`/api/pos/reservations/${reservationId}`, {
-        method: "PATCH",
-        body: payload,
-      }),
+      payload.status === 'seated'
+        ? this.adminFetch(`/api/pos/reservations/${reservationId}`, { method: 'PATCH', body: payload })
+        : this.invoke('offline:reservation-update', { ...payload, reservationId }),
+
   };
 
   services = {
@@ -4360,7 +4370,9 @@ export class TauriBridge implements PlatformBridge {
       customerId: string;
       points: number;
       orderId?: string;
+      checkoutReservation?: boolean;
     }) => this.inv("loyalty:redeem", opts),
+    releaseRedemption: (opts: { orderId: string }) => this.inv("loyalty:release-redemption", opts),
     getTransactions: (customerId: string) =>
       this.inv("loyalty:transactions", { customerId }),
   };

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createCheckoutDraft, getCheckoutDraftStore, type CheckoutDraft, type CheckoutDraftStore } from '../services/CheckoutDraftStore';
+import { confirmPaymentAdmission as confirmedAdmissionDraft, createCheckoutDraft, getCheckoutDraftStore, type CheckoutDraft, type CheckoutDraftStore } from '../services/CheckoutDraftStore';
 
 // Native refuses with this exact code on the binding lease, before touching
 // SQLite, while a terminal binding decision drains. Tomikro's windows lasted
@@ -62,6 +62,11 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
         if (proof.outcome !== 'not_found') {
           draft = { ...draft, phase: 'checkout_pending' };
           await owner.save(draft);
+        } else {
+          // A crash before payment confirmation can leave the local points
+          // secured while the retained cart is still editable. Release that
+          // original reservation before its balance is loaded again.
+          await owner.releaseEditableLoyaltyReservation(draft);
         }
       }
       if (generation !== epoch.current) return;
@@ -142,6 +147,39 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     return draft.checkoutRequestId;
   }, []);
 
+  const confirmPaymentAdmission = useCallback(async (paymentData: Record<string, any>) => {
+    if (!active.current || !store.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    const draft = confirmedAdmissionDraft(current.current, paymentData);
+    const owner = store.current;
+    const generation = epoch.current;
+    const isCurrent = () => generation === epoch.current && active.current && owner === store.current && current.current === draft;
+    current.current = draft;
+    pendingSave.current = true;
+    freezeInFlight.current = draft;
+    setRestored(draft);
+    try { await retryPrewriteScopeRefusal(() => owner.save(draft), isCurrent); }
+    catch (cause) { if (isCurrent()) setError('draftSaveFailed'); throw cause; }
+    finally { if (freezeInFlight.current === draft) freezeInFlight.current = null; }
+    if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    pendingSave.current = false;
+    lastSaved.current = JSON.stringify(draft);
+    setError(null);
+    return draft.submission!;
+  }, []);
+
+  const cancelPaymentAdmission = useCallback(async () => {
+    if (!active.current || !store.current || freezeInFlight.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    const owner = store.current;
+    const draft = current.current;
+    const editing = await owner.cancelPaymentAdmission();
+    if (owner !== store.current || current.current !== draft || !active.current) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    current.current = editing;
+    lastSaved.current = JSON.stringify(editing);
+    pendingSave.current = false;
+    setRestored(editing);
+    setError(null);
+  }, []);
+
   const clear = useCallback(async (accepted: boolean) => {
     if (!store.current || (!accepted && !active.current)) throw new Error('CHECKOUT_DRAFT_NOT_READY');
     const draft = current.current;
@@ -215,6 +253,8 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
       if (!active.current || !store.current || current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_NOT_READY');
       return store.current.checkAdmission(context);
     },
+    confirmPaymentAdmission,
+    cancelPaymentAdmission,
     identity: () => current.current.checkoutRequestId,
     isPending: () => current.current.phase === 'checkout_pending',
     hasSubmission: () => Boolean(current.current.submission),

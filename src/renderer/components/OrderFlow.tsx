@@ -1,3 +1,5 @@
+import { saveOrderWithLoyalty, LoyaltyCheckoutRefused } from '../services/LoyaltyCheckout';
+import type { SalonSale } from '../pages/verticals/salon/salon-sale';
 import { resolveAdjustmentAttribution } from '../utils/staffAttribution';
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { LiquidGlassModal } from './ui/pos-glass-components';
@@ -15,7 +17,8 @@ import {
   OutstandingPaymentMethodModal,
   type OutstandingPaymentSelection,
 } from './modals/OutstandingPaymentMethodModal';
-import type { PaymentModalExistingOrder } from './modals/PaymentModal';
+import type { PaymentModalExistingOrder, RoomChargeContext } from './modals/PaymentModal';
+import { SalonRoomChargeModal } from '../pages/verticals/hotel/SalonRoomChargeModal';
 import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
@@ -116,6 +119,8 @@ import {
 
 
 interface OrderFlowProps {
+  salonSale?: SalonSale;
+  onSalonClose?: () => void;
   className?: string;
   /** Force retail mode - always show ProductCatalogModal instead of MenuModal */
   forceRetailMode?: boolean;
@@ -183,7 +188,7 @@ const composeOrderTypeAriaLabel = (title: string, description: string): string =
   return `${cleanTitle}. ${cleanDescription}`;
 };
 
-const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false, showFab = true, restoreDraftOnMount = true }) => {
+const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false, showFab = true, restoreDraftOnMount = true, salonSale, onSalonClose }) => {
   const bridge = getBridge();
   const { t } = useI18n();
   const { isFeatureEnabled } = useFeatures();
@@ -237,6 +242,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [customerToEdit, setCustomerToEdit] = useState<Customer | null>(null);
 
   // Order flow states
+  const [restoredSalonMode, setRestoredSalonMode] = useState(false);
+  const isSalonSale = !!salonSale || restoredSalonMode;
   const [selectedOrderType, setSelectedOrderType] = useState<'pickup' | 'delivery' | 'dine-in' | null>(null);
   const [restoredEditContext, setRestoredEditContext] = useState<Record<string, any> | null>(null);
   const [recoveredEditPrompt, setRecoveredEditPrompt] = useState<{
@@ -244,6 +251,14 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     amount: number; resolve(): void; reject(error: Error): void;
   } | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [salonRoomChoice, setSalonRoomChoice] = useState<RoomChargeContext | null | undefined>(undefined);
+  useEffect(() => {
+    if (!salonSale) return;
+    setSalonRoomChoice(undefined);
+    setSelectedOrderType('pickup');
+    setSelectedCustomer(salonSale.customer);
+    setIsMenuModalOpen(true);
+  }, [salonSale]);
   const [selectedAddress, setSelectedAddress] = useState<any>(null);
   const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
   const [isTransitioning, setIsTransitioning] = useState(false);
@@ -323,6 +338,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Use module context organizationId if available, otherwise fall back to cache
   const organizationId = resolvedIdentityOrganizationId || moduleOrgId || localOrgId;
   const effectiveBranchId = resolvedIdentityBranchId || branchId || staff?.branchId || null;
+  const needsSalonRoomChoice = isMenuModalOpen && isSalonSale && !restoredEditContext &&
+    salonRoomChoice === undefined && Boolean(effectiveBranchId && organizationId) &&
+    hasModule(MODULE_IDS.ROOMS) && hasModule(MODULE_IDS.ORDERS) && hasModule('guest_billing');
 
   // Ordinary cash/card collection and the gift tender share one scope: the
   // resolved organization and this terminal's public id. A missing value fails
@@ -450,6 +468,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const resetFlow = useCallback(() => {
     dismissCheckoutRequestId();
     setRestoredEditContext(null);
+    setRestoredSalonMode(false);
     setSelectedTable(null);
     setTableNumber('');
     setIsOrderTypeModalOpen(false);
@@ -469,6 +488,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
   const restoreDraftContext = useCallback((context: Record<string, any>, renewal?: { previousCheckoutRequestId: string }) => {
     if (!['pickup', 'delivery', 'dine-in'].includes(context.orderType)) throw new Error('CHECKOUT_DRAFT_CONTEXT_INVALID');
+    setRestoredSalonMode(context.salonMode === true);
+    setSalonRoomChoice(context.roomChargeContext || null);
     setSelectedOrderType(context.orderType);
     setSelectedCustomer(context.selectedCustomer || { id: 'pickup-customer', name: '', phone: '', email: '', addresses: [] });
     setSelectedAddress(context.selectedAddress || null);
@@ -1806,6 +1827,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         status: 'pending' as const,
         payment_method: isGhostOrder || paymentMethod === 'table' ? null : (paymentMethod || null),
         room_id: isRoomChargePayment ? roomId : null,
+        folio_id: isRoomChargePayment ? orderData.paymentData?.folio_id ?? orderData.paymentData?.roomCharge?.activeFolioId ?? null : null,
         roomId: isRoomChargePayment ? roomId : null,
         initialPayment,
         skipAutoPrint: askBeforeReceiptPrint,
@@ -1886,7 +1908,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return false;
       }
 
-      const result = await createOrder(orderToCreate);
+      const result = await saveOrderWithLoyalty(
+          orderToCreate, hasLoyaltyModule && !isGhostOrder ? loyaltyRedemption : null,
+          bridge.loyalty, () => createOrder(orderToCreate),
+          { redemptionSecured: orderData.loyalty_checkout_secured === true, receiptConfirmed: orderData.paymentData?.method === 'twint' },
+        );
 
       if (result.success) {
         orderPersisted = true;
@@ -1909,39 +1935,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
         toast.success(t('orderFlow.orderCreated', { orderNumber: displayOrderNumber }));
 
-        if (hasLoyaltyModule && !isGhostOrder && loyaltyRedemption && result.orderId) {
-          const redeemCustomerId = resolvePersistedCustomerId(
-            loyaltyRedemption.customer_id,
-            orderToCreate.customer_id,
-            orderToCreate.customerId,
-          );
-          const redeemPoints = Math.max(
-            0,
-            Math.trunc(Number(loyaltyRedemption.points_redeemed || 0)),
-          );
 
-          if (redeemCustomerId && redeemPoints > 0) {
-            bridge.loyalty
-              .redeemPoints({
-                customerId: redeemCustomerId,
-                points: redeemPoints,
-                orderId: result.orderId,
-              })
-              .then((res: any) => {
-                if (!res?.success) {
-                  throw new Error(res?.error || 'Loyalty redemption failed');
-                }
-              })
-              .catch((error: any) => {
-                console.warn('[OrderFlow] Loyalty redemption failed:', error);
-                toast.error(
-                  t('loyalty.redeemFailed', {
-                    defaultValue: 'Order saved, but loyalty points were not redeemed',
-                  }),
-                );
-              });
-          }
-        }
 
         // Track order + discount application
         try {
@@ -1987,7 +1981,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
         // Cash register / fiscal print (fire-and-forget, non-blocking)
         if (result.orderId) {
-          finalizeCreatedOrderPayment(result.orderId, isGhostOrder, {
+          const printing = finalizeCreatedOrderPayment(result.orderId, isGhostOrder, {
             askBeforePrint: askBeforeReceiptPrint,
             autoPrintSuppressed: askBeforeReceiptPrint,
             amount: total_amount,
@@ -2004,6 +1998,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               console.warn('[OrderFlow] Cash register print error (non-blocking):', printError);
               toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
             });
+          // The salon host unmounts this flow on close. Keep its receipt prompt alive.
+          if (isSalonSale) await printing;
         }
 
         // Additional success feedback for delivery orders
@@ -2044,6 +2040,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return false;
       }
     } catch (error) {
+      if (error instanceof LoyaltyCheckoutRefused) {
+        toast.error(t('loyalty.checkoutRefused'));
+        return false;
+      }
       console.error('Error creating order:', error);
       toast.error(t('orderFlow.orderFailed'));
       // If the order persisted before the throw, the cart must still clear —
@@ -2053,7 +2053,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isOperationalShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId, selectedTable, tableNumber]);
+  }, [isSalonSale, selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isOperationalShiftActive, staff, taxRatePercentage, reloadTerminalSettings, effectiveBranchId, organizationId, hasLoyaltyModule, t, silentRefresh, finalizeCreatedOrderPayment, shouldAskPaymentPrint, collectionScope, ordinaryRefusalText, takeCheckoutRequestId, resetCheckoutRequestId, selectedTable, tableNumber]);
 
   // Order-type chooser ergonomics aligned with the main OrderDashboard modal (Round 346): modal width + grid
   // scale to the number of visible cards (pickup always present; delivery/tables optional), and each card
@@ -2287,11 +2287,15 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       )}
 
       {/* Order Modal - Shows MenuModal for food verticals, ProductCatalogModal for retail */}
-      {isMenuModalOpen && selectedOrderType && selectedCustomer && (
-        isRetailVertical ? (
+      {needsSalonRoomChoice && effectiveBranchId && organizationId && (
+        <SalonRoomChargeModal branchId={effectiveBranchId} organizationId={organizationId}
+          onSelect={setSalonRoomChoice} onClose={() => { handleMenuModalClose(); onSalonClose?.(); }} />
+      )}
+      {isMenuModalOpen && !needsSalonRoomChoice && selectedOrderType && selectedCustomer && (
+        isRetailVertical && !isSalonSale ? (
           <ProductCatalogModal
             isOpen={isMenuModalOpen}
-            onClose={handleMenuModalClose}
+            onClose={() => { handleMenuModalClose(); onSalonClose?.(); }}
             selectedCustomer={selectedCustomer}
             selectedAddress={selectedAddress}
             orderType={selectedOrderType === 'delivery' ? 'delivery' : 'pickup'}
@@ -2302,7 +2306,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           />
         ) : (
           <MenuModal
-            draftContext={{ selectedTable, tableNumber, deliveryZoneInfo, ...restoredEditContext }}
+            salonMode={isSalonSale}
+            roomChargeContext={isSalonSale ? salonRoomChoice ?? null : null}
+            initialCartItems={salonSale?.items}
+            draftContext={{ selectedTable, tableNumber, deliveryZoneInfo, salonMode: isSalonSale, ...restoredEditContext }}
             onDraftRestore={restoreDraftContext}
             onRecoveredOrder={acceptRecoveredDraftOrder}
             editMode={!!restoredEditContext}
@@ -2313,7 +2320,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             onEditPreflight={preflightRecoveredEdit}
             onEditComplete={completeRecoveredEdit}
             isOpen={isMenuModalOpen}
-            onClose={handleMenuModalClose}
+            onClose={() => { handleMenuModalClose(); onSalonClose?.(); }}
             selectedCustomer={selectedCustomer}
             selectedAddress={selectedAddress}
             orderType={selectedOrderType}

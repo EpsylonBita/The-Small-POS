@@ -75,7 +75,7 @@ test('MenuModal uses existing translation keys for dine-in title and search plac
   const modalSource = readFileSync(menuModalPath, 'utf8');
 
   assert.match(modalSource, /t\('orders\.type\.dineIn', \{ defaultValue: 'Dine In' \}\)/);
-  assert.match(modalSource, /placeholder=\{t\('menu\.search', \{ defaultValue: 'Search menu items\.\.\.' \}\)\}/);
+  assert.match(modalSource, /placeholder=\{salonMode \? t\('salonSale\.search'\) : t\('menu\.search', \{ defaultValue: 'Search menu items\.\.\.' \}\)\}/);
   assert.doesNotMatch(modalSource, /orders\.type\.dine_in/);
   assert.doesNotMatch(modalSource, /menu\.search\.placeholder/);
 });

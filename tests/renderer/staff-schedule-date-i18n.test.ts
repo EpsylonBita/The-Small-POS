@@ -21,10 +21,10 @@ test('StaffScheduleView formats dates/times through the locale-aware helpers', (
   assert.match(viewSource, /formatDate\(createModalDate, \{ weekday: 'long', day: '2-digit', month: 'short' \}\)/);
   assert.match(viewSource, /formatDate\(day, \{ weekday: 'short' \}\)/);
   // Shift time ranges and the add-shift preview use formatTime/formatDate.
-  assert.match(viewSource, /formatTime\(start, \{ hour: '2-digit', minute: '2-digit' \}\)/);
-  assert.match(viewSource, /formatTime\(end, \{ hour: '2-digit', minute: '2-digit' \}\)/);
-  assert.match(viewSource, /formatDate\(start, \{ day: '2-digit', month: 'short' \}\)/);
-  assert.match(viewSource, /formatDate\(end, \{ day: '2-digit', month: 'short' \}\)/);
+  assert.match(viewSource, /formatTime\(start, \{ timeZone, hour: '2-digit', minute: '2-digit' \}\)/);
+  assert.match(viewSource, /formatTime\(end, \{ timeZone, hour: '2-digit', minute: '2-digit' \}\)/);
+  assert.match(viewSource, /formatDate\(start, \{ timeZone, day: '2-digit', month: 'short' \}\)/);
+  assert.match(viewSource, /formatDate\(end, \{ timeZone, day: '2-digit', month: 'short' \}\)/);
 });
 
 test('StaffScheduleView no longer uses system-locale date/time formatting', () => {

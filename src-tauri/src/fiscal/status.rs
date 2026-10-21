@@ -16,7 +16,7 @@
 //! fiscal_status_unavailable` or a malformed body leave the verdict to expire
 //! to "unknown" — the fail-closed behaviour: the Z guard still blocks.
 //! Receipts are queued whatever the verdict (review of the 29/09/2026 fixes);
-//! a fresh inactive verdict only keeps them from holding the Z.
+//! a confirmed inactive verdict keeps them from holding the Z.
 //!
 //! Refreshed by the background sync pass (at most every four minutes, inside
 //! the cache's five-minute TTL; a minute after a failure), right after a
@@ -133,7 +133,7 @@ pub fn parse_fiscal_status_response(body: &Value) -> Option<FiscalStatus> {
     let active = active && reason != "branch_config_not_connected";
     Some(FiscalStatus {
         active,
-        plugin_id: if active { text("pluginId") } else { None },
+        plugin_id: text("pluginId"),
         reason,
         checked_at: text("checkedAt").unwrap_or_default(),
     })
@@ -345,7 +345,7 @@ mod tests {
         }))
         .unwrap();
         assert!(!reply.active);
-        assert_eq!(reply.plugin_id, None);
+        assert_eq!(reply.plugin_id.as_deref(), Some("mydata"));
         for reason in [
             "active",
             "credentials_missing",

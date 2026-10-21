@@ -1853,16 +1853,22 @@ mod tests {
 }
 
 /// Explicit, audited adoption of the active pre-v96 cashier's operating unit.
+/// On the blocking pool, never the window thread or a runtime worker (Tomikro
+/// 20/10/2026, see database_lock.rs).
 #[tauri::command]
-pub fn shift_confirm_legacy_currency(
+pub async fn shift_confirm_legacy_currency(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, crate::auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    crate::legacy_shift_currency::confirm(
-        &db,
-        &auth_state,
-        arg0.ok_or("Missing currency confirmation")?,
-    )
+    crate::database_lock::run_blocking_command("shift_confirm_legacy_currency", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        crate::legacy_shift_currency::confirm(
+            &db,
+            &auth_state,
+            arg0.ok_or("Missing currency confirmation")?,
+        )
+    })
+    .await
 }

@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // message and "Try again", and no discount is allowed on an assumed cap.
 
 const mocks = vi.hoisted(() => ({
+  coupon: null as any,
+  loyaltyEnabled: false,
+  redeem: vi.fn(),
   settings: {
     maxDiscountPercentage: 30,
     unavailable: true,
@@ -19,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   legacyAdmission: false,
   confirmationError: false,
   draftFreezeError: false,
+  confirmationFreezeError: false,
   editOrder: null as any,
   inspect: null as any,
   applyEditSettlement: vi.fn(),
@@ -88,7 +92,7 @@ vi.mock('../../../hooks/useDeliveryValidation', () => {
 
 vi.mock('../../../hooks/useAcquiredModules', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../hooks/useAcquiredModules')>();
-  const value = { hasModule: () => false };
+  const value = { hasModule: (id: string) => mocks.loyaltyEnabled && id === actual.MODULE_IDS.LOYALTY };
   return { ...actual, useAcquiredModules: () => value };
 });
 
@@ -115,7 +119,7 @@ vi.mock('../../../services/terminal-credentials', () => ({
 
 vi.mock('../../../utils/api-helpers', () => ({
   posApiGet: vi.fn(async () => ({ success: false })),
-  posApiPost: vi.fn(async () => ({ success: false })),
+  posApiPost: vi.fn(async () => ({ success: true, data: { valid: true, coupon: mocks.coupon } })),
 }));
 
 vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
@@ -145,7 +149,8 @@ vi.mock('../../../../lib', async (importOriginal) => {
       if (command === 'checkout_draft_get' && draftStorage.loadGate) await draftStorage.loadGate;
       if (command === 'checkout_draft_inspect') return mocks.inspect ?? { success: true, outcome: 'not_found', canCollect: false };
       if (command === 'checkout_draft_put') {
-        if (mocks.draftFreezeError && input.draft.phase === 'checkout_pending') throw new Error('DISK_UNAVAILABLE');
+        if ((mocks.draftFreezeError && input.draft.phase === 'checkout_pending') ||
+          (mocks.confirmationFreezeError && input.draft.state.paymentAdmission === 'confirmed')) throw new Error('DISK_UNAVAILABLE');
         draftStorage.draft = input.draft; draftStorage.generation++;
       }
       if (command === 'checkout_draft_delete') {
@@ -158,9 +163,12 @@ vi.mock('../../../../lib', async (importOriginal) => {
     settings: { get: vi.fn(async () => null) },
     recovery: { createPreActionSnapshot: mocks.recoverySnapshot },
     orders: { getById: vi.fn(async () => mocks.editOrder), applyEditSettlement: (...args: any[]) => mocks.applyEditSettlement(...args) },
+    branchData: { validateCoupon: vi.fn(async () => ({ success: true, data: { valid: true, coupon: mocks.coupon } })) },
     loyalty: {
-      getSettings: vi.fn(async () => null),
-      getCustomerBalance: vi.fn(async () => null),
+      redeemPoints: (...args: any[]) => mocks.redeem(...args),
+      releaseRedemption: vi.fn(async () => ({ success: true })),
+      getSettings: vi.fn(async () => ({ settings: { is_active: true, min_redemption_points: 100, redemption_rate: 0.01 } })),
+      getCustomerBalance: vi.fn(async () => ({ customer: { points_balance: 1000 } })),
     },
   };
   return {
@@ -180,11 +188,17 @@ vi.mock('../../menu/MenuItemGrid', () => ({
   ),
 }));
 vi.mock('../../menu/MenuCart', () => ({
-  MenuCart: ({ onCheckout, maxDiscountPercentage }: any) => {
+  MenuCart: ({ onCheckout, maxDiscountPercentage, onApplyCoupon, appliedCoupon, couponDiscount, onRemoveItem, cartItems, onOpenLoyaltyRedeem, loyaltyRedemption }: any) => {
     mocks.cartMaxDiscount.push(maxDiscountPercentage);
     return (
       <div data-testid="menu-cart">
         <button onClick={onCheckout}>Checkout</button>
+        <button onClick={() => onApplyCoupon('SAVE')}>Apply coupon</button>
+        <button onClick={() => onRemoveItem(cartItems[0].id)}>Remove first item</button>
+        <button onClick={onOpenLoyaltyRedeem}>Redeem points</button>
+        <span data-testid="applied-coupon">{appliedCoupon?.code ?? 'none'}</span>
+        <span data-testid="coupon-discount">{couponDiscount}</span>
+        <span data-testid="loyalty-applied">{loyaltyRedemption?.pointsRedeemed ?? 0}</span>
       </div>
     );
   },
@@ -192,12 +206,19 @@ vi.mock('../../menu/MenuCart', () => ({
 vi.mock('../../menu/MenuItemModal', () => ({ MenuItemModal: () => null }));
 vi.mock('../../menu/ComboChoiceModal', () => ({ ComboChoiceModal: () => null }));
 vi.mock('../PaymentModal', () => ({
-  PaymentModal: ({ isOpen, onPaymentComplete }: any) => (isOpen ? <div data-testid="payment-modal">payment
-    <button onClick={() => onPaymentComplete({ method: 'cash', amount: 8 })}>Confirm cash</button>
-    <button onClick={() => onPaymentComplete({ method: 'card', amount: 8 })}>Confirm card</button>
+  PaymentModal: ({ isOpen, onPaymentComplete, onBeforePayment, onSplitPayment, orderTotal }: any) => (isOpen ? <div data-testid="payment-modal">payment
+    <button onClick={() => onBeforePayment({ method: 'twint', amount: 7, currency: 'CHF', idempotencyKey: 'loyalty-twint' })}>Admit loyalty QR</button>
+    <button onClick={() => onPaymentComplete({ method: 'twint', amount: 7, currency: 'CHF', idempotencyKey: 'loyalty-twint', metadata: { provider: 'twint', confirmation: 'cashier', confirmation_action: 'confirm' } })}>Confirm loyalty receipt</button>
+    <button onClick={() => onBeforePayment({ method: 'twint', amount: 7.2, currency: 'CHF', idempotencyKey: 'admitted-twint' })}>Admit QR</button>
+    <button onClick={() => onPaymentComplete({ method: 'twint', amount: 7.2, currency: 'CHF', idempotencyKey: 'admitted-twint', metadata: { provider: 'twint', confirmation: 'cashier', confirmation_action: 'confirm' } })}>Confirm TWINT receipt</button>
+    <button onClick={() => onBeforePayment({ method: 'card', amount: 7.2, transactionId: 'approved-card' })}>Admit card</button>
+    <button onClick={() => onPaymentComplete({ method: 'card', amount: 7.2, transactionId: 'approved-card' })}>Complete approved card</button>
+    <button onClick={async () => { const data = { method: 'cash', amount: orderTotal }; if (await onBeforePayment(data)) await onPaymentComplete(data); }}>Confirm cash</button>
+    <button onClick={async () => { const data = { method: 'card', amount: orderTotal }; if (await onBeforePayment(data)) await onPaymentComplete(data); }}>Confirm card</button>
+    <button onClick={() => onSplitPayment(null)}>Confirm split</button>
   </div> : null),
 }));
-vi.mock('../LoyaltyRedeemModal', () => ({ LoyaltyRedeemModal: () => null }));
+vi.mock('../LoyaltyRedeemModal', () => ({ LoyaltyRedeemModal: ({ isOpen, onRedeem }: any) => isOpen ? <button onClick={() => onRedeem(1, 100)}>Use 100 points</button> : null }));
 
 import { MenuModal } from '../MenuModal';
 import { menuService } from '../../../services/MenuService';
@@ -216,6 +237,9 @@ const renderMenu = (onClose = vi.fn()) =>
   );
 
 beforeEach(() => {
+  mocks.coupon = { id: 'coupon-1', code: 'SAVE', discount_type: 'percentage', discount_value: 10, min_order_amount: 10 };
+  mocks.loyaltyEnabled = false;
+  mocks.redeem.mockReset().mockResolvedValue({ success: true });
   mocks.settings.unavailable = true;
   mocks.settings.maxDiscountPercentage = 30;
   mocks.settings.refreshSettings.mockClear();
@@ -226,6 +250,7 @@ beforeEach(() => {
   mocks.confirmationError = false;
   mocks.editOrder = null;
   mocks.draftFreezeError = false;
+  mocks.confirmationFreezeError = false;
   mocks.inspect = null;
   mocks.applyEditSettlement.mockReset();
   mocks.recoverySnapshot.mockReset().mockResolvedValue({ id: 'pre-action-snapshot' });
@@ -850,4 +875,175 @@ describe('MenuModal paid edit corrections (06/10/2026)', () => {
     expect(commit).not.toHaveBeenCalled();
     expect(draftStorage.draft?.phase).toBe('editing');
   });
+});
+
+
+describe('coupon and loyalty checkout admission', () => {
+  it('removes the coupon and recomputes the discount when the qualifying basket shrinks', async () => {
+    mocks.settings.unavailable = false;
+    renderMenu();
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Apply coupon'));
+    await waitFor(() => expect(screen.getByTestId('applied-coupon').textContent).toBe('SAVE'));
+    expect(screen.getByTestId('coupon-discount').textContent).toBe('1.6');
+    fireEvent.click(screen.getByText('Remove first item'));
+    await waitFor(() => expect(screen.getByTestId('applied-coupon').textContent).toBe('none'));
+    expect(screen.getByTestId('coupon-discount').textContent).toBe('0');
+    expect(mocks.toastError).toHaveBeenCalledWith("Your order doesn't meet this coupon's minimum amount");
+  });
+
+  it.each(['cash', 'split'])('rechecks a coupon that expires while the payment picker is open (%s)', async method => {
+    mocks.settings.unavailable = false;
+    mocks.coupon.min_order_amount = 0;
+    mocks.coupon.expires_at = new Date(Date.now() + 60000).toISOString();
+    const complete = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Apply coupon'));
+    await waitFor(() => expect(screen.getByTestId('applied-coupon').textContent).toBe('SAVE'));
+    fireEvent.click(screen.getByText('Checkout'));
+    await screen.findByTestId('payment-modal');
+    // Time passes without a basket update or a render that would remove it.
+    const later = Date.now() + 120000;
+    vi.spyOn(Date, 'now').mockReturnValue(later);
+    fireEvent.click(screen.getByText(method === 'cash' ? 'Confirm cash' : 'Confirm split'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('This coupon has expired'));
+    expect(complete).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
+  });
+
+  it('a refused loyalty debit keeps the cart editable and removes the prepared discount before save', async () => {
+    mocks.settings.unavailable = false;
+    mocks.loyaltyEnabled = true;
+    mocks.redeem.mockRejectedValue(new Error('Insufficient balance'));
+    const complete = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={{ id: '11111111-1111-4111-8111-111111111111', name: 'Customer' }} onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Redeem points'));
+    fireEvent.click(await screen.findByText('Use 100 points'));
+    await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('loyalty.checkoutRefused'));
+    expect(complete).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
+    expect(screen.getByTestId('loyalty-applied').textContent).toBe('0');
+  });
+});
+
+
+it.each([['Admit QR', 'Confirm TWINT receipt', 'twint'], ['Admit card', 'Complete approved card', 'card']])('retains the frozen coupon total after payment admission: %s', async (admit, confirm, method) => {
+  mocks.settings.unavailable = false;
+  mocks.coupon.min_order_amount = 0;
+  mocks.coupon.expires_at = new Date(Date.now() + 60000).toISOString();
+  const complete = vi.fn(async submission => {
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    expect(draftStorage.draft.submission).toEqual(JSON.parse(JSON.stringify(submission)));
+    return true;
+  });
+  render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+  fireEvent.click(screen.getByText('Add espresso'));
+  fireEvent.click(screen.getByText('Apply coupon'));
+  await waitFor(() => expect(screen.getByTestId('applied-coupon').textContent).toBe('SAVE'));
+  fireEvent.click(screen.getByText('Checkout'));
+  fireEvent.click(await screen.findByText(admit));
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('checkout_pending'));
+  expect(draftStorage.draft.submission).toMatchObject({ total: 7.2, coupon_discount_amount: 0.8, total_discount_amount: 0.8, paymentData: { method, amount: 7.2 } });
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120000);
+  fireEvent.click(screen.getByText(confirm));
+  await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({ total: 7.2, coupon_code: 'SAVE', coupon_discount_amount: 0.8, total_discount_amount: 0.8, paymentData: expect.objectContaining({ method, amount: 7.2 }) }));
+  expect(mocks.toastError).not.toHaveBeenCalledWith('This coupon has expired');
+});
+
+
+it('does not redeem loyalty again after the admitted QR receipt is confirmed', async () => {
+  mocks.settings.unavailable = false;
+  mocks.loyaltyEnabled = true;
+  const complete = vi.fn(async () => true);
+  render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={{ id: '11111111-1111-4111-8111-111111111111', name: 'Customer' }} onOrderComplete={complete} />);
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+  fireEvent.click(screen.getByText('Add espresso'));
+  fireEvent.click(screen.getByText('Redeem points'));
+  fireEvent.click(await screen.findByText('Use 100 points'));
+  await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+  fireEvent.click(screen.getByText('Checkout'));
+  fireEvent.click(await screen.findByText('Admit loyalty QR'));
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('checkout_pending'));
+  expect(mocks.redeem).toHaveBeenCalledOnce();
+  mocks.redeem.mockRejectedValue(new Error('Program disabled after the customer paid'));
+  fireEvent.click(screen.getByText('Confirm loyalty receipt'));
+  await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+  expect(mocks.redeem).toHaveBeenCalledOnce();
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({ total: 7, loyalty_discount_amount: 1, loyalty_checkout_secured: true }));
+});
+
+
+it('recovers the confirmed original TWINT receipt after confirmation persistence failed, without a new admission', async () => {
+  mocks.settings.unavailable = false;
+  mocks.coupon.min_order_amount = 0;
+  mocks.coupon.expires_at = new Date(Date.now() + 60000).toISOString();
+  const complete = vi.fn(async () => true);
+  render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+  fireEvent.click(screen.getByText('Add espresso'));
+  fireEvent.click(screen.getByText('Apply coupon'));
+  await waitFor(() => expect(screen.getByTestId('applied-coupon').textContent).toBe('SAVE'));
+  fireEvent.click(screen.getByText('Checkout'));
+  fireEvent.click(await screen.findByText('Admit QR'));
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('checkout_pending'));
+  const originalId = draftStorage.draft.checkoutRequestId;
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120000);
+  mocks.confirmationFreezeError = true;
+  fireEvent.click(screen.getByText('Confirm TWINT receipt'));
+  await screen.findByText('modals.menu.draftSaveFailed');
+  expect(complete).not.toHaveBeenCalled();
+  mocks.confirmationFreezeError = false;
+  fireEvent.click(screen.getByText('Check original checkout'));
+  await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: originalId, total: 7.2, coupon_discount_amount: 0.8,
+    paymentData: expect.objectContaining({ method: 'twint', amount: 7.2, idempotencyKey: 'admitted-twint' }) }));
+});
+
+
+it.each(['paid', 'not-paid'])('recovers an unconfirmed TWINT admission after restart: %s', async decision => {
+  mocks.settings.unavailable = false;
+  mocks.loyaltyEnabled = true;
+  const customer = { id: '11111111-1111-4111-8111-111111111111', name: 'Customer' };
+  const complete = vi.fn(async () => true);
+  const first = render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={customer} onOrderComplete={complete} />);
+  await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+  fireEvent.click(screen.getByText('Add espresso'));
+  fireEvent.click(screen.getByText('Redeem points'));
+  fireEvent.click(await screen.findByText('Use 100 points'));
+  await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+  fireEvent.click(screen.getByText('Checkout'));
+  fireEvent.click(await screen.findByText('Admit loyalty QR'));
+  await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('admitted'));
+  const original = JSON.parse(JSON.stringify(draftStorage.draft.submission));
+  expect(mocks.redeem).toHaveBeenCalledOnce();
+  first.unmount();
+  render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={customer} onOrderComplete={complete} />);
+  fireEvent.click(await screen.findByTestId(decision === 'paid' ? 'twint-recover-paid' : 'twint-recover-not-paid'));
+  if (decision === 'paid') {
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(complete).toHaveBeenCalledWith({ ...original, paymentData: { ...original.paymentData,
+      metadata: { provider: 'twint', confirmation: 'cashier', confirmation_action: 'confirm' } } });
+    expect(draftStorage.draft).toBeNull();
+    expect(mocks.redeem).toHaveBeenCalledOnce();
+  } else {
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(draftStorage.draft.submission).toBeUndefined();
+    expect(complete).not.toHaveBeenCalled();
+    expect(getBridge().invoke).toHaveBeenCalledWith('loyalty_release_redemption', { arg0: { orderId: original.clientRequestId } });
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(mocks.redeem).toHaveBeenCalledTimes(2);
+  }
 });

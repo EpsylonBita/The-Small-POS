@@ -1,3 +1,5 @@
+import { secureLoyaltyCheckout, LoyaltyCheckoutRefused } from '../../services/LoyaltyCheckout';
+import { SalonCatalogPicker } from '../../pages/verticals/salon/SalonCatalogPicker';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
@@ -64,7 +66,7 @@ import {
 import { isLegacyFallbackAddress } from '../../utils/customer-addresses';
 import { resolvePersistedCustomerId } from '../../utils/persisted-customer-id';
 import { buildPickupOrderDetails, pickupCustomerIdentity, readPickupCustomerDraft } from '../../utils/pickup-customer';
-import { resolveCouponErrorKey, COUPON_ERROR_FALLBACKS } from '../../utils/couponErrors';
+import { couponEligibilityError, resolveCouponErrorKey, COUPON_ERROR_FALLBACKS } from '../../utils/couponErrors';
 import { shouldBypassPaymentForTableOrder } from '../../utils/tableOrderFlow';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../../lib';
@@ -94,6 +96,13 @@ type MenuModalCartItem = MenuCartItem & {
  * default. Android copies the original values (`PaidOrderEditService`).
  */
 const RETAINED_LINE_FISCAL_FIELDS = [
+  ['service_id', 'serviceId'],
+  ['appointment_id', 'appointmentId'],
+  ['staff_id', 'staffId'],
+  ['retail_product_id', 'retailProductId'],
+  ['retail_variant_id', 'retailVariantId'],
+  ['line_role', 'lineRole'],
+  ['metadata', 'metadata'],
   ['vat_category_code', 'vatCategoryCode'],
   ['price_includes_vat', 'priceIncludesVat'],
   ['vat_rate_percent', 'vatRatePercent'],
@@ -408,6 +417,7 @@ export function isMenuTopMostDialog(
 }
 
 interface MenuModalProps {
+  salonMode?: boolean;
   isOpen: boolean;
   onClose: () => void;
   draftContext?: Record<string, any>;
@@ -447,6 +457,7 @@ interface MenuModalProps {
     } | null;
     loyalty_discount_amount?: number;
     loyalty_points_redeemed?: number;
+    loyalty_checkout_secured?: boolean;
     total_discount_amount?: number;
     is_ghost?: boolean;
     ghost_source?: string | null;
@@ -476,6 +487,7 @@ interface MenuModalProps {
 export const MenuModal: React.FC<MenuModalProps> = ({
   isOpen,
   onClose,
+  salonMode: requestedSalonMode = false,
   draftContext,
   onDraftRestore,
   onRecoveredOrder,
@@ -538,6 +550,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
   const [cartItems, setCartItems] = useState<MenuModalCartItem[]>([]);
   const draftPersistence = useCheckoutDraftPersistence(isOpen);
+  const admittedCheckoutRef = useRef<{ submission: Record<string, any>; confirmed: boolean; fallbackOrderId?: string } | null>(null);
+  useEffect(() => { if (!isOpen) admittedCheckoutRef.current = null; }, [isOpen]);
+  const salonMode = requestedSalonMode || draftPersistence.restored?.context.salonMode === true;
   const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
   const restoredDraftRef = useRef<string | null>(null);
   const contextRestoreRequestedRef = useRef<string | null>(null);
@@ -748,7 +763,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const hasCustomerInfo = !!(customerChipName || customerChipPhone);
 
   useKdsLiveDraftSync({
-    enabled: !editMode,
+    enabled: !editMode && !salonMode,
     isOpen,
     cartItems,
     orderType,
@@ -1478,7 +1493,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // Reset cart when opening in non-edit mode (only on first open)
         if (!hasLoadedItemsRef.current) {
           hasLoadedItemsRef.current = true;
-          // Don't reset cart here - let it be managed by handleAddToCart
+          if (salonMode && initialCartItems.length && !restoredDraftRef.current) setCartItems(initialCartItems);
         }
       }
     };
@@ -1944,8 +1959,18 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }));
   };
 
-  const handleRemoveLoyaltyRedemption = () => {
-    setAppliedLoyaltyRedemption(null);
+  const handleRemoveLoyaltyRedemption = async () => {
+    if (draftPersistence.isPending()) return;
+    setIsLocalProcessing(true);
+    try {
+      const released = await bridge.loyalty.releaseRedemption({ orderId: draftPersistence.identity() });
+      if (released?.success !== true) throw new Error('LOYALTY_RELEASE_NOT_CONFIRMED');
+      setAppliedLoyaltyRedemption(null);
+    } catch {
+      toast.error(t('modals.menu.draftRecoveryUnavailable'));
+    } finally {
+      setIsLocalProcessing(false);
+    }
   };
 
   const buildMenuOfferCartItems = useCallback((items: MenuModalCartItem[]): OfferEvaluationCartItem[] => {
@@ -2138,7 +2163,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // gave 1.0050000000000001 here and 1.01 on the server, and the two disagreed by a cent on
   // the receipt.
   const calculateCouponDiscount = (): number => {
-    if (!appliedCoupon) return 0;
+    if (admittedCheckoutRef.current) return admittedCheckoutRef.current.submission.coupon_discount_amount ?? 0;
+    if (!appliedCoupon || couponEligibilityError(appliedCoupon, cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0))) return 0;
     const subtotal = Math.max(
       cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) - (offerEvaluation?.discount_total ?? 0),
       0,
@@ -2179,6 +2205,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   ? 'loading'
                   : 'requires_selection';
   const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+  const checkAppliedCoupon = () => {
+    if (admittedCheckoutRef.current || draftPersistence.isPending() || !appliedCoupon) return true;
+    const reasonKey = couponEligibilityError(appliedCoupon, cartSubtotal);
+    if (!reasonKey) return true;
+    setAppliedCoupon(null);
+    const message = t(reasonKey, COUPON_ERROR_FALLBACKS[reasonKey]);
+    setCouponError(message);
+    toast.error(message);
+    return false;
+  };
+
+  useEffect(() => {
+    checkAppliedCoupon();
+  }, [appliedCoupon, cartSubtotal, t]);
+
   const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
   const matchedOfferNames: string[] = Array.from(
     new Set(
@@ -2412,7 +2453,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const draftSnapshot = {
     cartItems,
     context: { ...draftContext, orderType, selectedCustomer, selectedAddress, roomChargeContext,
-      editMode, editOrderId, editSupabaseId, editSourceOrderType, editHeaders,
+      salonMode, editMode, editOrderId, editSupabaseId, editSourceOrderType, editHeaders,
       editExpectedVersion: editExpectedVersionRef.current, editOriginalOrder: editOriginalOrderRef.current,
       supersedesEditEvent: supersedesEditEventRef.current },
     state: { manualDiscountMode, manualDiscountValue, manualDeliveryFee, pickupCustomerDraft, pickupCustomerEdited: pickupCustomerEditedRef.current,
@@ -2477,13 +2518,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     void draftPersistence.persist(draftSnapshot).catch(draftPersistence.failedSave);
   }, [isOpen, draftPersistence.status, draftSnapshotSignature]);
 
-  const recoverSavedCheckout = async () => {
+  const recoverSavedCheckout = async (twintDecision?: 'paid') => {
     if (draftRecoveryInFlight.current || isLocalProcessing) return;
     draftRecoveryInFlight.current = true;
     setDraftRecoveryBusy(true);
     try {
       let proof = await draftPersistence.inspect();
-      const original = draftPersistence.restored?.submission;
+      let original = draftPersistence.restored?.submission;
       if (['declined', 'not_sent', 'not_charged'].includes(proof.outcome) && original?.paymentData?.method === 'card') {
         // The command rechecks the stored refusal and draft CAS atomically.
         // Rehydration propagates the renewed identity to the parent before Pay.
@@ -2562,7 +2603,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       }
       if (proof.outcome === 'not_found' || proof.outcome === 'declined') {
         const method = original?.paymentData?.method;
-        const noProviderCollection = ['cash', 'table', 'pending'].includes(method) ||
+        let confirmedOnRecovery = false;
+        if (proof.outcome === 'not_found' && twintDecision === 'paid' && method === 'twint' &&
+          draftPersistence.restored?.state.paymentAdmission === 'admitted') {
+          original = await draftPersistence.confirmPaymentAdmission({ ...original!.paymentData, metadata: {
+            ...original!.paymentData.metadata, provider: 'twint', confirmation: 'cashier', confirmation_action: 'confirm',
+          } });
+          confirmedOnRecovery = true;
+        }
+        const confirmedTwintReceipt = method === 'twint' &&
+          (confirmedOnRecovery || draftPersistence.restored?.state.paymentAdmission === 'confirmed') &&
+          original?.paymentData?.currency === 'CHF' && Boolean(original?.paymentData?.idempotencyKey) &&
+          original?.paymentData?.metadata?.provider === 'twint' &&
+          original?.paymentData?.metadata?.confirmation === 'cashier' &&
+          ['confirm', 'skip'].includes(original?.paymentData?.metadata?.confirmation_action);
+        const noProviderCollection = ['cash', 'table', 'pending'].includes(method) || confirmedTwintReceipt ||
           (original?.is_ghost === true && !method);
         if (original && noProviderCollection && onOrderComplete) {
           // Replay the exact confirmed request. A not_found read never permits
@@ -2633,6 +2688,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handleCheckout = async () => {
+    if (!checkAppliedCoupon()) return;
     if (draftPersistence.status !== 'ready' || draftPersistence.isPending() || editSubmissionInFlight.current ||
       checkoutSaveInFlight.current) return;
     const ownsEditSubmission = Boolean(editMode && editOrderId && onEditComplete);
@@ -2780,7 +2836,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
 
     if (shouldBypassPaymentWithGhostMode) {
-      await handlePaymentComplete(undefined);
+      if (await admitCheckoutPayment(undefined)) await handlePaymentComplete(undefined);
       return;
     }
 
@@ -2792,7 +2848,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // to reach PaymentModal so the room_charge tender appears and posts to the folio.
       hasRoomCharge: Boolean(roomChargeContext?.roomId && roomChargeContext?.activeFolioId),
     })) {
-      await handlePaymentComplete({ method: 'table', status: 'pending', amount: 0 });
+      const paymentData = { method: 'table', status: 'pending', amount: 0 };
+      if (await admitCheckoutPayment(paymentData)) await handlePaymentComplete(paymentData);
       return;
     }
 
@@ -2883,85 +2940,146 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     );
   };
 
+  const prepareCheckoutDiscounts = async () => {
+    if (!checkAppliedCoupon()) return false;
+    if (!effectiveLoyaltyRedemption || shouldBypassPaymentWithGhostMode) return true;
+    try {
+      await secureLoyaltyCheckout({ clientRequestId: draftPersistence.identity() }, {
+        customer_id: effectiveLoyaltyRedemption.customerId,
+        points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+      }, bridge.loyalty);
+      return true;
+    } catch (error) {
+      if (error instanceof LoyaltyCheckoutRefused) {
+        setAppliedLoyaltyRedemption(null);
+        setShowPaymentModal(false);
+        setCheckoutPhase('editing');
+        toast.error(t('loyalty.checkoutRefused'));
+      } else {
+        toast.error(t('modals.menu.draftRecoveryUnavailable'));
+      }
+      return false;
+    }
+  };
+
+  const buildCheckoutSubmission = (paymentData?: any, isGhostOrder = shouldBypassPaymentWithGhostMode) => {
+    const ghostMetadata = buildGhostMetadata();
+    return {
+      clientRequestId: draftPersistence.identity(),
+      items: cartItems,
+      total: discountedSubtotal,
+      ...checkoutCustomerDetails,
+      address: selectedAddress || null, // Explicitly pass null if undefined
+      orderType,
+      paymentData,
+      loyalty_checkout_secured: Boolean(effectiveLoyaltyRedemption && !isGhostOrder),
+      discountPercentage: currentDiscountPercentage,
+      discountAmount: currentManualDiscountAmount,
+      manualDiscountMode,
+      manualDiscountValue,
+      total_discount_amount: totalDiscountAmount,
+      ...(effectiveLoyaltyRedemption ? {
+        loyalty_redemption: {
+          customer_id: effectiveLoyaltyRedemption.customerId,
+          points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+          discount_amount: currentLoyaltyDiscountAmount,
+        },
+        loyalty_discount_amount: currentLoyaltyDiscountAmount,
+        loyalty_points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
+      } : {}),
+      is_ghost: isGhostOrder,
+      ghost_source: isGhostOrder ? 'manual_code_x_1' : null,
+      ghost_metadata: ghostMetadata,
+      deliveryFee: resolvedDeliveryFee,
+      deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
+      ...(appliedCoupon ? {
+        coupon_id: appliedCoupon.id,
+        coupon_code: appliedCoupon.code,
+        coupon_discount_amount: currentCouponDiscountAmount,
+      } : {}),
+    };
+  };
+
+  const admitCheckoutPayment = async (paymentData?: any) => {
+    const original = admittedCheckoutRef.current;
+    if (original) {
+      // The folio refused this already-saved order. Its replacement tender
+      // keeps the original quote; the existing-order payment journal owns it.
+      return Boolean(original.fallbackOrderId && paymentData?.roomChargeFallback === true &&
+        paymentData.existingOrderId === original.fallbackOrderId && paymentData.amount === original.submission.paymentData.amount);
+    }
+    if (draftPersistence.isPending()) return false;
+    if (!await prepareCheckoutDiscounts()) return false;
+    const { ordinaryOwner: _owner, ...durablePayment } = paymentData || {};
+    const submission = JSON.parse(JSON.stringify(buildCheckoutSubmission(paymentData ? durablePayment : undefined)));
+    admittedCheckoutRef.current = { submission, confirmed: false };
+    try {
+      await draftPersistence.freeze({ ...draftSnapshot, state: { ...draftSnapshot.state, paymentAdmission: 'admitted' } }, submission);
+      return true;
+    } catch {
+      // No QR or terminal operation was started. The retained draft owns recovery.
+      setShowPaymentModal(false);
+      setCheckoutPhase('editing');
+      return false;
+    }
+  };
+
+  const cancelCheckoutPaymentAdmission = async () => {
+    if (draftRecoveryInFlight.current) return false;
+    const admission = admittedCheckoutRef.current;
+    if (!admission && !(draftPersistence.isPending() && draftPersistence.restored?.state.paymentAdmission === 'admitted')) return true;
+    if (admission?.confirmed) return false;
+    draftRecoveryInFlight.current = true;
+    setDraftRecoveryBusy(true);
+    try {
+      await draftPersistence.cancelPaymentAdmission();
+      admittedCheckoutRef.current = null;
+      setShowPaymentModal(false);
+      setCheckoutPhase('editing');
+      return true;
+    } catch {
+      toast.error(t('modals.menu.draftRecoveryUnavailable'));
+      return false;
+    } finally { draftRecoveryInFlight.current = false; setDraftRecoveryBusy(false); }
+  };
+
   const handlePaymentComplete = async (paymentData?: any): Promise<boolean> => {
     setIsLocalProcessing(true);
     setCheckoutPhase('finishing');
-    const isGhostOrder = shouldBypassPaymentWithGhostMode;
-    const ghostMetadata = buildGhostMetadata();
-
-    // Debug: Log cart items with notes, categoryName, and customizations before passing to onOrderComplete
-    console.log('[MenuModal.handlePaymentComplete] cartItems details:', cartItems.map(item => ({
-      name: item.name,
-      categoryName: item.categoryName,
-      customizationsCount: item.customizations?.length || 0,
-      customizations: item.customizations,
-      notes: item.notes
-    })));
-
-    // Log address state for debugging
-    console.log('[MenuModal.handlePaymentComplete] selectedAddress:', selectedAddress);
-    console.log('[MenuModal.handlePaymentComplete] orderType:', orderType);
-    console.log('[MenuModal.handlePaymentComplete] selectedCustomer:', selectedCustomer);
-
-    // Note: Address validation is NOT enforced here because:
-    // 1. OrderDashboard has comprehensive multi-source address resolution with database fallback
-    // 2. The customer may have an address in the database (customers.address or customer_addresses table)
-    //    that isn't passed to MenuModal but will be resolved by OrderDashboard
-    // 3. Blocking here would prevent legitimate orders where address is in the database
-    // OrderDashboard.handleOrderComplete will validate and show error if address truly cannot be resolved
-
     try {
+      const admission = admittedCheckoutRef.current;
+      if (!admission) throw new Error('CHECKOUT_DRAFT_ADMISSION_REQUIRED');
+      admission.confirmed = true;
+      // Eligibility and the debit were secured before collection. Only receipt
+      // evidence is added now; all prices, discounts and identity stay frozen.
+      const isRoomChargeFallback = admission.fallbackOrderId && paymentData?.roomChargeFallback === true && paymentData.existingOrderId === admission.fallbackOrderId;
+      const submission = isRoomChargeFallback
+        ? { ...admission.submission, paymentData }
+        : paymentData
+        ? await draftPersistence.confirmPaymentAdmission(paymentData)
+        : admission.submission;
       if (onOrderComplete) {
-        const submission = {
-          clientRequestId: draftPersistence.identity(),
-          items: cartItems,
-          total: discountedSubtotal,
-          ...checkoutCustomerDetails,
-          address: selectedAddress || null, // Explicitly pass null if undefined
-          orderType,
-          paymentData,
-          discountPercentage: currentDiscountPercentage,
-          discountAmount: currentManualDiscountAmount,
-          manualDiscountMode,
-          manualDiscountValue,
-          total_discount_amount: totalDiscountAmount,
-          ...(effectiveLoyaltyRedemption ? {
-            loyalty_redemption: {
-              customer_id: effectiveLoyaltyRedemption.customerId,
-              points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
-              discount_amount: currentLoyaltyDiscountAmount,
-            },
-            loyalty_discount_amount: currentLoyaltyDiscountAmount,
-            loyalty_points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
-          } : {}),
-          is_ghost: isGhostOrder,
-          ghost_source: isGhostOrder ? 'manual_code_x_1' : null,
-          ghost_metadata: ghostMetadata,
-          deliveryFee: resolvedDeliveryFee,
-          deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
-          ...(appliedCoupon ? {
-            coupon_id: appliedCoupon.id,
-            coupon_code: appliedCoupon.code,
-            coupon_discount_amount: currentCouponDiscountAmount,
-          } : {}),
+        const completionSubmission = { ...submission,
+          ...(paymentData?.ordinaryOwner ? { paymentData: { ...submission.paymentData, ordinaryOwner: paymentData.ordinaryOwner } } : {}),
         };
-        // The ordinary collection owner is an in-memory claim, never a journal field.
-        const { ordinaryOwner: _owner, ...durablePaymentData } = paymentData || {};
-        await draftPersistence.freeze(draftSnapshot, { ...submission, paymentData: durablePaymentData });
-        const completionResult = await onOrderComplete(submission);
-
+        const completionResult = await onOrderComplete(completionSubmission as any);
+        if (paymentData && completionSubmission.paymentData) Object.assign(paymentData, completionSubmission.paymentData);
+        if (completionResult === false && paymentData?.roomChargeFallback === true && paymentData.existingOrderId) {
+          admission.fallbackOrderId = paymentData.existingOrderId;
+        }
         if (completionResult === false) {
           setIsLocalProcessing(false);
           setCheckoutPhase('payment');
           return false;
         }
       }
-
       await draftPersistence.clear(true);
-      // Reset state
+      admittedCheckoutRef.current = null;
+      if (paymentData?.method === 'pending') { setIsLocalProcessing(false); return true; }
+      setAppliedCoupon(null);
       setCartItems([]);
-      setSelectedCategory("all");
-      setSelectedSubcategory("");
+      setSelectedCategory('all');
+      setSelectedSubcategory('');
       setManualDiscountMode('percentage');
       setManualDiscountValue(0);
       setAppliedLoyaltyRedemption(null);
@@ -2981,74 +3099,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
   };
 
-  /**
-   * Called when the user taps "Split" inside PaymentModal.
-   * Creates the order first (with payment_status='pending'), then opens
-   * SplitPaymentModal so the user can allocate amounts to each person.
-   */
+  // Split creates the frozen pending order before its payment modal collects.
   const handleSplitPayment = async (tipSelection: TipSelection | null) => {
-    if (!onOrderComplete) {
-      return;
-    }
-
+    if (!onOrderComplete) return;
     setIsLocalProcessing(true);
-    setCheckoutPhase('finishing');
-    try {
-      // Create the order with pending payment method.
-      // Parent flows detect split checkout and open SplitPaymentModal after creation.
-      const submission = {
-        clientRequestId: draftPersistence.identity(),
-        items: cartItems,
-        total: discountedSubtotal,
-        ...checkoutCustomerDetails,
-        address: selectedAddress || null,
-        orderType,
-        paymentData: {
-          method: 'pending',
-          status: 'pending',
-          amount: 0,
-          tipAmount: tipSelection?.amount,
-          tipRecipientRole: tipSelection?.recipientRole,
-        },
-        discountPercentage: currentDiscountPercentage,
-        discountAmount: currentManualDiscountAmount,
-        manualDiscountMode,
-        manualDiscountValue,
-        total_discount_amount: totalDiscountAmount,
-        ...(effectiveLoyaltyRedemption ? {
-          loyalty_redemption: {
-            customer_id: effectiveLoyaltyRedemption.customerId,
-            points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
-            discount_amount: currentLoyaltyDiscountAmount,
-          },
-          loyalty_discount_amount: currentLoyaltyDiscountAmount,
-          loyalty_points_redeemed: effectiveLoyaltyRedemption.pointsRedeemed,
-        } : {}),
-        is_ghost: false,
-        ghost_source: null,
-        ghost_metadata: null,
-        deliveryFee: resolvedDeliveryFee,
-        deliveryZoneInfo: effectiveDeliveryZoneInfo,
-        ...(appliedCoupon ? {
-          coupon_id: appliedCoupon.id,
-          coupon_code: appliedCoupon.code,
-          coupon_discount_amount: currentCouponDiscountAmount,
-        } : {}),
-      };
-      await draftPersistence.freeze(draftSnapshot, submission);
-      const completionResult = await onOrderComplete(submission);
-
-      if (completionResult === false) {
-        setCheckoutPhase('payment');
-        return;
-      }
-      await draftPersistence.clear(true);
-    } catch (error) {
-      console.error('[MenuModal.handleSplitPayment] Error creating order for split:', error);
-      toast.error(t('modals.menu.orderFailed'));
+    const paymentData = { method: 'pending', status: 'pending', amount: 0,
+      tipAmount: tipSelection?.amount, tipRecipientRole: tipSelection?.recipientRole };
+    if (!await admitCheckoutPayment(paymentData)) { setIsLocalProcessing(false); return; }
+    const completionResult = await handlePaymentComplete(paymentData);
+    if (completionResult === false) {
       setCheckoutPhase('payment');
-    } finally {
-      setIsLocalProcessing(false);
+      return;
     }
   };
 
@@ -3056,6 +3117,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Generate modal title based on mode
   const getModalTitle = () => {
+    if (salonMode) return t('salonSale.title');
     const typeLabel =
       orderType === 'delivery'
         ? t('modals.menu.delivery')
@@ -3116,7 +3178,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   autoFocus
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
-                  placeholder={t('menu.search', { defaultValue: 'Search menu items...' })}
+                  placeholder={salonMode ? t('salonSale.search') : t('menu.search', { defaultValue: 'Search menu items...' })}
                   className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-yellow-400/70 focus:outline-none focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
@@ -3201,9 +3263,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 ? t('modals.menu.editDraftPending', { defaultValue: 'Your original change is saved for recovery. Check its result before making another change.' })
                 : t('modals.menu.draftPending', { defaultValue: 'The original checkout is retained. Confirm its result before starting another payment.' }))
               : t('modals.menu.draftLoading', { defaultValue: 'Loading the saved cart…' }))}
-            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit || isLocalProcessing} onClick={recoverSavedCheckout} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+            {draftPersistence.isPending() && !refusedEdit && <button type="button" disabled={draftRecoveryBusy || isSavingEdit || isLocalProcessing} onClick={() => void recoverSavedCheckout()} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
               {t('modals.menu.draftRecover', { defaultValue: 'Check original checkout' })}
             </button>}
+            {draftPersistence.isPending() && draftPersistence.restored?.state.paymentAdmission === 'admitted' &&
+              draftPersistence.restored?.submission?.paymentData?.method === 'twint' && <>
+              <button type="button" data-testid="twint-recover-paid" disabled={draftRecoveryBusy || isLocalProcessing}
+                onClick={() => void recoverSavedCheckout('paid')} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                {t('modals.menu.twintRecoveryPaid')}
+              </button>
+              <button type="button" data-testid="twint-recover-not-paid" disabled={draftRecoveryBusy || isLocalProcessing}
+                onClick={() => void cancelCheckoutPaymentAdmission()} className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                {t('modals.menu.twintRecoveryNotPaid')}
+              </button>
+            </>}
             {draftPersistence.isPending() && <button
               type="button"
               disabled={draftRecoveryBusy || isSavingEdit || checkoutPhase !== 'editing' || draftPersistence.error === 'draftSaveFailed'}
@@ -3230,6 +3303,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0" style={draftPersistence.status !== 'ready' || draftPersistence.isPending() ? { pointerEvents: 'none', opacity: 0.6 } : undefined}>
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+            {salonMode ? <SalonCatalogPicker branchId={staff?.branchId || ''} organizationId={getCachedTerminalCredentials()?.organizationId || ''}
+              search={menuSearchQuery} menuItems={menuItemsForCategoryTabs} onAdd={line => setCartItems(previous => [...previous, line])} /> : <>
             <MenuCategoryTabs
               selectedCategory={selectedCategory}
               onCategoryChange={(cat) => { setSelectedCategory(cat); setMenuSearchQuery(''); }}
@@ -3257,6 +3332,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onComboSelect={handleComboSelect}
               searchQuery={menuSearchQuery}
             />
+            </>}
           </div>
 
           {/* Right Panel - Cart - Flex layout for proper height inheritance */}
@@ -3374,7 +3450,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       {isOpen && (
         <PaymentModal
           isOpen={showPaymentModal}
-          onClose={() => {
+          onClose={async () => {
+            if (admittedCheckoutRef.current && !admittedCheckoutRef.current.confirmed && !await cancelCheckoutPaymentAdmission()) return;
+            if (effectiveLoyaltyRedemption && checkoutPhase === 'payment' && !draftPersistence.isPending()) {
+              setIsLocalProcessing(true);
+              try {
+                const released = await bridge.loyalty.releaseRedemption({ orderId: draftPersistence.identity() });
+                if (released?.success !== true) throw new Error('LOYALTY_RELEASE_NOT_CONFIRMED');
+              } catch {
+                toast.error(t('modals.menu.draftRecoveryUnavailable'));
+                setIsLocalProcessing(false);
+                return;
+              }
+              setIsLocalProcessing(false);
+            }
             setShowPaymentModal(false);
             // PaymentModal also calls onClose after a successful completion.
             // Keep the menu surface suppressed while the parent is opening the
@@ -3384,11 +3473,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               setCheckoutPhase('editing');
             }
           }}
-          orderTotal={finalOrderTotal}
-          discountAmount={totalDiscountAmount}
+          orderTotal={admittedCheckoutRef.current ? admittedCheckoutRef.current.submission.total + admittedCheckoutRef.current.submission.deliveryFee : finalOrderTotal}
+          discountAmount={admittedCheckoutRef.current?.submission.total_discount_amount ?? totalDiscountAmount}
           deliveryFee={resolvedDeliveryFee}
           orderType={orderType}
           minimumOrderAmount={hasDeliveryPro ? (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0) : 0}
+          onBeforePayment={admitCheckoutPayment}
+          onPaymentAdmissionCancelled={cancelCheckoutPaymentAdmission}
           onPaymentComplete={handlePaymentComplete}
           onSplitPayment={onOrderComplete ? handleSplitPayment : undefined}
           isProcessing={effectiveProcessing}

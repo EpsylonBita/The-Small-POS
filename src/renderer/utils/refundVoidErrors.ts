@@ -30,6 +30,12 @@ const errorText = (error: unknown): string => {
  */
 export function refundVoidErrorMessage(error: unknown, t: Translate, fallback: string): string {
   const text = errorText(error);
+  if (text.includes('PAYMENT_CANONICAL_REFRESH_REQUIRED')) {
+    return String(t('modals.refund.canonicalRefreshRequired'));
+  }
+  if (text.includes('PAYMENT_CANONICAL_RETURN_FINAL')) {
+    return String(t('modals.refund.canonicalReturnFinal'));
+  }
   if (text.includes(PAYMENT_PLACEHOLDER_NOT_MONEY)) {
     return String(
       t('modals.refund.placeholderNotMoney', {

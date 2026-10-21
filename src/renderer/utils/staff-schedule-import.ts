@@ -1,3 +1,5 @@
+import { branchWallTime, branchWallTimeToIso } from './branch-time';
+
 export type ScheduleImportShiftStatus = 'scheduled' | 'active' | 'completed' | 'cancelled';
 
 export interface ImportedScheduleShift {
@@ -20,6 +22,7 @@ export interface ScheduleImportStaff {
 
 export interface ScheduleImportContext {
   staffList?: ScheduleImportStaff[];
+  timeZone?: string;
 }
 
 export interface ScheduleImportResult {
@@ -300,6 +303,7 @@ function resolveDatesForMatrix(
   rows: unknown[][],
   dayMap: Map<number, number>,
   dayHeaderRowIdx: number,
+  timeZone: string,
 ): Map<number, Date> {
   const result = new Map<number, Date>();
 
@@ -313,7 +317,7 @@ function resolveDatesForMatrix(
       if (typeof cell === 'number' && cell > 25000 && cell < 80000) {
         result.set(colIdx, new Date((cell - 25569) * 86400 * 1000));
       } else if (typeof cell === 'string' && /^\d{4}-\d{2}-\d{2}/.test(cell)) {
-        result.set(colIdx, new Date(cell));
+        result.set(colIdx, new Date(`${cell.slice(0, 10)}T00:00:00Z`));
       }
     }
     if (result.size === dayMap.size) {
@@ -321,24 +325,23 @@ function resolveDatesForMatrix(
     }
   }
 
-  const today = new Date();
+  const today = new Date(`${branchWallTime(new Date(), timeZone).slice(0, 10)}T00:00:00Z`);
   const monday = new Date(today);
-  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
-  monday.setHours(0, 0, 0, 0);
+  monday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
 
   for (const [colIdx, weekday] of dayMap.entries()) {
     const date = new Date(monday);
-    date.setDate(monday.getDate() + ((weekday + 6) % 7));
+    date.setUTCDate(monday.getUTCDate() + ((weekday + 6) % 7));
     result.set(colIdx, date);
   }
   return result;
 }
 
-function buildISO(date: Date, hour: number, minute: number, addDays: number): string {
+function buildISO(date: Date, hour: number, minute: number, addDays: number, timeZone: string): string {
   const next = new Date(date);
-  next.setDate(next.getDate() + addDays);
-  next.setHours(hour, minute, 0, 0);
-  return next.toISOString();
+  next.setUTCDate(next.getUTCDate() + addDays);
+  next.setUTCHours(hour, minute, 0, 0);
+  return branchWallTimeToIso(next.toISOString().slice(0, 19), timeZone);
 }
 
 function parseMatrixBlock(
@@ -348,7 +351,8 @@ function parseMatrixBlock(
   ctx: ScheduleImportContext | undefined,
   blockEndIdx: number,
 ): { shifts: ImportedScheduleShift[]; unmatched: Set<string> } {
-  const dates = resolveDatesForMatrix(rows, dayMap, dayHeaderRowIdx);
+  if (!ctx?.timeZone) throw new Error('TIMEZONE_UNAVAILABLE');
+  const dates = resolveDatesForMatrix(rows, dayMap, dayHeaderRowIdx, ctx.timeZone);
   const shifts: ImportedScheduleShift[] = [];
   const unmatched = new Set<string>();
 
@@ -385,12 +389,13 @@ function parseMatrixBlock(
       if (!parsed || !baseDate) {
         continue;
       }
-      const startTime = buildISO(baseDate, parsed.sH, parsed.sM, parsed.startNextDay ? 1 : 0);
+      const startTime = buildISO(baseDate, parsed.sH, parsed.sM, parsed.startNextDay ? 1 : 0, ctx.timeZone);
       const endTime = buildISO(
         baseDate,
         parsed.eH,
         parsed.eM,
         (parsed.startNextDay ? 1 : 0) + (parsed.crossesMidnight ? 1 : 0),
+        ctx.timeZone,
       );
       shifts.push({
         staffId,

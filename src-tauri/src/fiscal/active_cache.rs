@@ -3,7 +3,7 @@
 //! Implements Task 21a of `.claude/specs/fiscalization-core/tasks.md`.
 //! Satisfies Req 4.10, Req 4.11.
 //!
-//! Fed by [`super::status`] from `GET /api/pos/fiscal/status`. A FRESH
+//! Fed by [`super::status`] from `GET /api/pos/fiscal/status`. A confirmed
 //! "Inactive" answer (the server told us no fiscal plugin is active for this
 //! branch) is used for exactly one thing: queued fiscal rows of that branch
 //! do not hold the Z — neither the close-day guard
@@ -16,10 +16,12 @@
 //! it. Receipts are always queued; the server answers `skipped` for a branch
 //! without a plugin and the row drains.
 //!
-//! "Unknown" (no recent successful poll, or TTL expired) keeps every queued
-//! row fail-closed for the Z.
+//! The closeout verdict survives TTL expiry and restart. A never-confirmed
+//! branch, or a last confirmed active branch, keeps queued rows fail-closed.
 
+use rusqlite::Connection;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -62,6 +64,7 @@ impl CacheEntry {
 #[derive(Default)]
 struct CacheState {
     by_branch: HashMap<String, CacheEntry>,
+    db_path: Option<PathBuf>,
 }
 
 fn state() -> MutexGuard<'static, CacheState> {
@@ -70,6 +73,54 @@ fn state() -> MutexGuard<'static, CacheState> {
         .get_or_init(|| Mutex::new(CacheState::default()))
         .lock()
         .expect("FiscalActiveCache mutex poisoned")
+}
+
+/// Durable last successful status, independent of the display freshness TTL.
+pub const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS fiscal_branch_status (
+    branch_id TEXT PRIMARY KEY NOT NULL,
+    active INTEGER NOT NULL CHECK(active IN (0, 1)),
+    plugin_id TEXT,
+    reason TEXT,
+    confirmed_at_ms INTEGER NOT NULL
+);";
+
+/// Called after migration, before any closeout/drain can inspect the cache.
+/// Restored answers are deliberately stale for display/printed-VAT purposes.
+pub fn initialize(conn: &Connection, db_path: &Path) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT branch_id, active, plugin_id, reason FROM fiscal_branch_status")
+        .map_err(|e| format!("read confirmed fiscal statuses: {e}"))?;
+    let entries = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CacheEntry {
+                    active: row.get(1)?,
+                    plugin_id: row.get(2)?,
+                    reason: row.get(3)?,
+                    fetched_at: Instant::now() - FRESHNESS_TTL,
+                },
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut s = state();
+    s.by_branch.clear();
+    for entry in entries {
+        let (branch, entry) = entry.map_err(|e| e.to_string())?;
+        s.by_branch.insert(branch, entry);
+    }
+    s.db_path = Some(db_path.to_path_buf());
+    Ok(())
+}
+
+/// Only closeout uses the last confirmed answer without a TTL. Receipts still
+/// enqueue unconditionally; freshness-sensitive fiscal checks keep `verdict`.
+pub fn closeout_verdict(branch_id: &str) -> CacheVerdict {
+    match state().by_branch.get(branch_id) {
+        Some(entry) if entry.active => CacheVerdict::Active,
+        Some(_) => CacheVerdict::Inactive,
+        None => CacheVerdict::Unknown,
+    }
 }
 
 /// Look up the current verdict for a branch.
@@ -121,13 +172,30 @@ pub fn update_with_status(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     };
+    let branch_id = branch_id.into();
+    let plugin_id = trimmed(plugin_id);
+    let reason = trimmed(reason);
     let mut s = state();
+    if let Some(path) = &s.db_path {
+        let saved = (|| -> rusqlite::Result<()> {
+            let conn = Connection::open(path)?;
+            conn.busy_timeout(Duration::from_secs(5))?;
+            conn.execute("INSERT INTO fiscal_branch_status(branch_id, active, plugin_id, reason, confirmed_at_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(branch_id) DO UPDATE SET
+                active=excluded.active, plugin_id=excluded.plugin_id, reason=excluded.reason, confirmed_at_ms=excluded.confirmed_at_ms",
+                rusqlite::params![branch_id, active, plugin_id, reason, chrono::Utc::now().timestamp_millis()])?;
+            Ok(())
+        })();
+        if let Err(error) = saved {
+            tracing::error!(%error, "Failed to persist confirmed fiscal status");
+        }
+    }
     s.by_branch.insert(
-        branch_id.into(),
+        branch_id,
         CacheEntry {
             active,
-            plugin_id: trimmed(plugin_id),
-            reason: trimmed(reason),
+            plugin_id,
+            reason,
             fetched_at: Instant::now(),
         },
     );
@@ -160,7 +228,7 @@ pub fn fresh_connected_plugin(branch_id: &str) -> Option<String> {
         .and_then(|entry| entry.plugin_id.clone())
 }
 
-/// Branches whose fresh verdict is `Inactive`, for the SQL predicates that
+/// Branches whose last confirmed verdict is `Inactive`, for the SQL predicates that
 /// exempt their fiscal rows from the Z closeout drain. Only ids made of
 /// `[A-Za-z0-9_-]` (UUIDs, test ids) are returned, so a caller may embed them
 /// as SQL string literals.
@@ -170,8 +238,7 @@ pub fn inactive_branch_ids() -> Vec<String> {
         .by_branch
         .iter()
         .filter(|(branch_id, entry)| {
-            entry.is_fresh()
-                && !entry.active
+            !entry.active
                 && !branch_id.is_empty()
                 && branch_id
                     .chars()
@@ -186,7 +253,9 @@ pub fn inactive_branch_ids() -> Vec<String> {
 /// Test-only: clear all cached entries between tests. NEVER call in production.
 #[cfg(test)]
 pub fn reset_for_tests() {
-    state().by_branch.clear();
+    let mut s = state();
+    s.by_branch.clear();
+    s.db_path = None;
 }
 
 #[cfg(test)]
@@ -218,7 +287,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn inactive_branch_ids_lists_only_fresh_inactive_sql_safe_ids() {
+    fn inactive_branch_ids_lists_only_confirmed_inactive_sql_safe_ids() {
         reset_for_tests();
         update("d28cef2e-bbf2-496a-b922-45b497525715", false);
         update("branch_active", true);

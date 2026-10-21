@@ -1058,10 +1058,9 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         let mut returned_cash_target: Option<(String, String, f64)> = None;
 
         if role_type == "cashier" || role_type == "manager" {
-            // Transfer active driver shifts to the next cashier BEFORE calculating expected.
-            // This marks them as transferred and removes their starting amounts from driverCashGiven
-            // so the closing cashier is not held liable for cash given to drivers who haven't returned.
-            let transferred_driver_starting_total = transfer_active_cash_staff(
+            // Move only the return obligation. The float physically left this
+            // drawer, so its original driver_cash_given deduction stays here.
+            transfer_active_cash_staff(
                 &conn,
                 &shift_branch_id,
                 &shift_terminal_id,
@@ -1069,41 +1068,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 &now,
             )?;
 
-            if transferred_driver_starting_total > 0.0 {
-                // Subtract transferred driver starting amounts from driver_cash_given.
-                // W4c dual-write: mirror onto driver_cash_given_cents.
-                let transferred_driver_starting_total_cents =
-                    Cents::round_half_even(transferred_driver_starting_total).as_i64();
-                conn.execute(
-                    "UPDATE cash_drawer_sessions SET
-                    driver_cash_given = COALESCE(driver_cash_given, 0) - ?1,
-                    driver_cash_given_cents = COALESCE(driver_cash_given_cents, 0) - ?2,
-                    updated_at = ?3
-                 WHERE staff_shift_id = ?4",
-                    params![
-                        transferred_driver_starting_total,
-                        transferred_driver_starting_total_cents,
-                        now,
-                        shift_id
-                    ],
-                )
-                .map_err(|e| format!("adjust driver_cash_given for transfers: {e}"))?;
-                info!(
-                    shift_id = %shift_id,
-                    total_deducted = %transferred_driver_starting_total,
-                    "Subtracted transferred driver starting amounts from driver_cash_given"
-                );
-            }
-
-            // Wave 2a (shifts.rs:823 high-severity finding): require all
-            // drivers in this cashier's business-day window to have
-            // closed or been transferred before the cashier can close.
-            // Otherwise the expected-cash formula — which deducts
-            // `driver_given` but adds back `driver_returned` — understates
-            // expected for active drivers, because `driver_returned = 0`
-            // and `inherited_driver_expected_returns` only covers
-            // drivers explicitly transferred to this cashier. Rejecting
-            // here is simpler and auditable.
+            // Require active cash-return staff to have an explicit successor
+            // or a pending handover before closing their cashier.
             // `transfer_active_cash_staff` has already run. Any drivers
             // that were successfully transferred to a specific next
             // cashier have `transferred_to_cashier_shift_id` set;
@@ -1112,8 +1078,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             // is acceptable — the outstanding cash obligation moves
             // with the driver. An "orphan" here is a driver who is
             // BOTH unassigned AND not flagged pending — meaning
-            // transfer never happened and the cashier's formula
-            // would silently understate expected.
+            // transfer never happened and their return obligation is unowned.
             let orphan_active_dependent_drivers: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM staff_shifts
@@ -1271,30 +1236,17 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 staff_payments
             };
 
-            // Inherited driver expected returns: drivers transferred TO this cashier shift
-            // who are still active. Their expected cash return is added to the cashier's expected.
-            let inherited_driver_expected_returns = compute_inherited_cash_staff_expected_returns(
-                &conn,
-                &shift_id,
-                &shift_check_in_time,
-            )?;
-
-            if inherited_driver_expected_returns != 0.0 {
-                info!(
-                    shift_id = %shift_id,
-                    inherited = %inherited_driver_expected_returns,
-                    "Including inherited driver expected returns in cashier formula"
-                );
-            }
-
-            expected = opening_cash + cash_sales
-                - refunds
-                - expenses
-                - deducted_staff_payments
-                - drops
-                - driver_given
-                + driver_returned
-                + inherited_driver_expected_returns;
+            // Outstanding wallets are not drawer cash. Only a recorded return
+            // credits the receiving drawer, including the original float.
+            expected = (Cents::round_half_even(opening_cash)
+                + Cents::round_half_even(cash_sales)
+                - Cents::round_half_even(refunds)
+                - Cents::round_half_even(expenses)
+                - Cents::round_half_even(deducted_staff_payments)
+                - Cents::round_half_even(drops)
+                - Cents::round_half_even(driver_given)
+                + Cents::round_half_even(driver_returned))
+                .to_f64_dp2();
         } else if is_non_financial_role {
             expected = 0.0;
         } else {
@@ -1357,7 +1309,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         let variance = if is_non_financial_role {
             0.0
         } else {
-            closing_cash_to_persist - expected
+            (Cents::round_half_even(closing_cash_to_persist) - Cents::round_half_even(expected))
+                .to_f64_dp2()
         };
         let variance = match gift_terms {
             Some(preparation) => Cents::new(
@@ -3727,18 +3680,17 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
     // wants to diverge.
     let deducted_staff_payments = reconciled_staff_payments;
 
-    let inherited_driver_expected_returns =
-        compute_inherited_cash_staff_expected_returns(conn, shift_id, &check_in_time)?;
-
-    let expected = opening_cash + reconciled_cash_sales
-        - reconciled_refunds
-        - reconciled_expenses
-        - deducted_staff_payments
-        - cash_drops
-        - driver_cash_given
-        + driver_cash_returned
-        + inherited_driver_expected_returns;
-    let variance = closing_cash_amount - expected;
+    let expected = (Cents::round_half_even(opening_cash)
+        + Cents::round_half_even(reconciled_cash_sales)
+        - Cents::round_half_even(reconciled_refunds)
+        - Cents::round_half_even(reconciled_expenses)
+        - Cents::round_half_even(deducted_staff_payments)
+        - Cents::round_half_even(cash_drops)
+        - Cents::round_half_even(driver_cash_given)
+        + Cents::round_half_even(driver_cash_returned))
+    .to_f64_dp2();
+    let variance = (Cents::round_half_even(closing_cash_amount) - Cents::round_half_even(expected))
+        .to_f64_dp2();
 
     // W4c dual-write: corrected expected/variance and shift snapshot mirror.
     let expected_cents_corrected = Cents::round_half_even(expected).as_i64();
@@ -4886,8 +4838,8 @@ fn require_same_recorded_shift_currency(
 
 /// Transfer active driver/server shifts currently assigned to this cashier.
 ///
-/// Marks each shift as transfer-pending and returns the opening cash total so the
-/// closing cashier is no longer charged for float that has not yet come back.
+/// Marks each shift as transfer-pending and returns its opening cash total for
+/// diagnostics. No drawer cash moves until the staff member actually returns.
 fn transfer_active_cash_staff(
     conn: &rusqlite::Connection,
     branch_id: &str,
@@ -5103,56 +5055,6 @@ fn claim_transferred_cash_staff(
     }
 
     Ok(drivers.len())
-}
-
-/// Compute the expected cash returns from inherited driver/server shifts.
-///
-/// These are active staff assigned to this cashier whose shift started before the
-/// cashier checked in, which means the current drawer did not originally issue the float.
-fn compute_inherited_cash_staff_expected_returns(
-    conn: &rusqlite::Connection,
-    cashier_shift_id: &str,
-    cashier_check_in_time: &str,
-) -> Result<f64, String> {
-    let mut stmt = conn
-        .prepare(
-            // W4b-ii: cents-with-real-fallback shim (removed in 4e).
-            "SELECT ss.id, ss.role_type,
-                    COALESCE(ss.opening_cash_amount_cents, CAST(ROUND(ss.opening_cash_amount * 100) AS INTEGER), 0)
-             FROM staff_shifts ss
-             WHERE ss.transferred_to_cashier_shift_id = ?1
-               AND ss.status = 'active'
-               AND ss.role_type IN ('driver', 'server')
-               AND ss.check_in_time < ?2",
-        )
-        .map_err(|e| format!("prepare inherited staff query: {e}"))?;
-
-    let drivers: Vec<(String, String, f64)> = stmt
-        .query_map(params![cashier_shift_id, cashier_check_in_time], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                Cents::new(row.get::<_, i64>(2).unwrap_or(0)).to_f64_dp2(),
-            ))
-        })
-        .map_err(|e| format!("query inherited staff: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    let mut total = 0.0;
-
-    for (staff_shift_id, role_type, opening) in &drivers {
-        let cash_collected = compute_shift_cash_collected(conn, staff_shift_id, role_type)?;
-        let expenses = compute_shift_expenses_total(conn, staff_shift_id);
-        total += if role_type == "driver" {
-            let tips = compute_driver_shift_tip_total_in_window(conn, staff_shift_id, None, None)?;
-            calculate_driver_return(*opening, cash_collected, expenses, tips)
-        } else {
-            opening + cash_collected - expenses
-        };
-    }
-
-    Ok(total)
 }
 
 pub(crate) fn build_cashier_staff_checkout_rows(
@@ -8921,9 +8823,267 @@ mod tests {
     }
 
     #[test]
+    fn tomikro_19_10_driver_float_stays_with_issuing_drawer_and_z() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = handover_test_db();
+        let first = handover_open(&db, "Angeliki", "cashier", 15858, "2026-10-19T16:58:00Z");
+        handover_cash_sale(
+            &db,
+            &first,
+            "till-sale",
+            9733,
+            "2026-10-19T18:00:00Z",
+            false,
+        );
+        let tasos = handover_open(&db, "Tasos", "driver", 2000, "2026-10-19T19:55:00Z");
+        handover_cash_sale(&db, &tasos, "delivery", 4950, "2026-10-19T20:00:00Z", true);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO shift_expenses (currency, id, staff_shift_id, staff_id, branch_id,
+                    expense_type, amount, amount_cents, description, created_at, updated_at)
+                 VALUES ('EUR', 'driver-expense', ?1, 'Tasos', 'b1', 'other', 1.0, 100,
+                    'Driver cash expense', '2026-10-19T20:30:00Z', '2026-10-19T20:30:00Z')",
+                [&tasos],
+            )
+            .unwrap();
+        }
+        let first_close = handover_close(&db, &first, 23146, "2026-10-19T22:21:00Z");
+        assert_eq!(first_close["expected"], 235.91);
+        assert_eq!(
+            Cents::round_half_even(first_close["variance"].as_f64().unwrap()).as_i64(),
+            -445
+        );
+        assert_eq!(handover_drawer_movements(&db, &first), (2000, 0));
+        let first_payload = load_latest_shift_sync_payload(&db, "update", &first);
+        assert_eq!(first_payload["cashDrawer"]["driverCashGiven"], 20.0);
+
+        let second = handover_open(&db, "Alexandra", "cashier", 23146, "2026-10-19T22:21:00Z");
+        assert_eq!(handover_drawer_movements(&db, &second), (0, 0));
+        let returned = handover_close(&db, &tasos, 6850, "2026-10-19T23:59:00Z");
+        assert_eq!(returned["expected"], 68.5);
+        assert_eq!(returned["variance"], 0.0);
+        let gjergji = handover_open(&db, "Gjergji", "driver", 2000, "2026-10-20T00:44:00Z");
+        handover_close(&db, &gjergji, 2000, "2026-10-20T06:02:00Z");
+        assert_eq!(handover_drawer_movements(&db, &second), (2000, 8850));
+        let second_close = handover_close(&db, &second, 30097, "2026-10-20T06:03:00Z");
+        assert_eq!(second_close["expected"], 299.96);
+        assert_eq!(
+            Cents::round_half_even(second_close["variance"].as_f64().unwrap()).as_i64(),
+            101
+        );
+
+        let z = crate::zreport::preview_z_report_for_date(
+            &db,
+            &serde_json::json!({
+                "branchId": "b1", "terminalId": "t1", "date": "2026-10-19",
+            }),
+        )
+        .unwrap();
+        let report = &z["report"]["reportJson"];
+        assert_eq!(report["cashDrawer"]["driverCashGiven"], 40.0);
+        assert_eq!(report["cashDrawer"]["driverCashReturned"], 88.5);
+        assert_eq!(report["cashDrawer"]["totalVariance"], -3.44);
+        assert_eq!(z["report"]["cashVariance"], -3.44);
+        let rows = report["drawers"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let variances: Vec<i64> = rows
+            .iter()
+            .map(|row| Cents::round_half_even(row["variance"].as_f64().unwrap()).as_i64())
+            .collect();
+        assert_eq!(variances, vec![-445, 101]);
+    }
+
+    #[test]
+    fn driver_and_server_float_survive_double_cashier_handover() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        for role in ["driver", "server"] {
+            let db = handover_test_db();
+            let first = handover_open(&db, "first", "cashier", 10000, "2026-10-19T08:00:00Z");
+            let staff = handover_open(&db, "cash-staff", role, 2000, "2026-10-19T09:00:00Z");
+            let closed = handover_close(&db, &first, 8000, "2026-10-19T10:00:00Z");
+            assert_eq!(closed["expected"], 80.0);
+            assert_eq!(closed["variance"], 0.0);
+            let second = handover_open(&db, "second", "cashier", 8000, "2026-10-19T10:00:00Z");
+            let closed = handover_close(&db, &second, 8000, "2026-10-19T12:00:00Z");
+            assert_eq!(closed["expected"], 80.0);
+            assert_eq!(closed["variance"], 0.0);
+            let third = handover_open(&db, "third", "cashier", 8000, "2026-10-19T12:00:00Z");
+            // A correction of the already closed drawer must not add this
+            // still-out wallet to its physical expected cash either.
+            {
+                let conn = db.conn.lock().unwrap();
+                let corrected = recompute_closed_cashier_shift_financial_snapshot(
+                    &conn,
+                    &second,
+                    "2026-10-19T12:01:00Z",
+                )
+                .unwrap();
+                assert_eq!(corrected, (80.0, 0.0));
+            }
+            let returned = handover_close(&db, &staff, 2000, "2026-10-19T13:00:00Z");
+            assert_eq!(returned["expected"], 20.0);
+            handover_close(&db, &third, 10000, "2026-10-19T14:00:00Z");
+            assert_eq!(handover_drawer_movements(&db, &first), (2000, 0));
+            assert_eq!(handover_drawer_movements(&db, &second), (0, 0));
+            assert_eq!(handover_drawer_movements(&db, &third), (0, 2000));
+            let z = crate::zreport::preview_z_report_for_date(
+                &db,
+                &serde_json::json!({"branchId":"b1"}),
+            )
+            .unwrap();
+            let drawer = &z["report"]["reportJson"]["cashDrawer"];
+            assert_eq!(drawer["driverCashGiven"], 20.0);
+            assert_eq!(drawer["driverCashReturned"], 20.0);
+            assert_eq!(drawer["totalVariance"], 0.0);
+        }
+    }
+
+    #[test]
+    fn driver_and_server_same_cashier_return_keeps_float_baseline() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        for role in ["driver", "server"] {
+            let db = handover_test_db();
+            let cashier = handover_open(&db, "cashier", "cashier", 10000, "2026-10-19T08:00:00Z");
+            let staff = handover_open(&db, "cash-staff", role, 2000, "2026-10-19T09:00:00Z");
+            let returned = handover_close(&db, &staff, 2000, "2026-10-19T10:00:00Z");
+            assert_eq!(returned["expected"], 20.0);
+            assert_eq!(returned["variance"], 0.0);
+            assert_eq!(handover_drawer_movements(&db, &cashier), (2000, 2000));
+            let closed = handover_close(&db, &cashier, 10000, "2026-10-19T11:00:00Z");
+            assert_eq!(closed["expected"], 100.0);
+            assert_eq!(closed["variance"], 0.0);
+            let z = crate::zreport::preview_z_report_for_date(
+                &db,
+                &serde_json::json!({"branchId":"b1"}),
+            )
+            .unwrap();
+            assert_eq!(
+                z["report"]["reportJson"]["cashDrawer"]["totalVariance"],
+                0.0
+            );
+        }
+    }
+
+    fn handover_test_db() -> DbState {
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "b1", "EUR");
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-10-19T00:00:00Z",
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn handover_open(
+        db: &DbState,
+        staff: &str,
+        role: &str,
+        opening_cents: i64,
+        at: &str,
+    ) -> String {
+        let opened = open_shift(
+            db,
+            &serde_json::json!({
+                "staffId": staff, "branchId": "b1", "terminalId": "t1", "roleType": role,
+                "openingCash": Cents::new(opening_cents).to_f64_dp2(),
+            }),
+        )
+        .unwrap();
+        let id = opened["shiftId"].as_str().unwrap().to_string();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE staff_shifts SET check_in_time=?1, created_at=?1 WHERE id=?2",
+            params![at, id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET opened_at=?1, created_at=?1 WHERE staff_shift_id=?2",
+            params![at, id],
+        )
+        .unwrap();
+        id
+    }
+
+    fn handover_close(db: &DbState, id: &str, counted_cents: i64, at: &str) -> Value {
+        let closed = close_shift(
+            db,
+            &serde_json::json!({
+                "shiftId": id, "closingCash": Cents::new(counted_cents).to_f64_dp2(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(closed["success"], true, "{closed}");
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE staff_shifts SET check_out_time=?1 WHERE id=?2",
+            params![at, id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET closed_at=?1 WHERE staff_shift_id=?2",
+            params![at, id],
+        )
+        .unwrap();
+        closed
+    }
+
+    fn handover_drawer_movements(db: &DbState, id: &str) -> (i64, i64) {
+        let conn = db.conn.lock().unwrap();
+        let (given, given_cents, returned, returned_cents): (f64, i64, f64, i64) = conn
+            .query_row(
+                // A drawer with no movement keeps NULL cents; readers use the same fallback.
+                "SELECT COALESCE(driver_cash_given, 0),
+                COALESCE(driver_cash_given_cents, CAST(ROUND(COALESCE(driver_cash_given, 0) * 100) AS INTEGER)),
+                COALESCE(driver_cash_returned, 0),
+                COALESCE(driver_cash_returned_cents, CAST(ROUND(COALESCE(driver_cash_returned, 0) * 100) AS INTEGER))
+                FROM cash_drawer_sessions WHERE staff_shift_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(Cents::round_half_even(given).as_i64(), given_cents);
+        assert_eq!(Cents::round_half_even(returned).as_i64(), returned_cents);
+        (given_cents, returned_cents)
+    }
+
+    fn handover_cash_sale(db: &DbState, shift: &str, id: &str, cents: i64, at: &str, driver: bool) {
+        let conn = db.conn.lock().unwrap();
+        let amount = Cents::new(cents).to_f64_dp2();
+        conn.execute(
+            "INSERT INTO orders (currency, id, order_number, branch_id, items, total_amount,
+                total_amount_cents, status, payment_status, order_type, staff_shift_id, created_at, updated_at)
+             VALUES ('EUR', ?1, ?1, 'b1', '[]', ?2, ?3, 'completed', 'paid', ?4, ?5, ?6, ?6)",
+            params![id,amount,cents,if driver {"delivery"} else {"pickup"},shift,at],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (currency, id, order_id, method, amount, amount_cents,
+                status, staff_shift_id, created_at, updated_at)
+             VALUES ('EUR', ?1, ?1, 'cash', ?2, ?3, 'completed', ?4, ?5, ?5)",
+            params![id, amount, cents, shift, at],
+        )
+        .unwrap();
+        if driver {
+            conn.execute(
+                "INSERT INTO driver_earnings (currency, id, driver_id, staff_shift_id, order_id, branch_id,
+                    total_earning, total_earning_cents, payment_method, cash_collected, cash_collected_cents,
+                    cash_to_return, cash_to_return_cents, settled, is_transferred, created_at, updated_at)
+                 VALUES ('EUR', ?1, 'Tasos', ?2, ?1, 'b1', 0.0, 0, 'cash', ?3, ?4, ?3, ?4, 0, 0, ?5, ?5)",
+                params![id,shift,amount,cents,at],
+            ).unwrap();
+        }
+    }
+
+    #[test]
     fn test_cashier_close_transfers_active_drivers() {
         // When a cashier closes, active drivers should be marked is_transfer_pending = 1
-        // and driver_cash_given should be reduced by their starting amounts.
+        // while driver_cash_given retains the float physically issued here.
         let db = test_db();
         seed_operating_currency_for_test(&db, "b1", "EUR");
 
@@ -8999,15 +9159,16 @@ mod tests {
             .unwrap();
         assert_eq!(pending_b, 1, "driver-b should be transfer pending");
 
-        // Verify driver_cash_given was reduced: original 75 - (50 + 25) = 0
-        let dcg: f64 = conn
+        // Both monetary mirrors retain the original 75.00 physical outflow.
+        let (dcg, dcg_cents): (f64, i64) = conn
             .query_row(
-                "SELECT driver_cash_given FROM cash_drawer_sessions WHERE id = 'cd-1'",
+                "SELECT driver_cash_given, driver_cash_given_cents FROM cash_drawer_sessions WHERE id = 'cd-1'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(dcg, 0.0, "driver_cash_given should be 75 - 75 = 0");
+        assert_eq!((dcg, dcg_cents), (75.0, 7500));
+        assert_eq!(result["expected"], 425.0);
     }
 
     #[test]

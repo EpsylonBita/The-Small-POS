@@ -2,6 +2,10 @@
 //! path, stack, identifier, or arbitrary field is included in the returned JSON.
 //! Shared contract: shared/pos/health/runtime-log-events.ts and its fixtures.
 
+// Database-lock lines (database_lock.rs, Tomikro 20/10/2026) keep their fixed
+// code and their lock-site labels, from these fixed lists only. Equal to
+// shared/pos/health/__fixtures__/runtime-log-db-lock.json (tests compare).
+use crate::database_lock::{EVENT_CODES as DB_LOCK_EVENT_CODES, LOCK_LABELS as DB_LOCK_LABELS};
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -860,18 +864,24 @@ fn runtime_error_code(message: &str) -> Option<&'static str> {
 }
 
 fn is_specific_code(code: &str) -> bool {
-    RUNTIME_ERROR_CODES.binary_search(&code).is_ok() || is_checkout_event_code(code)
+    RUNTIME_ERROR_CODES.binary_search(&code).is_ok()
+        || is_checkout_event_code(code)
+        || DB_LOCK_EVENT_CODES.contains(&code)
+}
+
+fn listed(value: &str, list: &[&'static str]) -> Option<&'static str> {
+    list.iter().copied().find(|listed| *listed == value)
 }
 
 fn checkout_event_code(message: &str) -> String {
     // Only a fixed structured field is retained, never prose or arbitrary errors.
-    checkout_field(message, "event_code")
+    structured_field(message, "event_code")
         .filter(|value| is_checkout_event_code(value))
         .unwrap_or("checkout_persistence_event")
         .to_string()
 }
 
-fn checkout_field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
+fn structured_field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
     let mut found = None;
     for (start, _) in message.match_indices(key) {
         let prefix = &message[..start];
@@ -1044,14 +1054,21 @@ pub(super) fn project_line(line: &str) -> Result<Value, &'static str> {
             event["errorCode"] = json!(code);
         }
         if let Some(phase @ ("editing" | "checkout_pending" | "invalid")) =
-            checkout_field(message, "draft_phase")
+            structured_field(message, "draft_phase")
         {
             event["draftPhase"] = json!(phase);
         }
         return Ok(event);
     }
     let message_lower = message.to_ascii_lowercase();
-    let code = if matches!(component, "printing" | "network")
+    let db_lock_code = if component == "database" {
+        structured_field(message, "event_code").and_then(|code| listed(code, DB_LOCK_EVENT_CODES))
+    } else {
+        None
+    };
+    let code = if let Some(code) = db_lock_code {
+        code
+    } else if matches!(component, "printing" | "network")
         && contains_any(&message_lower, &["timeout", "timed out", "os error 10060"])
     {
         "transport_timeout"
@@ -1082,6 +1099,15 @@ pub(super) fn project_line(line: &str) -> Result<Value, &'static str> {
         json!({"timestamp": timestamp, "level": level, "component": component, "eventCode": code});
     if let Some(code) = error_code {
         event["errorCode"] = json!(code);
+    }
+    if db_lock_code.is_some() {
+        for (key, field) in [("lockLabel", "lock_label"), ("holderLabel", "holder_label")] {
+            if let Some(label) =
+                structured_field(message, field).and_then(|label| listed(label, DB_LOCK_LABELS))
+            {
+                event[key] = json!(label);
+            }
+        }
     }
     if component != "unknown"
         && !contains_any(
@@ -1331,6 +1357,81 @@ mod tests {
         assert_eq!(
             runtime_error_code("\"TERMINAL_REBIND_PENDING\": x"),
             Some("TERMINAL_REBIND_PENDING")
+        );
+    }
+
+    /// The production lines project, through the support-bundle projector,
+    /// to their fixed code, labels and duration, and to nothing else.
+    #[test]
+    fn runtime_logs_keep_database_lock_lines_as_the_desktop_writes_them() {
+        use crate::database_lock::{
+            log_slow_wait, log_watchdog_event, SlowWait, WatchdogEvent, UNTRACED,
+        };
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Captured {
+            type Writer = Writer;
+            fn make_writer(&'writer self) -> Writer {
+                Writer(Arc::clone(&self.0))
+            }
+        }
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_slow_wait(SlowWait {
+                label: "checkout_draft_put",
+                holder_label: "parity_queue_process",
+                waited: Duration::from_millis(1_234),
+            });
+            log_watchdog_event(WatchdogEvent::HeldLong {
+                holder_label: UNTRACED,
+                held: Duration::from_millis(3_001),
+            });
+            log_watchdog_event(WatchdogEvent::Released {
+                holder_label: "z_report_generate",
+                held: Duration::from_millis(612_000),
+            });
+        });
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                let mut event =
+                    project_line(line).unwrap_or_else(|reason| panic!("{reason}: {line}"));
+                event.as_object_mut().unwrap().remove("timestamp");
+                event
+            })
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                json!({"level": "warn", "component": "database",
+                    "eventCode": "db_lock_wait_slow", "lockLabel": "checkout_draft_put",
+                    "holderLabel": "parity_queue_process", "durationMs": 1234}),
+                json!({"level": "warn", "component": "database",
+                    "eventCode": "db_lock_held_long", "holderLabel": "untraced",
+                    "durationMs": 3001}),
+                json!({"level": "warn", "component": "database",
+                    "eventCode": "db_lock_released", "holderLabel": "z_report_generate",
+                    "durationMs": 612000}),
+            ],
+            "{text}"
         );
     }
 

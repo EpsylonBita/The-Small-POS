@@ -75,6 +75,20 @@ describe('table check workflow ownership', () => {
     mocks.enqueueUpdate.mockResolvedValue('queued-close');
   });
 
+  it('offers only available tables and compatible checks as merge destinations',async()=>{
+    mocks.get.mockResolvedValue({success:true,data:{success:true,session:makeSession(sourceId,'T01',3)}});
+    const compatible={...t2,id:'SAME',tableNumber:'SAME',status:'occupied',tableSessionId:targetId,currentOrderId:'remote-order'};
+    const independent={...compatible,id:'OTHER',tableNumber:'OTHER',currentOrderId:'other-order'};
+    render(<TableCheckManagerModal {...props} tables={[t1,t2,compatible,independent] as any} />);
+    await waitFor(()=>expect(screen.getByText('Coffee')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button',{name:'Merge'}));
+    await waitFor(()=>expect(screen.getByText('Merge Table')).toBeInTheDocument());
+    const destinations=within(screen.getByRole('listbox',{name:'Table'}));
+    expect(destinations.getByRole('option',{name:/T02/})).toBeInTheDocument();
+    expect(destinations.getByRole('option',{name:/SAME/})).toBeInTheDocument();
+    expect(destinations.queryByRole('option',{name:/OTHER/})).toBeNull();
+  });
+
   it('uses a staff-facing number instead of the internal hash in the table title', async () => {
     const raw='ORD-20261010-1ea711cbfd03e5efc93e924138a8c836';
     mocks.get.mockResolvedValue({ success:true, data:{success:true, session: { ...makeSession(sourceId,'T01',3), opened_at:'2026-10-10T16:29:45Z',

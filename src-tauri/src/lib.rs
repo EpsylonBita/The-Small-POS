@@ -44,6 +44,7 @@ mod core_helpers;
 mod courier_integrity;
 mod customer_display;
 mod data_helpers;
+mod database_lock;
 mod db;
 mod device_admission;
 mod diagnostics;
@@ -55,6 +56,7 @@ pub mod fiscal; // pub so integration tests (tests/*.rs) can exercise enqueue_fo
 mod gift_financial_closing;
 mod gift_financial_opening;
 mod hardware_manager;
+mod hotel_folio;
 mod idempotency;
 mod incident_reporting;
 mod lan_transport;
@@ -769,8 +771,7 @@ pub(crate) async fn reconcile_native_startup(
     commands::settings::reconcile_startup_terminal_binding_with_access(db).await?;
     let report = {
         let connection = db
-            .conn
-            .lock()
+            .lock_traced("repairs_startup_janitor")
             .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE")?;
         repairs::run_startup_staging_janitor(&connection)?
     };
@@ -1012,6 +1013,9 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             }
             let caller_id_manager = Arc::new(callerid::CallerIdManager::new());
             app.manage(db_state);
+            // Names a long hold of the main connection in the support bundle
+            // (db_lock_held_long); it only ever try-locks (Tomikro 20/10/2026).
+            database_lock::start_watchdog(app.handle().clone());
 
             // Auth state
             app.manage(auth::AuthState::new());
@@ -1744,6 +1748,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::loyalty::loyalty_lookup_by_card,
             commands::loyalty::loyalty_earn_points,
             commands::loyalty::loyalty_redeem_points,
+            commands::loyalty::loyalty_release_redemption,
             commands::loyalty::loyalty_get_transactions,
             // Hardware manager
             commands::hardware::hardware_get_status,

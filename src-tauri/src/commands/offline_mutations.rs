@@ -1,10 +1,11 @@
 use chrono::{Duration as ChronoDuration, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, menu, read_local_setting, storage, sync_queue, value_str};
 
 use super::api_bridge::{
@@ -16,41 +17,50 @@ fn now_rfc3339() -> String {
 }
 
 /// Complete unresolved inventory overlays; unlike the queue UI this has no 500-row cap.
+// On the blocking pool, never the window thread or a runtime worker: it reads
+// the main connection and the terminal credentials (Tomikro 20/10/2026, see
+// database_lock.rs).
 #[tauri::command]
-pub fn inventory_snapshot_overlays(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let org = organization_id(&db, &json!({}));
-    let branch = branch_id(&db, &json!({}));
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT table_name, record_id, data FROM parity_sync_queue
+pub async fn inventory_snapshot_overlays(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("inventory_snapshot_overlays", move || {
+        let db = app.state::<db::DbState>();
+        let org = organization_id(&db, &json!({}));
+        let branch = branch_id(&db, &json!({}));
+        let conn = db
+            .lock_traced("inventory_snapshot_overlays")
+            .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT table_name, record_id, data FROM parity_sync_queue
          WHERE organization_id = ?1 AND table_name IN ('products', 'inventory_adjustments')
          AND status IN ('pending', 'processing', 'failed', 'conflict') ORDER BY created_at, rowid",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![org], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?;
-    let mut overlays = Vec::new();
-    for row in rows {
-        let (table, id, payload) = row.map_err(|e| e.to_string())?;
-        let data: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-        if data
-            .get("branch_id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| id != branch)
-        {
-            continue;
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![org], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut overlays = Vec::new();
+        for row in rows {
+            let (table, id, payload) = row.map_err(|e| e.to_string())?;
+            let data: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            if data
+                .get("branch_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != branch)
+            {
+                continue;
+            }
+            overlays.push(json!({ "table": table, "id": id, "data": data }));
         }
-        overlays.push(json!({ "table": table, "id": id, "data": data }));
-    }
-    Ok(json!(overlays))
+        Ok(json!(overlays))
+    })
+    .await
 }
 
 fn object_payload(arg0: Option<Value>, arg1: Option<Value>) -> Result<Value, String> {
@@ -657,6 +667,79 @@ fn patch_reservation_caches(db: &db::DbState, reservation: &Value) -> Result<(),
     })
 }
 
+/// Persist the document and the replay before returning success. The original
+/// create and every follow-up keep their own queue identity.
+fn persist_reservation_mutation(
+    conn: &Connection,
+    reservation: &Value,
+    payload: &Value,
+    operation: &str,
+) -> Result<String, String> {
+    let id = reservation["id"].as_str().ok_or("Missing reservation id")?;
+    let org = reservation["organization_id"]
+        .as_str()
+        .ok_or("Missing organization")?;
+    let branch = reservation["branch_id"].as_str().ok_or("Missing branch")?;
+    conn.execute_batch("SAVEPOINT reservation_write")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let local_id: Option<String> = conn
+            .query_row(
+                "SELECT local_id FROM reservation_local_identity WHERE
+          (local_id=?1 OR server_id=?1) AND organization_id=?2 AND branch_id=?3",
+                params![id, org, branch],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO reservation_local_identity(local_id,server_id,organization_id,branch_id,data)
+          VALUES(?1,?2,?3,?4,?5) ON CONFLICT(local_id) DO UPDATE SET data=excluded.data",
+          params![local_id.as_deref().unwrap_or(id),if operation=="INSERT" {None} else {Some(id)},org,branch,reservation.to_string()]).map_err(|e|e.to_string())?;
+        enqueue_parity_item(
+            conn,
+            "reservations",
+            id,
+            operation,
+            payload,
+            "hospitality",
+            "manual",
+        )
+    })();
+    if result.is_ok() {
+        conn.execute_batch("RELEASE reservation_write")
+    } else {
+        conn.execute_batch("ROLLBACK TO reservation_write; RELEASE reservation_write")
+    }
+    .map_err(|e| e.to_string())?;
+    result
+}
+
+fn reservation_patch(base: &mut Value, payload: &Value) {
+    for (snake, camel) in [
+        ("customer_name", "customerName"),
+        ("customer_phone", "customerPhone"),
+        ("customer_email", "customerEmail"),
+        ("party_size", "partySize"),
+        ("table_id", "tableId"),
+        ("reservation_date", "reservationDate"),
+        ("reservation_time", "reservationTime"),
+        ("duration_minutes", "durationMinutes"),
+        ("special_requests", "specialRequests"),
+        ("cancellation_reason", "cancellationReason"),
+        ("notes", "notes"),
+        ("status", "status"),
+        ("room_id", "roomId"),
+        ("room_number", "roomNumber"),
+        ("check_in_date", "checkInDate"),
+        ("check_out_date", "checkOutDate"),
+    ] {
+        if let Some(value) = payload.get(snake).or_else(|| payload.get(camel)) {
+            base[snake] = value.clone();
+        }
+    }
+    base["updated_at"] = json!(now_rfc3339());
+}
+
 #[tauri::command]
 pub async fn offline_reservation_create(
     arg0: Option<Value>,
@@ -664,42 +747,40 @@ pub async fn offline_reservation_create(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
+    let mut payload = object_payload(arg0, arg1)?;
+    let org = organization_id(&db, &json!({}));
+    let branch = branch_id(&db, &json!({}));
+    if org == "pending-org" || branch.is_empty() {
+        return Err("RESERVATION_SCOPE_REQUIRED".into());
+    }
+    payload["organization_id"] = json!(org);
+    payload["branch_id"] = json!(branch);
+    if read_string(&payload, &["reservationType"]).as_deref() == Some("room")
+        || read_string(&payload, &["roomId", "room_id"]).is_some()
+    {
+        return super::api_bridge::api_fetch_from_admin(
+            Some(json!({"path":"/api/pos/reservations","method":"POST","body":payload})),
+            None,
+            db,
+        )
+        .await;
+    }
+    let id = read_string(&payload, &["clientRequestId", "id"])
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    payload["id"] = json!(id);
+    payload["clientRequestId"] = json!(id);
     let reservation = build_local_reservation(&db, &payload);
-    let reservation_id = read_string(&reservation, &["id"]).unwrap_or_default();
-    patch_reservation_caches(&db, &reservation)?;
-
     let queue_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "reservations",
-            &reservation_id,
-            "INSERT",
-            &payload,
-            "hospitality",
-            "manual",
-        )?
+        persist_reservation_mutation(&conn, &reservation, &payload, "INSERT")?
     };
-
+    let _ = patch_reservation_caches(&db, &reservation);
     let _ = app.emit(
         "reservation_updated",
-        json!({
-            "reservation": reservation,
-            "queued": true,
-            "queueId": queue_id,
-        }),
+        json!({"reservation":reservation,"queued":true}),
     );
     emit_queue_hint(&app, "hospitality");
-
-    Ok(json!({
-        "success": true,
-        "data": {
-            "reservation": reservation,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+    Ok(json!({"success":true,"data":{"reservation":reservation,"queueId":queue_id,"queued":true}}))
 }
 
 #[tauri::command]
@@ -709,49 +790,68 @@ pub async fn offline_reservation_update(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let reservation_id = read_string(&payload, &["reservationId", "reservation_id", "id"])
-        .ok_or_else(|| "Missing reservation id".to_string())?;
-    let mut reservation = build_local_reservation(&db, &payload);
-    if let Some(object) = reservation.as_object_mut() {
-        set_object_field(object, "id", Value::String(reservation_id.clone()));
+    let mut payload = object_payload(arg0, arg1)?;
+    if payload.get("status").and_then(Value::as_str) == Some("seated") {
+        return Err("RESERVATION_SEATING_REQUIRES_CANONICAL_SESSION".into());
     }
-    patch_reservation_caches(&db, &reservation)?;
-
-    let mut queue_object = payload.as_object().cloned().unwrap_or_default();
-    queue_object.insert("id".to_string(), Value::String(reservation_id.clone()));
-    let queue_payload = Value::Object(queue_object);
+    let id = read_string(&payload, &["reservationId", "reservation_id", "id"])
+        .ok_or("Missing reservation id")?;
+    let org = organization_id(&db, &json!({}));
+    let branch = branch_id(&db, &json!({}));
+    let stored = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT data FROM reservation_local_identity WHERE (local_id=?1 OR server_id=?1)
+        AND organization_id=?2 AND branch_id=?3",
+            params![id, org, branch],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+    };
+    let mut reservation = stored.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    if reservation.is_none() {
+        for path in list_cached_admin_get_paths(&db, &["/api/pos/reservations".into()])? {
+            if let Some((cached, _)) = read_cached_admin_get_response(&db, &path) {
+                let candidate = cached
+                    .get("reservation")
+                    .filter(|v| v["id"] == id)
+                    .cloned()
+                    .or_else(|| {
+                        cached
+                            .get("reservations")
+                            .and_then(Value::as_array)
+                            .and_then(|rows| rows.iter().find(|v| v["id"] == id).cloned())
+                    });
+                if candidate.is_some() {
+                    reservation = candidate;
+                    break;
+                }
+            }
+        }
+    }
+    let mut reservation = reservation.ok_or("RESERVATION_NOT_CACHED")?;
+    if reservation["organization_id"] != org || reservation["branch_id"] != branch {
+        return Err("RESERVATION_SCOPE_MISMATCH".into());
+    }
+    if !reservation["room_id"].is_null() {
+        return super::api_bridge::api_fetch_from_admin(Some(json!({"path":format!("/api/pos/reservations/{id}"),"method":"PATCH","body":payload})),None,db).await;
+    }
+    payload["organization_id"] = json!(org);
+    payload["branch_id"] = json!(branch);
+    reservation_patch(&mut reservation, &payload);
+    payload["id"] = json!(id);
     let queue_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "reservations",
-            &reservation_id,
-            "UPDATE",
-            &queue_payload,
-            "hospitality",
-            "manual",
-        )?
+        persist_reservation_mutation(&conn, &reservation, &payload, "UPDATE")?
     };
-
+    let _ = patch_reservation_caches(&db, &reservation);
     let _ = app.emit(
         "reservation_updated",
-        json!({
-            "reservation": reservation,
-            "queued": true,
-            "queueId": queue_id,
-        }),
+        json!({"reservation":reservation,"queued":true}),
     );
     emit_queue_hint(&app, "hospitality");
-
-    Ok(json!({
-        "success": true,
-        "data": {
-            "reservation": reservation,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+    Ok(json!({"success":true,"data":{"reservation":reservation,"queueId":queue_id,"queued":true}}))
 }
 
 fn default_end_time(start_time: &str, duration_minutes: i64) -> String {
@@ -765,7 +865,8 @@ fn default_end_time(start_time: &str, duration_minutes: i64) -> String {
 
 fn build_local_appointment(db: &db::DbState, payload: &Value) -> Value {
     let now = now_rfc3339();
-    let appointment_id = read_string(payload, &["id"]).unwrap_or_else(|| temp_id("appointment"));
+    let appointment_id = read_string(payload, &["client_request_id", "id"])
+        .unwrap_or_else(|| temp_id("appointment"));
     let start_time = read_string(payload, &["start_time", "startTime"]).unwrap_or_else(now_rfc3339);
     let duration_minutes =
         read_i64(payload, &["total_duration_minutes", "duration_minutes"]).unwrap_or(30);
@@ -773,6 +874,7 @@ fn build_local_appointment(db: &db::DbState, payload: &Value) -> Value {
         .unwrap_or_else(|| default_end_time(&start_time, duration_minutes));
     json!({
         "id": appointment_id,
+        "client_request_id": appointment_id,
         "organization_id": organization_id(db, payload),
         "branch_id": branch_id(db, payload),
         "customer_id": read_string(payload, &["customer_id", "customerId"]),
@@ -813,6 +915,49 @@ fn patch_appointment_caches(db: &db::DbState, appointment: &Value) -> Result<(),
     })
 }
 
+fn merge_cached_appointment_status(
+    db: &db::DbState,
+    id: &str,
+    status: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let org = organization_id(db, payload);
+    let branch = branch_id(db, payload);
+    let mut updated = None;
+    patch_cached_admin_paths(db, "/api/pos/appointments", |_path, data| {
+        let patch = |record: &mut Value| -> bool {
+            if read_string(record, &["id"]).as_deref() != Some(id)
+                || read_string(record, &["organization_id"]).as_deref() != Some(org.as_str())
+                || read_string(record, &["branch_id"]).as_deref() != Some(branch.as_str())
+            {
+                return false;
+            }
+            record["status"] = json!(status);
+            record["updated_at"] = json!(now_rfc3339());
+            if status == "in_progress" {
+                record["checked_in_at"] = json!(now_rfc3339());
+            }
+            true
+        };
+        let mut changed = false;
+        if let Some(rows) = data.get_mut("appointments").and_then(Value::as_array_mut) {
+            for row in rows {
+                if patch(row) {
+                    updated = Some(row.clone());
+                    changed = true;
+                }
+            }
+        }
+        if let Some(row) = data.get_mut("appointment") {
+            if patch(row) {
+                updated = Some(row.clone());
+                changed = true;
+            }
+        }
+        Ok(changed)
+    })?;
+    updated.ok_or_else(|| "SALON_APPOINTMENT_NOT_CACHED".to_string())
+}
 #[tauri::command]
 pub async fn offline_appointment_create(
     arg0: Option<Value>,
@@ -820,9 +965,10 @@ pub async fn offline_appointment_create(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
+    let mut payload = object_payload(arg0, arg1)?;
     let appointment = build_local_appointment(&db, &payload);
     let appointment_id = read_string(&appointment, &["id"]).unwrap_or_default();
+    payload["client_request_id"] = Value::String(appointment_id.clone());
     patch_appointment_caches(&db, &appointment)?;
 
     let queue_id = {
@@ -870,12 +1016,12 @@ pub async fn offline_appointment_update_status(
         .ok_or_else(|| "Missing appointment id".to_string())?;
     let status = read_string(&payload, &["status"])
         .ok_or_else(|| "Missing appointment status".to_string())?;
-    let mut appointment = build_local_appointment(&db, &payload);
-    if let Some(object) = appointment.as_object_mut() {
-        set_object_field(object, "id", Value::String(appointment_id.clone()));
-        set_object_field(object, "status", Value::String(status.clone()));
-    }
-    patch_appointment_caches(&db, &appointment)?;
+    let org = organization_id(&db, &payload);
+    let appointment_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        sync_queue::resolve_appointment_id(&conn, &org, &appointment_id)?
+    };
+    let appointment = merge_cached_appointment_status(&db, &appointment_id, &status, &payload)?;
 
     let queue_payload = json!({
         "id": appointment_id,
@@ -1281,6 +1427,15 @@ pub async fn offline_drive_thru_update_status(
     }))
 }
 
+fn room_status_requires_checkout(room: &Value, next: &str) -> bool {
+    next != "occupied"
+        && (room.get("status").and_then(Value::as_str) == Some("occupied")
+            || room.get("effective_status").and_then(Value::as_str) == Some("occupied")
+            || ["active_folio", "activeFolio"]
+                .iter()
+                .any(|key| room.get(*key).is_some_and(|f| !f.is_null())))
+}
+
 fn patch_rooms_cache(
     db: &db::DbState,
     room_id: &str,
@@ -1316,6 +1471,18 @@ pub async fn offline_room_update_status(
         .ok_or_else(|| "Missing room id".to_string())?;
     let status =
         read_string(&payload, &["status"]).ok_or_else(|| "Missing room status".to_string())?;
+    for path in list_cached_admin_get_paths(&db, &["/api/pos/rooms".into()])? {
+        if let Some((cached, _)) = read_cached_admin_get_response(&db, &path) {
+            if let Some(rooms) = cached.get("rooms").and_then(Value::as_array) {
+                if rooms.iter().any(|room| {
+                    room.get("id").and_then(Value::as_str) == Some(&room_id)
+                        && room_status_requires_checkout(room, &status)
+                }) {
+                    return Err("ROOM_CHECKOUT_REQUIRED".into());
+                }
+            }
+        }
+    }
     let updated_room = patch_rooms_cache(&db, &room_id, &status)?;
     let queue_payload = json!({
         "room_id": room_id,
@@ -1914,6 +2081,50 @@ mod offline_room_checkin_tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    #[test]
+    fn salon_status_merge_keeps_service_customer_staff_and_time() {
+        let db = test_db_state();
+        let original = json!({"id":"appt","organization_id":"org","branch_id":"branch","customer_id":"customer","staff_id":"stylist","service_id":"haircut","start_time":"2026-10-21T07:00:00Z","end_time":"2026-10-21T08:00:00Z","appointment_services":[{"service_id":"haircut","price":25}],"status":"scheduled"});
+        cache_admin_get_response(
+            &db,
+            "/api/pos/appointments",
+            &json!({"appointments":[original]}),
+        )
+        .unwrap();
+        let updated = merge_cached_appointment_status(
+            &db,
+            "appt",
+            "in_progress",
+            &json!({"organization_id":"org","branch_id":"branch"}),
+        )
+        .unwrap();
+        assert_eq!(updated["status"], "in_progress");
+        for field in [
+            "customer_id",
+            "staff_id",
+            "service_id",
+            "start_time",
+            "end_time",
+            "appointment_services",
+        ] {
+            assert_eq!(updated[field], original[field], "{field}");
+        }
+        assert!(merge_cached_appointment_status(
+            &db,
+            "appt",
+            "cancelled",
+            &json!({"organization_id":"other","branch_id":"branch"})
+        )
+        .is_err());
+        assert!(merge_cached_appointment_status(
+            &db,
+            "missing",
+            "in_progress",
+            &json!({"organization_id":"org","branch_id":"branch"})
+        )
+        .is_err());
     }
 
     fn seed_rooms_cache(db: &db::DbState, path: &str) {
@@ -2848,5 +3059,59 @@ mod stale_write_capture_tests {
             patch_housekeeping_cache(&db, "task-2", "status", json!("in_progress"))
                 .expect("patch of a row without a server stamp");
         assert_eq!(never_seen, None);
+    }
+}
+
+#[cfg(test)]
+mod reservation_durability_tests {
+    use super::*;
+    #[test]
+    fn reservation_patch_preserves_customer_and_only_changes_requested_fields() {
+        let mut row = json!({"id":"booking","customer_name":"Ada","party_size":4,"table_id":"table-1","status":"pending"});
+        reservation_patch(
+            &mut row,
+            &json!({"status":"cancelled","cancellation_reason":"Called"}),
+        );
+        assert_eq!(row["customer_name"], "Ada");
+        assert_eq!(row["party_size"], 4);
+        assert_eq!(row["table_id"], "table-1");
+        assert_eq!(row["cancellation_reason"], "Called");
+    }
+    #[test]
+    fn reservation_document_and_outbox_roll_back_together_on_queue_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).unwrap();
+        let row = json!({"id":"local-res","organization_id":"org-1","branch_id":"branch-1","customer_name":"Ada"});
+        conn.execute_batch("CREATE TRIGGER refuse_reservation BEFORE INSERT ON parity_sync_queue WHEN NEW.table_name='reservations' BEGIN SELECT RAISE(ABORT,'disk full'); END;").unwrap();
+        assert!(persist_reservation_mutation(&conn, &row, &row, "INSERT").is_err());
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM reservation_local_identity", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod hotel_departure_tests {
+    use super::*;
+    #[test]
+    fn hotel_room_status_never_frees_occupied_or_active_folio() {
+        for room in [
+            json!({"status":"occupied"}),
+            json!({"status":"available","active_folio":{"id":"folio"}}),
+            json!({"effective_status":"occupied"}),
+        ] {
+            for next in ["available", "cleaning", "maintenance", "reserved"] {
+                assert!(room_status_requires_checkout(&room, next));
+            }
+            assert!(!room_status_requires_checkout(&room, "occupied"));
+        }
+        assert!(!room_status_requires_checkout(
+            &json!({"status":"cleaning","active_folio":null}),
+            "available"
+        ));
     }
 }

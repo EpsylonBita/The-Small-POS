@@ -980,6 +980,7 @@ pub async fn sync_retry_financial_item(
 
 #[tauri::command]
 pub async fn sync_retry_all_failed_financial(
+    arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
     sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
     app: tauri::AppHandle,
@@ -1008,6 +1009,15 @@ pub async fn sync_retry_all_failed_financial(
             .map_err(|e| format!("begin retry_all tx: {e}"))?;
 
         let retry_result: Result<i64, String> = (|| {
+            if arg0
+                .as_ref()
+                .and_then(|value| value.get("incomingOnly"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                return sync::resume_unresolved_remote_payment_recovery(&conn)
+                    .map(|count| count as i64);
+            }
             // Step 1: snapshot the exact queue rows we're about to retry.
             let rows: Vec<(i64, String, String)> = {
                 let mut stmt = conn
@@ -1041,8 +1051,9 @@ pub async fn sync_retry_all_failed_financial(
                 out
             };
 
+            let incoming_resumed = sync::resume_unresolved_remote_payment_recovery(&conn)? as i64;
             if rows.is_empty() {
-                return Ok(0);
+                return Ok(incoming_resumed);
             }
 
             // Step 2: reset the sync_queue rows by explicit id list.
@@ -1112,7 +1123,7 @@ pub async fn sync_retry_all_failed_financial(
             // is atomic with the financial reset.
             let parity_updated = retry_failed_non_repair_parity_rows(&conn)?;
 
-            Ok((updated as i64) + (parity_updated as i64))
+            Ok((updated as i64) + (parity_updated as i64) + incoming_resumed)
         })();
 
         match retry_result {

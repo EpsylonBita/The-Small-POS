@@ -486,7 +486,8 @@ fn request_active_print_stops_for_job_ids_and_owner(
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type,
-        "order_receipt"
+        "folio_statement"
+            | "order_receipt"
             | "delivery_slip"
             | "kitchen_ticket"
             | "repair_intake"
@@ -667,7 +668,8 @@ pub fn enqueue_print_job_with_payload(
     entity_payload_json: Option<&Value>,
     invalidator: &dyn PrintQueueInvalidator,
 ) -> Result<Value, String> {
-    if entity_type != "order_receipt"
+    if entity_type != "folio_statement"
+        && entity_type != "order_receipt"
         && entity_type != "kitchen_ticket"
         && entity_type != "repair_intake"
         && entity_type != "repair_label"
@@ -3218,9 +3220,11 @@ pub fn mark_print_job_failed_non_retryable(
 /// guard; the underlying SQLite `Connection` is intact. The print worker
 /// recovers the guard instead of permanently bricking the queue on the first
 /// panic-under-guard anywhere in the process.
-fn lock_conn_recovering(db: &DbState) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
-    db.conn
-        .lock()
+///
+/// Traced as `print_dispatch`: the immediate dispatch after a sale runs on the
+/// main connection, so a long print step names itself when the till waits.
+fn lock_conn_recovering(db: &DbState) -> crate::database_lock::TracedConnection<'_> {
+    db.lock_traced("print_dispatch")
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -5497,13 +5501,18 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     let computed_vat_amount = tax_amount_cents
         .map(|cents| crate::money::Cents::new(cents).to_f64_dp2())
         .unwrap_or(tax_amount);
-    let printed_vat = printed_receipt_vat(
-        &conn,
-        order_branch_id.as_deref(),
-        total_amount,
-        tip_amount,
-        computed_vat_amount,
-    );
+    let is_folio_settlement = crate::hotel_folio::is_local(&conn, order_id)?;
+    let printed_vat = if is_folio_settlement {
+        (computed_vat_amount > 0.0).then_some(computed_vat_amount)
+    } else {
+        printed_receipt_vat(
+            &conn,
+            order_branch_id.as_deref(),
+            total_amount,
+            tip_amount,
+            computed_vat_amount,
+        )
+    };
 
     let menu_lookup = build_menu_category_lookup(&conn);
 
@@ -5512,6 +5521,10 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default()
         .into_iter()
+        .filter(|item| {
+            !is_folio_settlement
+                || item.get("folio_line_kind").and_then(Value::as_str) != Some("transfer")
+        })
         .map(|item| {
             let category_fields = resolve_item_category_fields(&item, &menu_lookup);
             ReceiptItem {
@@ -5589,6 +5602,17 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         emphasize: false,
         discount_percent: None,
     });
+    if is_folio_settlement {
+        let transfer = total_amount - items.iter().map(|item| item.total).sum::<f64>();
+        if transfer.abs() >= 0.005 {
+            totals.push(TotalsLine {
+                label: "Room charges collected".into(),
+                amount: transfer,
+                emphasize: false,
+                discount_percent: None,
+            });
+        }
+    }
     if discount_amount > 0.0 {
         totals.push(TotalsLine {
             label: "Discount".to_string(),
@@ -5743,6 +5767,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     };
 
     Ok(OrderReceiptDoc {
+        currency: None,
         order_id: order_id.to_string(),
         order_number: platform_short_code.unwrap_or(if order_number.is_empty() {
             order_id.to_string()
@@ -6087,6 +6112,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
     }
 
     Ok(OrderReceiptDoc {
+        currency: None,
         order_id: order_id.to_string(),
         order_number: if order_number.is_empty() {
             order_id.to_string()
@@ -6473,19 +6499,12 @@ fn build_shift_checkout_doc(
         summary.get("transferredWaiters").and_then(Value::as_array),
     ];
     let mut transferred_staff_count = 0_i64;
-    let mut transferred_staff_returns = 0.0_f64;
     for group in transferred_staff_groups.into_iter().flatten() {
         transferred_staff_count += group.len() as i64;
-        transferred_staff_returns += group
-            .iter()
-            .map(|entry| {
-                entry
-                    .get("net_cash_amount")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-            })
-            .sum::<f64>();
     }
+    // These staff are still out. Their eventual full return is already shown
+    // by driver_cash_returned once received; it is not another drawer inflow.
+    let transferred_staff_returns = 0.0_f64;
     let staff_payout_lines = summary
         .get("staffPayments")
         .and_then(Value::as_array)
@@ -7135,15 +7154,28 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
     .unwrap_or(0.0);
     let refunds_total = number_from_paths(
         payload,
-        &["/refunds/total", "/refundsTotal", "/refunds_total"],
+        &[
+            "/sales/revenueRefundsTotal",
+            "/refunds/total",
+            "/refundsTotal",
+            "/refunds_total",
+        ],
     )
     .unwrap_or(0.0);
     let drawer_refunds_total = number_from_paths(
         payload,
         &["/cashDrawer/totalRefunds", "/drawerRefundsTotal"],
     );
-    let voids_total =
-        number_from_paths(payload, &["/voids/total", "/voidsTotal", "/voids_total"]).unwrap_or(0.0);
+    let voids_total = number_from_paths(
+        payload,
+        &[
+            "/sales/revenueVoidsTotal",
+            "/voids/total",
+            "/voidsTotal",
+            "/voids_total",
+        ],
+    )
+    .unwrap_or(0.0);
     let discounts_total = number_from_paths(
         payload,
         &["/discounts/total", "/discountsTotal", "/discounts_total"],
@@ -7253,6 +7285,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         .unwrap_or_default();
 
     ZReportDoc {
+        hotel_report: serde_json::json!({"hotel":payload["hotel"],"presentation":payload["presentation"],"sales":payload["sales"]}),
         currency: text_from_paths(payload, &["/currency"])
             .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
         gift_liability_cash_cents: 0,
@@ -7316,9 +7349,11 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
             payload,
             &["/integrity/paymentCoverage", "/daySummary/total"],
         ),
-        refunds_total,
+        refunds_total: number_from_paths(payload, &["/sales/revenueRefundsTotal"])
+            .unwrap_or(refunds_total),
         drawer_refunds_total,
-        voids_total,
+        voids_total: number_from_paths(payload, &["/sales/revenueVoidsTotal"])
+            .unwrap_or(voids_total),
         discounts_total,
         expenses_total,
         drawer_expenses_total,
@@ -7520,6 +7555,7 @@ fn build_z_report_doc_with_conn(
         number_from_paths(&rj, &["/tips/total", "/tipsTotal"]).unwrap_or(tips_total);
 
     Ok(ZReportDoc {
+        hotel_report: serde_json::json!({"hotel":rj["hotel"],"presentation":rj["presentation"],"sales":rj["sales"]}),
         currency: text_from_paths(&rj, &["/currency"])
             .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
         gift_liability_cash_cents: 0,
@@ -7581,9 +7617,10 @@ fn build_z_report_doc_with_conn(
             &rj,
             &["/integrity/paymentCoverage", "/daySummary/total"],
         ),
-        refunds_total,
+        refunds_total: number_from_paths(&rj, &["/sales/revenueRefundsTotal"])
+            .unwrap_or(refunds_total),
         drawer_refunds_total: number_from_paths(&rj, &["/cashDrawer/totalRefunds"]),
-        voids_total,
+        voids_total: number_from_paths(&rj, &["/sales/revenueVoidsTotal"]).unwrap_or(voids_total),
         discounts_total,
         expenses_total,
         drawer_expenses_total: number_from_paths(&rj, &["/cashDrawer/totalExpenses"]),
@@ -8194,6 +8231,21 @@ fn build_document_and_gift_binding_for_job(
 
     let mut gift_close_binding = None;
     let document = match entity_type {
+        "folio_statement" => {
+            let payload = payload.ok_or("Folio statement requires a frozen payload")?;
+            let doc: OrderReceiptDoc = serde_json::from_value(payload)
+                .map_err(|e| format!("Invalid folio statement: {e}"))?;
+            if doc.order_id != entity_id
+                || doc
+                    .currency
+                    .as_deref()
+                    .and_then(crate::fiscal::payload_builder::normalize_currency_code)
+                    .is_none()
+            {
+                return Err("Invalid folio statement identity or currency".into());
+            }
+            Ok(ReceiptDocument::OrderReceipt(doc))
+        }
         "order_receipt" => Ok(ReceiptDocument::OrderReceipt(build_order_receipt_doc(
             db, entity_id,
         )?)),
@@ -9225,7 +9277,9 @@ fn render_managed_payload(
     let mut layout = resolve_layout_config(db, profile, entity_type)?;
     match document {
         ReceiptDocument::OrderReceipt(receipt) => {
-            apply_order_currency_to_layout(db, &receipt.order_id, &mut layout)?;
+            if receipt.currency.is_none() {
+                apply_order_currency_to_layout(db, &receipt.order_id, &mut layout)?;
+            }
         }
         // Delivery slips print order money too: the order's currency, not
         // only the store's (founder, 13/10/2026). A failed lookup keeps the
@@ -9867,7 +9921,8 @@ fn defer_incomplete_food_print(
 ) -> Result<bool, String> {
     if !matches!(
         entity_type,
-        "order_receipt"
+        "folio_statement"
+            | "order_receipt"
             | "delivery_slip"
             | "kitchen_ticket"
             | "order_completed_receipt"
@@ -18832,7 +18887,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_document_for_job_cashier_shift_checkout_includes_transferred_staff_returns() {
+    fn test_build_document_for_job_cashier_checkout_excludes_outstanding_transferred_returns() {
         let _fake = crate::tests::fake_keyring::install_empty();
         let db = test_db();
         seed_print_store_currency(&db);
@@ -18900,7 +18955,9 @@ mod tests {
         match doc {
             ReceiptDocument::ShiftCheckout(doc) => {
                 assert_eq!(doc.transferred_staff_count, 1);
-                assert_eq!(doc.transferred_staff_returns, 60.0);
+                assert_eq!(doc.transferred_staff_returns, 0.0);
+                assert_eq!(doc.driver_cash_given, 0.0);
+                assert_eq!(doc.driver_cash_returned, 0.0);
             }
             _ => panic!("expected shift checkout document"),
         }
@@ -22953,5 +23010,50 @@ mod tests {
             doc.cancellation_reason.is_none(),
             "cancellation_reason should be None when payload has null"
         );
+    }
+}
+
+#[cfg(test)]
+mod hotel_statement_tests {
+    use super::*;
+    #[test]
+    fn hotel_statement_is_a_real_queued_document_with_its_own_currency() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        let db = DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+        let payload = serde_json::json!({"order_id":"folio-101","order_number":"101","order_type":"","currency":"CHF","created_at":"2026-10-20T12:00:00Z","status_label":"Folio statement","items":[{"name":"Stay","quantity":2.0,"total":200.0}],"payments":[{"label":"Cash","amount":150.0}],"totals":[{"label":"Balance","amount":50.0}]});
+        let queued = enqueue_print_job_with_payload(
+            &db,
+            "folio_statement",
+            "folio-101",
+            None,
+            Some(&payload),
+            &NoopPrintQueueInvalidator,
+        )
+        .unwrap();
+        assert_eq!(queued["success"], true);
+        let document = build_document_for_job(
+            &db,
+            "folio_statement",
+            "folio-101",
+            Some(&payload.to_string()),
+        )
+        .unwrap();
+        let mut config = receipt_renderer::LayoutConfig::default();
+        config.currency_symbol = " EUR".into();
+        receipt_renderer::apply_document_currency(&document, &mut config);
+        assert_eq!(config.currency_symbol, " CHF");
+        let stored: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT entity_type FROM print_jobs LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, "folio_statement");
     }
 }

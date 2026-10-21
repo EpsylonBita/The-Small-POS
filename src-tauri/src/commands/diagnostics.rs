@@ -885,9 +885,222 @@ mod destructive_command_auth_audit {
         let orders = include_str!("orders.rs");
         assert_gated(orders, "pub async fn orders_clear_all(");
 
-        // Round 2: the canonical parity outbox wipe (a sync, not async, command).
+        // Round 2: the canonical parity outbox wipe.
         let sync_queue = include_str!("sync_queue.rs");
-        assert_gated(sync_queue, "pub fn sync_queue_clear(");
+        assert_gated(sync_queue, "pub async fn sync_queue_clear(");
+    }
+}
+
+/// Tomikro 20/10/2026 (1.4.133): the till window froze for 7–15 minutes and
+/// "Complete order" did nothing, with no refusal in the support bundle. Tauri 2
+/// runs a plain synchronous `#[tauri::command] fn` on the MAIN thread, the one
+/// that pumps the window. The checkout draft save was such a command: it waited
+/// there for the SQLite connection mutex while another holder kept it, and the
+/// whole window stopped responding. Marking a synchronous `fn`
+/// `#[tauri::command(async)]` is no cure: tauri-macros then runs its body on a
+/// Tokio runtime worker, and a few such waits park every worker. Every command
+/// must therefore be an `async fn`, with a blocking body on the blocking pool
+/// (`database_lock::run_blocking_command`). This parses every source file with
+/// `syn`, so neither attribute spacing nor line breaks hide a command.
+#[cfg(test)]
+mod main_thread_command_audit {
+    use proc_macro2::TokenTree;
+    use std::path::{Path, PathBuf};
+    use syn::spanned::Spanned;
+    use syn::{Attribute, ImplItem, Item, Meta, Signature};
+
+    const MAIN_THREAD: &str = "runs on the main thread";
+    const RUNTIME_WORKER: &str = "is marked (async) and runs on a Tokio runtime worker";
+
+    #[derive(Default)]
+    struct Audit {
+        /// Every `#[tauri::command]` fn.
+        commands: usize,
+        /// `file:line: fn name ...` of every command that is not an `async fn`.
+        offenders: Vec<String>,
+    }
+
+    /// The `#[tauri::command]` attribute, whatever its spacing or line breaks.
+    fn command_attribute(attrs: &[Attribute]) -> Option<&Attribute> {
+        attrs.iter().find(|attr| {
+            let segments = &attr.path().segments;
+            segments.len() == 2 && segments[0].ident == "tauri" && segments[1].ident == "command"
+        })
+    }
+
+    /// `#[tauri::command(.., async, ..)]`: an `async` among the arguments.
+    fn marked_async(attr: &Attribute) -> bool {
+        match &attr.meta {
+            Meta::List(list) => list
+                .tokens
+                .clone()
+                .into_iter()
+                .any(|token| matches!(token, TokenTree::Ident(ident) if ident == "async")),
+            Meta::Path(_) | Meta::NameValue(_) => false,
+        }
+    }
+
+    fn check(path: &Path, attrs: &[Attribute], signature: &Signature, audit: &mut Audit) {
+        let Some(attr) = command_attribute(attrs) else {
+            return;
+        };
+        audit.commands += 1;
+        if signature.asyncness.is_none() {
+            audit.offenders.push(format!(
+                "{}:{}: fn {} {}",
+                path.display(),
+                attr.span().start().line,
+                signature.ident,
+                if marked_async(attr) {
+                    RUNTIME_WORKER
+                } else {
+                    MAIN_THREAD
+                }
+            ));
+        }
+    }
+
+    /// Free fns, the contents of inline modules and impl-block fns.
+    fn walk(path: &Path, items: &[Item], audit: &mut Audit) {
+        for item in items {
+            match item {
+                Item::Fn(function) => check(path, &function.attrs, &function.sig, audit),
+                Item::Mod(module) => {
+                    if let Some((_, items)) = &module.content {
+                        walk(path, items, audit);
+                    }
+                }
+                Item::Impl(block) => {
+                    for item in &block.items {
+                        if let ImplItem::Fn(function) = item {
+                            check(path, &function.attrs, &function.sig, audit);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn audit_source(path: &Path, source: &str) -> Audit {
+        let file = syn::parse_file(source).unwrap_or_else(|error| {
+            let at = error.span().start();
+            panic!("{}:{}: cannot parse: {error}", path.display(), at.line)
+        });
+        let mut audit = Audit::default();
+        walk(path, &file.items, &mut audit);
+        audit
+    }
+
+    fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("read source directory") {
+            let path = entry.expect("source directory entry").path();
+            if path.is_dir() {
+                rust_files(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_tauri_command_is_a_synchronous_fn() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        let mut commands = 0;
+        let mut offenders = Vec::new();
+        for path in files {
+            let source = std::fs::read_to_string(&path).expect("read source file");
+            let audit = audit_source(&path, &source);
+            commands += audit.commands;
+            offenders.extend(audit.offenders);
+        }
+        // The scan must see the command surface (518 commands on 20/10/2026).
+        assert!(commands > 400, "only {commands} commands found");
+        assert!(
+            offenders.is_empty(),
+            "these Tauri commands are synchronous fns: on the main thread a wait \
+             freezes the window, on a runtime worker it stalls the runtime; make \
+             them `async fn` and run a blocking body through \
+             `database_lock::run_blocking_command`:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Spells `#[tauri::command` from `#[cmd`, so that a text search for
+    /// commands (`grep '#\[tauri::command'`) never hits this test.
+    fn source(text: &str) -> String {
+        text.replace("#[cmd", concat!("#[tauri", "::command"))
+    }
+
+    #[test]
+    fn the_audit_flags_every_synchronous_command_spelling_and_accepts_async_fns() {
+        let path = Path::new("example.rs");
+        let audit = |text: &str| audit_source(path, &source(text));
+        let flagged = |line: usize, name: &str, why: &str| {
+            vec![format!("example.rs:{line}: fn {name} {why}")]
+        };
+        for (text, expected) in [
+            (
+                "#[cmd]\npub fn checkout_draft_put(db: State<'_, DbState>) -> Result<(), String> {}\n",
+                flagged(1, "checkout_draft_put", MAIN_THREAD),
+            ),
+            ("# [tauri::command] pub fn spaced() {}\n", flagged(1, "spaced", MAIN_THREAD)),
+            (
+                "#[tauri :: command] pub fn spaced_path() {}\n",
+                flagged(1, "spaced_path", MAIN_THREAD),
+            ),
+            (
+                "#[\n    tauri::command\n] pub fn split() {}\n",
+                flagged(1, "split", MAIN_THREAD),
+            ),
+            (
+                "#[cmd(rename_all = \"snake_case\")]\n/// docs\n#[allow(clippy::too_many_arguments)]\n\npub(crate) fn plain() {}\n",
+                flagged(1, "plain", MAIN_THREAD),
+            ),
+            (
+                "mod inner {\n    #[cmd]\n    pub fn nested() {}\n}\n",
+                flagged(2, "nested", MAIN_THREAD),
+            ),
+            (
+                "impl Example {\n    #[cmd]\n    pub fn method(&self) {}\n}\n",
+                flagged(2, "method", MAIN_THREAD),
+            ),
+            // `(async)` is recognised, also split across lines, and still
+            // rejected: the body would park a runtime worker.
+            (
+                "#[cmd(async)]\npub fn moved() -> Result<(), String> {}\n",
+                flagged(1, "moved", RUNTIME_WORKER),
+            ),
+            (
+                "#[cmd(rename_all = \"snake_case\", async)]\npub fn moved() {}\n",
+                flagged(1, "moved", RUNTIME_WORKER),
+            ),
+            (
+                "#[cmd(\n    async\n)]\npub fn moved() {}\n",
+                flagged(1, "moved", RUNTIME_WORKER),
+            ),
+        ] {
+            let found = audit(text);
+            assert_eq!(found.offenders, expected, "{text}");
+            assert_eq!(found.commands, 1, "{text}");
+        }
+        for (text, commands) in [
+            (
+                "#[cmd]\npub async fn already() -> Result<(), String> {}\n",
+                1,
+            ),
+            ("#[cmd]\n// note\npub(crate) async fn already() {}\n", 1),
+            ("#[cmd(async)]\npub async fn redundant() {}\n", 1),
+            ("// #[cmd]\npub fn helper() {}\n", 0),
+            ("/* #[cmd] */\npub fn helper() {}\n", 0),
+            ("const TEXT: &str = \"#[cmd]\";\npub fn helper() {}\n", 0),
+        ] {
+            let found = audit(text);
+            assert!(found.offenders.is_empty(), "{text}: {:?}", found.offenders);
+            assert_eq!(found.commands, commands, "{text}");
+        }
     }
 }
 

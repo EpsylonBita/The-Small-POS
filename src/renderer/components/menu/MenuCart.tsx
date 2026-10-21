@@ -1,3 +1,4 @@
+import type { CouponEligibility } from '../../utils/couponErrors';
 import { getStoreCurrency } from '../../utils/store-currency';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -72,12 +73,11 @@ export interface CartItem {
   reward_signature?: string;
 }
 
-export interface AppliedCoupon {
+export interface AppliedCoupon extends CouponEligibility {
   id: string;
   code: string;
   discount_type: 'percentage' | 'fixed_amount';
   discount_value: number;
-  minimum_order_amount?: number;
 }
 
 export interface AppliedLoyaltyRedemption {

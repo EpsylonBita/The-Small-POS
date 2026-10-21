@@ -452,6 +452,17 @@ export const ReservationsView: React.FC = memo(() => {
       setSelectedReservation(null);
       return;
     }
+    if (target?.tableId && !target.roomId && status === 'seated') {
+      try {
+        reservationsService.setContext(branchId || '', effectiveOrgId || '');
+        const seated = await reservationsService.seatReservation(reservationId);
+        reservationsService.continueSeatedReservation(seated);
+        setSelectedReservation(null);
+      } catch (error) {
+        toast.error(t('reservationsView.toasts.updateFailed', { defaultValue: 'Failed to update reservation' }));
+      }
+      return;
+    }
     const updated = await updateStatus(reservationId, status);
     if (!updated) return;
 

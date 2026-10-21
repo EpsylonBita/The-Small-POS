@@ -303,7 +303,7 @@ pub fn collect_fiscal_queue_blockers(
     let verdict = if scope.branch_id.trim().is_empty() {
         CacheVerdict::Unknown
     } else {
-        active_cache::verdict(scope.branch_id.trim())
+        active_cache::closeout_verdict(scope.branch_id.trim())
     };
     let count = count_queued_fiscal_in_window(conn, scope)?;
     let rows = if count > 0 {
@@ -367,7 +367,7 @@ pub fn ensure_no_queued_fiscal_for_window(
     conn: &Connection,
     scope: &FiscalCloseScope,
 ) -> Result<(), CloseBlockedError> {
-    let verdict = active_cache::verdict(scope.branch_id.trim());
+    let verdict = active_cache::closeout_verdict(scope.branch_id.trim());
     if let CacheVerdict::Inactive = verdict {
         return Ok(());
     }
@@ -432,6 +432,70 @@ mod audit_7_tests {
 
     fn day(branch_id: &str, iso: &str) -> FiscalCloseScope {
         FiscalCloseScope::utc_day(branch_id, iso)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn confirmed_status_survives_restart_and_failed_poll_for_closeout() {
+        active_cache::reset_for_tests();
+        let dir = std::env::temp_dir().join(format!("fiscal-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("status.db");
+        let persisted = Connection::open(&file).unwrap();
+        persisted.execute_batch(active_cache::SCHEMA_SQL).unwrap();
+        active_cache::initialize(&persisted, &file).unwrap();
+        active_cache::update_with_status("no-plugin", false, None, Some("no_active_plugin".into()));
+        active_cache::update_with_status(
+            "plugin",
+            true,
+            Some("fiscalization_gr".into()),
+            Some("active".into()),
+        );
+        active_cache::reset_for_tests();
+        active_cache::initialize(&persisted, &file).unwrap();
+        let conn = make_conn();
+        let date = "2026-10-20";
+        for branch in ["no-plugin", "plugin", "never-known"] {
+            insert_pending_fiscal(&conn, branch, date);
+            let _ = crate::fiscal::status::apply_fiscal_status_result(
+                branch,
+                Err(crate::api::AdminFetchError::transport("offline")),
+            );
+            assert_eq!(active_cache::verdict(branch), CacheVerdict::Unknown);
+            let evidence = collect_fiscal_queue_blockers(&conn, &day(branch, date)).unwrap();
+            assert_eq!(evidence.count, 1);
+            assert_eq!(evidence.blocking, branch != "no-plugin");
+            assert_eq!(
+                ensure_no_queued_fiscal_for_window(&conn, &day(branch, date)).is_ok(),
+                branch == "no-plugin"
+            );
+            assert_eq!(
+                crate::sync_queue::fiscal_row_is_closeout_exempt(
+                    "fiscal",
+                    &json!({"branchId":branch}).to_string()
+                ),
+                branch == "no-plugin"
+            );
+        }
+        assert_eq!(
+            active_cache::inactive_branch_ids(),
+            vec!["no-plugin".to_string()]
+        );
+        crate::fiscal::status::apply_fiscal_status_result(
+            "no-plugin",
+            Ok(json!({"active":true,"pluginId":"fiscalization_gr","reason":"active"})),
+        );
+        assert!(ensure_no_queued_fiscal_for_window(&conn, &day("no-plugin", date)).is_err());
+        active_cache::reset_for_tests();
+        active_cache::initialize(&persisted, &file).unwrap();
+        assert!(ensure_no_queued_fiscal_for_window(&conn, &day("no-plugin", date)).is_err());
+        let stored: (Option<String>, i64) = persisted.query_row("SELECT plugin_id, confirmed_at_ms FROM fiscal_branch_status WHERE branch_id='no-plugin'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(stored.0.as_deref(), Some("fiscalization_gr"));
+        assert!(stored.1 > 0);
+        active_cache::reset_for_tests();
+        drop(persisted);
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

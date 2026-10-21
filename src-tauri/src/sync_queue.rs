@@ -615,7 +615,7 @@ pub(crate) fn fiscal_row_is_closeout_exempt(module_type: &str, data: &str) -> bo
         })
         .filter(|branch_id| !branch_id.is_empty())
         .is_some_and(|branch_id| {
-            crate::fiscal::active_cache::verdict(&branch_id)
+            crate::fiscal::active_cache::closeout_verdict(&branch_id)
                 == crate::fiscal::active_cache::CacheVerdict::Inactive
         })
 }
@@ -3122,18 +3122,23 @@ fn normalize_order_update_items_for_request(
         return None;
     }
 
-    let has_manual_or_stale_item = normalized.iter().any(|item| {
-        item.get("menu_item_id")
-            .and_then(Value::as_str)
-            .filter(|candidate| Uuid::parse_str(candidate).is_ok())
-            .is_none()
+    let has_unidentified_item = normalized.iter().any(|item| {
+        !["menu_item_id", "retail_product_id", "service_id"]
+            .iter()
+            .any(|key| {
+                item.get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate| Uuid::parse_str(candidate).is_ok())
+            })
+            && item.get("is_manual").and_then(bool_from_value) != Some(true)
     });
 
-    if has_manual_or_stale_item {
+    if has_unidentified_item {
         // Older admin deployments still have a NOT NULL/FK-constrained
         // order_items.menu_item_id on the PATCH replacement path. Keep the
-        // replay moving by syncing the status and financial snapshot; the
-        // local table check remains the source for manual line details.
+        // legacy fallback for untyped manual/stale lines, but explicit retail,
+        // service and manual identities belong to the current line contract.
+        // Their complete snapshots must reach the server, including on PATCH.
         return None;
     }
 
@@ -3147,7 +3152,7 @@ fn normalize_order_update_items_for_request(
     for item in &normalized {
         let quantity = number_field_from_sources(&[item], &["quantity"])
             .unwrap_or(1.0)
-            .max(1.0);
+            .max(0.001);
         let unit_price = number_field_from_sources(&[item], &["unit_price", "unitPrice", "price"])
             .unwrap_or_default()
             .max(0.0);
@@ -3184,7 +3189,7 @@ fn normalize_order_update_items_for_request(
             .get("quantity")
             .and_then(number_from_value)
             .unwrap_or(1.0)
-            .max(1.0);
+            .max(0.001);
         let unit_price = object
             .get("unit_price")
             .and_then(number_from_value)
@@ -3218,16 +3223,23 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
             .filter(|candidate| Uuid::parse_str(candidate).is_ok());
         let name = string_field(&item, &["name", "menu_item_name", "menuItemName"]);
         let quantity = number_field_from_sources(&[&item], &["quantity"])
-            .unwrap_or(1.0)
-            .max(1.0)
-            .round() as i64;
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(1.0);
+        // order_items.quantity is NUMERIC(10,3). Keep weighed quantities, while
+        // retaining the legacy integer JSON encoding for whole menu quantities.
+        let quantity = ((quantity * 1000.0).round() / 1000.0).max(0.001);
+        let quantity_json = if quantity.fract() == 0.0 {
+            serde_json::json!(quantity as i64)
+        } else {
+            serde_json::json!(quantity)
+        };
         let raw_total = number_field_from_sources(&[&item], &["total_price", "totalPrice"])
             .unwrap_or_default()
             .max(0.0);
         let unit_price = number_field_from_sources(&[&item], &["unit_price", "unitPrice", "price"])
             .or_else(|| {
-                if raw_total > 0.0 && quantity > 0 {
-                    Some(raw_total / quantity as f64)
+                if raw_total > 0.0 {
+                    Some(raw_total / quantity)
                 } else {
                     None
                 }
@@ -3236,8 +3248,10 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
             .max(0.0);
         let total_price = if raw_total > 0.0 {
             raw_total
+        } else if quantity.fract() != 0.0 {
+            (unit_price * quantity * 100.0).round() / 100.0
         } else {
-            (unit_price * quantity as f64).max(0.0)
+            (unit_price * quantity).max(0.0)
         };
 
         let original_unit_price =
@@ -3251,7 +3265,7 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
 
         let mut normalized_item = serde_json::json!({
             "menu_item_id": menu_item_id,
-            "quantity": quantity,
+            "quantity": quantity_json,
             "unit_price": unit_price,
             "total_price": total_price,
             "name": name,
@@ -3259,6 +3273,26 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
             "customizations": normalize_customizations_for_insert(item.get("customizations")),
         });
         if let Some(object) = normalized_item.as_object_mut() {
+            // Omit absent fields so legacy menu payloads stay byte-identical.
+            // Preserve explicit nulls and false as well as snake/camel aliases.
+            for (snake, camel) in [
+                ("vat_category_code", "vatCategoryCode"),
+                ("price_includes_vat", "priceIncludesVat"),
+                ("tax_exemption_reason", "taxExemptionReason"),
+                ("fiscal_document_profile", "fiscalDocumentProfile"),
+                ("retail_product_id", "retailProductId"),
+                ("retail_variant_id", "retailVariantId"),
+                ("service_id", "serviceId"),
+                ("appointment_id", "appointmentId"),
+                ("staff_id", "staffId"),
+                ("line_role", "lineRole"),
+                ("is_manual", "isManual"),
+                ("metadata", "metadata"),
+            ] {
+                if let Some(value) = item.get(snake).or_else(|| item.get(camel)) {
+                    object.insert(snake.to_string(), value.clone());
+                }
+            }
             if let Some(original_unit_price) = original_unit_price {
                 object.insert(
                     "original_unit_price".to_string(),
@@ -9507,6 +9541,121 @@ pub fn check_age_warnings(conn: &Connection) -> Result<Vec<String>, String> {
     Ok(warnings)
 }
 
+pub(crate) fn resolve_appointment_id(
+    conn: &Connection,
+    org: &str,
+    local: &str,
+) -> Result<String, String> {
+    let key = format!("salon_appointment_alias::{org}::{local}");
+    let remote: Option<String> = conn
+        .query_row(
+            "SELECT setting_value FROM local_settings WHERE setting_category='local' AND setting_key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(remote.unwrap_or_else(|| local.to_string()))
+}
+
+fn prepare_appointment_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: String,
+) -> Result<RequestPreparation, String> {
+    let mut body = payload.clone();
+    let endpoint = if item.operation == "INSERT" {
+        body["client_request_id"] =
+            serde_json::json!(string_field(payload, &["client_request_id"])
+                .unwrap_or_else(|| item.record_id.clone()));
+        if let Some(object) = body.as_object_mut() {
+            object.remove("id");
+        }
+        "/api/pos/appointments".to_string()
+    } else {
+        let id = resolve_appointment_id(conn, &item.organization_id, &item.record_id)?;
+        if Uuid::parse_str(&id).is_err() {
+            return Ok(RequestPreparation::WaitingForParent {
+                reason: "Waiting for appointment create acknowledgement".to_string(),
+            });
+        }
+        body["id"] = serde_json::json!(id);
+        format!("/api/pos/appointments/{id}/status")
+    };
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint,
+        method: resolve_http_method(item),
+        body: Some(body.to_string()),
+        terminal_id,
+    }))
+}
+
+fn remap_synced_appointment(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> Result<(), String> {
+    if item.operation != "INSERT" {
+        return Ok(());
+    }
+    let record = response
+        .and_then(|r| {
+            r.get("appointment")
+                .or_else(|| r.get("data").and_then(|d| d.get("appointment")))
+        })
+        .ok_or("SALON_APPOINTMENT_ACK_MISSING")?;
+    let remote = string_field(record, &["id"])
+        .filter(|id| Uuid::parse_str(id).is_ok())
+        .ok_or("SALON_APPOINTMENT_ACK_INVALID")?;
+    // Fail closed on a cross-scope acknowledgement.
+    if string_field(record, &["organization_id"]).is_some_and(|org| org != item.organization_id) {
+        return Err("SALON_APPOINTMENT_ACK_SCOPE".into());
+    }
+    let key = format!(
+        "salon_appointment_alias::{}::{}",
+        item.organization_id, item.record_id
+    );
+    conn.execute("INSERT INTO local_settings (setting_category,setting_key,setting_value,updated_at) VALUES ('local',?1,?2,datetime('now')) ON CONFLICT(setting_category,setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at", params![key, remote]).map_err(|e| e.to_string())?;
+    conn.execute("UPDATE parity_sync_queue SET record_id=?1,data=json_set(data,'$.id',?1) WHERE organization_id=?2 AND table_name='appointments' AND record_id=?3 AND operation<>'INSERT'", params![remote, item.organization_id, item.record_id]).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT setting_key,setting_value FROM local_settings WHERE setting_category='local' AND setting_key LIKE 'admin_api_get::/api/pos/appointments%'").map_err(|e| e.to_string())?;
+    let caches = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+    for (key, raw) in caches {
+        let mut envelope: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let Some(data) = envelope.get_mut("data") else {
+            continue;
+        };
+        let patch = |row: &mut Value| {
+            if string_field(row, &["id"]).as_deref() == Some(item.record_id.as_str())
+                && string_field(row, &["organization_id"]).as_deref()
+                    == Some(item.organization_id.as_str())
+            {
+                // Preserve a locally queued status and the rich cached record.
+                row["id"] = serde_json::json!(remote);
+                row["client_request_id"] = serde_json::json!(item.record_id);
+            }
+        };
+        if let Some(rows) = data.get_mut("appointments").and_then(Value::as_array_mut) {
+            for row in rows {
+                patch(row);
+            }
+        }
+        if let Some(row) = data.get_mut("appointment") {
+            patch(row);
+        }
+        conn.execute(
+            "UPDATE local_settings SET setting_value=?1 WHERE setting_category='local' AND setting_key=?2",
+            params![envelope.to_string(), key],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPreparation, String> {
     let payload =
         serde_json::from_str::<Value>(&item.data).unwrap_or_else(|_| Value::Object(Map::new()));
@@ -9524,6 +9673,8 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
     }
 
     match item.table_name.as_str() {
+        "reservations" => prepare_reservation_request(conn, item, &payload, terminal_id.as_str()),
+        "appointments" => prepare_appointment_request(conn, item, &payload, terminal_id),
         "orders" => prepare_order_request(conn, item, &payload, terminal_id.as_str()),
         "payments" => prepare_payment_request(conn, item, &payload, terminal_id.as_str()),
         "payment_adjustments" => {
@@ -9578,6 +9729,86 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
             terminal_id,
         })),
     }
+}
+
+fn prepare_reservation_request(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+    terminal_id: &str,
+) -> Result<RequestPreparation, String> {
+    let branch = string_field(payload, &["branch_id", "branchId"])
+        .or_else(|| runtime_credential(conn, "branch_id"))
+        .unwrap_or_default();
+    if runtime_credential(conn, "branch_id").is_some_and(|active| active != branch) {
+        return Ok(RequestPreparation::Deferred {
+            reason: "RESERVATION_BRANCH_SCOPE_MISMATCH".into(),
+        });
+    }
+    let identity = conn
+        .query_row(
+            "SELECT server_id FROM reservation_local_identity
+      WHERE (local_id=?1 OR server_id=?1) AND organization_id=?2 AND branch_id=?3",
+            params![item.record_id, item.organization_id, branch],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let mut body = payload.clone();
+    let id = if item.operation == "INSERT" {
+        body["clientRequestId"] = serde_json::json!(item.record_id);
+        item.record_id.clone()
+    } else {
+        match identity {
+            Some(None) => {
+                return Ok(RequestPreparation::WaitingForParent {
+                    reason: "Waiting for reservation create acknowledgement".into(),
+                })
+            }
+            Some(Some(remote)) => remote,
+            None => item.record_id.clone(),
+        }
+    };
+    // Retain only this intent. Do not turn a status write into a detail reset.
+    if item.operation != "INSERT" {
+        let mut patch = Map::new();
+        for key in [
+            "status",
+            "cancellation_reason",
+            "cancellationReason",
+            "table_id",
+            "tableId",
+            "customerName",
+            "customerPhone",
+            "customerEmail",
+            "customerId",
+            "partySize",
+            "reservationDate",
+            "reservationTime",
+            "durationMinutes",
+            "specialRequests",
+            "notes",
+            "roomId",
+            "roomNumber",
+            "checkInDate",
+            "checkOutDate",
+        ] {
+            if let Some(value) = body.get(key) {
+                patch.insert(key.into(), value.clone());
+            }
+        }
+        body = Value::Object(patch);
+    }
+    Ok(RequestPreparation::Ready(RequestSpec {
+        endpoint: if item.operation == "INSERT" {
+            "/api/pos/reservations".into()
+        } else {
+            format!("/api/pos/reservations/{id}")
+        },
+        method: resolve_http_method(item),
+        body: Some(body.to_string()),
+        terminal_id: terminal_id.into(),
+    }))
 }
 
 /// Why a fiscal receipt waits: the server must know its order first.
@@ -10114,6 +10345,26 @@ fn resolve_loyalty_order_reference(conn: &Connection, payload: &Value) -> Option
     )
 }
 
+fn is_loyalty_order_ended_response(
+    item: &SyncQueueItem,
+    status: u16,
+    body: Option<&Value>,
+) -> bool {
+    item.table_name == "loyalty_transactions"
+        && status == 409
+        && body.and_then(|v| v.get("success")).and_then(Value::as_bool) == Some(false)
+        && body.and_then(|v| v.get("code")).and_then(Value::as_str) == Some("LOYALTY_ORDER_ENDED")
+}
+
+fn retire_ended_loyalty_item(conn: &Connection, item: &SyncQueueItem) -> Result<(), String> {
+    crate::commands::loyalty::reverse_local_loyalty_transaction(
+        conn,
+        &item.organization_id,
+        &item.record_id,
+    )?;
+    mark_success(conn, &item.id, item.claim_generation)
+}
+
 /// Wave 5 Session 6: loyalty dispatcher. The admin loyalty API exposes two
 /// distinct endpoints (`/api/pos/loyalty/earn` and `/api/pos/loyalty/redeem`)
 /// with narrow payload shapes — a raw pass-through of the producer payload
@@ -10130,6 +10381,21 @@ fn prepare_loyalty_request(
     payload: &Value,
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
+    if payload.get("checkout_reservation").and_then(Value::as_bool) == Some(true) {
+        let checkout_id = payload
+            .get("order_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE organization_id = ?1 AND (id = ?2 OR client_request_id = ?2))",
+            params![item.organization_id, checkout_id], |row| row.get(0),
+        ).map_err(|e| format!("loyalty reservation parent: {e}"))?;
+        if !exists {
+            return Ok(RequestPreparation::WaitingForParent {
+                reason: "Waiting for loyalty checkout save".into(),
+            });
+        }
+    }
     let order_id = resolve_loyalty_order_reference(conn, payload);
     let tx_type = payload
         .get("transaction_type")
@@ -11039,9 +11305,9 @@ fn prepare_order_request(
                         .map(|cents| cents / 100.0)
                 });
             if identified_edit {
-                // This path requires the atomic editor, which accepts manual
-                // lines and requires existing canonical UUIDs. Legacy insert
-                // normalization intentionally omits those identities.
+                // The shared normalizer retains the sold quantity, vertical
+                // identities and fiscal fields. The atomic editor also needs
+                // the canonical order-item UUID and original category details.
                 let originals = parse_json_array(items);
                 let mut normalized = normalize_order_insert_items(items);
                 if normalized.is_empty() {
@@ -11069,15 +11335,7 @@ fn prepare_order_request(
                     }) {
                         line.insert("id".to_string(), Value::String(id));
                     }
-                    for key in [
-                        "quantity",
-                        "category_id",
-                        "category_name",
-                        "vat_category_code",
-                        "price_includes_vat",
-                        "tax_exemption_reason",
-                        "fiscal_document_profile",
-                    ] {
+                    for key in ["category_id", "category_name"] {
                         if let Some(value) = original.get(key) {
                             line.insert(key.to_string(), value.clone());
                         }
@@ -13267,6 +13525,66 @@ fn apply_success(
     let now = Utc::now().to_rfc3339();
 
     match item.table_name.as_str() {
+        "reservations" => {
+            let remote = response
+                .and_then(|v| {
+                    v.get("reservation")
+                        .or_else(|| v.pointer("/data/reservation"))
+                })
+                .ok_or("RESERVATION_ACK_MISSING")?;
+            let remote_id = remote
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("RESERVATION_ACK_MISSING")?;
+            let branch = remote
+                .get("branch_id")
+                .and_then(Value::as_str)
+                .ok_or("RESERVATION_ACK_SCOPE_MISSING")?;
+            if remote.get("organization_id").and_then(Value::as_str)
+                != Some(item.organization_id.as_str())
+            {
+                return Err("RESERVATION_ACK_SCOPE_MISMATCH".into());
+            }
+            let mut doc: Value = conn
+                .query_row(
+                    "SELECT data FROM reservation_local_identity WHERE
+              (local_id=?1 OR server_id=?1) AND organization_id=?2 AND branch_id=?3",
+                    params![item.record_id, item.organization_id, branch],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_else(|| remote.clone());
+            let has_followups: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE organization_id=?1
+              AND table_name='reservations' AND record_id IN (?2,?3) AND id<>?4)",
+                    params![item.organization_id, item.record_id, remote_id, item.id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if !has_followups {
+                doc = remote.clone();
+            }
+            // Preserve newer queued edits while installing the canonical identity.
+            doc["id"] = serde_json::json!(remote_id);
+            if let Some(number) = remote.get("reservation_number") {
+                doc["reservation_number"] = number.clone();
+            }
+            conn.execute(
+                "UPDATE reservation_local_identity SET server_id=?1,data=?2 WHERE
+              (local_id=?3 OR server_id=?3) AND organization_id=?4 AND branch_id=?5",
+                params![
+                    remote_id,
+                    doc.to_string(),
+                    item.record_id,
+                    item.organization_id,
+                    branch
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         "orders" => {
             if apply_edit_settlement_ack(conn, item, response, &now)?
                 || apply_header_edit_ack(conn, item, response, &now)?
@@ -13491,6 +13809,7 @@ fn apply_success(
         "customers" => {
             remap_synced_local_customer(conn, item, response)?;
         }
+        "appointments" => remap_synced_appointment(conn, item, response)?,
         "driver_earnings" | "driver_earning" => {
             if item.operation != "DELETE" {
                 let remote_id = response
@@ -14262,7 +14581,8 @@ async fn process_repair_command_item(
     let safe_base = match crate::api::resolve_admin_base(api_base_url) {
         Ok(base) => base,
         Err(_) => {
-            let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                .map_err(|error| format!("lock: {error}"))?;
             return apply_repair_hook_failure(
                 &db,
                 item,
@@ -14271,7 +14591,8 @@ async fn process_repair_command_item(
         }
     };
     let mut prepared = {
-        let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+        let db = crate::database_lock::lock(conn, "parity_queue_process")
+            .map_err(|error| format!("lock: {error}"))?;
         match prepare_repair_command_request(&db, item, hooks) {
             Ok(prepared) => prepared,
             Err(error) => return apply_repair_hook_failure(&db, item, error),
@@ -14302,7 +14623,8 @@ async fn process_repair_command_item(
             }
         },
         Err(_) => {
-            let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                .map_err(|error| format!("lock: {error}"))?;
             if !repair_claim_generation_matches(&db, item) {
                 return Ok(RepairQueueProcessOutcome::Stale);
             }
@@ -14329,7 +14651,8 @@ async fn process_repair_command_item(
         )
     };
 
-    let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+    let db = crate::database_lock::lock(conn, "parity_queue_process")
+        .map_err(|error| format!("lock: {error}"))?;
     if !repair_claim_generation_matches(&db, item) {
         return Ok(RepairQueueProcessOutcome::Stale);
     }
@@ -14445,7 +14768,8 @@ async fn process_repair_attachment_item(
         }
     };
     if crate::api::resolve_admin_base(api_base_url).is_err() {
-        let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+        let db = crate::database_lock::lock(conn, "parity_queue_process")
+            .map_err(|error| format!("lock: {error}"))?;
         return apply_repair_hook_failure(
             &db,
             item,
@@ -14453,7 +14777,8 @@ async fn process_repair_attachment_item(
         );
     }
     let prepared = {
-        let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+        let db = crate::database_lock::lock(conn, "parity_queue_process")
+            .map_err(|error| format!("lock: {error}"))?;
         match prepare_repair_attachment_request(&db, item, hooks) {
             Ok(prepared) => prepared,
             Err(error) => return apply_repair_hook_failure(&db, item, error),
@@ -14476,7 +14801,8 @@ async fn process_repair_attachment_item(
             }
         };
 
-    let db = conn.lock().map_err(|error| format!("lock: {error}"))?;
+    let db = crate::database_lock::lock(conn, "parity_queue_process")
+        .map_err(|error| format!("lock: {error}"))?;
     if !repair_claim_generation_matches(&db, item) {
         return Ok(RepairQueueProcessOutcome::Stale);
     }
@@ -14716,7 +15042,8 @@ where
         let lease = match acquire_claim_gate() {
             Ok(lease) => lease,
             Err(block) => {
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                let db = crate::database_lock::lock(conn, "parity_queue_process")
+                    .map_err(|e| format!("lock: {e}"))?;
                 let queue_depth = renderer_get_length(&db)?;
                 let telemetry = SyncTelemetryBuilder::new(started_at, queue_depth)
                     .finish(&db, 0, 0, 0, visibility)?;
@@ -14738,7 +15065,8 @@ where
             }
         };
         {
-            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                .map_err(|e| format!("lock: {e}"))?;
             exact_item = renderer_retry_and_dequeue_exact(&db, item_id)?;
             queue_depth_before = renderer_get_length(&db)?;
         }
@@ -14750,7 +15078,8 @@ where
         let prepass_gate_lease = match acquire_claim_gate() {
             Ok(lease) => lease,
             Err(block) => {
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                let db = crate::database_lock::lock(conn, "parity_queue_process")
+                    .map_err(|e| format!("lock: {e}"))?;
                 let queue_depth = match visibility {
                     QueueProcessVisibility::InternalAll => get_length(&db)?,
                     QueueProcessVisibility::RendererNonRepair => renderer_get_length(&db)?,
@@ -14776,7 +15105,8 @@ where
         };
         // Check for age warnings and perform bounded maintenance before processing.
         {
-            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                .map_err(|e| format!("lock: {e}"))?;
             if visibility == QueueProcessVisibility::InternalAll {
                 quarantined += quarantine_reserved_repair_lookalikes(&db)?;
                 let _ = redact_identifiable_legacy_repair_audit_payloads(&db)?;
@@ -14933,7 +15263,8 @@ where
                 exact_item.take()
             }
             QueueProcessSelection::All => {
-                let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                let db = crate::database_lock::lock(conn, "parity_queue_process")
+                    .map_err(|e| format!("lock: {e}"))?;
                 match visibility {
                     QueueProcessVisibility::InternalAll => {
                         let (item, newly_quarantined) =
@@ -14975,7 +15306,8 @@ where
         }
 
         let gift_close_bound = {
-            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                .map_err(|e| format!("lock: {e}"))?;
             is_gift_close_bound_item(&db, &item.id)?
         };
         if gift_close_bound {
@@ -15102,7 +15434,8 @@ where
             || fiscal_row_is_closeout_exempt(&item.module_type, &item.data);
 
         let request_spec = {
-            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                .map_err(|e| format!("lock: {e}"))?;
             with_live_generic_claim(&db, &item, |db| prepare_request(db, &item))?
         };
         let Some(request_spec) = request_spec else {
@@ -15113,7 +15446,8 @@ where
             RequestPreparation::Ready(spec) => spec,
             RequestPreparation::Consumed { reason } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         mark_success(db, &item.id, item.claim_generation)
                     })?
@@ -15127,7 +15461,8 @@ where
             }
             RequestPreparation::Deferred { reason } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         mark_deferred(db, &item.id, &reason, item.claim_generation)
                     })?
@@ -15139,7 +15474,8 @@ where
             }
             RequestPreparation::WaitingForParent { reason } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         mark_waiting_for_parent(db, &item.id, &reason, item.claim_generation)
                     })?
@@ -15154,7 +15490,8 @@ where
                 local_order_id,
             } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         mark_waiting_for_order_create(
                             db,
@@ -15172,7 +15509,8 @@ where
             }
             RequestPreparation::Conflict { reason } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         log_conflict(
                             db,
@@ -15202,7 +15540,8 @@ where
             }
             RequestPreparation::ManualResolution { reason_code } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         park_customer_phone_country_resolution(
                             db,
@@ -15222,7 +15561,8 @@ where
             }
             RequestPreparation::Failed { reason } => {
                 let applied = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         let outcome = mark_failure_in_transaction(
                             db,
@@ -15311,10 +15651,25 @@ where
                 let response_body = resp.text().await.unwrap_or_default();
                 let response_json = serde_json::from_str::<Value>(&response_body).ok();
                 {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     if !is_live_generic_claim(&db, &item)? {
                         continue;
                     }
+                }
+
+                if is_loyalty_order_ended_response(&item, status, response_json.as_ref()) {
+                    let retired = {
+                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            retire_ended_loyalty_item(db, &item)
+                        })?
+                    };
+                    if retired.is_some() {
+                        processed += 1;
+                        telemetry.record_success(&item);
+                    }
+                    continue;
                 }
 
                 if item.module_type == "table_service"
@@ -15333,7 +15688,8 @@ where
                     )
                 {
                     let marked = {
-                        let db = conn.lock().map_err(|error| error.to_string())?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|error| error.to_string())?;
                         if !is_live_generic_claim(&db, &item)? {
                             continue;
                         }
@@ -15374,7 +15730,8 @@ where
                     )
                 {
                     let marked = {
-                        let db = conn.lock().map_err(|error| error.to_string())?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|error| error.to_string())?;
                         if !is_live_generic_claim(&db, &item)? {
                             continue;
                         }
@@ -15404,7 +15761,8 @@ where
                 }
                 if let Some(failure) = parse_parity_terminal_auth_failure(status, &response_body) {
                     let parked = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_terminal_auth_pending(db, &item, failure)
                         })?
@@ -15448,7 +15806,8 @@ where
                 {
                     // Success -- remove from queue
                     let applied = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             apply_success(db, &item, response_json.as_ref())?;
                             if item.table_name == "customer_addresses" {
@@ -15469,7 +15828,8 @@ where
                     // the transport path, which reschedules with backoff and
                     // never turns the row into a dead letter.
                     let failure = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_failure_in_transaction(db, &item.id, code, item.claim_generation)
                         })?
@@ -15498,7 +15858,8 @@ where
                         // A write against a shift a remote close froze: a
                         // conflict that names it, never retried.
                         let applied = {
-                            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                                .map_err(|e| format!("lock: {e}"))?;
                             with_live_generic_claim(&db, &item, |db| {
                                 log_conflict(
                                     db,
@@ -15535,7 +15896,8 @@ where
                     // Refused for good: the row stops as `failed` with the
                     // server's own sentence, exactly like a 4xx answer.
                     let failure = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             let failure = mark_failure_in_transaction(
                                 db,
@@ -15586,7 +15948,8 @@ where
                     // budget) and goes through once the phones close.
                     let reason = crate::unit_shift_readiness::wait_reason_from_body(&response_body);
                     let marked = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_waiting_for_unit_shifts(
                                 db,
@@ -15620,7 +15983,8 @@ where
                     let reason =
                         server_conflict_reason(&response_body, &item.table_name, &item.operation);
                     let applied = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             log_conflict(
                                 db,
@@ -15665,7 +16029,8 @@ where
                         "CUSTOMER_ADDRESS_WRITE_REQUIRES_REVIEW"
                     };
                     let applied = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             record_customer_address_default_recovery_outcome(
                                 db,
@@ -15708,7 +16073,8 @@ where
                     // step, and the next sync pass mirrors the order's server
                     // payments (`restore_ledgers_after_set_aside`).
                     let applied = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             let now = Utc::now().to_rfc3339();
                             let outcome = crate::payment_review::set_aside_platform_held_payment(
@@ -15746,7 +16112,8 @@ where
                     // set aside for a manager (`payments_need_review`) like a
                     // platform-held refusal, never retried into a failure.
                     let applied = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             let now = Utc::now().to_rfc3339();
                             let outcome =
@@ -15787,7 +16154,8 @@ where
                     let order_not_found =
                         is_fiscal_order_not_found_response(status, &response_body);
                     let outcome = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             if order_not_found {
                                 if order_create_in_flight(db, &item.record_id) {
@@ -15851,7 +16219,8 @@ where
                 } else if is_parent_order_wait_response(status, &response_body) {
                     let reason = "Waiting for parent order sync";
                     let marked = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_deferred(db, &item.id, reason, item.claim_generation)
                         })?
@@ -15870,7 +16239,8 @@ where
                     // own sync state is what the operator sees. Only a close
                     // with nothing of its own in flight escalates as before.
                     let waiting_on_local_payment = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         // Unreadable: the close keeps today's deferral path.
                         table_session_payment_in_flight(&db, &item.record_id).unwrap_or_else(
                             |error| {
@@ -15889,7 +16259,8 @@ where
                         "Waiting for table payment sync"
                     };
                     let marked = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             if waiting_on_local_payment {
                                 mark_waiting_on_local_payment(
@@ -15923,7 +16294,8 @@ where
                         )
                     };
                     let marked = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_module_required(db, &item.id, &reason, item.claim_generation)
                         })?
@@ -15940,7 +16312,8 @@ where
                     }
                 } else if is_replay_conflict_response(status, &response_body, &item) {
                     {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         if !is_live_generic_claim(&db, &item)? {
                             continue;
                         }
@@ -15987,7 +16360,8 @@ where
                         server_conflict_reason(&response_body, &item.table_name, &item.operation);
 
                     let applied = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             log_conflict(
                                 db,
@@ -16033,7 +16407,8 @@ where
                 } else if status == 429 {
                     let error_message = "HTTP_429_RATE_LIMITED".to_string();
                     let marked = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_rate_limited(
                                 db,
@@ -16058,7 +16433,8 @@ where
                     }
                 } else if status == 408 {
                     let failure = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_failure_in_transaction(
                                 db,
@@ -16089,7 +16465,8 @@ where
                         parity_client_error_code(&item.table_name, status, &response_body);
                     let resolved_at = Utc::now().to_rfc3339();
                     let outcome = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             if resolve_live_payment_total_conflict_with_conn(
                                 db,
@@ -16163,7 +16540,8 @@ where
                     let mut stale_fallback_claim = false;
                     for (fallback_outcome, fallback_spec) in fallback_specs {
                         {
-                            let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                                .map_err(|e| format!("lock: {e}"))?;
                             if !is_live_generic_claim(&db, &item)? {
                                 stale_fallback_claim = true;
                                 break;
@@ -16197,7 +16575,11 @@ where
 
                                 if fallback_is_success {
                                     let applied = {
-                                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                                        let db = crate::database_lock::lock(
+                                            conn,
+                                            "parity_queue_process",
+                                        )
+                                        .map_err(|e| format!("lock: {e}"))?;
                                         with_live_generic_claim(&db, &item, |db| {
                                             apply_success(db, &item, fallback_json.as_ref())?;
                                             mark_success(db, &item.id, item.claim_generation)
@@ -16242,7 +16624,8 @@ where
 
                     let error_code = format!("HTTP_{status}_SERVER_ERROR");
                     let failure = {
-                        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
                             mark_failure_in_transaction(
                                 db,
@@ -16275,7 +16658,8 @@ where
                 // Network error (retriable)
                 let error_code = "NETWORK_ERROR".to_string();
                 let failure = {
-                    let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
                         mark_failure_in_transaction(
                             db,
@@ -16313,7 +16697,8 @@ where
         && auth_outcome.is_none()
         && batch_block.is_none();
     let telemetry = {
-        let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
+        let db = crate::database_lock::lock(conn, "parity_queue_process")
+            .map_err(|e| format!("lock: {e}"))?;
         reconcile_payment_queue_mirrors(&db, None)?;
         telemetry.finish(&db, processed, failed, conflicts, visibility)?
     };
@@ -17605,6 +17990,108 @@ mod tests {
         }
     }
 
+    #[test]
+    fn salon_replay_keeps_identity_waits_and_remaps_followups() {
+        let conn = test_connection();
+        let local = "local-appointment-stable";
+        let create = queue_item(
+            "appointments",
+            "INSERT",
+            local,
+            serde_json::json!({"start_time":"2026-10-21T10:00:00"}),
+        );
+        let RequestPreparation::Ready(first) = prepare_appointment_request(
+            &conn,
+            &create,
+            &serde_json::from_str(&create.data).unwrap(),
+            "terminal".into(),
+        )
+        .unwrap() else {
+            panic!("create ready")
+        };
+        let body: Value = serde_json::from_str(first.body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["client_request_id"], local);
+        let update = queue_item(
+            "appointments",
+            "UPDATE",
+            local,
+            serde_json::json!({"id":local,"status":"in_progress"}),
+        );
+        assert!(matches!(
+            prepare_appointment_request(
+                &conn,
+                &update,
+                &serde_json::from_str(&update.data).unwrap(),
+                "terminal".into()
+            )
+            .unwrap(),
+            RequestPreparation::WaitingForParent { .. }
+        ));
+        conn.execute("INSERT INTO parity_sync_queue (id,table_name,record_id,operation,data,organization_id,created_at,module_type,conflict_strategy,version,status) VALUES ('followup','appointments',?1,'UPDATE',?2,'org-1',datetime('now'),'salon','manual',1,'pending')",params![local,update.data]).unwrap();
+        let cache_key = "admin_api_get::/api/pos/appointments";
+        crate::db::set_setting(&conn,"local",cache_key,&serde_json::json!({"data":{"appointments":[{"id":local,"organization_id":"org-1","customer_id":"customer","status":"in_progress","appointment_services":[{"service_id":"haircut"}]}]}}).to_string()).unwrap();
+        let remote = "10000000-0000-4000-8000-000000000001";
+        let answer = serde_json::json!({"appointment":{"id":remote,"organization_id":"org-1"}});
+        remap_synced_appointment(&conn, &create, Some(&answer)).unwrap();
+        assert_eq!(
+            resolve_appointment_id(&conn, "org-1", local).unwrap(),
+            remote
+        );
+        let raw = crate::db::get_setting(&conn, "local", cache_key).unwrap();
+        let cached: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(cached["data"]["appointments"][0]["id"], remote);
+        assert_eq!(cached["data"]["appointments"][0]["status"], "in_progress");
+        assert_eq!(cached["data"]["appointments"][0]["customer_id"], "customer");
+        assert_eq!(
+            cached["data"]["appointments"][0]["appointment_services"][0]["service_id"],
+            "haircut"
+        );
+
+        assert_eq!(
+            resolve_appointment_id(&conn, "other-org", local).unwrap(),
+            local
+        );
+        let (id, raw): (String, String) = conn
+            .query_row(
+                "SELECT record_id,data FROM parity_sync_queue WHERE id='followup'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(id, remote);
+        assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["id"], remote);
+        let RequestPreparation::Ready(next) = prepare_appointment_request(
+            &conn,
+            &update,
+            &serde_json::from_str(&update.data).unwrap(),
+            "terminal".into(),
+        )
+        .unwrap() else {
+            panic!("status ready")
+        };
+        assert!(next.endpoint.contains(remote));
+        // Lost acknowledgement repeats use exactly the original client key.
+        remap_synced_appointment(&conn, &create, Some(&answer)).unwrap();
+    }
+
+    #[test]
+    fn salon_order_replay_preserves_service_appointment_and_fiscal_fields() {
+        let input = serde_json::json!([{"menu_item_id":null,"service_id":"10000000-0000-4000-8000-000000000001","appointment_id":"20000000-0000-4000-8000-000000000001","name":"Haircut","quantity":1,"unit_price":25,"vat_category_code":"gr_standard_24","price_includes_vat":false,"tax_exemption_reason":"reason","fiscal_document_profile":"retail_receipt","metadata":{"staff_id":"stylist"}}]);
+        let output = normalize_order_insert_items(&input);
+        for field in [
+            "service_id",
+            "appointment_id",
+            "vat_category_code",
+            "price_includes_vat",
+            "tax_exemption_reason",
+            "fiscal_document_profile",
+            "metadata",
+        ] {
+            assert_eq!(output[0][field], input[0][field], "{field}");
+        }
+        assert!(output[0]["menu_item_id"].is_null());
+    }
+
     #[derive(Debug, Clone)]
     struct CapturedRequest {
         request_line: String,
@@ -18538,6 +19025,48 @@ mod tests {
             assert_eq!(body["expected_updated_at"], original["expected_updated_at"]);
             assert_eq!(item.data, original.to_string());
         }
+    }
+
+    #[test]
+    fn reservation_replay_waits_for_create_and_retargets_edits_after_ack() {
+        let conn = test_connection();
+        seed_terminal_context(&conn);
+        let doc = json!({"id":"local-res","organization_id":"org-1","branch_id":TEST_BRANCH_ID,"status":"confirmed","table_id":"table-2"});
+        conn.execute("INSERT INTO reservation_local_identity(local_id,organization_id,branch_id,data) VALUES('local-res','org-1',?2,?1)",params![doc.to_string(),TEST_BRANCH_ID]).unwrap();
+        let update = queue_item(
+            "reservations",
+            "UPDATE",
+            "local-res",
+            json!({"status":"cancelled","cancellation_reason":"Guest called","branch_id":TEST_BRANCH_ID}),
+        );
+        assert!(matches!(
+            prepare_request(&conn, &update).unwrap(),
+            RequestPreparation::WaitingForParent { .. }
+        ));
+        let create = queue_item(
+            "reservations",
+            "INSERT",
+            "local-res",
+            json!({"customerName":"Guest","branch_id":TEST_BRANCH_ID}),
+        );
+        let RequestPreparation::Ready(spec) = prepare_request(&conn, &create).unwrap() else {
+            panic!("create ready")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(spec.body.as_deref().unwrap()).unwrap()
+                ["clientRequestId"],
+            "local-res"
+        );
+        let reply = json!({"success":true,"reservation":{"id":"canonical-res","organization_id":"org-1","branch_id":TEST_BRANCH_ID,"status":"pending"}});
+        apply_success(&conn, &create, Some(&reply)).unwrap();
+        let RequestPreparation::Ready(spec) = prepare_request(&conn, &update).unwrap() else {
+            panic!("update ready after ack")
+        };
+        assert_eq!(spec.endpoint, "/api/pos/reservations/canonical-res");
+        assert_eq!(
+            serde_json::from_str::<Value>(spec.body.as_deref().unwrap()).unwrap(),
+            json!({"status":"cancelled","cancellation_reason":"Guest called"})
+        );
     }
 
     #[test]
@@ -21319,6 +21848,160 @@ mod tests {
         assert_eq!(body["total_amount_cents"], 1200);
         assert_eq!(body["subtotal_cents"], 1150);
         assert_eq!(body["tax_amount_cents"], 223);
+    }
+
+    #[test]
+    fn order_line_replay_preserves_vertical_and_fiscal_fields() {
+        let conn = test_connection();
+        let cases = [
+            json!({"name":"Weighed retail", "menu_item_id":TEST_MENU_ITEM_ID,
+                "retail_product_id":TEST_MENU_ITEM_ID, "quantity":0.35,
+                "unit_price":12.0, "total_price":4.2}),
+            json!({"name":"Reduced VAT", "menu_item_id":TEST_MENU_ITEM_ID, "quantity":1,
+                "unit_price":11.3, "total_price":11.3, "vat_category_code":"gr_reduced_13",
+                "price_includes_vat":false, "tax_exemption_reason":"recorded reason",
+                "fiscal_document_profile":"recorded profile"}),
+            json!({"name":"Variant", "menu_item_id":TEST_MENU_ITEM_ID, "quantity":1,
+                "unit_price":12.0, "total_price":12.0, "retail_product_id":TEST_MENU_ITEM_ID,
+                "retail_variant_id":"33333333-3333-4333-8333-333333333333",
+                "appointment_id":null, "is_manual":false}),
+            json!({"name":"Service", "quantity":1, "unit_price":30.0, "total_price":30.0,
+                "service_id":"44444444-4444-4444-8444-444444444444",
+                "appointment_id":"55555555-5555-4555-8555-555555555555", "staff_id":"66666666-6666-4666-8666-666666666666"}),
+            json!({"name":"Manual deposit", "quantity":1, "unit_price":5.0,
+                "total_price":5.0, "is_manual":true, "line_role":"deposit"}),
+        ];
+        for original in cases {
+            // Exercise both aliases through INSERT, legacy PATCH and the atomic editor.
+            for camel_case in [false, true] {
+                let mut source = original.clone();
+                if original["name"] == "Weighed retail" {
+                    source["quantity"] = json!(0.3504);
+                }
+                if camel_case {
+                    let object = source.as_object_mut().unwrap();
+                    for (snake, camel) in [
+                        ("retail_product_id", "retailProductId"),
+                        ("retail_variant_id", "retailVariantId"),
+                        ("service_id", "serviceId"),
+                        ("appointment_id", "appointmentId"),
+                        ("staff_id", "staffId"),
+                        ("line_role", "lineRole"),
+                        ("is_manual", "isManual"),
+                        ("vat_category_code", "vatCategoryCode"),
+                        ("price_includes_vat", "priceIncludesVat"),
+                        ("tax_exemption_reason", "taxExemptionReason"),
+                        ("fiscal_document_profile", "fiscalDocumentProfile"),
+                    ] {
+                        if let Some(value) = object.remove(snake) {
+                            object.insert(camel.to_string(), value);
+                        }
+                    }
+                }
+                let items = json!([source]);
+                let payload = json!({"branch_id":TEST_BRANCH_ID, "order_type":"pickup",
+                    "items":items, "total_amount":original["total_price"]});
+                let insert = build_order_insert_body(&conn, "vertical-replay", &payload).unwrap();
+                let update = normalize_order_update_items_for_request(&items, None, None)
+                    .expect("explicit vertical/manual identities must survive updates");
+                let edit_payload = json!({"client_event_id":"vertical-edit", "expected_version":1,
+                    "status":"pending", "items":items});
+                conn.execute(
+                    "INSERT OR IGNORE INTO orders (id, supabase_id, items, total_amount, status)
+                    VALUES ('vertical-replay', 'remote-vertical-replay', '[]', 0, 'pending')",
+                    [],
+                )
+                .unwrap();
+                let queue = queue_item("orders", "UPDATE", "vertical-replay", edit_payload.clone());
+                let edit =
+                    match prepare_order_request(&conn, &queue, &edit_payload, TEST_TERMINAL_ID)
+                        .unwrap()
+                    {
+                        RequestPreparation::Ready(spec) => {
+                            serde_json::from_str::<Value>(spec.body.as_deref().unwrap()).unwrap()
+                        }
+                        other => panic!("expected identified edit: {other:?}"),
+                    };
+                for line in [&insert["items"][0], &update[0], &edit["items"][0]] {
+                    for (key, expected) in original.as_object().unwrap() {
+                        assert_eq!(&line[key], expected, "{key}, camel={camel_case}: {line}");
+                    }
+                }
+                assert_eq!(insert["total_amount"], original["total_price"]);
+            }
+        }
+    }
+
+    #[test]
+    fn order_line_replay_rounds_quantity_to_millesimals_and_keeps_fractional_discount_math() {
+        let items = json!([{"menu_item_id":TEST_MENU_ITEM_ID, "quantity":0.3504,
+            "unit_price":10.0, "original_unit_price":12.0, "total_price":3.5}]);
+        let normalized = normalize_order_insert_items(&items);
+        assert_eq!(normalized[0]["quantity"], 0.35);
+        assert_eq!(normalized[0]["total_price"], 3.5);
+        let updated = normalize_order_update_items_for_request(&items, Some(0.7), Some(4.2))
+            .expect("fractional original subtotal matches");
+        assert_eq!(updated[0]["quantity"], 0.35);
+        assert_eq!(updated[0]["unit_price"], 12.0);
+        assert_eq!(updated[0]["total_price"], 4.2);
+        let without_total = normalize_order_insert_items(&json!([
+            {"quantity":0.35, "unit_price":12.0},
+            {"quantity":0.35, "total_price":4.2}
+        ]));
+        assert_eq!(without_total[0]["total_price"], 4.2);
+        assert!((without_total[1]["unit_price"].as_f64().unwrap() - 12.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn order_line_replay_vat_uses_the_same_fractional_reduced_rate_lines_as_insert() {
+        let conn = test_connection();
+        let payload = json!({"branch_id":TEST_BRANCH_ID, "order_type":"pickup", "items":[{
+            "menu_item_id":TEST_MENU_ITEM_ID, "quantity":0.35, "unit_price":12.0,
+            "total_price":4.2, "vatCategoryCode":"gr_reduced_13", "priceIncludesVat":true
+        }]});
+        let body = build_order_insert_body(&conn, "fractional-vat", &payload).unwrap();
+        let vat = order_insert_vat(&conn, "fractional-vat", &payload).unwrap();
+        let from_body = crate::fiscal::greece_vat::calculate_order_vat_from_order_body(
+            &body,
+            &crate::fiscal::greece_vat::branch_vat_settings(&conn),
+        );
+        assert_eq!(body["subtotal"], 4.2);
+        assert_eq!(body["total_amount"], 4.2);
+        assert_eq!(vat.tax_amount_cents, 48); // 4.20 - 4.20 / 1.13
+        assert_eq!(vat.tax_amount_cents, from_body.tax_amount_cents);
+        assert_eq!(vat.breakdown.lines, from_body.breakdown.lines);
+    }
+
+    #[test]
+    fn order_line_replay_legacy_menu_body_is_byte_identical() {
+        let conn = test_connection();
+        let payload = json!({"branch_id":TEST_BRANCH_ID, "order_type":"pickup", "items":[{
+            "menuItemId":TEST_MENU_ITEM_ID, "quantity":2, "price":6.0, "name":"Coffee",
+            "notes":"No sugar", "customizations":[], "originalUnitPrice":7.0, "isPriceOverridden":true
+        }]});
+        let body = build_order_insert_body(&conn, "legacy-menu", &payload).unwrap();
+        let expected = json!({
+            "client_order_id":"legacy-menu", "branch_id":TEST_BRANCH_ID,
+            "items":[{"menu_item_id":TEST_MENU_ITEM_ID, "quantity":2, "unit_price":6.0,
+                "total_price":12.0, "name":"Coffee", "notes":"No sugar", "customizations":{},
+                "original_unit_price":7.0, "is_price_overridden":true}],
+            "order_type":"pickup", "payment_status":"pending", "payment_method":"cash",
+            "total_amount":12.0, "total_amount_cents":1200, "subtotal":12.0, "subtotal_cents":1200,
+            "tax_amount":0.0, "tax_amount_cents":0, "tax_rate":null,
+            "delivery_fee":0.0, "delivery_fee_cents":0, "discount_percentage":0.0,
+            "discount_amount":0.0, "discount_amount_cents":0, "manual_discount_mode":null,
+            "manual_discount_value":null, "coupon_id":null, "coupon_code":null,
+            "coupon_discount_amount":0.0, "coupon_discount_amount_cents":0, "tip_amount":0.0,
+            "tip_amount_cents":0, "country_code":null, "pricing_mode":null, "customer_id":null,
+            "customer_name":null, "customer_phone":null, "customer_email":null, "order_number":null,
+            "status":"pending", "table_number":null, "table_id":null, "table_session_id":null,
+            "guest_count":null, "delivery_address":null, "delivery_address_id":null, "delivery_city":null,
+            "delivery_postal_code":null, "delivery_floor":null, "delivery_notes":null,
+            "delivery_latitude":null, "delivery_longitude":null, "delivery_address_fingerprint":null,
+            "delivery_zone_id":null, "name_on_ringer":null, "notes":null, "is_ghost":false,
+            "ghost_source":null, "room_id":null, "ghost_metadata":null
+        });
+        assert_eq!(body.to_string(), expected.to_string());
     }
 
     #[test]
@@ -24825,6 +25508,89 @@ mod tests {
             )
             .expect("count remaining row");
         assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn loyalty_order_ended_is_terminal_only_for_the_exact_loyalty_refusal() {
+        let item = queue_item("loyalty_transactions", "INSERT", "tx", json!({}));
+        let body = json!({"success":false,"code":"LOYALTY_ORDER_ENDED"});
+        assert!(is_loyalty_order_ended_response(&item, 409, Some(&body)));
+        assert!(!is_loyalty_order_ended_response(&item, 500, Some(&body)));
+        assert!(!is_loyalty_order_ended_response(
+            &item,
+            409,
+            Some(&json!({"success":false,"code":"INSUFFICIENT_POINTS"}))
+        ));
+        assert!(!is_loyalty_order_ended_response(
+            &queue_item("payments", "INSERT", "tx", json!({})),
+            409,
+            Some(&body)
+        ));
+    }
+
+    #[test]
+    fn loyalty_order_ended_restores_debit_once_and_removes_the_queue_row() {
+        let conn = test_connection();
+        conn.execute_batch("INSERT INTO loyalty_customers (id, user_profile_id, customer_id, organization_id, points_balance, total_redeemed)
+            VALUES ('balance', 'profile-1', 'customer-1', 'org-1', 20, 100);
+            INSERT INTO loyalty_transactions (id, customer_id, organization_id, points, transaction_type)
+            VALUES ('redemption', 'customer-1', 'org-1', -100, 'redeem');
+            INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id)
+            VALUES ('queue-1', 'loyalty_transactions', 'redemption', 'INSERT', '{}', 'org-1');").unwrap();
+        let item = queue_item("loyalty_transactions", "INSERT", "redemption", json!({}));
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        retire_ended_loyalty_item(&conn, &item).unwrap();
+        retire_ended_loyalty_item(&conn, &item).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            conn.query_row("SELECT points_balance FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            120
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT sync_state FROM loyalty_transactions", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "applied"
+        );
+    }
+
+    #[test]
+    fn loyalty_checkout_reservation_waits_until_its_scoped_order_is_saved() {
+        let conn = test_connection();
+        let payload = json!({"transaction_type":"redeem","points":-100,"order_id":"checkout-1","checkout_reservation":true});
+        let item = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "redemption",
+            payload.clone(),
+        );
+        assert!(matches!(
+            prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap(),
+            RequestPreparation::WaitingForParent { .. }
+        ));
+        conn.execute("INSERT INTO orders (id, organization_id, client_request_id, items, total_amount) VALUES ('other-order', 'other-org', 'checkout-1', '[]', 10)", []).unwrap();
+        assert!(matches!(
+            prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap(),
+            RequestPreparation::WaitingForParent { .. }
+        ));
+        conn.execute(
+            "UPDATE orders SET organization_id = 'org-1' WHERE id = 'other-order'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap(),
+            RequestPreparation::Ready(_)
+        ));
     }
 
     #[test]

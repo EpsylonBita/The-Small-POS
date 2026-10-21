@@ -456,6 +456,7 @@ test('AppointmentsService desktop create/status updates use offline mutation cha
 
   try {
     const created = await appointmentsService.createAppointment({
+      clientRequestId: 'local-appointment-retry-key',
       customerName: 'Ada Lovelace',
       customerPhone: '123456',
       customerEmail: 'ada@example.com',
@@ -469,6 +470,7 @@ test('AppointmentsService desktop create/status updates use offline mutation cha
     assert.deepEqual(calls[0], {
       channel: 'offline:appointment-create',
       payload: {
+        client_request_id: 'local-appointment-retry-key',
         customer_id: null,
         customer_name: 'Ada Lovelace',
         customer_phone: '123456',

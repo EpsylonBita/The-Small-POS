@@ -27,6 +27,7 @@ interface UseAppointmentsProps {
 }
 
 interface CreateAppointmentData {
+  clientRequestId?: string;
   customerId?: string | null;
   customerName?: string;
   customerPhone?: string;

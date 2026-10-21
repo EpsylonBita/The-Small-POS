@@ -12,6 +12,8 @@ import { posApiGet, posApiPatch } from '../utils/api-helpers';
 import { getBridge, isBrowser } from '../../lib';
 import { readModuleSnapshot } from './module-snapshots';
 import { offlineUpdateProductQuantity } from './offline-mutations';
+import { BarcodeService, type ScaleBarcodeRule } from '../../../../shared/services/BarcodeService';
+import { SnapshotAccessError } from './versioned-snapshot';
 
 // Types
 export interface Product {
@@ -77,6 +79,28 @@ export interface BarcodeScanResult {
   product: Product;
   embedded: EmbeddedScaleValue | null;
   variantId: string | null;
+}
+
+/** Resolve only within the already authenticated, organization/branch snapshot. */
+export function lookupSnapshotBarcode(rows: any[], barcode: string, rules?: ScaleBarcodeRule[]): BarcodeScanResult | null {
+  const cleaned = BarcodeService.cleanBarcode(barcode);
+  const active = rows.filter(row => row.is_active !== false);
+  const scale = BarcodeService.parseScaleBarcode(cleaned, rules);
+  if (scale) {
+    const row = active.find(row => [row.plu_code, row.sku, row.barcode].includes(scale.articleCode));
+    return row ? { product: transformProductFromAPI(row), variantId: null,
+      embedded: { value_type: scale.valueType, weight: scale.weight ?? null, price: scale.price ?? null } } : null;
+  }
+  for (const row of active) {
+    const alternate = (row.barcodes ?? row.product_barcodes ?? []).find((value: any) => value.barcode === cleaned);
+    const variant = (row.variants ?? []).find((value: any) => value.is_active && value.barcode === cleaned);
+    if (alternate || variant || row.barcode === cleaned) {
+      return { product: transformProductFromAPI(row), embedded: null,
+        variantId: alternate?.product_variant_id ?? variant?.id ?? null };
+    }
+  }
+  const row = active.find(row => (/^[0-9]{1,6}$/.test(cleaned) && row.plu_code === cleaned) || row.sku === cleaned);
+  return row ? { product: transformProductFromAPI(row), embedded: null, variantId: null } : null;
 }
 
 export interface ProductSupplier {
@@ -501,9 +525,25 @@ class ProductCatalogService {
       return null;
     }
     try {
+      // Access and terminal scope are revalidated even for a cached read.
+      // Scan locally first so a disconnected till never waits on lookup HTTP.
+      const snapshot = await readModuleSnapshot('product_catalog', false, true).catch(error => {
+        if (error instanceof SnapshotAccessError) throw error;
+        return { rows: [], categories: [], scaleBarcodeRules: undefined };
+      });
+      const scopedRows = snapshot.rows.filter(row => row.organization_id === this.organizationId &&
+        (!row.branch_id || row.branch_id === this.branchId));
+      const local = lookupSnapshotBarcode(scopedRows, barcode, snapshot.scaleBarcodeRules);
+      if (local) return local;
       if (this.useApiPrimary) {
         const apiResult = await this.fetchBarcodeScanResultFromApi(barcode);
         if (apiResult !== null) {
+          if (!apiResult.product.isActive || apiResult.product.organizationId !== this.organizationId ||
+              (apiResult.product.branchId && apiResult.product.branchId !== this.branchId)) return null;
+          const cachedProduct = scopedRows.find(row => row.id === apiResult.product.id);
+          apiResult.product.variants = cachedProduct
+            ? transformProductFromAPI(cachedProduct).variants
+            : await this.fetchProductVariants(apiResult.product.id);
           return apiResult;
         }
         if (!this.canUseSupabaseFallback()) {
@@ -528,6 +568,8 @@ class ProductCatalogService {
         ? await posApiGet<{ success: boolean; found: boolean; product?: any; embedded?: EmbeddedScaleValue | null; variant_id?: unknown }>(endpoint)
         : await getBridge().adminApi.fetchFromAdmin(endpoint, { method: 'GET' });
 
+      if ([401, 403].includes(result.status ?? 0)) throw new SnapshotAccessError('Module access denied');
+
       if (!result.success || !result.data?.success) {
         return null;
       }
@@ -542,6 +584,7 @@ class ProductCatalogService {
         variantId: typeof result.data.variant_id === 'string' ? result.data.variant_id : null,
       };
     } catch (error) {
+      if (error instanceof SnapshotAccessError) throw error;
       console.error('ProductCatalogService: API barcode lookup error:', error);
       return null;
     }

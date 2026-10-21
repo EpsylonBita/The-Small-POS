@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  reservationsEnabled: true,
   listeners: new Map<string, (payload: unknown) => void>(),
   bridge: { tables: { list: vi.fn() } },
 }));
@@ -14,10 +15,12 @@ vi.mock('../../../lib', () => ({
   },
 }));
 vi.mock('../../services/ReservationsService', () => ({
-  reservationsService: { setContext: vi.fn(), syncTableStatusesForToday: vi.fn().mockResolvedValue(undefined) },
+  reservationsService: { setContext: vi.fn(), projectArrivalTables: vi.fn(async tables => tables), syncTableStatusesForToday: vi.fn().mockResolvedValue(undefined) },
 }));
 vi.mock('../../utils/api-helpers', () => ({ posApiGet: vi.fn(), posApiPatch: vi.fn() }));
 
+vi.mock('../useAcquiredModules', () => ({ useAcquiredModules: () => ({ hasModule: () => mocks.reservationsEnabled }) }));
+import { reservationsService } from '../../services/ReservationsService';
 import { useTables } from '../useTables';
 
 const available = {
@@ -36,8 +39,10 @@ const tick = () => act(async () => { await vi.advanceTimersByTimeAsync(150); });
 
 beforeEach(() => {
   vi.useFakeTimers();
+  mocks.reservationsEnabled = true;
   mocks.listeners.clear();
   mocks.bridge.tables.list.mockReset().mockResolvedValue({ success: true, data: { tables: [available] } });
+  vi.mocked(reservationsService.projectArrivalTables).mockReset().mockImplementation(async tables => tables);
 });
 afterEach(() => { vi.useRealTimers(); });
 
@@ -49,6 +54,46 @@ async function mount(overrides: Partial<typeof options & { enabled: boolean }> =
 }
 
 describe('committed LAN table notification', () => {
+  it('retains previous arrivals through pending/incomplete reads, then clears only on a complete read', async () => {
+    vi.mocked(reservationsService.projectArrivalTables).mockImplementationOnce(async tables =>
+      tables.map(table => ({ ...table, status: 'reserved', reservationCanonicalStatus: table.status })));
+    const { result } = await mount();
+    expect(result.current.tables[0].status).toBe('reserved');
+    let finish!: (tables: any[]) => void;
+    let pendingTables!: any[];
+    vi.mocked(reservationsService.projectArrivalTables).mockImplementationOnce(tables => {
+      pendingTables = tables;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.tables[0].status).toBe('reserved');
+    await act(async () => { finish(pendingTables); }); // incomplete reads return input unchanged
+    expect(result.current.tables[0].status).toBe('reserved');
+    vi.mocked(reservationsService.projectArrivalTables).mockImplementationOnce(async tables =>
+      tables.map(table => ({ ...table, status: 'available' })));
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.tables[0].status).toBe('available');
+  });
+  it('renders local tables before booking decoration and ignores decoration older than a new check', async () => {
+    let finish!: (tables: any[]) => void;
+    vi.mocked(reservationsService.projectArrivalTables).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const { result } = await mount();
+    expect(result.current.tables[0].id).toBe(available.id);
+    expect(result.current.isLoading).toBe(false);
+    mocks.bridge.tables.list.mockResolvedValue({ success: true, data: { tables: [occupied] } });
+    await act(async () => { await result.current.refetch(); });
+    await act(async () => { finish([{ ...result.current.tables[0], status: 'reserved', currentOrderId: undefined, tableSessionId: null }]); });
+    expect(result.current.tables[0].status).toBe('occupied');
+    expect(result.current.tables[0].currentOrderId).toBe(occupied.current_order_id);
+  });
+
+  it('loads ordinary tables without requiring reservation data when Reservations is absent', async () => {
+    mocks.reservationsEnabled = false;
+    const { result } = await mount();
+    expect(result.current.tables[0].id).toBe(available.id);
+    expect(result.current.error).toBeNull();
+  });
+
   it.each(['newer server', 'new check', 'expired hint'])('does not pin an obsolete balance after %s', async scenario => {
     vi.setSystemTime(new Date('2026-10-12T03:00:00Z'));
     mocks.bridge.tables.list.mockResolvedValue({ success: true, data: { tables: [occupied] } });

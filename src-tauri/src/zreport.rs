@@ -1035,7 +1035,7 @@ fn rollover_order_predicate(conn: &Connection, cutoff_param: &str) -> Result<Str
         };
         later_money.push(format!(
             "EXISTS (SELECT 1 FROM payment_adjustments pa_later
-                     WHERE (pa_later.order_id = o.id {via_payment})
+                     WHERE COALESCE(pa_later.imported_remote, 0) = 0 AND (pa_later.order_id = o.id {via_payment})
                        AND julianday(pa_later.created_at) > julianday({cutoff_param}))"
         ));
     }
@@ -1157,6 +1157,20 @@ pub(crate) fn load_unsynced_money_for_cutoff(
              WHERE live.table_name = 'staff_payments'
                AND julianday(sp.created_at) <= julianday(?1)"
         ));
+    }
+    if table_present("unresolved_remote_payments")? {
+        // Incoming mirrors are not outgoing charges, but a retained financial
+        // row belonging to this closing order still fences its Z/rollover.
+        branches.push(
+            "SELECT 'canonical-pull:' || r.id, 'payments', r.id, 'PULL', 'pending',
+                    r.last_error, w.id, w.order_number, r.updated_at
+             FROM unresolved_remote_payments r
+             JOIN orders o ON (o.id = json_extract(r.payload,'$.order_id')
+                            OR o.supabase_id = json_extract(r.payload,'$.order_id')
+                            OR o.id = json_extract(r.payload,'$.metadata.local_order_id'))
+             JOIN window_orders w ON w.id = o.id"
+                .to_string(),
+        );
     }
     if branches.is_empty() {
         return Ok(Vec::new());
@@ -1417,7 +1431,9 @@ pub(crate) fn get_closeout_readiness_snapshot(
     let branch_id = resolve_closeout_branch_id(payload);
 
     let (window, active_staff_blockers, payment_blockers, gift_close, last_z_report) = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_readiness")
+            .map_err(|e| e.to_string())?;
         let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
         let active_staff_blockers = load_active_staff_closeout_blockers(
             &conn,
@@ -1472,7 +1488,9 @@ pub(crate) fn get_closeout_readiness_snapshot(
     // the last Z attempt ended. A read that fails says so; it never reads as
     // "nothing queued".
     let (fiscal_queue_blockers, last_closeout_attempt) = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_readiness")
+            .map_err(|e| e.to_string())?;
         let fiscal = if branch_id.trim().is_empty() {
             serde_json::json!({ "status": "not_collected", "reason": "branch unknown" })
         } else {
@@ -2909,6 +2927,9 @@ fn z_report_presentation_from_cache(
     let mut flags = serde_json::json!({
         "deliveryModuleEnabled": has_module("delivery"),
         "tablesModuleEnabled": has_module("tables"),
+        "guestBillingModuleEnabled": has_module("guest_billing"),
+        "roomsModuleEnabled": has_module("rooms"),
+        "driveThroughModuleEnabled": has_module("drive_through"),
     });
     if !has_module("plugin_integrations") {
         flags["twintPluginEnabled"] = serde_json::json!(false);
@@ -3353,6 +3374,10 @@ fn load_sales_by_type_for_period(
 ) -> Result<Value, String> {
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let history_terminal = db::get_setting(conn, "terminal", "terminal_id")
+        .or_else(|| storage::get_credential("terminal_id"))
+        .unwrap_or_default();
+    let returned_history_payment = returned_reconstructed_history_sql("op", &history_terminal);
     // W4b-iii: cents-with-real-fallback shim (removed in 4e).
     let sql = format!(
         "SELECT
@@ -3368,6 +3393,7 @@ fn load_sales_by_type_for_period(
          WHERE {financial_predicate}
            AND (?2 IS NULL OR julianday({financial_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND NOT {returned_history_payment}
            AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -3419,8 +3445,12 @@ fn load_sales_by_type_for_period(
 }
 
 fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Value, String> {
+    let history_terminal = db::get_setting(conn, "terminal", "terminal_id")
+        .or_else(|| storage::get_credential("terminal_id"))
+        .unwrap_or_default();
+    let returned_history_payment = returned_reconstructed_history_sql("op", &history_terminal);
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             // W4b-iii: cents-with-real-fallback shim (removed in 4e).
             "SELECT
                 CASE
@@ -3433,13 +3463,14 @@ fn load_sales_by_type_for_shift(conn: &Connection, shift_id: &str) -> Result<Val
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+               AND NOT {returned_history_payment}
                AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND COALESCE(o.order_context, '') <> 'repair_settlement'
                AND o.status NOT IN ('cancelled', 'canceled')
              GROUP BY bucket, op.method",
-        )
+        ))
         .map_err(|e| format!("prepare sales by type for shift: {e}"))?;
 
     let mut instore_cash = (0_i64, 0.0_f64);
@@ -3485,6 +3516,18 @@ fn load_non_driver_order_totals(
     conn: &Connection,
     shift: &ReportStaffShift,
 ) -> Result<(i64, f64, f64, f64), String> {
+    let collector_terminal: Option<String> = conn
+        .query_row(
+            "SELECT terminal_id FROM staff_shifts WHERE id=?1",
+            [&shift.id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read report collector terminal: {e}"))?
+        .flatten();
+    let terminal = collector_terminal.unwrap_or_default();
+    let returned_history_order = returned_history_order_filter_sql(&terminal);
+    let returned_history_payment = returned_reconstructed_history_sql("op", &terminal);
     let financial_expr = business_day::order_financial_timestamp_expr("o");
     let shift_start = shift
         .check_in_time
@@ -3513,6 +3556,7 @@ fn load_non_driver_order_totals(
               AND COALESCE(o.order_context, '') <> 'repair_settlement'
               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
               AND NOT {staff_open_tab}
+              AND {returned_history_order}
               {}
               AND NOT EXISTS (
                     SELECT 1 FROM driver_earnings de WHERE de.order_id = o.id
@@ -3544,6 +3588,8 @@ fn load_non_driver_order_totals(
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
            AND julianday({financial_expr}) >= julianday(?2)
            AND (?3 IS NULL OR julianday({financial_expr}) <= julianday(?3))
+           AND NOT {returned_history_payment}
+           AND {returned_history_order}
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -4348,7 +4394,7 @@ fn load_server_repair_projection(
 /// `print::build_order_receipt_doc` hands to `fiscal::receipt_vat` (the REAL
 /// total and tip, the computed VAT with its cents column first).
 const PRINTED_ORDER_VAT_COLUMNS: &str = "SELECT o.branch_id, COALESCE(o.total_amount, 0),
-        COALESCE(o.tip_amount, 0), o.tax_amount_cents, COALESCE(o.tax_amount, 0)";
+        COALESCE(o.tip_amount, 0), o.tax_amount_cents, COALESCE(o.tax_amount, 0), o.order_context";
 
 /// The Z's VAT, in cents: the sum of the VAT each order's slip prints
 /// (founder, 07/10/2026, as Android's `sales.taxTotal`). Every order goes
@@ -4372,16 +4418,22 @@ fn printed_order_vat_cents(
                 row.get::<_, f64>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, f64>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(|e| format!("query printed VAT: {e}"))?;
     let mut total_cents = 0_i64;
     for row in rows {
-        let (branch_id, total_amount, tip_amount, tax_amount_cents, tax_amount) =
+        let (branch_id, total_amount, tip_amount, tax_amount_cents, tax_amount, order_context) =
             row.map_err(|e| format!("read printed VAT: {e}"))?;
         let computed_vat_amount = tax_amount_cents
             .map(|cents| Cents::new(cents).to_f64_dp2())
             .unwrap_or(tax_amount);
+        if order_context.as_deref() == Some("folio_settlement") {
+            total_cents +=
+                tax_amount_cents.unwrap_or_else(|| Cents::round_half_even(tax_amount).as_i64());
+            continue;
+        }
         total_cents += context
             .order_vat_cents(
                 branch_id.as_deref(),
@@ -4392,6 +4444,103 @@ fn printed_order_vat_cents(
             .unwrap_or(0);
     }
     Ok(total_cents)
+}
+
+/// Folio transfers were recognised by their source order. Never sell them twice.
+fn hotel_report_totals(
+    conn: &Connection,
+    from: &str,
+    params: impl rusqlite::Params,
+) -> Result<Value, String> {
+    let mut statement=conn.prepare(&format!("SELECT COALESCE(o.order_context,''),COALESCE(o.items,'[]'),COALESCE(o.folio_charged,0),COALESCE(o.total_amount_cents,CAST(ROUND(o.total_amount*100) AS INTEGER)),o.id {from}")).map_err(|e|e.to_string())?;
+    let rows = statement
+        .query_map(params, |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let (mut transfers, mut tax, mut charged, mut count, mut transfer_refunds, mut transfer_voids) =
+        (0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
+    for row in rows {
+        let (context, items, folio_charged, total, id) = row.map_err(|e| e.to_string())?;
+        if context == "folio_settlement" {
+            let lines: Vec<Value> = serde_json::from_str(&items)
+                .map_err(|e| format!("Invalid folio settlement lines: {e}"))?;
+            let mut order_transfers = 0i64;
+            for line in lines {
+                let amount = line
+                    .get("total_price")
+                    .or_else(|| line.get("line_total_gross"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let cents = Cents::round_half_even(amount).as_i64();
+                if line.get("folio_line_kind").and_then(Value::as_str) == Some("transfer") {
+                    order_transfers += cents;
+                } else if line
+                    .pointer("/customizations/folio/charge_type")
+                    .and_then(Value::as_str)
+                    == Some("accommodation_tax")
+                {
+                    tax += cents;
+                }
+            }
+            transfers += order_transfers;
+            if total > 0 && order_transfers > 0 {
+                let mut payments=conn.prepare("SELECT COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER)),COALESCE(op.status,''),
+                  COALESCE((SELECT SUM(COALESCE(pa.amount_cents,CAST(ROUND(pa.amount*100) AS INTEGER))) FROM payment_adjustments pa WHERE pa.payment_id=op.id AND pa.adjustment_type='refund'),0),
+                  COALESCE((SELECT SUM(COALESCE(pa.amount_cents,CAST(ROUND(pa.amount*100) AS INTEGER))) FROM payment_adjustments pa WHERE pa.payment_id=op.id AND pa.adjustment_type='void'),0)
+                  FROM order_payments op WHERE op.order_id=?1").map_err(|e|e.to_string())?;
+                let receipts = payments
+                    .query_map([id], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
+                let (mut refunds, mut voids) = (0i64, 0i64);
+                for receipt in receipts {
+                    let (amount, status, returned, voided) = receipt.map_err(|e| e.to_string())?;
+                    let mut refund = returned.max(0).min(amount.max(0));
+                    let mut void = voided.max(0).min((amount - refund).max(0));
+                    if status == "refunded" {
+                        refund = amount - void;
+                    }
+                    if status == "voided" {
+                        void = amount - refund;
+                    }
+                    refunds += refund;
+                    voids += void;
+                }
+                let share = |amount: i64| {
+                    ((amount as i128 * order_transfers as i128 + total as i128 / 2) / total as i128)
+                        as i64
+                };
+                let returned = share(refunds);
+                transfer_refunds += returned;
+                transfer_voids += share(refunds + voids) - returned;
+            }
+        } else if folio_charged {
+            charged += total;
+            count += 1;
+        }
+    }
+    let collected = transfers - transfer_refunds - transfer_voids;
+    Ok(
+        serde_json::json!({"transferGross_cents":transfers,"transferGross":Cents::new(transfers).to_f64_dp2(),
+       "transferRefundsTotal_cents":transfer_refunds,"transferRefundsTotal":Cents::new(transfer_refunds).to_f64_dp2(),
+       "transferVoidsTotal_cents":transfer_voids,"transferVoidsTotal":Cents::new(transfer_voids).to_f64_dp2(),
+       "roomChargesCollected_cents":collected,"roomChargesCollected":Cents::new(collected).to_f64_dp2(),
+       "accommodationTax_cents":tax,"accommodationTax":Cents::new(tax).to_f64_dp2(),
+       "chargedToRoom_cents":charged,"chargedToRoom":Cents::new(charged).to_f64_dp2(),"chargedToRoomCount":count}),
+    )
 }
 
 /// Generate a Z-report for a closed shift.
@@ -4464,7 +4613,9 @@ fn shift_unrecorded_gift_returns_by_order_type(
 }
 
 pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db
+        .lock_traced("z_report_generate")
+        .map_err(|e| e.to_string())?;
 
     let shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
@@ -4645,6 +4796,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // same rule as the date-based aggregates, or the single-shift Z reports
     // uncollected tab money as revenue.
     let single_shift_open_tab = business_day::open_unsettled_table_tab_expr("o");
+    let returned_history_order = returned_history_order_filter_sql(&terminal_id);
+    let returned_history_payment = returned_reconstructed_history_sql("op", &terminal_id);
     // The orders of this shift's `sales.totalSales`. The printed VAT below
     // sums over these same rows.
     let single_shift_orders_from = format!(
@@ -4654,7 +4807,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
-           AND NOT {single_shift_open_tab}"
+           AND NOT {single_shift_open_tab}
+           AND {returned_history_order}"
     );
     let single_shift_order_agg_sql = format!(
         "SELECT COUNT(*) as cnt,
@@ -4681,11 +4835,13 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         params![shift_id],
     )?;
     let total_orders = ordinary_total_orders + repair_orders_count;
-    let gross_sales = ordinary_gross_sales + repair_tender_sales;
+    let hotel = hotel_report_totals(&conn, &single_shift_orders_from, params![shift_id])?;
+    let gross_sales =
+        ordinary_gross_sales + repair_tender_sales - hotel["transferGross"].as_f64().unwrap_or(0.0);
 
     // Payments: breakdown by method
     let mut pay_stmt = conn
-        .prepare(
+        .prepare(&format!(
             // W4b-iii: cents-with-real-fallback shim (removed in 4e).
             // THE-437: platform_ref splits bank-settled platform money out of
             // `other` — see the multi-shift twin in build_z_report_for_date.
@@ -4700,6 +4856,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE op.staff_shift_id = ?1
+               AND NOT {returned_history_payment}
                AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
@@ -4708,7 +4865,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                AND (op.method <> 'twint' OR op.currency = 'CHF')
                AND (op.method = 'twint' OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))
              GROUP BY op.method, platform_ref",
-        )
+        ))
         .map_err(|e| format!("prepare payment query: {e}"))?;
 
     let mut cash_sales = 0.0_f64;
@@ -4796,6 +4953,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              JOIN order_payments op ON pa.payment_id = op.id
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+               AND COALESCE(pa.imported_remote, 0) = 0
                AND COALESCE(o.is_ghost, 0) = 0
                AND COALESCE(o.is_test, 0) = 0
                AND COALESCE(o.order_context, '') <> 'repair_settlement'
@@ -5004,7 +5162,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
              SELECT order_id,
                     SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refund_sum_cents
              FROM payment_adjustments
-             WHERE adjustment_type = 'refund'
+             WHERE adjustment_type = 'refund' AND COALESCE(imported_remote, 0) = 0
              GROUP BY order_id
          ) r ON r.order_id = o.id
          WHERE o.staff_shift_id = ?1
@@ -5012,7 +5170,9 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
+           AND COALESCE(o.order_context,'') <> 'folio_settlement'
            AND NOT {shift_ot_open_tab}
+           AND {returned_history_order}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
     );
     // Order-type NET is per-order coverage: a gift card row's proven return
@@ -5025,6 +5185,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .prepare(&shift_ot_sql)
         .map_err(|e| format!("prepare order_type query: {e}"))?;
 
+    let mut room_service_orders = 0_i64;
+    let mut room_service_sales = 0.0_f64;
+    let mut drive_through_orders = 0_i64;
+    let mut drive_through_sales = 0.0_f64;
     let mut dine_in_orders = 0_i64;
     let mut dine_in_sales = 0.0_f64;
     let mut takeaway_orders = 0_i64;
@@ -5054,6 +5218,14 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "takeaway" | "pickup" => {
                 takeaway_orders += count;
                 takeaway_sales += total;
+            }
+            "room_service" | "room-service" => {
+                room_service_orders += count;
+                room_service_sales += total;
+            }
+            "drive_through" | "drive-through" | "drive_thru" => {
+                drive_through_orders += count;
+                drive_through_sales += total;
             }
             "delivery" => {
                 delivery_orders += count;
@@ -5096,7 +5268,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // excludes voided payments). Gross is an order-side figure; voids adjust it
     // down to money actually recognized. A prior review flagged this as a possible
     // double-deduction — it isn't.
-    let net_sales = gross_sales - refunds_total - voids_total - discounts_total;
+    let revenue_refunds_total =
+        refunds_total - hotel["transferRefundsTotal"].as_f64().unwrap_or(0.0);
+    let revenue_voids_total = voids_total - hotel["transferVoidsTotal"].as_f64().unwrap_or(0.0);
+    let net_sales = gross_sales - revenue_refunds_total - revenue_voids_total - discounts_total;
     let opening = opening_cash;
     let closing = closing_cash.unwrap_or(0.0);
     let expected = expected_cash.unwrap_or(0.0);
@@ -5192,6 +5367,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let mut report_json = serde_json::json!({
         "currency": currency,
         "presentation": presentation,
+        "hotel": hotel,
         "paymentsBreakdown": payments_breakdown,
         "date": report_date,
         "shifts": shift_counts,
@@ -5201,6 +5377,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "totalSales_cents": Cents::round_half_even(total_sales).as_i64(),
             // The z_reports columns of this row, so the copy the server keeps
             // carries what the printed Z prints (founder, 14/10/2026).
+            "revenueRefundsTotal":revenue_refunds_total,"revenueRefundsTotal_cents":Cents::round_half_even(revenue_refunds_total).as_i64(),
+            "revenueVoidsTotal":revenue_voids_total,"revenueVoidsTotal_cents":Cents::round_half_even(revenue_voids_total).as_i64(),
             "grossSales": gross_sales,
             "grossSales_cents": Cents::round_half_even(gross_sales).as_i64(),
             "netSales": net_sales,
@@ -5228,6 +5406,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "platformOnlineSales_cents": Cents::round_half_even(platform_online_sales).as_i64(),
             "platformCodSales": platform_cod_sales,
             "platformCodSales_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
+            "roomServiceOrders": room_service_orders,"roomServiceSales":room_service_sales,
+            "roomServiceSales_cents":Cents::round_half_even(room_service_sales).as_i64(),
+            "driveThroughOrders":drive_through_orders,"driveThroughSales":drive_through_sales,
+            "driveThroughSales_cents":Cents::round_half_even(drive_through_sales).as_i64(),
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
             "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
@@ -5504,6 +5686,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "terminalName": terminal_name,
             "reportDate": report_date,
             "generatedAt": now,
+            "revenueRefundsTotal":revenue_refunds_total,"revenueRefundsTotal_cents":Cents::round_half_even(revenue_refunds_total).as_i64(),
+            "revenueVoidsTotal":revenue_voids_total,"revenueVoidsTotal_cents":Cents::round_half_even(revenue_voids_total).as_i64(),
             "grossSales": gross_sales,
             "netSales": net_sales,
             "totalOrders": total_orders,
@@ -6032,6 +6216,37 @@ fn build_z_integrity_block(
     })
 }
 
+/// Returned server mirrors are history, not this till's sale. A recorded
+/// collecting shift on this terminal preserves master's original custody.
+fn returned_reconstructed_history_sql(alias: &str, terminal_id: &str) -> String {
+    let terminal = terminal_id.replace('\'', "''");
+    format!(
+        "(COALESCE({alias}.payment_origin,'') = 'sync_reconstructed'
+          AND (COALESCE(CASE WHEN json_valid({alias}.metadata) THEN json_extract({alias}.metadata,'$.canonical_return_status') END,'') IN ('refunded','voided')
+               OR EXISTS (SELECT 1 FROM payment_adjustments history_return
+                      WHERE history_return.payment_id={alias}.id
+                        AND history_return.imported_remote=1
+                        AND history_return.adjustment_type IN ('refund','void')))
+          AND NOT EXISTS (SELECT 1 FROM staff_shifts collector
+                          WHERE collector.id={alias}.staff_shift_id
+                            AND collector.terminal_id='{terminal}' AND '{terminal}'<>''))"
+    )
+}
+
+/// Leave master's order population intact unless its only real receipts are
+/// returned history. In particular, an original local receipt keeps its order.
+fn returned_history_order_filter_sql(terminal_id: &str) -> String {
+    let history = returned_reconstructed_history_sql("history_payment", terminal_id);
+    let original = returned_reconstructed_history_sql("original_payment", terminal_id);
+    let placeholder = crate::payments::placeholder_payment_sql("original_payment");
+    format!(
+        "(NOT EXISTS (SELECT 1 FROM order_payments history_payment
+                      WHERE history_payment.order_id=o.id AND {history})
+          OR EXISTS (SELECT 1 FROM order_payments original_payment
+                     WHERE original_payment.order_id=o.id AND NOT {original} AND NOT {placeholder}))"
+    )
+}
+
 fn build_z_report_for_date(
     db: &DbState,
     payload: &Value,
@@ -6169,6 +6384,11 @@ fn build_z_report_for_window(
     // `updated_at` drifted back into the window inflated turnover while being
     // exempt from the check that would have caught it. See
     // `business_day::z_report_reportable_order_expr`.
+    let history_terminal_id = db::get_setting(&conn, "terminal", "terminal_id")
+        .or_else(|| storage::get_credential("terminal_id"))
+        .unwrap_or_default();
+    let returned_history_order = returned_history_order_filter_sql(&history_terminal_id);
+    let returned_history_payment = returned_reconstructed_history_sql("op", &history_terminal_id);
     let last_z_anchor = business_day::last_z_anchor_utc(&conn);
     let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
     // The orders of `sales.totalSales`. The printed VAT below sums over these
@@ -6182,7 +6402,8 @@ fn build_z_report_for_window(
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
-           AND {reportable_order}"
+           AND {reportable_order}
+           AND {returned_history_order}"
     );
     let order_agg_sql = format!(
         // W4b-iii: cents-with-real-fallback shim (removed in 4e).
@@ -6227,7 +6448,13 @@ fn build_z_report_for_window(
         last_z_anchor.as_deref(),
     )?;
     let total_orders = ordinary_orders + repair_orders_count;
-    let gross_sales = ordinary_gross_sales + repair_tender_sales;
+    let hotel = hotel_report_totals(
+        &conn,
+        &reportable_orders_from,
+        params![period_start, cutoff_param, branch_id, last_z_anchor],
+    )?;
+    let gross_sales =
+        ordinary_gross_sales + repair_tender_sales - hotel["transferGross"].as_f64().unwrap_or(0.0);
 
     // --- Payments: breakdown by method across all shifts ---
     let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
@@ -6265,6 +6492,7 @@ fn build_z_report_for_window(
          WHERE {payment_scope_predicate}
            AND (?2 IS NULL OR julianday({payment_scope_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND NOT {returned_history_payment}
            AND (op.status = 'completed' AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed' AND TRIM(COALESCE(op.remote_payment_id, '')) = ''))
            AND COALESCE(o.is_ghost, 0) = 0
            AND COALESCE(o.is_test, 0) = 0
@@ -6494,6 +6722,7 @@ fn build_z_report_for_window(
          FROM payment_adjustments pa
          JOIN orders o ON o.id = pa.order_id
          WHERE {adjustment_scope_predicate}
+           AND COALESCE(pa.imported_remote, 0) = 0
            AND (?2 IS NULL OR julianday({adjustment_scope_expr}) <= julianday(?2))
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
@@ -6668,13 +6897,19 @@ fn build_z_report_for_window(
            AND COALESCE(o.is_test, 0) = 0
            AND COALESCE(o.order_context, '') <> 'repair_settlement'
            AND o.status NOT IN ('cancelled', 'canceled')
+           AND COALESCE(o.order_context,'') <> 'folio_settlement'
            AND NOT {order_type_open_tab}
+           AND {returned_history_order}
          GROUP BY COALESCE(o.order_type, 'dine-in')"
     );
     let mut ot_stmt = conn
         .prepare(&order_type_scope_sql)
         .map_err(|e| format!("prepare order_type query: {e}"))?;
 
+    let mut room_service_orders = 0_i64;
+    let mut room_service_sales = 0.0_f64;
+    let mut drive_through_orders = 0_i64;
+    let mut drive_through_sales = 0.0_f64;
     let mut dine_in_orders = 0_i64;
     let mut dine_in_sales = 0.0_f64;
     let mut takeaway_orders = 0_i64;
@@ -6702,6 +6937,14 @@ fn build_z_report_for_window(
             "takeaway" | "pickup" => {
                 takeaway_orders += count;
                 takeaway_sales += total;
+            }
+            "room_service" | "room-service" => {
+                room_service_orders += count;
+                room_service_sales += total;
+            }
+            "drive_through" | "drive-through" | "drive_thru" => {
+                drive_through_orders += count;
+                drive_through_sales += total;
             }
             "delivery" => {
                 delivery_orders += count;
@@ -6751,7 +6994,10 @@ fn build_z_report_for_window(
     // See single-shift path for the rationale: gross_sales is order-level
     // (orders.total_amount, NOT cash_sales + card_sales), so subtracting
     // voids_total does not double-count against payment-level figures.
-    let net_sales = gross_sales - refunds_total - voids_total - discounts_total;
+    let revenue_refunds_total =
+        refunds_total - hotel["transferRefundsTotal"].as_f64().unwrap_or(0.0);
+    let revenue_voids_total = voids_total - hotel["transferVoidsTotal"].as_f64().unwrap_or(0.0);
+    let net_sales = gross_sales - revenue_refunds_total - revenue_voids_total - discounts_total;
 
     // Driver/server amounts are wallets handed out from the till, not extra
     // physical drawers. These role-filtered values are only the legacy
@@ -7069,6 +7315,7 @@ fn build_z_report_for_window(
     let mut report_json = serde_json::json!({
         "currency": currency,
         "presentation": presentation,
+        "hotel": hotel,
         "paymentsBreakdown": payments_breakdown,
         "date": date,
         "shifts": {
@@ -7083,6 +7330,8 @@ fn build_z_report_for_window(
             "totalSales_cents": Cents::round_half_even(total_sales).as_i64(),
             // The z_reports columns of this row, so the copy the server keeps
             // carries what the printed Z prints (founder, 14/10/2026).
+            "revenueRefundsTotal":revenue_refunds_total,"revenueRefundsTotal_cents":Cents::round_half_even(revenue_refunds_total).as_i64(),
+            "revenueVoidsTotal":revenue_voids_total,"revenueVoidsTotal_cents":Cents::round_half_even(revenue_voids_total).as_i64(),
             "grossSales": gross_sales,
             "grossSales_cents": Cents::round_half_even(gross_sales).as_i64(),
             "netSales": net_sales,
@@ -7111,6 +7360,10 @@ fn build_z_report_for_window(
             "platformCodSales": platform_cod_sales,
             "platformCodSales_cents": Cents::round_half_even(platform_cod_sales).as_i64(),
             "platforms": platform_breakdown,
+            "roomServiceOrders": room_service_orders,"roomServiceSales":room_service_sales,
+            "roomServiceSales_cents":Cents::round_half_even(room_service_sales).as_i64(),
+            "driveThroughOrders":drive_through_orders,"driveThroughSales":drive_through_sales,
+            "driveThroughSales_cents":Cents::round_half_even(drive_through_sales).as_i64(),
             "dineInOrders": dine_in_orders,
             "dineInSales": dine_in_sales,
             "dineInSales_cents": Cents::round_half_even(dine_in_sales).as_i64(),
@@ -7258,7 +7511,9 @@ fn generate_z_report_for_window(
         return Err(message);
     }
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db
+        .lock_traced("z_report_generate_for_date")
+        .map_err(|e| e.to_string())?;
     let (period_start, period_end) = extract_period_bounds_from_report_json(&built.report_json);
     let period_start =
         period_start.ok_or("Missing reportJson.periodStart for Z-report persistence")?;
@@ -7630,7 +7885,9 @@ fn prepare_z_report_submission_at_with_phone_shifts(
     // --- Pre-condition: every shift is checked out, then freeze the window ---
     // One lock scope: no check-in can slip between the gate and the cutoff.
     let window = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_submit")
+            .map_err(|e| e.to_string())?;
         let _ = order_ownership::repair_historical_pickup_financial_attribution(
             &conn,
             branch_id.as_str(),
@@ -7677,7 +7934,9 @@ fn prepare_z_report_submission_at_with_phone_shifts(
 
     // --- Pre-condition: all orders must have settled payments ---
     {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_submit")
+            .map_err(|e| e.to_string())?;
         let blockers = load_unsettled_payment_blockers_for_window(&conn, &branch_id, &window)?;
         if let Some(message) = unsettled_payment_blocker_message(&blockers) {
             return Err(message);
@@ -7687,7 +7946,9 @@ fn prepare_z_report_submission_at_with_phone_shifts(
     // --- Pre-condition: every closed gift-bound drawer is canonically closed ---
     // Adopted proof is the evidence, never generic sync-queue emptiness.
     {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_submit")
+            .map_err(|e| e.to_string())?;
         let gift_close = load_gift_close_report_for_effective_window(&conn, &branch_id, &window)?;
         if let Some(message) = gift_close.blocker_message() {
             return Err(message);
@@ -7729,7 +7990,9 @@ fn prepare_z_report_submission_at_with_phone_shifts(
     // The Z is issued: freeze its window. A retry, the post-submission sync
     // gate (`unsynced_money_in_closing_window`) and the rollover read it.
     {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_submit")
+            .map_err(|e| e.to_string())?;
         persist_pending_z_report_context(
             &conn,
             &PendingZReportContext {
@@ -7773,7 +8036,7 @@ pub(crate) fn finalize_prepared_z_report_submission(
         Err(error) => {
             if prepared.created_new_z_report {
                 if let Some(ref generated_id) = prepared.z_report_id {
-                    match db.conn.lock() {
+                    match db.lock_traced("z_report_submit") {
                         Ok(conn) => {
                             if let Err(discard_error) =
                                 discard_generated_z_report(&conn, generated_id)
@@ -7801,7 +8064,9 @@ pub(crate) fn finalize_prepared_z_report_submission(
     };
 
     let sync_state = if let Some(ref generated_id) = prepared.z_report_id {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("z_report_submit")
+            .map_err(|e| e.to_string())?;
         current_z_report_sync_state(&conn, generated_id)
     } else {
         None
@@ -10060,6 +10325,273 @@ mod tests {
         ).expect("insert expense");
 
         shift_id.to_string()
+    }
+
+    #[test]
+    fn restored_returned_receipt_never_invents_z_tender() {
+        for status in ["refunded", "voided"] {
+            let db = test_db();
+            let shift = seed_closed_shift(&db);
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute_batch("DELETE FROM payment_adjustments WHERE payment_id='pay-1'; DELETE FROM order_payments WHERE id='pay-1'; UPDATE orders SET supabase_id='returned-order' WHERE id='ord-1';").unwrap();
+                let remote = serde_json::json!({"id":"returned-mirror","order_id":"returned-order","payment_method":"cash","amount":25,"currency":"EUR","status":status,"created_at":"2026-02-16T12:00:00Z","updated_at":"2026-02-16T13:00:00Z","adjustments":[{"id":"remote-return","adjustment_type":if status=="refunded" {"refund"} else {"void"},"amount_cents":2500,"currency":"EUR","created_at":"2026-02-16T13:00:00Z"}]});
+                crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+            }
+            let result = generate_z_report(&db, &serde_json::json!({"shiftId":shift})).unwrap();
+            assert_eq!(result["report"]["cashSales"], 35.0);
+            assert_eq!(result["report"]["cardSales"], 40.0);
+            assert_eq!(result["report"]["refundsTotal"], 0.0);
+            assert_eq!(result["report"]["voidsTotal"], 0.0);
+            assert_eq!(result["report"]["grossSales"], 75.0);
+            assert_eq!(result["report"]["netSales"], 75.0);
+        }
+    }
+
+    fn assert_returned_reconstructed_receipt_z_totals(returned_cents: i64) {
+        for pulled_before_return in [false, true] {
+            let db = test_db();
+            let shift = seed_closed_shift(&db);
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute_batch("DELETE FROM payment_adjustments; DELETE FROM order_payments WHERE id='pay-1';
+                    UPDATE orders SET total_amount=10,total_amount_cents=1000,supabase_id='remote-order' WHERE id='ord-1';
+                    UPDATE orders SET branch_id='branch-1',currency='CHF';
+                    UPDATE order_payments SET currency='CHF';
+                    UPDATE staff_shifts SET currency='CHF';
+                    UPDATE cash_drawer_sessions SET currency='CHF';").unwrap();
+                db::set_setting(&conn, "terminal", "terminal_id", "term-1").unwrap();
+                let mut remote = serde_json::json!({"id":"remote-receipt","order_id":"remote-order","payment_method":"cash","amount":10,"currency":"CHF","status":"completed","created_at":"2026-02-16T12:00:00Z","updated_at":"2026-02-16T13:00:00Z","adjustments":[]});
+                if pulled_before_return {
+                    crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+                }
+                remote["status"] = serde_json::json!(if returned_cents == 1000 {
+                    "refunded"
+                } else {
+                    "completed"
+                });
+                remote["adjustments"] = serde_json::json!([{"id":"remote-return","adjustment_type":"refund","amount_cents":returned_cents,"currency":"CHF","terminal_id":"other-till","created_at":"2026-02-16T13:00:00Z"}]);
+                crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+                crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+                let balance =
+                    crate::payments::load_order_payment_balance_snapshot(&conn, "ord-1").unwrap();
+                assert_eq!(
+                    balance.net_paid,
+                    Cents::new(1000 - returned_cents).to_f64_dp2()
+                );
+                assert_eq!(
+                    balance.outstanding_amount,
+                    Cents::new(returned_cents).to_f64_dp2()
+                );
+            }
+            let day = build_z_report_for_date(&db, &serde_json::json!({"branchId":"branch-1","date":"2026-02-16","cutoffAt":"2026-02-16T23:00:00Z"}), false).unwrap();
+            let single = generate_z_report(&db, &serde_json::json!({"shiftId":shift})).unwrap();
+            let single_json = &single["report"]["reportJson"];
+            for report in [&day.report_json, single_json] {
+                for (key, expected) in [
+                    ("cashSales", 35.0),
+                    ("cardSales", 40.0),
+                    ("twintSales", 0.0),
+                    ("grossSales", 75.0),
+                    ("netSales", 75.0),
+                    ("totalSales", 75.0),
+                    ("refundsTotal", 0.0),
+                    ("voidsTotal", 0.0),
+                ] {
+                    assert_eq!(
+                        report["sales"][key], expected,
+                        "{key}; prior pull={pulled_before_return}"
+                    );
+                }
+                assert_eq!(report["daySummary"]["total"], 75.0);
+                assert_eq!(report["sales"]["dineInSales"], 75.0);
+                assert_eq!(report["sales"]["byType"]["instore"]["cash"]["total"], 35.0);
+                for tender in ["other", "twint", "platform_online", "platform_cod"] {
+                    assert_eq!(report["paymentsBreakdown"][tender]["total"], 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_remote_refund_on_reconstructed_receipt_never_enters_z_totals() {
+        assert_returned_reconstructed_receipt_z_totals(600);
+    }
+
+    #[test]
+    fn full_remote_refund_on_reconstructed_receipt_never_enters_z_totals() {
+        assert_returned_reconstructed_receipt_z_totals(1000);
+    }
+
+    #[test]
+    fn retained_canonical_payment_for_closing_order_blocks_z() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO unresolved_remote_payments(id,payload,last_error,updated_at,next_retry_at) VALUES('canonical-unapplied',?1,'mirror failed',datetime('now'),datetime('now'))",
+            [serde_json::json!({"id":"canonical-unapplied","order_id":"ord-1"}).to_string()]).unwrap();
+        let rows = load_unsynced_money_for_cutoff(&conn, "2026-02-16T18:00:00Z").unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r.queue_id == "canonical-pull:canonical-unapplied"
+                && r.order_id.as_deref() == Some("ord-1")));
+    }
+
+    #[test]
+    fn local_and_imported_refunds_match_master_financials_with_separate_z_custody() {
+        for amount in [6.0, 10.0] {
+            let local = test_db();
+            let imported = test_db();
+            let local_shift = seed_closed_shift(&local);
+            let imported_shift = seed_closed_shift(&imported);
+            for db in [&local, &imported] {
+                let conn = db.conn.lock().unwrap();
+                conn.execute_batch("DELETE FROM payment_adjustments;
+                    UPDATE orders SET total_amount=10,total_amount_cents=1000,supabase_id='canonical-order' WHERE id='ord-1';
+                    UPDATE order_payments SET amount=10,amount_cents=1000 WHERE id='pay-1';
+                    UPDATE cash_drawer_sessions SET total_cash_sales=45,total_cash_sales_cents=4500,total_refunds=0,total_refunds_cents=0;").unwrap();
+            }
+            crate::refunds::refund_payment(&local, &serde_json::json!({"paymentId":"pay-1","amount":amount,"reason":"customer return","refundMethod":"cash"})).unwrap();
+            {
+                let conn = local.conn.lock().unwrap();
+                // Keep the real native return inside this historical fixture's
+                // report window; its money and custody come from refund_payment.
+                conn.execute("UPDATE payment_adjustments SET created_at='2026-02-16T13:00:00Z',updated_at='2026-02-16T13:00:00Z',staff_shift_id=?1", [&local_shift]).unwrap();
+            }
+            {
+                let conn = imported.conn.lock().unwrap();
+                let remote = serde_json::json!({"id":"canonical-payment","order_id":"canonical-order","amount":10,"payment_method":"cash","currency":"EUR","status":if amount == 10.0 {"refunded"} else {"completed"},"metadata":{"local_payment_id":"pay-1"},"created_at":"2026-02-16T12:00:00Z","updated_at":"2026-02-16T13:00:00Z","adjustments":[{"id":"canonical-refund","adjustment_type":"refund","amount_cents":Cents::round_half_even(amount).as_i64(),"currency":"EUR","terminal_id":"other-till","created_at":"2026-02-16T13:00:00Z"}]});
+                crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+                // Exact replay preserves master financial state and original custody.
+                crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+            }
+            for db in [&local, &imported] {
+                let conn = db.conn.lock().unwrap();
+                let balance =
+                    crate::payments::load_order_payment_balance_snapshot(&conn, "ord-1").unwrap();
+                assert_eq!(balance.net_paid, 10.0 - amount);
+                assert_eq!(balance.outstanding_amount, amount);
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT payment_status FROM orders WHERE id='ord-1'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                    if amount == 10.0 {
+                        "pending"
+                    } else {
+                        "partially_paid"
+                    }
+                );
+                assert!(
+                    !crate::payments::ledger_backs_claimed_status(&conn, "ord-1", "paid").unwrap()
+                );
+            }
+            let local_z =
+                generate_z_report(&local, &serde_json::json!({"shiftId":local_shift})).unwrap();
+            let imported_z =
+                generate_z_report(&imported, &serde_json::json!({"shiftId":imported_shift}))
+                    .unwrap();
+            assert_eq!(local_z["report"]["refundsTotal"], amount);
+            assert_eq!(imported_z["report"]["refundsTotal"], 0.0);
+            assert_eq!(imported_z["report"]["cashSales"], 45.0);
+            let imported_conn = imported.conn.lock().unwrap();
+            assert_eq!(
+                imported_conn
+                    .query_row(
+                        "SELECT total_refunds_cents FROM cash_drawer_sessions",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            let local_conn = local.conn.lock().unwrap();
+            assert_eq!(
+                local_conn
+                    .query_row(
+                        "SELECT total_refunds_cents FROM cash_drawer_sessions",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                Cents::round_half_even(amount).as_i64()
+            );
+        }
+    }
+
+    #[test]
+    fn imported_ordinary_refund_does_not_change_this_tills_z_figures() {
+        let baseline_db = test_db();
+        let baseline_shift = seed_closed_shift(&baseline_db);
+        let baseline =
+            generate_z_report(&baseline_db, &serde_json::json!({"shiftId":baseline_shift}))
+                .unwrap();
+        let db = test_db();
+        let shift = seed_closed_shift(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE orders SET supabase_id='remote-order-1' WHERE id='ord-1'",
+                [],
+            )
+            .unwrap();
+            let remote = serde_json::json!({"id":"remote-payment-1","order_id":"remote-order-1","amount":25,"payment_method":"cash","currency":"EUR","status":"completed","metadata":{"local_payment_id":"pay-1"},"created_at":"2026-02-16T12:00:00Z","updated_at":"2026-02-16T13:00:00Z","adjustments":[{"id":"foreign-refund","adjustment_type":"refund","amount_cents":600,"currency":"EUR","terminal_id":"other-till","created_at":"2026-02-16T13:00:00Z"}]});
+            crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+        }
+        let result = generate_z_report(&db, &serde_json::json!({"shiftId":shift})).unwrap();
+        for key in [
+            "grossSales",
+            "netSales",
+            "cashSales",
+            "cardSales",
+            "refundsTotal",
+            "voidsTotal",
+            "cashVariance",
+            "openingCash",
+            "closingCash",
+        ] {
+            assert_eq!(result["report"][key], baseline["report"][key], "{key}");
+        }
+        for key in ["drawers", "sales"] {
+            assert_eq!(
+                result["report"]["reportJson"][key], baseline["report"]["reportJson"][key],
+                "{key}"
+            );
+        }
+
+        fn without_financial_status(value: &Value) -> Value {
+            match value {
+                Value::Object(fields) => Value::Object(
+                    fields
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "paymentStatus")
+                        .map(|(key, value)| (key.clone(), without_financial_status(value)))
+                        .collect(),
+                ),
+                Value::Array(rows) => {
+                    Value::Array(rows.iter().map(without_financial_status).collect())
+                }
+                other => other.clone(),
+            }
+        }
+        assert_eq!(
+            without_financial_status(&result["report"]["reportJson"]["staffReports"]),
+            without_financial_status(&baseline["report"]["reportJson"]["staffReports"])
+        );
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT payment_status FROM orders WHERE id='ord-1'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "partially_paid"
+        );
     }
 
     #[test]
@@ -17038,5 +17570,59 @@ mod money_closeout_tests {
             "the two oldest go"
         );
         assert_eq!(result["print_jobs_kept_evidence"], PRINT_EVIDENCE_MAX_JOBS);
+    }
+}
+
+#[cfg(test)]
+mod hotel_z_tests {
+    use super::*;
+    #[test]
+    fn hotel_z_separates_transfer_tax_and_room_receivable() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,order_context,created_at,updated_at) VALUES('settle',?1,155,15500,'folio_settlement','now','now')",
+          [serde_json::json!([{"folio_line_kind":"revenue","total_price":100},{"folio_line_kind":"revenue","total_price":5,"customizations":{"folio":{"charge_type":"accommodation_tax"}}},{"folio_line_kind":"transfer","total_price":50}]).to_string()]).unwrap();
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,folio_charged,created_at,updated_at) VALUES('food','[]',50,5000,1,'now','now')",[]).unwrap();
+        conn.execute(
+            "UPDATE orders SET tax_amount_cents=1300 WHERE id='settle'",
+            [],
+        )
+        .unwrap();
+        crate::db::set_setting(&conn, "tax", "default_tax_rate", "24").unwrap();
+        let vat = printed_order_vat_cents(
+            &conn,
+            &format!("{PRINTED_ORDER_VAT_COLUMNS} FROM orders o WHERE id='settle'"),
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            vat, 1300,
+            "Never apply the owner's default VAT to transfers or accommodation tax"
+        );
+        let hotel = hotel_report_totals(&conn, "FROM orders o", []).unwrap();
+        assert_eq!(hotel["roomChargesCollected_cents"], 5000);
+        assert_eq!(hotel["accommodationTax_cents"], 500);
+        assert_eq!(hotel["chargedToRoom_cents"], 5000);
+        assert_eq!(hotel["chargedToRoomCount"], 1);
+        let gross = 205.0 - hotel["roomChargesCollected"].as_f64().unwrap();
+        assert_eq!(gross, 155.0);
+    }
+    #[test]
+    fn hotel_z_transfer_refund_is_not_a_second_sales_return() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,order_context,created_at,updated_at) VALUES('settle-refund',?1,150,15000,'folio_settlement','now','now')",
+          [serde_json::json!([{"folio_line_kind":"revenue","total_price":100},{"folio_line_kind":"transfer","total_price":50}]).to_string()]).unwrap();
+        conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,created_at,updated_at) VALUES('receipt-refund','settle-refund','cash',150,15000,'CHF','completed','now','now')",[]).unwrap();
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,created_at,updated_at) VALUES('return','receipt-refund','settle-refund','refund',150,15000,'Guest return','now','now')",[]).unwrap();
+        let hotel = hotel_report_totals(&conn, "FROM orders o", []).unwrap();
+        assert_eq!(hotel["transferGross_cents"], 5000);
+        assert_eq!(hotel["transferRefundsTotal_cents"], 5000);
+        assert_eq!(hotel["roomChargesCollected_cents"], 0);
+        let revenue_refunds = 150.0 - hotel["transferRefundsTotal"].as_f64().unwrap();
+        assert_eq!(
+            150.0 - hotel["transferGross"].as_f64().unwrap() - revenue_refunds,
+            0.0
+        );
     }
 }

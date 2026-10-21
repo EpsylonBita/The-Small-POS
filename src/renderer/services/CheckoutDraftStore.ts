@@ -49,6 +49,28 @@ const draftSignature = (value: unknown): string => JSON.stringify(value, (_key, 
   item && typeof item === 'object' && !Array.isArray(item)
     ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 
+// Confirmation may add receipt evidence; the admitted money and identity stay frozen.
+export function confirmPaymentAdmission(draft: CheckoutDraft, paymentData: Record<string, any>): CheckoutDraft {
+  const next = copy(draft);
+  const { ordinaryOwner: _owner, ...durablePayment } = paymentData;
+  const original = next.submission?.paymentData;
+  const withoutEvidence = (value: Record<string, any>) => { const result = { ...value }; delete result.metadata; return result; };
+  if (next.phase !== 'checkout_pending' || !original ||
+    !['admitted', 'confirmed'].includes(next.state.paymentAdmission) ||
+    draftSignature(withoutEvidence(original)) !== draftSignature(withoutEvidence(durablePayment))) {
+    throw new Error('CHECKOUT_DRAFT_PAYMENT_CHANGED');
+  }
+  next.submission!.paymentData = durablePayment;
+  next.state.paymentAdmission = 'confirmed';
+  return next;
+}
+
+function isPaymentAdmissionConfirmation(previous: CheckoutDraft, next: CheckoutDraft): boolean {
+  if (previous.state.paymentAdmission !== 'admitted' || next.state.paymentAdmission !== 'confirmed') return false;
+  try { return draftSignature(confirmPaymentAdmission(previous, next.submission?.paymentData || {})) === draftSignature(next); }
+  catch { return false; }
+}
+
 export function validateCheckoutDraft(value: unknown): asserts value is CheckoutDraft {
   const draft = value as CheckoutDraft;
   if (!draft || draft.schemaVersion !== 1 || !draft.draftId || !draft.checkoutRequestId ||
@@ -107,7 +129,8 @@ export class CheckoutDraftStore {
       await this.load();
       if (this.retired.has(snapshot.draftId)) throw new Error('CHECKOUT_DRAFT_CHANGED');
       if (this.retiredCheckouts.has(snapshot.checkoutRequestId)) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
-      if (this.draft?.phase === 'checkout_pending' && draftSignature(this.draft) !== draftSignature(snapshot)) {
+      if (this.draft?.phase === 'checkout_pending' && draftSignature(this.draft) !== draftSignature(snapshot) &&
+        !isPaymentAdmissionConfirmation(this.draft, snapshot)) {
         throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
       }
       const reply = await this.transport('checkout_draft_put', {
@@ -140,7 +163,7 @@ export class CheckoutDraftStore {
         return result;
       }
       if (reply.generation !== this.generation || draftSignature(reply.draft) !== draftSignature(this.draft) ||
-        (reply.draft && (reply.draft.phase !== 'editing' || reply.draft.draftId !== snapshot.draftId ||
+        (reply.draft && ((reply.draft.phase !== 'editing' && !isPaymentAdmissionConfirmation(reply.draft, snapshot)) || reply.draft.draftId !== snapshot.draftId ||
           reply.draft.checkoutRequestId !== snapshot.checkoutRequestId))) throw new Error('CHECKOUT_DRAFT_CHANGED');
       const saved: CheckoutDraftReply = await this.transport('checkout_draft_put', {
         ...this.scope, expectedGeneration: this.generation, draft: snapshot,
@@ -155,11 +178,42 @@ export class CheckoutDraftStore {
     });
   }
 
+  cancelPaymentAdmission(): Promise<CheckoutDraft> {
+    return this.ordered(async () => {
+      await this.load();
+      if (this.draft?.phase === 'editing' && this.draft.state.paymentAdmissionCancelled === true) {
+        await this.releaseEditableLoyaltyReservation(this.draft);
+        return copy(this.draft);
+      }
+      if (this.draft?.phase !== 'checkout_pending' || this.draft.state.paymentAdmission !== 'admitted') throw new Error('CHECKOUT_DRAFT_CHANGED');
+      const proof = await this.inspect(this.draft.checkoutRequestId);
+      if (proof.outcome !== 'not_found') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+      const editing = copy(this.draft);
+      editing.phase = 'editing';
+      delete editing.submission;
+      delete editing.state.paymentAdmission;
+      editing.state.paymentAdmissionCancelled = true;
+      // Invalidate the replayable discount first. A failed release is retried
+      // from this editable draft, never from its old secured submission.
+      const result = this.accept(await this.transport('checkout_draft_put', { ...this.scope, expectedGeneration: this.generation, draft: editing }));
+      this.loaded = Promise.resolve(result);
+      await this.releaseEditableLoyaltyReservation(editing);
+      return result!;
+    });
+  }
+
+  async releaseEditableLoyaltyReservation(draft: CheckoutDraft): Promise<void> {
+    if (draft.phase !== 'editing' || !draft.state.appliedLoyaltyRedemption) return;
+    const reply = await this.transport('loyalty_release_redemption', { arg0: { orderId: draft.checkoutRequestId } });
+    if (reply?.success !== true) throw new Error('LOYALTY_RELEASE_NOT_CONFIRMED');
+  }
+
   clear(draftId: string, accepted = false): Promise<void> {
     return this.ordered(async () => {
       await this.load();
       if ((this.draft && this.draft.draftId !== draftId) || (!this.draft && accepted)) throw new Error('CHECKOUT_DRAFT_CHANGED');
       if (!accepted && this.draft && this.draft.phase !== 'editing') throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
+      if (!accepted && this.draft) await this.releaseEditableLoyaltyReservation(this.draft);
       this.accept(await this.transport('checkout_draft_delete', {
         ...this.scope, expectedGeneration: this.generation,
       }));

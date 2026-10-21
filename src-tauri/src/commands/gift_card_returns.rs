@@ -1387,6 +1387,29 @@ fn adopt(
         return Err(stale());
     }
     let original = recheck_original(&tx, scope, &record).map_err(Refusal::pending)?;
+    // Adopt an exact row left by an older generic pull. Its pending return
+    // must not be included in its own prior-return floor or inserted twice.
+    // Every identity/value is checked before retiring the generic copy; the
+    // dedicated proof, replacement adjustment and header still commit together.
+    let generic: Option<(String,String,String,i64,i64)> = tx.query_row(
+        "SELECT payment_id,order_id,adjustment_type,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),imported_remote FROM payment_adjustments WHERE id=?1",
+        [&proof.payment_adjustment_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).optional().map_err(sql)?;
+    if let Some((payment, order, kind, cents, imported)) = generic {
+        if imported != 1
+            || payment != record.local_payment_id
+            || order != record.local_order_id
+            || kind != record.action
+            || cents != proof.returned_cents
+        {
+            return Err(stale());
+        }
+        tx.execute(
+            "DELETE FROM payment_adjustments WHERE id=?1 AND imported_remote=1",
+            [&proof.payment_adjustment_id],
+        )
+        .map_err(sql)?;
+    }
     let prior = prior_returned_cents(&tx, &record.local_payment_id).map_err(import)?;
     if proof.total_returned_cents < prior + proof.returned_cents {
         return Err(stale());

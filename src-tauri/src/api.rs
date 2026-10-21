@@ -304,6 +304,7 @@ pub struct AdminFetchError {
     /// firewall challenges, HTML 404s) leave this empty. Callers read typed
     /// fields from it (`app_error_field`), never its display text.
     app_error_body: Option<Value>,
+    retry_after_seconds: Option<i64>,
     kind: AdminFetchErrorKind,
 }
 
@@ -314,6 +315,7 @@ impl AdminFetchError {
             status: None,
             code: None,
             app_error_body: None,
+            retry_after_seconds: None,
             kind: AdminFetchErrorKind::Local,
         }
     }
@@ -324,6 +326,7 @@ impl AdminFetchError {
             status: None,
             code: None,
             app_error_body: None,
+            retry_after_seconds: None,
             kind: AdminFetchErrorKind::Transport,
         }
     }
@@ -335,6 +338,7 @@ impl AdminFetchError {
             status: Some(status),
             code: None,
             app_error_body: None,
+            retry_after_seconds: None,
             kind: AdminFetchErrorKind::Http,
         }
     }
@@ -361,8 +365,18 @@ impl AdminFetchError {
             status: Some(status),
             code,
             app_error_body,
+            retry_after_seconds: None,
             kind: AdminFetchErrorKind::Http,
         }
+    }
+
+    pub(crate) fn retry_after_seconds(&self) -> Option<i64> {
+        self.retry_after_seconds
+    }
+
+    pub(crate) fn with_retry_after(mut self, seconds: Option<i64>) -> Self {
+        self.retry_after_seconds = seconds;
+        self
     }
 
     pub fn status(&self) -> Option<u16> {
@@ -803,6 +817,66 @@ pub async fn fetch_from_admin_detailed_with_staff_session(
     staff_session_id: Option<&str>,
     timeout: Duration,
 ) -> Result<Value, AdminFetchError> {
+    fetch_from_admin_with_retry_after(
+        admin_url,
+        api_key,
+        path,
+        method,
+        body,
+        staff_session_id,
+        timeout,
+    )
+    .await
+    .map(|(body, _)| body)
+}
+
+pub(crate) async fn fetch_from_admin_detailed_with_retry_after(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+) -> Result<(Value, Option<i64>), AdminFetchError> {
+    fetch_from_admin_with_retry_after(
+        admin_url,
+        api_key,
+        path,
+        method,
+        body,
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+fn response_retry_after(resp: &reqwest::Response) -> Option<i64> {
+    let value = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u32>() {
+        return Some(i64::from(seconds).max(1));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
+            .num_seconds()
+            .saturating_add(1)
+            .max(1),
+    )
+}
+
+async fn fetch_from_admin_with_retry_after(
+    admin_url: &str,
+    api_key: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+    staff_session_id: Option<&str>,
+    timeout: Duration,
+) -> Result<(Value, Option<i64>), AdminFetchError> {
     let base = resolve_admin_base(admin_url)?;
     let resolved_api_key =
         extract_api_key_from_connection_string(api_key).unwrap_or_else(|| api_key.to_string());
@@ -853,11 +927,15 @@ pub async fn fetch_from_admin_detailed_with_staff_session(
     note_server_reply(status);
 
     if !status.is_success() {
+        let retry_after = response_retry_after(&resp);
         let body_text = read_capped_error_body(&mut resp).await;
-        return Err(admin_http_error_from_body(status, &body_text));
+        return Err(admin_http_error_from_body(status, &body_text).with_retry_after(retry_after));
     }
 
-    read_success_json(resp).await
+    let retry_after = response_retry_after(&resp);
+    read_success_json(resp)
+        .await
+        .map(|body| (body, retry_after))
 }
 
 /// Status and parsed body of one staff-session JSON POST at any HTTP status.
@@ -1038,8 +1116,9 @@ pub async fn fetch_raw_from_admin_detailed(
     note_server_reply(status);
 
     if !status.is_success() {
+        let retry_after = response_retry_after(&resp);
         let body_text = read_capped_error_body(&mut resp).await;
-        return Err(admin_http_error_from_body(status, &body_text));
+        return Err(admin_http_error_from_body(status, &body_text).with_retry_after(retry_after));
     }
 
     read_success_json(resp).await

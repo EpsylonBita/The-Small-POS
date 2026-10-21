@@ -3093,8 +3093,7 @@ fn begin_authoritative_access_reconciliation_inner(
     if identity_changed {
         if let Some(scope) = prior.as_ref() {
             let connection = db
-                .conn
-                .lock()
+                .lock_traced("repairs_access_reconciliation")
                 .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
             let directory = scope_staging_dir(&connection, scope)?;
             match fs::symlink_metadata(&directory) {
@@ -3160,8 +3159,7 @@ fn begin_authoritative_access_reconciliation_inner(
     // reconciliation must never own SQLite while waiting for those leases.
     block_access_reconciliation(prior.as_mut(), decision)?;
     let connection = db
-        .conn
-        .lock()
+        .lock_traced("repairs_access_reconciliation")
         .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
     if identity_changed {
         let external_cleanup = transition_journal

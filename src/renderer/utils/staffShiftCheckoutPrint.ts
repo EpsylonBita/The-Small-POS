@@ -1,4 +1,5 @@
 import { parseMoneyInputValue } from './moneyInput';
+import { fromCents, toCents } from '@shared/utils/money';
 
 export interface ShiftCheckoutPrintSnapshot {
   snapshotCheckOutTime: string;
@@ -99,25 +100,9 @@ export function resolveCashierCheckoutExpenseTotal(
 const getEffectiveOpeningAmount = (shift: BuildShiftCheckoutPrintSnapshotParams['shift'], summary?: any) =>
   Number(shift?.opening_cash_amount ?? summary?.shift?.opening_cash_amount ?? 0);
 
-const getInheritedStaffExpectedReturns = (summary: any) => {
-  const inheritedDrivers = Array.isArray(summary?.transferredDrivers) ? summary.transferredDrivers : [];
-  const inheritedWaiters = Array.isArray(summary?.transferredWaiters) ? summary.transferredWaiters : [];
-
-  const totalDrivers = inheritedDrivers.reduce(
-    (sum: number, item: any) => sum + Number(item?.net_cash_amount || 0),
-    0,
-  );
-  const totalWaiters = inheritedWaiters.reduce(
-    (sum: number, item: any) => sum + Number(item?.net_cash_amount || 0),
-    0,
-  );
-
-  return totalDrivers + totalWaiters;
-};
-
 const getCurrentCashierIssuedFloat = (summary: any) => {
   const recordedGiven = Number(summary?.cashDrawer?.driver_cash_given || 0);
-  if (recordedGiven > 0) {
+  if (summary?.cashDrawer?.driver_cash_given != null) {
     return recordedGiven;
   }
 
@@ -143,28 +128,21 @@ const getCashierExpectedBreakdown = (
   expensesTotal?: number,
 ) => {
   const calculationVersion = Number(shift?.calculation_version ?? 1);
-  const sales = Number(summary?.breakdown?.instore?.cashTotal || 0);
-  const cashRefunds = Number(summary?.cashRefunds || 0);
+  const sales = Number(summary?.cashierCash?.cashCollections ?? summary?.breakdown?.instore?.cashTotal ?? 0);
+  const cashRefunds = Number(summary?.cashierCash?.cashRefunds ?? summary?.cashRefunds ?? 0);
   const expenses = expensesTotal ?? Number(summary?.totalExpenses || 0);
   const cashDrops = Number(summary?.cashDrawer?.cash_drops || 0);
   const driverGiven = getCurrentCashierIssuedFloat(summary);
   const driverReturned = Number(summary?.cashDrawer?.driver_cash_returned || 0);
-  const inheritedDriverExpectedReturns = getInheritedStaffExpectedReturns(summary);
   const staffPayments = Array.isArray(summary?.staffPayments) ? summary.staffPayments : [];
   const recordedStaffPayments = staffPayments.length > 0
     ? staffPayments.reduce((sum: number, payment: any) => sum + Number(payment?.amount || 0), 0)
     : Number(summary?.cashDrawer?.total_staff_payments || 0);
   const deductedStaffPayments = recordedStaffPayments;
-  const expected =
-    opening +
-    sales -
-    cashRefunds -
-    expenses -
-    deductedStaffPayments -
-    cashDrops -
-    driverGiven +
-    driverReturned +
-    inheritedDriverExpectedReturns;
+  const expected = fromCents(
+    toCents(opening) + toCents(sales) - toCents(cashRefunds) - toCents(expenses) -
+    toCents(deductedStaffPayments) - toCents(cashDrops) - toCents(driverGiven) + toCents(driverReturned),
+  );
 
   return {
     calculationVersion,
@@ -208,7 +186,7 @@ function buildSnapshotValues(
     return {
       expectedAmount,
       closingAmount,
-      varianceAmount: closingAmount - expectedAmount,
+      varianceAmount: fromCents(toCents(closingAmount) - toCents(expectedAmount)),
     };
   }
 

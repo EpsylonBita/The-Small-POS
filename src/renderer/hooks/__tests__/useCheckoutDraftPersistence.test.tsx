@@ -473,3 +473,39 @@ describe('closing the order menu (1.4.125, stuck edit)', () => {
     expect(result.current.supersedesEdit()).toBe(false);
   });
 });
+
+
+it('releases an interrupted editable loyalty reservation before restoring the cart', async () => {
+  const draft = { ...createCheckoutDraft(), state: { appliedLoyaltyRedemption: { customerId: 'customer', pointsRedeemed: 100 } } };
+  const read = deferred<any>();
+  const native = setup(read);
+  const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+  await act(async () => read.resolve({ success: true, scope, generation: 1, draft }));
+  await waitFor(() => expect(result.current.status).toBe('loaded'));
+  expect(native).toHaveBeenCalledWith('loyalty_release_redemption', { arg0: { orderId: draft.checkoutRequestId } });
+  expect(result.current.restored?.checkoutRequestId).toBe(draft.checkoutRequestId);
+});
+
+it('keeps a frozen checkout loyalty debit with the original recovery request', async () => {
+  const draft = { ...createCheckoutDraft(), phase: 'checkout_pending' as const, state: { appliedLoyaltyRedemption: { customerId: 'customer', pointsRedeemed: 100 } } };
+  const read = deferred<any>();
+  const native = setup(read);
+  const { result } = renderHook(() => useCheckoutDraftPersistence(true));
+  await act(async () => read.resolve({ success: true, scope, generation: 1, draft }));
+  await waitFor(() => expect(result.current.status).toBe('loaded'));
+  expect(native.mock.calls.some(call => call[0] === 'loyalty_release_redemption')).toBe(false);
+});
+
+
+it('releases an editable cart reservation before deleting its retained draft', async () => {
+  const draft = { ...createCheckoutDraft(), state: { appliedLoyaltyRedemption: { pointsRedeemed: 100 } } };
+  const commands: string[] = [];
+  const owner = new CheckoutDraftStore(scope, async command => {
+    commands.push(command);
+    if (command === 'loyalty_release_redemption') return { success: true };
+    return { success: true, scope, generation: command === 'checkout_draft_get' ? 1 : 2, draft: command === 'checkout_draft_delete' ? null : draft };
+  });
+  await owner.load();
+  await owner.clear(draft.draftId, false);
+  expect(commands).toEqual(['checkout_draft_get', 'loyalty_release_redemption', 'checkout_draft_delete']);
+});

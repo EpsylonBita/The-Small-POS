@@ -26,11 +26,27 @@ export function roomWorkflowError(error: unknown, t: TFunction): string {
     : /check.?out.*after|ROOM_DATES_INVALID|INVALID_DATES/i.test(raw) ? 'invalidDates'
     : /ROOM_UNAVAILABLE|ROOM_DATES_UNAVAILABLE|ROOM_NOT_AVAILABLE|room.*not available|room.*unavailable|overlap|already reserved/i.test(raw) ? 'unavailable'
     : /ROOM_CHECKOUT_REQUIRED|folio_balance_outstanding|outstanding balance/i.test(raw) ? 'checkoutRequired'
+    : /ROOM_RESERVATION_DATES_MISMATCH/i.test(raw) ? 'datesMismatch'
     : /ROOM_CHECKIN_REQUIRED/i.test(raw) ? 'checkinRequired'
     : /MODULE_REQUIRED/i.test(raw) ? 'moduleRequired'
     : /ROOM_RESERVATION_REQUIRED/i.test(raw) ? 'reservationRequired'
     : /TERMINAL_RESERVATION|ROOM_RESERVATION_LOCKED/i.test(raw) ? 'locked'
-    : /network|fetch|offline|connect/i.test(raw) ? 'connectionError'
+    : /TIMEZONE_UNAVAILABLE|network|fetch|offline|connect/i.test(raw) ? 'connectionError'
     : 'saveFailed';
-  return t(`roomWorkflow.${key}`);
+  return key === 'datesMismatch' ? t('hotelMoney.errors.ROOM_RESERVATION_DATES_MISMATCH') : t(`roomWorkflow.${key}`);
+}
+
+/** Business wall clock from the branch's retained IANA location zone; never the PC. */
+export function branchCalendarClock(timeZone: string, instant = new Date()): { date: string; time: string } {
+  if (!timeZone) throw new Error('TIMEZONE_UNAVAILABLE');
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23' }).formatToParts(instant);
+    const value = (key: Intl.DateTimeFormatPartTypes) => parts.find(part => part.type === key)!.value;
+    return { date: `${value('year')}-${value('month')}-${value('day')}`, time: `${value('hour')}:${value('minute')}` };
+  } catch { throw new Error('TIMEZONE_UNAVAILABLE'); }
+}
+export function addHotelCalendarDays(date: string, days: number): string {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0,10);
 }

@@ -39,6 +39,7 @@ interface ScaleReadWeightResult {
   unit?: string;
   stable?: boolean;
   raw?: string;
+  readAt?: string;
 }
 
 const bridge = getBridge();
@@ -73,7 +74,8 @@ export function useScale(
             }));
           }
         });
-        unlistenRef.current = unlisten;
+        if (mounted) unlistenRef.current = unlisten;
+        else unlisten();
       } catch (e) {
         console.warn('[useScale] Failed to listen for scale events:', e);
       }
@@ -97,7 +99,9 @@ export function useScale(
       const baud = settings.scale_baud_rate || 9600;
       const protocol = settings.scale_protocol || 'generic';
 
-      bridge.hardware.scaleConnect({ port, baud, protocol }).catch((e) => {
+      bridge.hardware.scaleConnect({ port, baud, protocol }).then(() => {
+        setState(prev => ({ ...prev, connected: true, error: null }));
+      }).catch((e) => {
         console.warn('[useScale] Auto-connect failed:', e);
         setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
       });
@@ -145,8 +149,9 @@ export function useScale(
         return {
           weight: result.weight,
           unit: result.unit || 'kg',
-          stable: result.stable ?? true,
+          stable: result.stable === true,
           raw: result.raw,
+          timestamp: result.readAt,
         };
       }
       return null;

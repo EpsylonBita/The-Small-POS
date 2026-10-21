@@ -1456,8 +1456,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
               balanceMap[p.id] = {
                 originalAmount: p.amount,
                 totalRefunds: 0,
-                remaining: p.amount,
+                remaining: 0,
               };
+              toast.error(t("modals.refund.canonicalRefreshRequired"));
             }
           }
         }
@@ -1951,7 +1952,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               setActiveRefundId(null);
                               setVoidReason("");
                             }}
-                            disabled={processing}
+                            disabled={processing || !balance || balance.remaining <= 0 || balance.totalRefunds > 0}
                             className="flex-1 liquid-glass-modal-button bg-red-600/10 active:bg-red-600/20 text-red-400 border-red-500/20 gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <XCircle className="w-4 h-4" />

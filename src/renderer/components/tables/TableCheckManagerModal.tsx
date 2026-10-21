@@ -1210,8 +1210,9 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   ), [table?.id, tables, session?.id]);
   const mergeTables = useMemo(() => tables.filter(candidate =>
     candidate.id !== table?.id && candidate.tableSessionId !== session?.id &&
-    (candidate.status === 'available' || candidate.status === 'occupied'),
-  ), [table?.id, tables, session?.id]);
+    (candidate.status === 'available' ||
+      (candidate.status === 'occupied' && !!session?.active_order_id && candidate.currentOrderId === session.active_order_id)),
+  ), [table?.id, tables, session?.id, session?.active_order_id]);
   const sessionMetadata = useMemo<Record<string, unknown>>(
     () => (session?.metadata && typeof session.metadata === 'object' ? session.metadata : {}),
     [session?.metadata],

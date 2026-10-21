@@ -167,6 +167,35 @@ function validateSupportLocale(localeName, localeData) {
   return errors;
 }
 
+// A worker that writes JSON through a legacy code page turns every non-ASCII
+// letter into '?': the Android coupon and loyalty messages shipped as
+// "?? ??????? ??????????" and "f?r" until the 1.4.134 release caught them
+// (21/10/2026). A '?' never sits inside a word, never repeats, and Greek text
+// always keeps its Greek letters.
+function textDamage(localeName, text) {
+  if (text.includes('�')) return 'replacement character';
+  if (/\?{2,}/.test(text)) return 'run of question marks';
+  if (/\p{L}\?\p{L}/u.test(text)) return 'question mark inside a word';
+  if (localeName.startsWith('el') && text.includes('?') && !/[Ͱ-Ͽἀ-῿]/.test(text)) {
+    return 'Greek text without Greek letters';
+  }
+  return null;
+}
+
+function findDamagedText(localeName, value, prefix = '', errors = []) {
+  if (typeof value === 'string') {
+    const damage = textDamage(localeName, value);
+    if (damage) errors.push(`${prefix}: ${damage}: ${value.slice(0, 80)}`);
+  } else if (Array.isArray(value)) {
+    value.forEach((entry, index) => findDamagedText(localeName, entry, `${prefix}[${index}]`, errors));
+  } else if (isPlainObject(value)) {
+    for (const [key, nested] of Object.entries(value)) {
+      findDamagedText(localeName, nested, prefix ? `${prefix}.${key}` : key, errors);
+    }
+  }
+  return errors;
+}
+
 function main() {
   const files = fs
     .readdirSync(localesDir)
@@ -190,6 +219,22 @@ function main() {
   if (baseSupportErrors.length) {
     hasFailure = true;
     printList(`${baseLocale} support validation errors`, baseSupportErrors);
+  }
+
+  // Every locale file, overlays and support copy included: they ship too.
+  const localeFiles = (directory) =>
+    fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) return localeFiles(entryPath);
+      return entry.name.endsWith('.json') ? [entryPath] : [];
+    });
+  for (const filePath of localeFiles(localesDir).sort()) {
+    const relative = path.relative(localesDir, filePath).replaceAll('\\', '/');
+    const damaged = findDamagedText(path.basename(filePath), readJson(filePath));
+    if (damaged.length) {
+      hasFailure = true;
+      printList(`${relative} damaged text`, damaged);
+    }
   }
 
   for (const file of files) {

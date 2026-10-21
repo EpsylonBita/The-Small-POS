@@ -113,6 +113,7 @@ pub fn build_fiscal_data(
         unit_price: i64,
         own_discount: Option<i64>,
         menu_item_id: Option<String>,
+        line_role: Option<String>,
     }
     let mut register_items = Vec::with_capacity(items_arr.len());
     for (index, item) in items_arr.iter().enumerate() {
@@ -138,6 +139,7 @@ pub fn build_fiscal_data(
             unit_price,
             own_discount,
             menu_item_id: str_field(item, &["menu_item_id", "menuItemId"]).map(str::to_string),
+            line_role: str_field(item, &["line_role", "lineRole"]).map(str::to_string),
         });
     }
 
@@ -166,6 +168,7 @@ pub fn build_fiscal_data(
             .iter()
             .map(|item| GreeceOrderVatItem {
                 menu_item_id: item.menu_item_id.clone(),
+                line_role: item.line_role.clone(),
                 name: Some(item.name.clone()),
                 quantity: item.quantity,
                 unit_price: item.unit_price as f64 / 100.0,
@@ -249,6 +252,85 @@ pub fn build_fiscal_data(
         items: fiscal_items,
         payments: fiscal_payments,
         operator_id: operator_id.map(|s| s.to_string()),
+        receipt_comment: None,
+    })
+}
+
+/// A settlement register receipt uses frozen revenue lines, never transfers or
+/// today's VAT defaults. Actual retained tenders are apportioned in exact cents.
+pub(crate) fn build_folio_fiscal_data(
+    lines: &[serde_json::Value],
+    payments: &[serde_json::Value],
+    order_total: i64,
+    tax_rates: &[TaxRateConfig],
+    operator_id: Option<&str>,
+) -> Result<FiscalReceiptData, String> {
+    if lines.is_empty() {
+        return Err("FOLIO_SETTLEMENT_NO_REVENUE".into());
+    }
+    let mut items = Vec::new();
+    let mut gross = 0i64;
+    for line in lines {
+        let amount = line["grossCents"]
+            .as_i64()
+            .ok_or("FOLIO_SETTLEMENT_SNAPSHOT_INVALID")?;
+        let rate = line["rateBasisPoints"]
+            .as_i64()
+            .ok_or("FOLIO_SETTLEMENT_SNAPSHOT_INVALID")? as f64
+            / 100.0;
+        let tax = tax_rates
+            .iter()
+            .find(|configured| (configured.rate - rate).abs() < 0.01)
+            .cloned()
+            .ok_or("FOLIO_SETTLEMENT_FISCAL_TAX_MAPPING_REQUIRED")?;
+        gross += amount;
+        items.push(FiscalLineItem {
+            description: line["description"].as_str().unwrap_or("").to_string(),
+            quantity: 1.0,
+            unit_price: amount,
+            tax_code: tax.code,
+            tax_rate: rate,
+            department: tax.department,
+            discount: None,
+        });
+    }
+    if order_total <= 0 {
+        return Err("FOLIO_SETTLEMENT_AMOUNT_REQUIRED".into());
+    }
+    let mut prior = 0i64;
+    let mut allocated = 0i64;
+    let mut tenders = Vec::new();
+    for payment in payments {
+        if payment.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
+            continue;
+        }
+        let amount = payment
+            .get("remainingRefundable")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_else(|| {
+                f64_field(payment, &["amount"]).unwrap_or(0.0)
+                    - f64_field(payment, &["refundedAmount"]).unwrap_or(0.0)
+            });
+        prior += crate::money::Cents::round_half_even(amount.max(0.0)).as_i64();
+        let target = ((prior as i128 * gross as i128 + order_total as i128 / 2)
+            / order_total as i128) as i64;
+        if target > allocated {
+            tenders.push(FiscalPayment {
+                method: str_field(payment, &["method"])
+                    .ok_or("Payment method required")?
+                    .to_string(),
+                amount: target - allocated,
+            });
+        }
+        allocated = target;
+    }
+    if allocated != gross {
+        return Err("FOLIO_SETTLEMENT_PAYMENT_COVERAGE_REQUIRED".into());
+    }
+    Ok(FiscalReceiptData {
+        items,
+        payments: tenders,
+        operator_id: operator_id.map(str::to_string),
         receipt_comment: None,
     })
 }
@@ -950,6 +1032,32 @@ mod tests {
         let payments = vec![json!({"method": "card", "amount": 7.50})];
         let data = build_fiscal_data(&order, &payments, &sample_tax_rates(), None, &ctx()).unwrap();
         assert_eq!(data.items[0].discount, Some(250));
+    }
+
+    #[test]
+    fn deposit_register_line_keeps_its_full_price_without_an_order_discount() {
+        let order = json!({"items":[
+            {"name":"Goods 13", "quantity":1,"price":10,"vat_category_code":"gr_reduced_13"},
+            {"name":"Goods 24", "quantity":1,"price":10,"vat_category_code":"gr_standard_24"},
+            {"name":"Deposit", "quantity":1,"price":2,"vat_category_code":"gr_reduced_13","line_role":"deposit"}
+        ],"discount_amount":2,"total_amount":20});
+        let data = build_fiscal_data(
+            &order,
+            &[json!({"method":"cash","amount":20})],
+            &sample_tax_rates(),
+            None,
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(
+            data.items
+                .iter()
+                .map(|line| line.discount)
+                .collect::<Vec<_>>(),
+            vec![Some(100), Some(100), None]
+        );
+        assert_eq!(data.items[2].unit_price, 200);
+        assert_eq!(data.payments[0].amount, 2000);
     }
 
     #[test]

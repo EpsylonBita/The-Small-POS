@@ -18,6 +18,8 @@ export interface RestaurantTable {
   floorPlanId?: string | null;
   section?: string | null;
   status: TableStatus;
+  /** Canonical occupancy before read-only arrival decoration; never persisted. */
+  reservationCanonicalStatus?: TableStatus;
   positionX: number | null;
   positionY: number | null;
   width?: number | null;

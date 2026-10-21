@@ -3563,6 +3563,8 @@
       "manage": "Gérer"
     },
     "financial": {
+      "incomingRecovery": "Copies de paiements à récupérer : {{count}}. Les téléchargements sont suspendus après plusieurs échecs. Réessayez pour lire les données actuelles du serveur ; rien n’est débité ni supprimé.",
+      "incomingRetry": "Réessayer le téléchargement des paiements",
       "title": "Transactions financières",
       "subtitle": "Gérer les éléments financiers en attente et échoués",
       "driver": "Synchronisation revenus livreur",
@@ -5837,6 +5839,8 @@
         "noCapture": "La dernière demande n’a laissé aucun retour sur la carte cadeau : rien n’a été rendu. Vous pouvez la relancer."
       },
       "statusSetAside": "Mis de côté pour vérification",
+      "canonicalRefreshRequired": "Le solde actuel du paiement n’a pas pu être lu. Réessayez avant de rendre de l’argent.",
+      "canonicalReturnFinal": "Ce paiement a déjà été remboursé et ne peut pas être remboursé à nouveau.",
       "placeholderNotMoney": "Cette ligne de paiement n'enregistre aucun argent (la caisse l'a déduite de l'étiquette de la commande) : elle ne peut être ni remboursée ni annulée. Restaurez les paiements de la commande depuis le serveur avec « Synchroniser maintenant ».",
       "otherRefund": "Même moyen (autre)",
       "tenderRequired": "Choisissez comment le remboursement a été rendu",
@@ -7261,6 +7265,14 @@
     "connect": "Connecter et synchroniser"
   },
   "productCatalog": {
+    "retailReadiness": {
+      "chooseVariant": "Choisir une variante — {{name}}",
+      "stock": "Stock : {{quantity}}",
+      "readScale": "Lire la balance",
+      "scaleNotReady": "Aucun poids récent et stable. Vérifie la balance ou saisis la quantité manuellement.",
+      "variantUnavailable": "Cette variante est indisponible. Actualise le catalogue et réessaie.",
+      "invalidScaleLabel": "Cette étiquette de balance ne peut pas être utilisée. Vérifie le prix unitaire et saisis la quantité manuellement."
+    },
     "title": "Catalogue de produits",
     "scanBarcode": "Scanner un code-barres ou saisir un SKU...",
     "scanning": "Scan en cours...",
@@ -7842,6 +7854,7 @@
     "insufficientPoints": "Minimum {{min}} points requis",
     "redeemSuccess": "{{points}} points utilisés pour {{discount}} de remise",
     "redeemFailed": "Commande enregistrée, mais les points fidélité n'ont pas été utilisés",
+    "checkoutRefused": "Les points fidélité n'ont pas pu être réservés. La commande n'a pas été enregistrée. Retirez l'utilisation des points ou réessayez.",
     "redeemPrepared": "{{points}} points prêts pour {{discount}} de remise",
     "noCustomerSelected": "Sélectionnez un client enregistré pour utiliser des points",
     "moduleUnavailable": "Le module fidélité n'est pas activé sur ce terminal",
@@ -10152,5 +10165,66 @@
     "refusal": "La journée ne peut pas être clôturée sans connexion. Continuez à vendre : la journée reste ouverte et vous la clôturez dès que la connexion revient. Pour compter la caisse maintenant, faites la clôture du caissier, qui s'imprime aussi sans internet, et consultez l'aperçu sur cet écran.",
     "status": "Pas de connexion : la journée se clôture dès son retour",
     "checklist": "Pas de connexion au serveur. Continuez à vendre et clôturez la journée dès que la connexion revient."
+  },
+  "salonSale": {
+    "newSale": "Nouvelle vente de prestation",
+    "existingTicket": "Ce rendez-vous a déjà un ticket. Ouvre-le dans Commandes pour vérifier le paiement.",
+    "checkout": "Encaisser",
+    "add": "Ajouter au ticket",
+    "title": "Vente de prestations",
+    "search": "Rechercher des prestations et des produits…",
+    "pendingSync": "Attends la synchronisation de ce rendez-vous avant de l’encaisser.",
+    "unavailable": "Les détails de la prestation sont indisponibles. Actualise et réessaie."
+  },
+  "hotelDeskArrival": { "guestCount": "Nombre de personnes" },
+  "hotelDeskService": {
+    "title": "Paiement de la prestation",
+    "room": "Porter sur une chambre occupée",
+    "chooseRoom": "Choisir une chambre",
+    "loading": "Chargement des chambres occupées…",
+    "noRooms": "Aucune chambre occupée avec un compte actif dans la devise de l’établissement n’est disponible. Tu peux encaisser maintenant.",
+    "hint": "Choisis la chambre du client pour proposer le paiement sur chambre à la caisse.",
+    "collectNow": "Encaisser maintenant",
+    "useRoom": "Utiliser cette chambre"
+  },
+  "hotelMoney": {
+    "refund": "Remboursement",
+    "collect": "Encaisser le compte",
+    "statement": "Relevé du compte client",
+    "vatCategory": "Catégorie de TVA",
+    "chooseVat": "Choisir la catégorie de TVA",
+    "nightlyRate": "Tarif convenu par nuit : {{amount}}",
+    "vat": {
+      "gr_exempt": "Exonéré",
+      "gr_out_of_scope": "Hors champ TVA",
+      "gr_article_39_small_business": "Franchise des petites entreprises"
+    },
+    "errors": {
+      "FOLIO_SETTLEMENT_OPEN": "Reprends l’encaissement en cours.",
+      "NOTHING_TO_COLLECT": "Il n’y a rien à encaisser.",
+      "AMOUNT_EXCEEDS_COLLECTIBLE": "Le montant dépasse le solde actuellement encaissable.",
+      "FOLIO_NOT_COLLECTIBLE": "Ce compte client est fermé aux encaissements.",
+      "FOLIO_CURRENCY_MISMATCH": "La devise ne correspond pas au compte client.",
+      "FOLIO_CURRENCY_UNAVAILABLE": "La devise du compte client est indisponible.",
+      "SETTLEMENT_REQUEST_CONFLICT": "La demande initiale comporte d’autres informations. Reprends cette demande.",
+      "INVALID_INPUT": "Vérifie le montant et les informations.",
+      "FOLIO_NOT_FOUND": "Le compte client est introuvable ou n’est plus accessible.",
+      "SETTLEMENT_HAS_PAYMENTS": "Cet encaissement contient des paiements. Encaisse le reste ou rembourse les paiements d’origine.",
+      "FOLIO_SETTLEMENT_REQUIRED": "Encaisse ce compte depuis l’écran de paiement.",
+      "FOLIO_SETTLEMENT_IMMUTABLE": "Les lignes et les totaux du règlement ne peuvent pas être modifiés.",
+      "CHARGE_REQUEST_CONFLICT": "Une charge attend confirmation. Réessaie avec les informations d’origine.",
+      "ROOM_CHECKOUT_REQUIRED": "Effectue le départ du client avant de libérer cette chambre.",
+      "ROOM_RESERVATION_DATES_MISMATCH": "Une réservation couvre ces dates. Charge-la et utilise ses dates d’arrivée et de départ.",
+      "PAYMENT_MIRROR_PENDING": "Les paiements sont en cours de restauration. Synchronise et reprends avant d’encaisser à nouveau.",
+      "CONNECTION_REQUIRED": "Connecte-toi pour préparer ou annuler un encaissement.",
+      "ACTION_FAILED": "L’action n’a pas abouti. Réessaie la même demande."
+    }
+  },
+  "verticalReadinessDesk": {
+    "chooseParty": "À qui est destinée cette table ?",
+    "bookingDetails": "Réservation : {{name}} à {{time}}",
+    "walkIn": "Sans réservation",
+    "seatBooking": "Installer les clients réservés",
+    "timezoneUnavailable": "Le fuseau horaire du magasin est indisponible. Actualise les paramètres du terminal avant de modifier le planning."
   }
 }

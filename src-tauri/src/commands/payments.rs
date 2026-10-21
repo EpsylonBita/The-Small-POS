@@ -762,12 +762,20 @@ pub async fn payment_record(
     // use the same cashier-first flow as initial checkout. Split payments and
     // a card payment already approved by a directly integrated EFT terminal
     // retain their existing collection paths.
-    if should_fiscalize_full_balance_before_record(
-        &input,
-        terminal_approved,
-        collect_outstanding,
-        balance,
-    ) {
+    // A folio payment collects both sales and receivable transfers. Collect the
+    // ordinary tender first; its fiscal document is the revenue-only snapshot.
+    let folio_settlement = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::hotel_folio::is_local(&conn, &order_id)?
+    };
+    if !folio_settlement
+        && should_fiscalize_full_balance_before_record(
+            &input,
+            terminal_approved,
+            collect_outstanding,
+            balance,
+        )
+    {
         let order = crate::sync::get_order_by_id(&db, &order_id)?;
         let payment_idempotency_key = if collect_outstanding {
             Some(
@@ -1581,6 +1589,8 @@ pub async fn refund_payment(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing refund payload")?;
+    let payment_id = parse_payment_id_payload(Some(payload.clone()))?;
+    refresh_refund_payment_if_online(&db, &payment_id).await?;
     refunds::refund_payment(&db, &payload)
 }
 
@@ -1590,6 +1600,7 @@ pub async fn refund_void_payment(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = parse_refund_void_payload(arg0)?;
+    refresh_refund_payment_if_online(&db, &payload.payment_id).await?;
     refunds::void_payment_with_adjustment(
         &db,
         &payload.payment_id,
@@ -1614,7 +1625,37 @@ pub async fn refund_get_payment_balance(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payment_id = parse_payment_id_payload(arg0)?;
+    refresh_refund_payment_if_online(&db, &payment_id).await?;
     refunds::get_payment_balance(&db, &payment_id)
+}
+
+/// The modal's balance read and the native mutation both refresh admission.
+/// Offline uses the durable imported ledger; an online refusal/read error
+/// propagates, and never authorizes a return from a stale balance.
+async fn refresh_refund_payment_if_online(
+    db: &db::DbState,
+    payment_id: &str,
+) -> Result<(), String> {
+    if !crate::sync::check_network_status()
+        .await
+        .get("isOnline")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let order_id: String = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT order_id FROM order_payments WHERE id=?1",
+            [payment_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    crate::sync::refresh_canonical_payments_for_refund(db, &order_id)
+        .await
+        .map_err(|error| format!("PAYMENT_CANONICAL_REFRESH_REQUIRED: {error}"))
 }
 
 #[cfg(test)]

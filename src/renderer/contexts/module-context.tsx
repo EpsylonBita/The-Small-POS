@@ -11,6 +11,7 @@ import React, {
   ReactNode,
 } from 'react';
 import type { BusinessType } from '../../shared/types/organization';
+import { normalizeBusinessTypeAlias } from '../components/dashboards/dashboardOrderScope';
 import type {
   ModuleId,
   EnabledModule,
@@ -27,6 +28,7 @@ import {
   shouldShowInNavigation,
 } from '../../shared/constants/pos-modules';
 import { resolveViewModuleId } from '../utils/module-view-access';
+import { validateDependencies } from '../../../../shared/utils/moduleDependencies';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { getCachedTerminalCredentials } from '../services/terminal-credentials';
 
@@ -268,6 +270,20 @@ function areApiModuleListsEquivalent(
 // =============================================
 // PROVIDER COMPONENT
 // =============================================
+
+/**
+ * True when every REQUIRED dependency of the module is itself enabled.
+ * Mirrors Android's ModuleSyncService post-sync rule: a module whose required
+ * dependency is missing (e.g. guest_billing / housekeeping without rooms) is
+ * treated as disabled. Recommended and optional dependencies never block.
+ */
+export const hasRequiredModuleDependencies = (
+  enabledModules: EnabledModule[],
+  moduleId: string
+): boolean => {
+  const enabledIds = enabledModules.map((m) => m.module.id as string);
+  return validateDependencies(moduleId, enabledIds, { includeRecommended: false }).valid;
+};
 
 export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   const bridge = getBridge();
@@ -635,7 +651,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         return {
           enabledModules: transformed,
           lockedModules: [],
-          businessType: data.businessType,
+          businessType: normalizeBusinessTypeAlias(data.businessType),
           organizationId: data.organizationId,
           apiModules: data.apiModules,
         };
@@ -670,7 +686,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       return {
         enabledModules,
         lockedModules,
-        businessType: data.businessType,
+        businessType: normalizeBusinessTypeAlias(data.businessType),
         organizationId: data.organizationId,
       };
     } catch {
@@ -737,7 +753,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     try {
       // Fetch org configuration via typed bridge
       const orgId = await bridge.terminalConfig.getOrganizationId();
-      const bType = await bridge.terminalConfig.getBusinessType();
+      const bType = normalizeBusinessTypeAlias(await bridge.terminalConfig.getBusinessType());
 
       // Handle missing organization ID
       if (!orgId) {
@@ -857,7 +873,10 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    */
   const isModuleEnabled = useCallback(
     (moduleId: ModuleId): boolean => {
-      return enabledModules.some((m) => m.module.id === moduleId);
+      return (
+        enabledModules.some((m) => m.module.id === moduleId) &&
+        hasRequiredModuleDependencies(enabledModules, moduleId)
+      );
     },
     [enabledModules]
   );
@@ -1008,7 +1027,12 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
     // Add enabled modules (including guaranteed core modules)
     for (const m of modulesWithCore) {
-      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation && isRenderable(m.module.id)) {
+      if (
+        !isModuleExcludedFromPos(m.module.id) &&
+        m.module.showInNavigation &&
+        isRenderable(m.module.id) &&
+        hasRequiredModuleDependencies(modulesWithCore, m.module.id)
+      ) {
         allNavModules.push({
           module: m.module,
           isEnabled: true,
@@ -1100,7 +1124,11 @@ export const getModuleAccessStatic = (
     candidate.module.id === moduleId ||
     candidate.module.id === resolvedModuleId ||
     resolveViewModuleId(candidate.module.id) === resolvedModuleId;
-  const enabledModule = enabledModules.find(matchesModuleId);
+  const foundEnabledModule = enabledModules.find(matchesModuleId);
+  const enabledModule =
+    foundEnabledModule && hasRequiredModuleDependencies(enabledModules, foundEnabledModule.module.id)
+      ? foundEnabledModule
+      : undefined;
   const lockedModule = lockedModules.find(matchesModuleId);
 
   if (enabledModule) {

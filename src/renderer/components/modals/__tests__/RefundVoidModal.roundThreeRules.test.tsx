@@ -83,7 +83,7 @@ const payment = (id: string, method: string, extra: Record<string, unknown> = {}
   ...extra,
 });
 
-const openModal = async (rows: unknown[], balance: Record<string, unknown>) => {
+const openModal = async (rows: unknown[], balance: Record<string, unknown>, balanceError?: Error) => {
   mocks.bridge.payments.getOrderPayments.mockResolvedValue(rows);
   mocks.bridge.orders.getById.mockResolvedValue({ id: 'ord-1', order_type: 'delivery' });
   mocks.bridge.refunds.getPaymentBalance.mockResolvedValue({
@@ -92,6 +92,7 @@ const openModal = async (rows: unknown[], balance: Record<string, unknown>) => {
     remaining: 12,
     ...balance,
   });
+  if (balanceError) mocks.bridge.refunds.getPaymentBalance.mockRejectedValue(balanceError);
   mocks.bridge.refunds.listOrderAdjustments.mockResolvedValue([]);
   mocks.bridge.refunds.refundPayment.mockResolvedValue({ success: true });
   await act(async () => {
@@ -116,6 +117,30 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('the refund screen follows the shared rules (round 3 review)', () => {
+  it('blocks refund and void when the canonical balance refresh fails', async () => {
+    await openModal([payment('unreadable', 'cash')], {}, new Error('PAYMENT_CANONICAL_REFRESH_REQUIRED'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Refund$/ }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('button', { name: /^Void$/ }).hasAttribute('disabled')).toBe(true);
+    });
+    expect(mocks.bridge.refunds.refundPayment).not.toHaveBeenCalled();
+  });
+
+  it('shows the cross-till remainder and prevents a full void after the partial return', async () => {
+    await openModal([payment('cross-till', 'cash', { amount: 10 })], { originalAmount: 10, totalRefunds: 6, remaining: 4 });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Void$/ }).hasAttribute('disabled')).toBe(true));
+    await openRefundForm();
+    expect(screen.getByText(/^Maximum refundable:/).textContent).toMatch(/4[,.]00/);
+  });
+
+  it('blocks both return actions when a remote final return leaves zero balance', async () => {
+    await openModal([payment('remote-void', 'cash')], { remaining: 0 });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Refund$/ }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByRole('button', { name: /^Void$/ }).hasAttribute('disabled')).toBe(true);
+    });
+  });
+
   it('shows the original native receipt timestamp without changing the payment', async () => {
     const createdAt = '2026-10-09T13:35:10Z';
     const original = payment('native-cash', 'cash', { created_at: undefined, createdAt });

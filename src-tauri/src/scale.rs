@@ -53,6 +53,14 @@ pub struct ScaleStatus {
     pub last_read_at: Option<String>,
 }
 
+fn reading_changed(previous: Option<&WeightReading>, next: &WeightReading) -> bool {
+    previous.is_none_or(|old| {
+        (old.weight - next.weight).abs() > 0.001
+            || old.stable != next.stable
+            || old.unit != next.unit
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
@@ -252,7 +260,7 @@ pub fn connect(
 
     tokio::spawn(async move {
         info!(port = %port_name, "Scale background reader started");
-        let mut last_weight: Option<f64> = None;
+        let mut last_reading: Option<WeightReading> = None;
         let mut line_buf = String::new();
 
         while SCALE_RUNNING.load(Ordering::SeqCst) {
@@ -282,22 +290,19 @@ pub fn connect(
 
                                 if let Some(reading) = parse_weight_line(&line, &protocol_clone) {
                                     // Only emit if weight actually changed (debounce)
-                                    let changed = last_weight
-                                        .map(|lw| (lw - reading.weight).abs() > 0.001)
-                                        .unwrap_or(true);
+                                    let changed = reading_changed(last_reading.as_ref(), &reading);
+                                    last_reading = Some(reading.clone());
+                                    let now = chrono::Utc::now().to_rfc3339();
+                                    // Refresh the one-shot cache on EVERY frame. An
+                                    // unchanged stable weight is still a fresh reading.
+                                    if let Ok(mut s) = SCALE_STATUS.lock() {
+                                        if let Some(ref mut status) = *s {
+                                            status.last_reading = Some(reading.clone());
+                                            status.last_read_at = Some(now.clone());
+                                        }
+                                    }
 
                                     if changed {
-                                        last_weight = Some(reading.weight);
-                                        let now = chrono::Utc::now().to_rfc3339();
-
-                                        // Update status
-                                        if let Ok(mut s) = SCALE_STATUS.lock() {
-                                            if let Some(ref mut status) = *s {
-                                                status.last_reading = Some(reading.clone());
-                                                status.last_read_at = Some(now.clone());
-                                            }
-                                        }
-
                                         // Emit Tauri event
                                         use tauri::Emitter;
                                         let _ = app.emit(
@@ -445,6 +450,22 @@ pub fn get_status() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retail_scale_stability_changes_without_weight_change() {
+        let unstable = WeightReading {
+            weight: 0.425,
+            unit: "kg".into(),
+            stable: false,
+            raw: String::new(),
+        };
+        let stable = WeightReading {
+            stable: true,
+            ..unstable.clone()
+        };
+        assert!(reading_changed(Some(&unstable), &stable));
+        assert!(!reading_changed(Some(&stable), &stable));
+    }
 
     #[test]
     fn test_parse_toledo_stable() {

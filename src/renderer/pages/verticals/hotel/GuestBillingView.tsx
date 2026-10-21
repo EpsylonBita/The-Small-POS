@@ -1,3 +1,6 @@
+import { HotelSettlementModal } from './HotelSettlementModal';
+import { HotelVatField } from './HotelVatField';
+import { hotelErrorCode, postHotelCharge, printHotelFolio } from '../../../services/HotelSettlementService';
 import { canChargeFolio, commonFolioCurrency, recordedFolioCurrency } from '../../../utils/folio-currency';
 import { getStoreCurrency } from '../../../utils/store-currency';
 import React, { memo, useState, useEffect, useCallback, useId } from 'react';
@@ -10,15 +13,13 @@ import { useTheme } from '../../../contexts/theme-context';
 import { CentsMoneyInput } from '../../../components/ui/CentsMoneyInput';
 import { CreditCard, User, Calendar, Plus, Search, FileText, RefreshCw, AlertCircle, LogOut, X } from 'lucide-react';
 import { getBridge, isBrowser } from '../../../../lib';
-import { posApiGet, posApiFetch, posApiPost, isModuleRequiredApiError } from '../../../utils/api-helpers';
+import { posApiGet, posApiFetch, isModuleRequiredApiError } from '../../../utils/api-helpers';
 import {
   FOLIO_CHARGE_TYPES,
   FOLIO_PAYMENT_METHODS,
   FOLIO_STATUSES,
   FOLIO_STATUS_PRESENTATION,
-  folioChargesEndpoint,
   folioCheckoutEndpoint,
-  folioPaymentsEndpoint,
   isFolioStatus,
   parseFolioCheckoutOutstanding,
   summarizeFolios,
@@ -88,6 +89,8 @@ type FolioActionKind = 'charge' | 'payment';
 interface FolioActionSubmit {
   kind: FolioActionKind;
   chargeType: FolioChargeType;
+  clientRequestId: string;
+  vatCategoryCode: string;
   description: string;
   amount: number;
   quantity: number;
@@ -120,6 +123,8 @@ const FolioActionModal: React.FC<{
 }> = ({ kind, folio, isDark, initialAmount, onClose, onSubmit, t }) => {
   const titleId = useId();
   const [chargeType, setChargeType] = useState<FolioChargeType>('service');
+  const [clientRequestId] = useState(() => crypto.randomUUID());
+  const [vatCategoryCode, setVatCategoryCode] = useState('');
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState(
     initialAmount && initialAmount > 0 ? initialAmount.toFixed(2) : '',
@@ -156,7 +161,8 @@ const FolioActionModal: React.FC<{
       return;
     }
     const parsedQuantity = Number(quantity || '1');
-    if (kind === 'charge' && (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0)) {
+    if (kind === 'charge' && !vatCategoryCode) { setFormError(t('hotelMoney.chooseVat')); return; }
+    if (kind === 'charge' && (!Number.isInteger(parsedQuantity) || parsedQuantity <= 0)) {
       setFormError(t('guestBilling.validation.quantity', { defaultValue: 'Quantity must be greater than zero.' }));
       return;
     }
@@ -170,6 +176,7 @@ const FolioActionModal: React.FC<{
       const error = await onSubmit({
         kind,
         chargeType,
+        clientRequestId, vatCategoryCode,
         description: description.trim(),
         amount: parsedAmount,
         quantity: parsedQuantity,
@@ -182,6 +189,8 @@ const FolioActionModal: React.FC<{
         return;
       }
       onClose();
+    } catch (error) {
+      setFormError(t(`hotelMoney.errors.${hotelErrorCode(error)}`));
     } finally {
       setSubmitting(false);
     }
@@ -190,7 +199,7 @@ const FolioActionModal: React.FC<{
   const title =
     kind === 'charge'
       ? t('guestBilling.chargeModal.title', { defaultValue: 'Add Charge' })
-      : t('guestBilling.paymentModal.title', { defaultValue: 'Add Payment' });
+      : t('hotelMoney.collect');
 
   return renderModalPortal(
     <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
@@ -262,24 +271,8 @@ const FolioActionModal: React.FC<{
                 />
               </div>
             </>
-          ) : (
-            <div>
-              <label className={labelClass(isDark)}>
-                {t('guestBilling.fields.paymentMethod', { defaultValue: 'Payment Method' })}
-              </label>
-              <select
-                value={paymentMethod}
-                onChange={(e) => setPaymentMethod(e.target.value as FolioPaymentMethod)}
-                className={fieldClass(isDark)}
-              >
-                {FOLIO_PAYMENT_METHODS.map((method) => (
-                  <option key={method} value={method}>
-                    {paymentMethodLabels[method]}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          ) : null}
+          {kind === 'charge' && <HotelVatField value={vatCategoryCode} onChange={setVatCategoryCode} />}
 
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -308,23 +301,10 @@ const FolioActionModal: React.FC<{
                   className={fieldClass(isDark)}
                 />
               </div>
-            ) : (
-              <div>
-                <label className={labelClass(isDark)}>
-                  {t('guestBilling.fields.reference', { defaultValue: 'Reference' })}
-                </label>
-                <input
-                  type="text"
-                  value={reference}
-                  onChange={(e) => setReference(e.target.value)}
-                  maxLength={255}
-                  className={fieldClass(isDark)}
-                />
-              </div>
-            )}
+            ) : null}
           </div>
 
-          <div>
+          {kind === 'charge' && <div>
             <label className={labelClass(isDark)}>
               {t('guestBilling.fields.notes', { defaultValue: 'Notes' })}
             </label>
@@ -335,7 +315,7 @@ const FolioActionModal: React.FC<{
               rows={2}
               className={fieldClass(isDark)}
             />
-          </div>
+          </div>}
 
           {kind === 'payment' && (
             <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -374,7 +354,7 @@ const FolioActionModal: React.FC<{
                 ? t('common.loading', { defaultValue: 'Loading...' })
                 : kind === 'charge'
                   ? t('guestBilling.chargeModal.submit', { defaultValue: 'Post Charge' })
-                  : t('guestBilling.paymentModal.submit', { defaultValue: 'Post Payment' })}
+                  : t('hotelMoney.collect')}
             </button>
           </div>
         </div>
@@ -397,6 +377,7 @@ export const GuestBillingView: React.FC = memo(() => {
   const [actionModal, setActionModal] = useState<FolioActionKind | null>(null);
   const [paymentPrefill, setPaymentPrefill] = useState<number | null>(null);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [settlementRequest, setSettlementRequest] = useState<{ folioId: string; amountCents?: number } | null>(null);
   const [outstandingNotice, setOutstandingNotice] = useState<{
     folioId: string;
     balance: number | null;
@@ -425,6 +406,7 @@ export const GuestBillingView: React.FC = memo(() => {
 
       if (response.success && response.data?.folios) {
         setFolios(response.data.folios);
+        setSelectedFolio(current => current ? response.data!.folios.find(folio => folio.id === current.id) ?? current : null);
       } else {
         setError(response.error || response.data?.error || 'Failed to fetch guest folios');
       }
@@ -466,27 +448,15 @@ export const GuestBillingView: React.FC = memo(() => {
       const currency = recordedFolioCurrency(folio.currency);
       if (!currency) return t('guestBilling.errors.currencyUnavailable');
       if (input.kind === 'charge' && !canChargeFolio(currency, getStoreCurrency())) return t('guestBilling.errors.currencyMismatch');
-      const endpoint =
-        input.kind === 'charge' ? folioChargesEndpoint(folio.id) : folioPaymentsEndpoint(folio.id);
-      const body =
-        input.kind === 'charge'
-          ? {
-              chargeType: input.chargeType,
-              currency,
-              description: input.description,
-              amount: input.amount,
-              quantity: input.quantity,
-              ...(input.notes ? { notes: input.notes } : {}),
-            }
-          : {
-              amount: input.amount,
-              paymentMethod: input.paymentMethod,
-              currency,
-              reference: input.reference || null,
-              notes: input.notes || null,
-            };
+      if (input.kind === 'payment') {
+        setSettlementRequest({ folioId: folio.id, amountCents: Math.round(input.amount * 100) });
+        return null;
+      }
+      const body = { chargeType: input.chargeType, clientRequestId: input.clientRequestId,
+        vatCategoryCode: input.vatCategoryCode, currency, description: input.description,
+        amount: input.amount, quantity: input.quantity, ...(input.notes ? { notes: input.notes } : {}) };
 
-      const response = await posApiPost<FolioMutationResponse>(endpoint, body);
+      const response = await postHotelCharge<FolioMutationResponse>(folio.id, body);
       const payload = response.data;
       if (!response.success || payload?.success === false) {
         const message = response.error || payload?.error || null;
@@ -494,8 +464,7 @@ export const GuestBillingView: React.FC = memo(() => {
           return moduleRequiredMessage;
         }
         return (
-          message ||
-          t('guestBilling.errors.actionFailed', { defaultValue: 'Failed to update the folio.' })
+          t(`hotelMoney.errors.${hotelErrorCode(response.code ?? message)}`)
         );
       }
 
@@ -504,9 +473,7 @@ export const GuestBillingView: React.FC = memo(() => {
       }
       setOutstandingNotice((prev) => (prev?.folioId === folio.id ? null : prev));
       toast.success(
-        input.kind === 'charge'
-          ? t('guestBilling.chargeModal.success', { defaultValue: 'Charge posted to folio' })
-          : t('guestBilling.paymentModal.success', { defaultValue: 'Payment posted to folio' }),
+        t('guestBilling.chargeModal.success', { defaultValue: 'Charge posted to folio' }),
       );
       void fetchFolios({ silent: true });
       return null;
@@ -888,7 +855,7 @@ export const GuestBillingView: React.FC = memo(() => {
                 </button>
               </>
             )}
-            <button type="button" className={`w-full mt-2 py-2 rounded-xl flex items-center justify-center gap-2 transition-transform active:scale-95 ${
+            <button type="button" onClick={() => { void printHotelFolio(selectedFolio, key => t(key)).catch(error => toast.error(t(`hotelMoney.errors.${hotelErrorCode(error)}`))); }} className={`w-full mt-2 py-2 rounded-xl flex items-center justify-center gap-2 transition-transform active:scale-95 ${
               isDark ? 'bg-white/10 text-white active:bg-white/15' : 'bg-gray-100 text-gray-700 active:bg-gray-200'
             }`}>
               <FileText className="w-4 h-4" />
@@ -913,6 +880,10 @@ export const GuestBillingView: React.FC = memo(() => {
           t={t}
         />
       )}
+      {settlementRequest && <HotelSettlementModal {...settlementRequest}
+        onClose={() => setSettlementRequest(null)} onCollected={async () => {
+          setSettlementRequest(null); await fetchFolios({ silent: true });
+        }} />}
     </motion.div>
   );
 });

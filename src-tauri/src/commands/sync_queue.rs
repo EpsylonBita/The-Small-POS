@@ -2,9 +2,18 @@
 //!
 //! These commands wrap the `sync_queue` module's SQLite operations and expose
 //! them to the renderer via `@tauri-apps/api/core::invoke()`.
+//!
+//! The ones with a synchronous body run it on Tokio's blocking pool
+//! (`run_blocking_command`): Tauri 2 would run a plain `fn` on the window
+//! thread, where a wait for the connection froze the till (Tomikro 20/10/2026,
+//! see `database_lock.rs`), and a `fn` marked `(async)` on a runtime worker,
+//! where such waits stall the runtime. Ordering does not rely on any thread:
+//! each call is atomic under the connection mutex, and the renderer awaits
+//! each enqueue before the next.
 
-use tauri::State;
+use tauri::{Manager, State};
 
+use crate::database_lock::run_blocking_command;
 use crate::db::DbState;
 use crate::sync_queue;
 
@@ -12,24 +21,33 @@ use crate::sync_queue;
 ///
 /// Returns the generated UUID for the item.
 #[tauri::command]
-pub fn sync_queue_enqueue(
-    db: State<'_, DbState>,
+pub async fn sync_queue_enqueue(
+    app: tauri::AppHandle,
     item: sync_queue::EnqueueInput,
 ) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::enqueue(&conn, &item)
+    run_blocking_command("sync_queue_enqueue", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_enqueue")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::enqueue(&conn, &item)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn sync_queue_enqueue_table_batch(
-    db: State<'_, DbState>,
+pub async fn sync_queue_enqueue_table_batch(
+    app: tauri::AppHandle,
     items: Vec<sync_queue::EnqueueInput>,
 ) -> Result<Vec<String>, String> {
-    let conn = db
-        .conn
-        .lock()
-        .map_err(|error| format!("db lock: {error}"))?;
-    sync_queue::enqueue_table_transfer_batch(&conn, &items)
+    run_blocking_command("sync_queue_enqueue_table_batch", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_enqueue_table_batch")
+            .map_err(|error| format!("db lock: {error}"))?;
+        sync_queue::enqueue_table_transfer_batch(&conn, &items)
+    })
+    .await
 }
 
 /// Dequeue the next item to process (highest priority, oldest first).
@@ -37,20 +55,32 @@ pub fn sync_queue_enqueue_table_batch(
 /// Marks the item as `processing` so it won't be dequeued again.
 /// Returns `null` if no items are ready.
 #[tauri::command]
-pub fn sync_queue_dequeue(
-    db: State<'_, DbState>,
+pub async fn sync_queue_dequeue(
+    app: tauri::AppHandle,
 ) -> Result<Option<sync_queue::SyncQueueItem>, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_dequeue(&conn)
+    run_blocking_command("sync_queue_dequeue", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_dequeue")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_dequeue(&conn)
+    })
+    .await
 }
 
 /// Peek at the next item without removing or changing its status.
 #[tauri::command]
-pub fn sync_queue_peek(
-    db: State<'_, DbState>,
+pub async fn sync_queue_peek(
+    app: tauri::AppHandle,
 ) -> Result<Option<sync_queue::SyncQueueItem>, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_peek(&conn)
+    run_blocking_command("sync_queue_peek", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_peek")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_peek(&conn)
+    })
+    .await
 }
 
 /// Remove all items from the sync queue (the canonical parity outbox).
@@ -60,94 +90,152 @@ pub fn sync_queue_peek(
 /// full-wipe commands it must require SystemControl and snapshot first — the
 /// webview is the trust boundary.
 #[tauri::command]
-pub fn sync_queue_clear(
-    db: State<'_, DbState>,
-    auth_state: State<'_, crate::auth::AuthState>,
+pub async fn sync_queue_clear(
+    app: tauri::AppHandle,
 ) -> Result<(), crate::auth::GuardedCommandError> {
-    crate::auth::authorize_privileged_action(
-        crate::auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    crate::recovery::snapshot_before_destructive_action(
-        &db,
-        crate::recovery::RecoveryPointKind::PreClearOperationalData,
-    )?;
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_clear(&conn).map_err(Into::into)
+    run_blocking_command("sync_queue_clear", move || {
+        let db = app.state::<DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        crate::auth::authorize_privileged_action(
+            crate::auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        crate::recovery::snapshot_before_destructive_action(
+            &db,
+            crate::recovery::RecoveryPointKind::PreClearOperationalData,
+        )?;
+        let conn = db
+            .lock_traced("sync_queue_clear")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_clear(&conn).map_err(Into::into)
+    })
+    .await
 }
 
 /// Get the current number of items in the sync queue.
 #[tauri::command]
-pub fn sync_queue_length(db: State<'_, DbState>) -> Result<i64, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_get_length(&conn)
+pub async fn sync_queue_length(app: tauri::AppHandle) -> Result<i64, String> {
+    run_blocking_command("sync_queue_length", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_length")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_get_length(&conn)
+    })
+    .await
 }
 
 /// Get detailed queue status (total, pending, failed, conflicts, oldest age).
 #[tauri::command]
-pub fn sync_queue_status(db: State<'_, DbState>) -> Result<sync_queue::QueueStatus, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_get_status(&conn)
+pub async fn sync_queue_status(app: tauri::AppHandle) -> Result<sync_queue::QueueStatus, String> {
+    run_blocking_command("sync_queue_status", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_status")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_get_status(&conn)
+    })
+    .await
 }
 
 /// List actionable parity queue items, optionally filtered by module.
 #[tauri::command]
-pub fn sync_queue_list_items(
-    db: State<'_, DbState>,
+pub async fn sync_queue_list_items(
+    app: tauri::AppHandle,
     query: Option<sync_queue::QueueListQuery>,
 ) -> Result<Vec<sync_queue::SyncQueueItem>, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_list_actionable_items(&conn, &query.unwrap_or_default())
+    run_blocking_command("sync_queue_list_items", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_list_items")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_list_actionable_items(&conn, &query.unwrap_or_default())
+    })
+    .await
 }
 
 /// Retry a single parity queue item immediately.
 #[tauri::command]
-pub fn sync_queue_retry_item(db: State<'_, DbState>, item_id: String) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_retry_item(&conn, item_id.as_str())
+pub async fn sync_queue_retry_item(app: tauri::AppHandle, item_id: String) -> Result<(), String> {
+    run_blocking_command("sync_queue_retry_item", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_retry_item")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_retry_item(&conn, item_id.as_str())
+    })
+    .await
 }
 
 /// Health "Sync now": make these renderer-visible pending rows due now
 /// (their retry time only, recorded in the recovery action log first).
 #[tauri::command]
-pub fn sync_queue_make_due(
-    db: State<'_, DbState>,
+pub async fn sync_queue_make_due(
+    app: tauri::AppHandle,
     item_ids: Vec<String>,
     issue_code: Option<String>,
 ) -> Result<sync_queue::MakeDueResult, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_make_items_due(&conn, &item_ids, issue_code.as_deref().unwrap_or("sync"))
+    run_blocking_command("sync_queue_make_due", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_make_due")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_make_items_due(
+            &conn,
+            &item_ids,
+            issue_code.as_deref().unwrap_or("sync"),
+        )
+    })
+    .await
 }
 
 /// Renderer-visible parity queue rows by id (a missing row is gone).
 #[tauri::command]
-pub fn sync_queue_items_by_id(
-    db: State<'_, DbState>,
+pub async fn sync_queue_items_by_id(
+    app: tauri::AppHandle,
     item_ids: Vec<String>,
 ) -> Result<Vec<sync_queue::SyncQueueItem>, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_items_by_id(&conn, &item_ids)
+    run_blocking_command("sync_queue_items_by_id", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_items_by_id")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_items_by_id(&conn, &item_ids)
+    })
+    .await
 }
 
 /// Retry all actionable parity queue items for a module.
 #[tauri::command]
-pub fn sync_queue_retry_module(
-    db: State<'_, DbState>,
+pub async fn sync_queue_retry_module(
+    app: tauri::AppHandle,
     module_type: String,
 ) -> Result<sync_queue::RetryItemsResult, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_retry_items_by_module(&conn, module_type.as_str())
+    run_blocking_command("sync_queue_retry_module", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_retry_module")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_retry_items_by_module(&conn, module_type.as_str())
+    })
+    .await
 }
 
 /// List conflict audit records produced by parity queue processing.
 #[tauri::command]
-pub fn sync_queue_list_conflicts(
-    db: State<'_, DbState>,
+pub async fn sync_queue_list_conflicts(
+    app: tauri::AppHandle,
     limit: Option<i64>,
 ) -> Result<Vec<sync_queue::ConflictAuditEntry>, String> {
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    sync_queue::renderer_list_conflict_audit_entries(&conn, limit.unwrap_or(100))
+    run_blocking_command("sync_queue_list_conflicts", move || {
+        let db = app.state::<DbState>();
+        let conn = db
+            .lock_traced("sync_queue_list_conflicts")
+            .map_err(|e| format!("db lock: {e}"))?;
+        sync_queue::renderer_list_conflict_audit_entries(&conn, limit.unwrap_or(100))
+    })
+    .await
 }
 
 /// Process all pending items in the queue by syncing them to the admin API.

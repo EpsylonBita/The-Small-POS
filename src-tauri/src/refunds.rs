@@ -153,7 +153,7 @@ fn cash_handler_by_rule(conn: &Connection, order_id: &str) -> Result<CashHandler
 /// legacy cash reading.
 pub(crate) fn refund_counts_as_cash_sql(pa: &str, op: &str) -> String {
     format!(
-        "(LOWER(COALESCE(NULLIF(TRIM({pa}.refund_method), ''), NULLIF(TRIM({op}.method), ''), 'cash')) = 'cash')"
+        "(COALESCE({pa}.imported_remote, 0) = 0 AND LOWER(COALESCE(NULLIF(TRIM({pa}.refund_method), ''), NULLIF(TRIM({op}.method), ''), 'cash')) = 'cash')"
     )
 }
 
@@ -488,6 +488,8 @@ fn refund_payment_with_cash_handler(
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
+    let canonical_return = payments::canonical_return_status(conn, &payment_id)?;
+    let pay_status = canonical_return.as_deref().unwrap_or(&pay_status);
     // Shared rule R1 (round 3 review, 01/10/2026; Android
     // `assertOrderPaymentCanBeReversed`): the delivery platform's settlement
     // row is the platform's money, mirrored from the server. The till never
@@ -564,6 +566,9 @@ fn refund_payment_with_cash_handler(
 
     // This is a new return: the exact saved adjustment returned above remains
     // recoverable even when parent ownership is no longer observable.
+    if canonical_return.as_deref() == Some("refunded") {
+        return Err("PAYMENT_CANONICAL_RETURN_FINAL: Cannot refund a refunded payment".into());
+    }
     let _ = crate::payments::ecommerce_disposition(conn, &order_id)?;
 
     // R5: a refund always names its tender: the caller's, else the
@@ -997,6 +1002,7 @@ pub fn void_payment_with_adjustment(
     if pay_method.trim().eq_ignore_ascii_case("twint") {
         return Err("TWINT_ORIGINAL_PROVIDER_REFUND_REQUIRED: Return TWINT money through the original provider; no cash or card refund was performed".into());
     }
+    let pay_status = payments::canonical_return_status(&conn, payment_id)?.unwrap_or(pay_status);
     match pay_status.as_str() {
         "completed" => {}
         "voided" => return Err(format!("Payment {payment_id} is already voided")),
@@ -1083,6 +1089,8 @@ pub fn void_payment_with_adjustment(
                 |row| row.get(0),
             )
             .unwrap_or_else(|_| pay_status.clone());
+        let tx_pay_status =
+            payments::canonical_return_status(&conn, payment_id)?.unwrap_or(tx_pay_status);
         match tx_pay_status.as_str() {
             "completed" => {}
             "voided" => return Err(format!("Payment {payment_id} is already voided")),
@@ -1378,7 +1386,11 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
         )
         .unwrap_or(0.0);
 
-    if status == "voided" {
+    let canonical_return = payments::canonical_return_status(&conn, payment_id)?;
+    let status = canonical_return.clone().unwrap_or(status);
+    if status == "voided" || canonical_return.as_deref() == Some("refunded") {
+        // Preserve the return kind: a canonical full refund is refunded,
+        // even when its adjustment details are not all available locally.
         // Wave 10 medium: surface the actual refund total even for voided
         // payments so callers can distinguish "voided" from "voided after
         // partial refund". `balance` is still forced to 0 — a voided
@@ -1389,7 +1401,8 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
             "originalAmount": original_amount,
             "totalRefunds": total_refunds,
             "balance": 0.0,
-            "status": "voided",
+            "remaining": 0.0,
+            "status": status,
         }));
     }
 
@@ -1407,6 +1420,7 @@ pub fn get_payment_balance(db: &DbState, payment_id: &str) -> Result<Value, Stri
         "originalAmount": original_amount,
         "totalRefunds": total_refunds,
         "balance": balance,
+        "remaining": balance,
         "status": status,
         "defaultRefundMethod": default_refund_method,
         "cashHandlerByRule": cash_handler_by_rule,
@@ -1550,6 +1564,65 @@ mod tests {
             )
             .unwrap();
         (status, cents, adjustments, queue)
+    }
+
+    #[test]
+    fn cross_till_refund_import_limits_balance_without_drawer_or_queue_movement() {
+        let db = test_db();
+        let payment = seed_order_and_payment(&db, "cross-till", 10.0);
+        let remote = serde_json::json!({
+            "id":"remote-cross-till", "order_id":"11111111-1111-4111-8111-111111111111",
+            "payment_method":"cash", "amount":10, "currency":"EUR", "status":"completed",
+            "metadata":{"local_payment_id":payment}, "created_at":"2026-10-20T10:00:00Z",
+            "updated_at":"2026-10-20T10:01:00Z",
+            "adjustments":[{"id":"till-a-refund", "adjustment_type":"refund", "amount_cents":600,
+                "currency":"EUR", "terminal_id":"till-a", "created_at":"2026-10-20T10:01:00Z"}]
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE order_payments SET currency='EUR' WHERE id=?1",
+                [&payment],
+            )
+            .unwrap();
+            conn.execute_batch("INSERT INTO staff_shifts(id,staff_id,role_type,check_in_time,created_at,updated_at) VALUES('till-b-shift','cashier-b','cashier',datetime('now'),datetime('now'),datetime('now'));
+                INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opening_amount_cents,total_cash_sales,total_cash_sales_cents,total_refunds,total_refunds_cents,opened_at,created_at,updated_at)
+                VALUES('drawer-b','till-b-shift','cashier-b','branch','till-b',100,10000,10,1000,0,0,datetime('now'),datetime('now'),datetime('now'));
+                UPDATE orders SET staff_shift_id='till-b-shift' WHERE id='cross-till';").unwrap();
+            let before: String = conn.query_row("SELECT COALESCE(json_group_array(json_object('id',id,'refunds',total_refunds_cents,'sales',total_cash_sales_cents)),'[]') FROM cash_drawer_sessions", [], |r| r.get(0)).unwrap();
+            for _ in 0..2 {
+                crate::sync::sync_remote_payment_into_local_for_test(&conn, &remote).unwrap();
+            }
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM payment_adjustments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='payment_adjustments'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            let after: String = conn.query_row("SELECT COALESCE(json_group_array(json_object('id',id,'refunds',total_refunds_cents,'sales',total_cash_sales_cents)),'[]') FROM cash_drawer_sessions", [], |r| r.get(0)).unwrap();
+            assert_eq!(before, after);
+            let cash_predicate = refund_counts_as_cash_sql("pa", "op");
+            assert_eq!(conn.query_row(&format!("SELECT COUNT(*) FROM payment_adjustments pa JOIN order_payments op ON op.id=pa.payment_id WHERE {cash_predicate}"),[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
+        assert_eq!(get_payment_balance(&db, &payment).unwrap()["balance"], 4.0);
+        let error=refund_payment(&db,&serde_json::json!({"paymentId":payment,"amount":5,"reason":"return","refundMethod":"cash"})).unwrap_err();
+        assert!(error.contains("exceeds remaining balance 4.00"), "{error}");
+        assert_eq!(
+            list_order_adjustments(&db, "cross-till").unwrap()["adjustments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

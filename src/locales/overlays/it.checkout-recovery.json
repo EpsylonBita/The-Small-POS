@@ -12,6 +12,8 @@
       "draftRecoveryUnavailable": "La conferma originale non può essere verificata. Il carrello salvato resta protetto.",
       "draftPending": "La conferma originale viene conservata. Verifica il risultato prima di avviare un altro pagamento.",
       "draftLoading": "Caricamento del carrello salvato…",
+      "twintRecoveryPaid": "Il cliente ha pagato – completa la ricevuta originale",
+      "twintRecoveryNotPaid": "Non pagato – annulla il pagamento",
       "draftRecover": "Verifica la conferma originale",
       "draftRecovered": "L’ordine originale è stato ripristinato.",
       "draftExistingTable": "Questo tavolo ha già un conto aperto. Aprilo per aggiungere articoli.",

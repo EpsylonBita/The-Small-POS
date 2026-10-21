@@ -3563,6 +3563,8 @@
       "manage": "Manage"
     },
     "financial": {
+      "incomingRecovery": "Payment copies need recovery: {{count}}. Downloads pause after repeated failures. Retry to read the latest server records; nothing is charged or discarded.",
+      "incomingRetry": "Retry payment downloads",
       "title": "Financial Transactions",
       "subtitle": "Manage pending and failed financial sync items",
       "driver": "Driver Earnings Sync",
@@ -5837,6 +5839,8 @@
         "noCapture": "The last request left no return on the gift card: nothing was returned. You can start it again."
       },
       "statusSetAside": "Set aside for review",
+      "canonicalRefreshRequired": "The latest payment balance could not be read. Try again before returning money.",
+      "canonicalReturnFinal": "This payment has already been returned and cannot be refunded again.",
       "placeholderNotMoney": "This payment row records no money (the till guessed it from the order's label): it cannot be refunded or voided. Restore the order's payments from the server with Sync Now.",
       "otherRefund": "Same tender (other)",
       "tenderRequired": "Choose how the refund was paid back",
@@ -7261,6 +7265,14 @@
     "connect": "Connect & Sync"
   },
   "productCatalog": {
+    "retailReadiness": {
+      "chooseVariant": "Choose a variant — {{name}}",
+      "stock": "Stock: {{quantity}}",
+      "readScale": "Read scale",
+      "scaleNotReady": "No fresh, stable weight. Check the scale or enter the quantity manually.",
+      "variantUnavailable": "This variant is unavailable. Refresh the catalogue and try again.",
+      "invalidScaleLabel": "This scale label cannot be used. Check the unit price and enter the quantity manually."
+    },
     "title": "Product Catalog",
     "scanBarcode": "Scan barcode or enter SKU...",
     "scanning": "Scanning...",
@@ -7842,6 +7854,7 @@
     "insufficientPoints": "Minimum {{min}} points required",
     "redeemSuccess": "Redeemed {{points}} points for {{discount}} discount",
     "redeemFailed": "Order saved, but loyalty points were not redeemed",
+    "checkoutRefused": "Loyalty points could not be secured. The order was not saved. Remove the redemption or try again.",
     "redeemPrepared": "{{points}} points ready for {{discount}} discount",
     "noCustomerSelected": "Select a saved customer to redeem points",
     "moduleUnavailable": "Loyalty module is not enabled for this terminal",
@@ -10152,5 +10165,66 @@
     "refusal": "The day can't be closed without a connection. Keep selling: the day stays open and you close it once the connection is back. To count the drawer now, use the cashier checkout, which prints without internet, and the preview on this screen.",
     "status": "No connection: the day closes once it is back",
     "checklist": "No connection to the server. Keep selling; close the day once the connection is back."
+  },
+  "salonSale": {
+    "newSale": "New service sale",
+    "existingTicket": "This appointment already has a ticket. Open it in Orders to check its payment.",
+    "checkout": "Checkout",
+    "add": "Add to ticket",
+    "title": "Service sale",
+    "search": "Search services and products…",
+    "pendingSync": "Wait for this appointment to sync before checkout.",
+    "unavailable": "Service details are unavailable. Refresh and try again."
+  },
+  "hotelDeskArrival": { "guestCount": "Number of guests" },
+  "hotelDeskService": {
+    "title": "Service sale payment",
+    "room": "Charge to an occupied room",
+    "chooseRoom": "Choose a room",
+    "loading": "Loading occupied rooms…",
+    "noRooms": "No occupied room with an active folio in the store currency is available. You can collect payment now.",
+    "hint": "Choose the guest's room to offer room payment at checkout.",
+    "collectNow": "Collect payment now",
+    "useRoom": "Use this room"
+  },
+  "hotelMoney": {
+    "refund": "Refund",
+    "collect": "Collect folio",
+    "statement": "Folio statement",
+    "vatCategory": "VAT category",
+    "chooseVat": "Choose VAT category",
+    "nightlyRate": "Agreed nightly rate: {{amount}}",
+    "vat": {
+      "gr_exempt": "Exempt",
+      "gr_out_of_scope": "Outside VAT scope",
+      "gr_article_39_small_business": "Small business exemption"
+    },
+    "errors": {
+      "FOLIO_SETTLEMENT_OPEN": "Resume the open collection.",
+      "NOTHING_TO_COLLECT": "There is nothing to collect.",
+      "AMOUNT_EXCEEDS_COLLECTIBLE": "The amount exceeds the current collectible balance.",
+      "FOLIO_NOT_COLLECTIBLE": "This folio is closed for collection.",
+      "FOLIO_CURRENCY_MISMATCH": "The currency does not match the folio.",
+      "FOLIO_CURRENCY_UNAVAILABLE": "The folio currency is unavailable.",
+      "SETTLEMENT_REQUEST_CONFLICT": "The original collection request has different details. Resume that request.",
+      "INVALID_INPUT": "Check the amount and details.",
+      "FOLIO_NOT_FOUND": "The folio was not found or is no longer accessible.",
+      "SETTLEMENT_HAS_PAYMENTS": "This collection holds payments. Collect the rest or refund the original payments.",
+      "FOLIO_SETTLEMENT_REQUIRED": "Collect this folio through the payment screen.",
+      "FOLIO_SETTLEMENT_IMMUTABLE": "Settlement lines and totals cannot be changed.",
+      "CHARGE_REQUEST_CONFLICT": "A charge is awaiting confirmation. Retry its original details.",
+      "ROOM_CHECKOUT_REQUIRED": "Check out the guest before freeing this room.",
+      "ROOM_RESERVATION_DATES_MISMATCH": "A booking covers these dates. Load the booking and use its arrival and departure dates.",
+      "PAYMENT_MIRROR_PENDING": "Payments are still being restored. Sync and resume before collecting again.",
+      "CONNECTION_REQUIRED": "Connect to prepare or cancel a collection.",
+      "ACTION_FAILED": "The action could not be completed. Retry the same request."
+    }
+  },
+  "verticalReadinessDesk": {
+    "chooseParty": "Who is this table for?",
+    "bookingDetails": "Booking: {{name}} at {{time}}",
+    "walkIn": "Walk-in",
+    "seatBooking": "Seat booking",
+    "timezoneUnavailable": "The store time zone is unavailable. Refresh terminal settings before changing the schedule."
   }
 }

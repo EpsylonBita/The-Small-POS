@@ -45,6 +45,8 @@ import {
   type OrdinaryTerminalVerdict,
 } from '../../hooks/useOrderStore';
 
+const formatMoney = formatCurrency;
+
 export interface CartItem { name: string; quantity: number; totalPrice: number; price?: number; itemIndex?: number; isSynthetic?: boolean; [key: string]: any }
 type TabMode = 'by-amount' | 'by-items';
 type ReceiptMode = 'combined' | 'individual';
@@ -89,6 +91,7 @@ export interface SplitPaymentCollectionMode {
 interface SplitPaymentModalProps {
   isOpen: boolean; onClose: () => void; orderId: string; orderTotal: number; items: CartItem[];
   onSplitComplete: (result: SplitPaymentResult) => void | Promise<void>; existingPayments?: any[];
+  initialTender?: 'cash' | 'card'; currency?: string;
   initialMode?: TabMode; isGhostOrder?: boolean; collectionMode?: SplitPaymentCollectionMode;
   allowDiscounts?: boolean; isReconciliationPending?: boolean;
   /** Existing-order ordinary collection scope of this terminal; when set (null fails closed) every charge and confirm runs under the order's ordinary claim. */
@@ -191,7 +194,8 @@ const SplitAmountInput: React.FC<{
   />
 );
 
-export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope }) => {
+export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, onClose, orderId, orderTotal, items, onSplitComplete, existingPayments = EMPTY_EXISTING_PAYMENTS, initialMode = 'by-amount', isGhostOrder = false, collectionMode, allowDiscounts = true, isReconciliationPending = false, collectionScope, initialTender, currency }) => {
+  const formatCurrency = (value: number) => formatMoney(value, currency ?? getStoreCurrency());
   const { t } = useTranslation();
   const bridge = getBridge();
   const viewEpoch = useRef(0);
@@ -319,7 +323,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
   const updatePortion = useCallback((portionId: string, updater: (portion: SplitPortion) => SplitPortion) => setPortions((current) => current.map((portion) => portion.id === portionId ? updater(portion) : portion)), []);
   const initializePortions = useCallback((mode: TabMode, amountDue: number) => {
     const half = round2(amountDue / 2);
-    const initialPortions = mode === 'by-items'
+    const initialPortions = initialTender ? [{ ...createPortion(personLabel(0), amountDue), method: initialTender }] : mode === 'by-items'
       ? [createPortion(personLabel(0), 0), createPortion(personLabel(1), 0)]
       : [createPortion(personLabel(0), half), createPortion(personLabel(1), round2(amountDue - half))];
     setPortions(initialPortions.map(withCollectionDefaults));
@@ -329,7 +333,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     setOpenAssignmentItemIndex(null);
     setDiscountEditorPortionId(null);
     setDiscountDraftValue('');
-  }, [personLabel, withCollectionDefaults]);
+  }, [personLabel, withCollectionDefaults, initialTender]);
   const applySplitStateSnapshot = useCallback((snapshot: SplitStateSnapshot, options?: { resetDraft?: boolean; mode?: TabMode }) => {
     setOrderFinancials(snapshot.financials);
     setCompletedPayments(snapshot.payments);
@@ -938,7 +942,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               {discountEditorPortionId === portion.id ? (
                 <div className="flex items-center gap-2 rounded-2xl border border-slate-200/90 bg-slate-50/80 p-2 dark:border-white/10 dark:bg-white/5">
                   <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-500 dark:text-white/40">{getStoreCurrency() ?? '—'}</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-500 dark:text-white/40">{currency ?? getStoreCurrency() ?? '—'}</span>
                     <SplitAmountInput
                       amount={Number(discountDraftValue) || 0}
                       label={t('splitPayment.discount', { defaultValue: 'Discount' })}
@@ -1013,7 +1017,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               </div>
               <div className="split-payment-amount-row flex items-center gap-3">
                 <div className="relative min-w-0 flex-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-500 dark:text-white/40">{getStoreCurrency() ?? '—'}</span>
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-500 dark:text-white/40">{currency ?? getStoreCurrency() ?? '—'}</span>
                   <SplitAmountInput amount={portion.grossAmount} label={portion.label}
                     disabled={portion.status !== 'draft' || isProcessing || isTerminalChargeInFlight}
                     onAmountChange={(amount) => updatePortionGrossAmount(portion.id, amount)} />

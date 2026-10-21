@@ -2,10 +2,11 @@ import { getBridge, isBrowser } from '../../lib';
 import { posApiGet } from '../utils/api-helpers';
 import { getOptionalWarmupModules } from './pos-module-warmup-access';
 import { fetchAllPages, SnapshotAccessError, VersionedSnapshot, type Snapshot } from './versioned-snapshot';
+import type { ScaleBarcodeRule } from '../../../../shared/services/BarcodeService';
 
 type Row = Record<string, any>;
 type Module = 'inventory' | 'product_catalog';
-type Data = { rows: Row[]; categories: Row[] };
+type Data = { rows: Row[]; categories: Row[]; scaleBarcodeRules?: ScaleBarcodeRule[] };
 type Overlay = { table: string; id: string; data: Row };
 const engines = new Map<Module, VersionedSnapshot<Data>>();
 const storageKey = (module: Module) => `pos-complete-snapshot-v1:${module}`;
@@ -25,9 +26,11 @@ function engine(module: Module): VersionedSnapshot<Data> {
     },
     fetch: async () => {
       const endpoint = module === 'inventory' ? 'inventory' : 'products';
+      let scaleBarcodeRules: ScaleBarcodeRule[] | undefined;
       const rows = await fetchAllPages<Row>(async offset => {
         const data = await request(`/api/pos/${endpoint}?limit=200&offset=${offset}`);
         if (!Array.isArray(data[endpoint]) || typeof data.pagination?.hasMore !== 'boolean') throw new Error('Incomplete snapshot response');
+        if (module === 'product_catalog' && offset === 0 && Array.isArray(data.scale_barcode_rules)) scaleBarcodeRules = data.scale_barcode_rules;
         return { rows: data[endpoint], pagination: data.pagination };
       });
       const categories = module === 'product_catalog' ? await fetchAllPages<Row>(async offset => {
@@ -35,7 +38,7 @@ function engine(module: Module): VersionedSnapshot<Data> {
         if (!Array.isArray(data.categories) || typeof data.pagination?.hasMore !== 'boolean') throw new Error('Incomplete categories response');
         return { rows: data.categories, pagination: data.pagination };
       }) : [];
-      return { rows, categories };
+      return { rows, categories, ...(scaleBarcodeRules ? { scaleBarcodeRules } : {}) };
     },
     load: scope => {
       try { const value = JSON.parse(localStorage.getItem(storageKey(module)) || 'null') as Snapshot<Data> | null; return value?.scope === scope ? value : null; } catch { return null; }
@@ -58,7 +61,7 @@ export function overlayPendingRows(rows: Row[], overlays: Overlay[], module: Mod
   });
 }
 
-export async function readModuleSnapshot(module: Module, force = false): Promise<Data> {
+export async function readModuleSnapshot(module: Module, force = false, preferCached = false): Promise<Data> {
   const bridge = getBridge();
   const config = await bridge.terminalConfig.getFullConfig() as Record<string, unknown>;
   const scope = JSON.stringify([config?.organization_id, config?.branch_id, config?.terminal_id]);
@@ -71,7 +74,7 @@ export async function readModuleSnapshot(module: Module, force = false): Promise
   const relevantPending = pending.some(item => item.table === (module === 'inventory' ? 'inventory_adjustments' : 'products'));
   // Freeze the raw baseline while unresolved deltas exist. A retry may already
   // have reached the server; replacing that baseline could apply it twice.
-  const cached = relevantPending ? engine(module).cached(scope) : null;
+  const cached = relevantPending || preferCached ? engine(module).cached(scope) : null;
   const data = cached ?? await engine(module).read(scope, force);
   // Read all unresolved mutations locally, including failed/conflicted entries.
   // Keep the stored snapshot raw so repeated reads never apply a delta twice.

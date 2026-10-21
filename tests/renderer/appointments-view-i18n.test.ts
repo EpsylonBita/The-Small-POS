@@ -265,7 +265,7 @@ test('Appointments page staff filter sources branch staff, usable even with zero
   assert.doesNotMatch(viewSource, /if \(showCreateModal\) \{\s*loadDropdownData\(\);/);
   assert.match(
     viewSource,
-    /loadDropdownData\(\);\s*\}, \[bridge, branchId, effectiveOrgId, formData\.date, t\]\)/,
+    /loadDropdownData\(\);\s*\}, \[bridge, branchId, effectiveOrgId, formData\.date, t, timeZone\]\)/,
   );
 });
 

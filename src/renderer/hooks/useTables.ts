@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { RestaurantTable, TableAPIResponse, TableStatus } from '../types/tables';
 import { transformTableFromAPI } from '../types/tables';
 import { reservationsService } from '../services/ReservationsService';
+import { useAcquiredModules } from './useAcquiredModules';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
 import {
@@ -55,7 +56,11 @@ export function useTables({
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const optimisticTableOverridesRef = useRef<Record<string, Partial<RestaurantTable>>>({});
+  const tableReadGeneration = useRef(0);
+  const arrivalDecorationRef = useRef({ scope: '', tableIds: new Set<string>() });
   const bridge = getBridge();
+  const { hasModule } = useAcquiredModules();
+  const reservationsEnabled = hasModule('reservations');
 
   const mergeOptimisticTableOverrides = useCallback((nextTables: RestaurantTable[]) => {
     const overrides = optimisticTableOverridesRef.current;
@@ -113,7 +118,9 @@ export function useTables({
   }, []);
 
   const fetchTables = useCallback(async () => {
+    const generation = ++tableReadGeneration.current;
     if (!branchId || !organizationId || !enabled) {
+      arrivalDecorationRef.current = { scope: '', tableIds: new Set() };
       setTables([]);
       setIsLoading(false);
       return;
@@ -142,15 +149,40 @@ export function useTables({
       }
 
       const tableRows = Array.isArray(payload.tables) ? payload.tables : [];
-      setTables(mergeOptimisticTableOverrides(tableRows.map((row) => transformTableFromAPI(row))));
+      if (generation !== tableReadGeneration.current) return;
+      const canonicalTables = tableRows.map((row) => transformTableFromAPI(row));
+      const arrivalScope = reservationsEnabled ? `${organizationId}:${branchId}` : '';
+      if (arrivalDecorationRef.current.scope !== arrivalScope) {
+        arrivalDecorationRef.current = { scope: arrivalScope, tableIds: new Set() };
+      }
+      // Keep the last known decoration while the bounded booking read is pending
+      // or incomplete. Fresh canonical occupancy always takes precedence.
+      const arrivalTables = canonicalTables.map(table =>
+        arrivalDecorationRef.current.tableIds.has(table.id) && !table.currentOrderId && !table.tableSessionId &&
+          ['available', 'reserved'].includes(table.status)
+          ? { ...table, status: 'reserved' as const, reservationCanonicalStatus: table.status } : table);
+      setTables(mergeOptimisticTableOverrides(arrivalTables));
+      if (reservationsEnabled) {
+        reservationsService.setContext(branchId, organizationId);
+        // Local tables render immediately; booking decoration never delays them.
+        // Missing booking/zone data keeps the previous presentation.
+        void reservationsService.projectArrivalTables(arrivalTables).then(projected => {
+          if (generation === tableReadGeneration.current) {
+            arrivalDecorationRef.current.tableIds = new Set(projected.filter(table =>
+              table.status === 'reserved' && table.reservationCanonicalStatus !== undefined).map(table => table.id));
+            setTables(mergeOptimisticTableOverrides(projected));
+          }
+        }).catch(() => {});
+      }
     } catch (err) {
+      if (generation !== tableReadGeneration.current) return;
       console.error('[useTables] Failed to fetch tables:', formatError(err));
       setError(err instanceof Error ? err : new Error('Failed to fetch tables'));
       setTables([]);
     } finally {
-      setIsLoading(false);
+      if (generation === tableReadGeneration.current) setIsLoading(false);
     }
-  }, [branchId, organizationId, enabled, bridge, mergeOptimisticTableOverrides]);
+  }, [branchId, organizationId, enabled, bridge, mergeOptimisticTableOverrides, reservationsEnabled]);
 
   const updateTableStatus = useCallback(
     async (
@@ -311,18 +343,9 @@ export function useTables({
   );
 
   useEffect(() => {
-    const initializeTables = async () => {
-      await fetchTables();
-
-      if (branchId && organizationId) {
-        reservationsService.setContext(branchId, organizationId);
-        await reservationsService.syncTableStatusesForToday();
-        await fetchTables();
-      }
-    };
-
-    void initializeTables();
-  }, [fetchTables, branchId, organizationId]);
+    void fetchTables();
+    return () => { tableReadGeneration.current += 1; };
+  }, [fetchTables]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -453,6 +476,8 @@ export function useTables({
       scheduleRefresh(150);
     };
 
+    const arrivalTimer = reservationsEnabled ? setInterval(() => scheduleRefresh(0), TABLE_REFRESH_MIN_MS) : null;
+
     onEvent('sync:status', handleSyncStatus);
     onEvent('sync:complete', handleOrderMutation);
     onEvent('order-realtime-update', handleLanCanonicalApplied);
@@ -464,6 +489,7 @@ export function useTables({
 
     return () => {
       disposed = true;
+      if (arrivalTimer) clearInterval(arrivalTimer);
       if (pendingTimer) clearTimeout(pendingTimer);
       offEvent('sync:status', handleSyncStatus);
       offEvent('sync:complete', handleOrderMutation);
@@ -474,7 +500,7 @@ export function useTables({
       offEvent('table-session-settled', handleTableSessionSettled);
       offEvent('table-session-balance-updated', handleTableSessionBalanceUpdated);
     };
-  }, [fetchTables, enabled]);
+  }, [fetchTables, enabled, reservationsEnabled]);
 
   return {
     tables,

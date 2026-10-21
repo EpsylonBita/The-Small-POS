@@ -29,7 +29,7 @@ import {
   type CloseWithoutHandoverOutcome,
 } from './staff-shift/CloseWithoutHandoverPanel';
 import React, { useState, useEffect, useRef } from 'react';
-import { roundMoney } from '@shared/utils/money';
+import { fromCents, roundMoney, toCents } from '@shared/utils/money';
 import { toast } from 'react-hot-toast';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { X, Clock, FileText, Plus, AlertCircle, User, ChevronLeft, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil, QrCode, Delete } from 'lucide-react';
@@ -904,16 +904,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const closeConfirm = () => setConfirmDialog(prev => ({ ...prev, isOpen: false }));
 
-  const getInheritedStaffExpectedReturns = (summary: any) => {
-    const inheritedDrivers = Array.isArray(summary?.transferredDrivers) ? summary.transferredDrivers : [];
-    const inheritedWaiters = Array.isArray(summary?.transferredWaiters) ? summary.transferredWaiters : [];
-
-    const totalDrivers = inheritedDrivers.reduce((sum: number, item: any) => sum + Number(item?.net_cash_amount || 0), 0);
-    const totalWaiters = inheritedWaiters.reduce((sum: number, item: any) => sum + Number(item?.net_cash_amount || 0), 0);
-
-    return totalDrivers + totalWaiters;
-  };
-
   const getEffectiveOpeningAmount = (shift: any, summary?: any) =>
     Number(shift?.opening_cash_amount ?? summary?.shift?.opening_cash_amount ?? 0);
 
@@ -930,7 +920,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const getCurrentCashierIssuedFloat = (summary: any) => {
     const recordedGiven = Number(summary?.cashDrawer?.driver_cash_given || 0);
-    if (recordedGiven > 0) return recordedGiven;
+    if (summary?.cashDrawer?.driver_cash_given != null) return recordedGiven;
 
     const checkoutRows = Array.isArray(summary?.driverDeliveries) ? summary.driverDeliveries : [];
     const inheritedDrivers = Array.isArray(summary?.transferredDrivers) ? summary.transferredDrivers : [];
@@ -960,22 +950,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const cashDrops = Number(summary?.cashDrawer?.cash_drops || 0);
     const driverGiven = getCurrentCashierIssuedFloat(summary);
     const driverReturned = Number(summary?.cashDrawer?.driver_cash_returned || 0);
-    const inheritedDriverExpectedReturns = getInheritedStaffExpectedReturns(summary);
+    // An inherited wallet credits the drawer only when its return is recorded.
+    const inheritedDriverExpectedReturns = 0;
     const staffPayments = Array.isArray(summary?.staffPayments) ? summary.staffPayments : [];
     const recordedStaffPayments = staffPayments.length > 0
       ? staffPayments.reduce((sum: number, payment: any) => sum + Number(payment?.amount || 0), 0)
       : Number(summary?.cashDrawer?.total_staff_payments || 0);
     const deductedStaffPayments = recordedStaffPayments;
-    const expected =
-      opening +
-      sales -
-      cashRefunds -
-      expenses -
-      deductedStaffPayments -
-      cashDrops -
-      driverGiven +
-      driverReturned +
-      inheritedDriverExpectedReturns;
+    const expected = fromCents(
+      toCents(opening) + toCents(sales) - toCents(cashRefunds) - toCents(expenses) -
+      toCents(deductedStaffPayments) - toCents(cashDrops) - toCents(driverGiven) + toCents(driverReturned),
+    );
 
     return {
       calculationVersion,
@@ -8101,25 +8086,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         </div>
                       </details>
                     )}
-
-                    {/* Plus transferred staff returns */}
-                    {(() => {
-                      const inheritedDrivers = shiftSummary?.transferredDrivers || [];
-                      const inheritedWaiters = shiftSummary?.transferredWaiters || [];
-                      const inheritedDriverExpectedReturns = getInheritedStaffExpectedReturns(shiftSummary);
-                      if (inheritedDriverExpectedReturns <= 0) return null;
-                      return (
-                        <div className="flex justify-between items-center p-3 bg-slate-900/30 rounded-2xl border border-slate-600/40">
-                          <div className="flex flex-col">
-                            <span className="text-sm text-slate-200">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Transferred Staff Returns')}</span>
-                            <span className="text-xs text-slate-300/70">
-                              {inheritedDrivers.length + inheritedWaiters.length} {t('modals.staffShift.transferredDriversCount', 'staff transferred to this cashier')}
-                            </span>
-                          </div>
-                          <span className="font-bold text-slate-300">+{formatCurrency(inheritedDriverExpectedReturns)}</span>
-                        </div>
-                      );
-                    })()}
 
                     {/* Expected Amount */}
                     {(() => {

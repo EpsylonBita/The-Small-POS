@@ -185,6 +185,8 @@ pub(crate) struct PaymentIncrementalSyncResponse {
     #[serde(default)]
     pub payments: Vec<Value>,
     #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
     pub sync_timestamp: Option<String>,
     #[serde(default)]
     pub total_count: Option<usize>,
@@ -660,17 +662,21 @@ fn count_sync_queue_rows(
 }
 
 fn collect_financial_sync_stats(conn: &rusqlite::Connection) -> FinancialSyncStats {
+    let (incoming_pending,incoming_failed):(i64,i64)=conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN retry_count<6 THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN retry_count>=6 THEN 1 ELSE 0 END),0) FROM unresolved_remote_payments",
+        [],|r|Ok((r.get(0)?,r.get(1)?)),
+    ).unwrap_or((0,0));
     FinancialSyncStats {
         pending_payments: count_sync_queue_rows(
             conn,
             &["payment", "order_payment"],
             PENDING_SYNC_STATES,
-        ),
+        ) + incoming_pending,
         failed_payments: count_sync_queue_rows(
             conn,
             &["payment", "order_payment"],
             FAILED_SYNC_STATES,
-        ),
+        ) + incoming_failed,
         pending_adjustments: count_sync_queue_rows(
             conn,
             &["payment_adjustment"],
@@ -1619,6 +1625,12 @@ pub fn create_order(
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let identity_payload = payload.get("orderData").unwrap_or(payload);
+    if crate::hotel_folio::is_settlement(payload)
+        || crate::hotel_folio::is_settlement(identity_payload)
+    {
+        return Err("FOLIO_SETTLEMENT_IMMUTABLE".into());
+    }
+
     if remote_order_is_repair_settlement(payload)
         || remote_order_is_repair_settlement(identity_payload)
     {
@@ -2064,7 +2076,23 @@ pub fn create_order(
                     .map(str::to_string)
             })
             .ok_or("Room charge requires a room")?;
-        metadata["room_charge"] = serde_json::json!({"currency":currency,"room_id":room_id});
+        let folio_id = str_field(payload, "folio_id")
+            .or_else(|| str_field(payload, "folioId"))
+            .or_else(|| {
+                metadata
+                    .pointer("/room_charge/folio_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        if metadata
+            .pointer("/room_charge/folio_id")
+            .and_then(Value::as_str)
+            .is_some_and(|pinned| Some(pinned) != folio_id.as_deref())
+        {
+            return Err("FOLIO_MISMATCH".to_string());
+        }
+        metadata["room_charge"] =
+            serde_json::json!({"currency":currency,"room_id":room_id,"folio_id":folio_id});
         ghost_metadata = Some(metadata.to_string());
     }
 
@@ -3441,7 +3469,21 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
     let is_online = storage::is_configured();
     let last_sync = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
     let pending_total = pending + queued_remote + parity_status.pending + parity_status.in_progress;
-    let error_total = errors + parity_status.failed + parity_status.conflicts;
+    let unresolved_payments: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unresolved_remote_payments",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let error_total = errors + parity_status.failed + parity_status.conflicts + unresolved_payments;
+    let paused_payments: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unresolved_remote_payments WHERE retry_count>=6",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     let remote_auth_pause = sync_state.remote_auth_snapshot();
     let mut payload = serde_json::json!({
         "isOnline": is_online,
@@ -3456,6 +3498,8 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
             Value::Null
         },
         "syncErrors": error_total,
+        "unresolvedRemotePayments": unresolved_payments,
+        "unresolvedRemotePaymentsPaused": paused_payments,
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
@@ -7703,6 +7747,9 @@ enum QueuedRemoteDisposition {
 }
 
 fn is_permanent_order_sync_error(error: &str) -> bool {
+    if error.contains("ROOM_CHARGE_IN_SETTLEMENT") || error.contains("FOLIO_SETTLEMENT_IMMUTABLE") {
+        return true;
+    }
     let lower = error.to_lowercase();
     lower.contains("invalid menu items")
         || lower.contains("customer not found in organization")
@@ -9277,6 +9324,98 @@ fn remote_order_already_z_closed(remote_order: &Value) -> bool {
     }
 }
 
+const CLOSED_PAYMENT_PARENT_CACHE_LIMIT: i64 = 256;
+
+/// The branch history must not accumulate one setting per closed order. Keep
+/// markers for parents still stored locally, and a small cache for absent
+/// parents. A cache miss is unknown, never permission to dismiss a payment.
+fn compact_closed_payment_parent_markers(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+            "DELETE FROM local_settings WHERE setting_category='sync'
+               AND setting_key GLOB 'payments_closed_parent:*'
+               AND NOT EXISTS(SELECT 1 FROM orders o WHERE o.id=substr(local_settings.setting_key,24)
+                   OR o.supabase_id=substr(local_settings.setting_key,24))
+               AND rowid NOT IN (SELECT s.rowid FROM local_settings s WHERE s.setting_category='sync'
+                   AND s.setting_key GLOB 'payments_closed_parent:*'
+                   AND NOT EXISTS(SELECT 1 FROM orders o WHERE o.id=substr(s.setting_key,24)
+                       OR o.supabase_id=substr(s.setting_key,24))
+                   ORDER BY s.updated_at DESC,s.rowid DESC LIMIT ?1)",
+            [CLOSED_PAYMENT_PARENT_CACHE_LIMIT],
+    ).map(|_| ()).map_err(|e| format!("compact parent closure cache: {e}"))
+}
+
+fn remember_closed_payment_parent(conn: &Connection, remote_order: &Value) -> Result<(), String> {
+    let Some(id) = str_any(remote_order, &["id"]) else {
+        return Ok(());
+    };
+    let explicitly_closed = remote_order.get("is_closed").and_then(Value::as_bool) == Some(true)
+        || remote_order
+            .get("z_report_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
+    let cutoff = crate::business_day::retention_cutoff_utc(conn);
+    let final_status = matches!(
+        str_any(remote_order, &["status"]).as_deref(),
+        Some("completed" | "delivered" | "cancelled" | "canceled" | "refunded")
+    );
+    let predates_closed_day: bool = if final_status {
+        conn.query_row(
+            "SELECT COALESCE(datetime(?1)<datetime(?2),0)",
+            params![str_any(remote_order, &["created_at"]), cutoff],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?
+    } else {
+        false
+    };
+    if !explicitly_closed && !predates_closed_day {
+        return Err("Canonical parent closure is not verified; payment retained".into());
+    }
+    let proof = serde_json::json!({"id":id,"is_closed":remote_order.get("is_closed"),"z_report_id":remote_order.get("z_report_id"),"local_z_cutoff":cutoff});
+    db::set_setting(
+        conn,
+        "sync",
+        &format!("payments_closed_parent:{id}"),
+        &proof.to_string(),
+    )?;
+    compact_closed_payment_parent_markers(conn)?;
+    conn.execute(
+        "DELETE FROM unresolved_remote_payments WHERE json_extract(payload,'$.order_id')=?1 OR json_extract(payload,'$.orderId')=?1",
+        [&id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Deliberate ownership/exclusion decisions must not enter the retry journal.
+fn remote_payment_intentionally_excluded(
+    conn: &Connection,
+    payment: &Value,
+) -> Result<bool, String> {
+    let method =
+        str_any(payment, &["payment_method", "paymentMethod", "method"]).unwrap_or_default();
+    let final_return = matches!(
+        str_any(payment, &["status"]).as_deref(),
+        Some("voided" | "refunded")
+    );
+    if method.eq_ignore_ascii_case(payments::GIFT_CARD_METHOD) && final_return {
+        // Its dedicated original-card importer owns both proof and adjustment.
+        return Ok(true);
+    }
+    if let Some(parent) = str_any(payment, &["order_id", "orderId"]) {
+        if db::get_setting(conn, "sync", &format!("payments_closed_parent:{parent}")).is_some() {
+            return Ok(true);
+        }
+        let repair: bool=conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE (id=?1 OR supabase_id=?1) AND lower(trim(COALESCE(order_context,'')))='repair_settlement')",
+            [&parent],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if repair {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn materialize_remote_order(
     conn: &rusqlite::Connection,
     remote_order: &Value,
@@ -9298,6 +9437,9 @@ fn materialize_remote_order(
         return Ok(None);
     }
 
+    if crate::hotel_folio::is_settlement(remote_order) {
+        return crate::hotel_folio::import(conn, remote_order).map(Some);
+    }
     if let Some(existing_local_id) = resolve_local_order_id(conn, remote_order) {
         if local_order_is_repair_settlement(conn, &existing_local_id)? {
             return Ok(None);
@@ -9324,6 +9466,7 @@ fn materialize_remote_order(
     // never run its own Z has no cutoff at all — which is precisely the case
     // where the whole remote history would otherwise land here (PR #164).
     if remote_order_already_z_closed(remote_order) {
+        remember_closed_payment_parent(conn, remote_order)?;
         debug!(
             remote_id = %remote_id,
             "Skipping remote order Admin already closed with a Z-report"
@@ -9367,6 +9510,7 @@ fn materialize_remote_order(
                 )
                 .unwrap_or(false);
             if precedes_cutoff {
+                remember_closed_payment_parent(conn, remote_order)?;
                 debug!(
                     remote_id = %remote_id,
                     status = %remote_status,
@@ -11441,6 +11585,31 @@ fn apply_remote_payment_status(
     remote_payment: &Value,
     updated_at: &str,
 ) -> Result<bool, String> {
+    // Canonical returns belong to the terminal that handed the money back.
+    // Import their ledger below for admission/history; never reverse this
+    // terminal's original drawer entry or courier custody from that import.
+    if (remote_payment
+        .get("adjustments")
+        .and_then(Value::as_array)
+        .is_some()
+        && matches!(
+            str_any(remote_payment, &["status"]).as_deref(),
+            Some("voided" | "refunded")
+        ))
+        || remote_payment
+            .get("adjustments")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    matches!(
+                        row.get("adjustment_type").and_then(Value::as_str),
+                        Some("refund" | "void")
+                    )
+                })
+            })
+    {
+        return Ok(false);
+    }
     if remote_payment_is_completed_money(remote_payment) {
         return Ok(false);
     }
@@ -11716,6 +11885,204 @@ fn sync_remote_payment_into_local_with_context(
     conn: &Connection,
     remote_payment: &Value,
 ) -> Result<Option<SyncedRemotePaymentMirror>, String> {
+    if remote_payment_intentionally_excluded(conn, remote_payment)? {
+        if let Some(id) = str_any(remote_payment, &["id", "payment_id", "paymentId"]) {
+            conn.execute("DELETE FROM unresolved_remote_payments WHERE id=?1", [id])
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(None);
+    }
+    conn.execute_batch("SAVEPOINT canonical_payment_import")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mirror = sync_remote_payment_row_into_local(conn, remote_payment)?;
+        if let Some(mirror) = &mirror {
+            import_canonical_payment_adjustments(
+                conn,
+                &mirror.local_order_id,
+                &mirror.local_payment_id,
+                remote_payment,
+            )?;
+            // A mirror never held this till's original money. Returned mirrors
+            // are history only; locally collected originals retain custody.
+            conn.execute(
+                "UPDATE order_payments SET status=json_extract(metadata,'$.canonical_return_status')
+                 WHERE id=?1 AND payment_origin='sync_reconstructed'
+                   AND json_valid(metadata) AND json_extract(metadata,'$.canonical_return_status') IN ('voided','refunded')",
+                [&mirror.local_payment_id],
+            ).map_err(|e|e.to_string())?;
+            // The retained balance follows the complete imported ledger, not
+            // the pre-import projection used while hydrating the receipt.
+            payments::recompute_order_payment_state(
+                conn,
+                &mirror.local_order_id,
+                &mirror.updated_at,
+                &mirror.local_payment_id,
+            )?;
+            // Targeted admission/repair also retires a previously retained
+            // snapshot so an older failed pull cannot overwrite fresh proof.
+            conn.execute(
+                "DELETE FROM unresolved_remote_payments WHERE id=?1",
+                [&mirror.remote_payment_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(mirror)
+    })();
+    match result {
+        Ok(mirror) => {
+            conn.execute_batch("RELEASE canonical_payment_import")
+                .map_err(|e| e.to_string())?;
+            Ok(mirror)
+        }
+        Err(error) => {
+            conn.execute_batch(
+                "ROLLBACK TO canonical_payment_import; RELEASE canonical_payment_import",
+            )
+            .map_err(|e| e.to_string())?;
+            Err(error)
+        }
+    }
+}
+
+/// Canonical adjustment ids are the submitted adjustment_id, including exact
+/// replays. Keep local originals (and their drawer attribution) untouched.
+fn canonical_adjustment_context(row: &Value) -> Result<&str, String> {
+    match row.get("adjustment_context") {
+        None | Some(Value::Null) => Ok("manual"),
+        Some(Value::String(context))
+            if matches!(context.as_str(), "manual" | "edit_settlement") =>
+        {
+            Ok(context.as_str())
+        }
+        _ => Err("Canonical adjustment has invalid adjustment_context".into()),
+    }
+}
+
+fn import_canonical_payment_adjustments(
+    conn: &Connection,
+    order_id: &str,
+    payment_id: &str,
+    payment: &Value,
+) -> Result<(), String> {
+    let method: String = conn
+        .query_row(
+            "SELECT method FROM order_payments WHERE id=?1",
+            [payment_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if method.eq_ignore_ascii_case(payments::GIFT_CARD_METHOD) {
+        return Ok(());
+    }
+    let Some(rows) = payment.get("adjustments").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for row in rows {
+        let kind = row
+            .get("adjustment_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !matches!(kind, "refund" | "void") {
+            continue;
+        }
+        let context = canonical_adjustment_context(row)?;
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or("Canonical adjustment has no id")?;
+        let cents = row
+            .get("amount_cents")
+            .and_then(Value::as_i64)
+            .filter(|c| *c > 0)
+            .ok_or("Canonical adjustment has invalid cents")?;
+        let currency = row
+            .get("currency")
+            .and_then(Value::as_str)
+            .ok_or("Canonical adjustment has no currency")?;
+        let local_currency: String = conn
+            .query_row(
+                "SELECT currency FROM order_payments WHERE id=?1",
+                [payment_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !local_currency.eq_ignore_ascii_case(currency) {
+            return Err("Canonical adjustment currency mismatch".into());
+        }
+        let existing: Option<(String, String, i64, String, i64)> = conn.query_row(
+            "SELECT payment_id, adjustment_type, COALESCE(amount_cents, CAST(ROUND(amount*100) AS INTEGER)),adjustment_context,imported_remote FROM payment_adjustments WHERE id=?1",
+            [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        if let Some((existing_payment, existing_kind, existing_cents, existing_context, imported)) =
+            existing
+        {
+            if existing_payment != payment_id || existing_kind != kind || existing_cents != cents {
+                return Err("Canonical adjustment conflicts with local original".into());
+            }
+            if imported == 1 {
+                // Upgrade copies pulled before the API exposed context. This
+                // changes classification only, never cash or outgoing queues.
+                conn.execute("UPDATE payment_adjustments SET adjustment_context=?1 WHERE id=?2 AND imported_remote=1", params![context,id])
+                    .map_err(|e| format!("refresh canonical adjustment context: {e}"))?;
+            } else if row.get("adjustment_context").is_some_and(|v| !v.is_null())
+                && existing_context != context
+            {
+                return Err("Canonical adjustment context conflicts with local original".into());
+            }
+            continue;
+        }
+        let created = row
+            .get("created_at")
+            .and_then(Value::as_str)
+            .ok_or("Canonical adjustment has no timestamp")?;
+        conn.execute(
+            "INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,imported_remote,created_at,updated_at,adjustment_context)
+             VALUES(?1,?2,?3,?4,?5,?6,'', 'applied',1,?7,?7,?8)",
+            params![id,payment_id,order_id,kind,Cents::new(cents).to_f64_dp2(),cents,created,
+                context],
+        ).map_err(|e| format!("import canonical adjustment: {e}"))?;
+    }
+    // Local void/full-refund transitions leave coverage and fingerprints.
+    // Preserve an original's physical status for custody, but give financial
+    // readers the same final-status exclusion. Gift returns exited above.
+    let final_status = match payment.get("status").and_then(Value::as_str) {
+        Some(status @ ("voided" | "refunded")) => Some(status),
+        _ if rows
+            .iter()
+            .any(|row| row.get("adjustment_type").and_then(Value::as_str) == Some("void")) =>
+        {
+            Some("voided")
+        }
+        _ => {
+            let fully_returned: bool = conn.query_row(
+                "SELECT COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0)>0
+                    AND COALESCE((SELECT SUM(COALESCE(pa.amount_cents,CAST(ROUND(pa.amount*100) AS INTEGER)))
+                        FROM payment_adjustments pa WHERE pa.payment_id=op.id AND pa.adjustment_type='refund'),0)
+                    >= COALESCE(op.amount_cents,CAST(ROUND(op.amount*100) AS INTEGER),0)
+                 FROM order_payments op WHERE op.id=?1", [payment_id], |r| r.get(0),
+            ).map_err(|e| format!("read canonical refund completion: {e}"))?;
+            if fully_returned {
+                Some("refunded")
+            } else {
+                None
+            }
+        }
+    };
+    if let Some(status) = final_status {
+        conn.execute(
+            "UPDATE order_payments SET metadata=json_set(COALESCE(NULLIF(metadata,''),'{}'),'$.canonical_return_status',?1) WHERE id=?2",
+            params![status,payment_id],
+        ).map_err(|e| format!("preserve canonical return status: {e}"))?;
+    }
+    Ok(())
+}
+
+fn sync_remote_payment_row_into_local(
+    conn: &Connection,
+    remote_payment: &Value,
+) -> Result<Option<SyncedRemotePaymentMirror>, String> {
     let Some(remote_payment_id) = str_any(remote_payment, &["id", "payment_id", "paymentId"])
     else {
         return Ok(None);
@@ -11907,9 +12274,15 @@ fn sync_remote_payment_into_local_with_context(
         }
     }
 
-    // Past the identity matches every path below adopts or creates a local
-    // `completed` row: never for money the server does not count.
-    if !completed_money {
+    // Canonical returned rows carry an adjustment array, possibly empty.
+    // Restore them as non-counting history; legacy non-money rows without
+    // that contract remain deliberately excluded after identity matching.
+    if !completed_money
+        && remote_payment
+            .get("adjustments")
+            .and_then(Value::as_array)
+            .is_none()
+    {
         return Ok(None);
     }
 
@@ -13262,6 +13635,29 @@ fn apply_remote_orders_page(conn: &Connection, orders: Vec<Value>) -> RemoteOrde
     let mut page_error: Option<String> = None;
 
     for remote_order in orders {
+        if remote_order_already_z_closed(&remote_order) {
+            if let Err(error) = remember_closed_payment_parent(conn, &remote_order) {
+                page_error = Some(error);
+                break;
+            }
+        }
+        if crate::hotel_folio::is_settlement(&remote_order) {
+            if remote_order_visible_to_current_terminal(conn, &remote_order).unwrap_or(false)
+                && remote_order
+                    .get("items")
+                    .or_else(|| remote_order.get("order_items"))
+                    .is_some_and(Value::is_array)
+                && remote_order
+                    .get("fiscal_line_snapshot")
+                    .is_some_and(Value::is_array)
+            {
+                if let Err(error) = crate::hotel_folio::import(conn, &remote_order) {
+                    page_error = Some(error);
+                    break;
+                }
+            }
+            continue;
+        }
         if remote_order_is_repair_settlement(&remote_order) {
             continue;
         }
@@ -13978,110 +14374,293 @@ async fn reconcile_remote_orders(
     })
 }
 
+/// One bad incoming row must not starve the stream. Retain its full canonical
+/// snapshot independently of outgoing money queues. Retry at most 25 per pass,
+/// with a five-minute cooldown. After six failed applications, retain the original
+/// for operator retry rather than cycling forever or silently dropping money.
+fn remote_payment_empty_mirror_is_intentional(
+    conn: &Connection,
+    payment: &Value,
+) -> Result<bool, String> {
+    Ok(remote_payment_intentionally_excluded(conn, payment)?
+        || matches!(
+            str_any(payment, &["status"]).as_deref(),
+            Some("pending" | "failed" | "cancelled" | "canceled")
+        )
+        || (matches!(
+            str_any(payment, &["status"]).as_deref(),
+            Some("voided" | "refunded")
+        ) && payment
+            .get("adjustments")
+            .and_then(Value::as_array)
+            .is_none()))
+}
+
+fn apply_or_retain_remote_payment(conn: &Connection, payment: &Value) -> Result<usize, String> {
+    let id = str_any(payment, &["id", "payment_id", "paymentId"]).unwrap_or_else(|| {
+        use sha2::Digest;
+        format!(
+            "malformed:{:x}",
+            sha2::Sha256::digest(payment.to_string().as_bytes())
+        )
+    });
+    match sync_remote_payment_into_local_with_context(conn, payment) {
+        Ok(Some(_)) => {
+            conn.execute("DELETE FROM unresolved_remote_payments WHERE id=?1", [&id])
+                .map_err(|e| e.to_string())?;
+            Ok(1)
+        }
+        Ok(None) if remote_payment_empty_mirror_is_intentional(conn, payment)? => {
+            conn.execute("DELETE FROM unresolved_remote_payments WHERE id=?1", [&id])
+                .map_err(|e| e.to_string())?;
+            Ok(0)
+        }
+        result => {
+            let error = match result {
+                Err(error) => error,
+                _ => "Canonical payment cannot yet be matched to a local receipt/parent".into(),
+            };
+            conn.execute(
+                "INSERT INTO unresolved_remote_payments(id,payload,last_error,retry_count,updated_at,next_retry_at)
+                 VALUES(?1,?2,?3,1,datetime('now'),datetime('now','+5 minutes'))
+                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                    retry_count=MIN(unresolved_remote_payments.retry_count+1,1000000),
+                    last_error=excluded.last_error,updated_at=excluded.updated_at,next_retry_at=excluded.next_retry_at",
+                params![id,serde_json::to_string(payment).map_err(|e| e.to_string())?,error],
+            ).map_err(|e| format!("retain unresolved canonical payment: {e}"))?;
+            warn!(remote_payment_id=%id,error=%error,"Canonical payment retained for bounded local mirror retry");
+            Ok(0)
+        }
+    }
+}
+
+/// Explicit Financial Sync retry resumes a bounded cycle, preserving every
+/// retained original. It cannot dismiss a payment or authorize new collection.
+pub(crate) fn resume_unresolved_remote_payment_recovery(
+    conn: &Connection,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE unresolved_remote_payments SET retry_count=0,next_retry_at=datetime('now')",
+        [],
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn retry_unresolved_remote_payments(conn: &Connection) -> Result<usize, String> {
+    let mut stmt=conn.prepare("SELECT payload FROM unresolved_remote_payments WHERE retry_count<6 AND next_retry_at<=datetime('now') ORDER BY updated_at,id LIMIT 25").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut changed = 0;
+    for row in rows {
+        changed += apply_or_retain_remote_payment(
+            conn,
+            &serde_json::from_str::<Value>(&row).map_err(|e| e.to_string())?,
+        )?;
+    }
+    Ok(changed)
+}
+
+fn payment_pull_path(cursor: Option<&str>, since: &str) -> String {
+    match cursor {
+        Some(cursor) => format!(
+            "/api/pos/payments?limit=200&cursor={}",
+            percent_encode(cursor)
+        ),
+        None => format!(
+            "/api/pos/payments?limit=200&since={}",
+            percent_encode(since)
+        ),
+    }
+}
+
+/// The page, unresolved receipts, and its opaque cursor commit together.
+/// A failed park or commit replays the entire page safely on the next pass.
+fn apply_remote_payment_page(conn: &Connection, response: &Value) -> Result<usize, String> {
+    let rows = response
+        .get("payments")
+        .and_then(Value::as_array)
+        .ok_or("Canonical payment response has no payments array")?;
+    let cursor = response
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if !rows.is_empty() && cursor.is_none() {
+        return Err("Canonical payment page has no next_cursor".into());
+    }
+    conn.execute_batch("SAVEPOINT canonical_payment_page")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut changed = 0;
+        for row in rows {
+            changed += apply_or_retain_remote_payment(conn, row)?;
+        }
+        // Empty pages never advance, including on the first legacy-since pull.
+        if !rows.is_empty() {
+            crate::db::set_setting(conn, "sync", "payments_cursor", cursor.unwrap())?;
+        }
+        Ok(changed)
+    })();
+    match result {
+        Ok(changed) => {
+            conn.execute_batch("RELEASE canonical_payment_page")
+                .map_err(|e| e.to_string())?;
+            Ok(changed)
+        }
+        Err(error) => {
+            conn.execute_batch(
+                "ROLLBACK TO canonical_payment_page; RELEASE canonical_payment_page",
+            )
+            .map_err(|e| e.to_string())?;
+            Err(error)
+        }
+    }
+}
+
+/// Exact authenticated parent reads can retire excluded history even when its
+/// order-stream checkpoint already passed the closure before this app update.
+/// Network failures never consume the local application retry budget.
+fn defer_retained_remote_payment(db: &DbState, id: &str) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute("UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','+5 minutes') WHERE id=?1",[id]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+async fn retire_verified_closed_payment_parents(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<(), String> {
+    let candidates: Vec<(String, String, i64)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        compact_closed_payment_parent_markers(&conn)?;
+        let mut stmt=conn.prepare("SELECT id,payload,retry_count FROM unresolved_remote_payments WHERE next_retry_at<=datetime('now') ORDER BY next_retry_at,id LIMIT 2").map_err(|e|e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    for (id, payload, attempts) in candidates {
+        let payment: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            if remote_payment_intentionally_excluded(&conn, &payment)? {
+                conn.execute("DELETE FROM unresolved_remote_payments WHERE id=?1", [&id])
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            if attempts >= 6 {
+                conn.execute("UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','+5 minutes') WHERE id=?1",[&id]).map_err(|e|e.to_string())?;
+            }
+        }
+        let Some(parent) = str_any(&payment, &["order_id", "orderId"]) else {
+            continue;
+        };
+        let path = format!(
+            "/api/pos/orders/sync?order_id={}&limit=1",
+            percent_encode(&parent)
+        );
+        let response = match api::fetch_from_admin_detailed_with_timeout(
+            admin_url,
+            api_key,
+            &path,
+            "GET",
+            None,
+            Duration::from_secs(3),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                debug!(error=%error,"Canonical parent check deferred; original and retry budget retained");
+                defer_retained_remote_payment(db, &id)?;
+                continue;
+            }
+        };
+        if let Some(order) = response
+            .get("orders")
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.get("id").and_then(Value::as_str) == Some(parent.as_str()))
+            })
+        {
+            if remote_order_already_z_closed(order) {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                if let Err(error) = remember_closed_payment_parent(&conn, order) {
+                    warn!(error=%error,"Parent closure not admitted; canonical payment stays retained");
+                }
+                continue;
+            }
+        }
+        // A paused original is reviewed or explicitly retried by the operator;
+        // periodic read-only closure checks never restart its application cycle.
+        if attempts >= 6 {
+            continue;
+        }
+        let rows =
+            match fetch_order_payment_ledger(admin_url, api_key, &parent, Duration::from_secs(3))
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => {
+                    defer_retained_remote_payment(db, &id)?;
+                    continue;
+                }
+            };
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if let Some(fresh) = rows.iter().find(|row| {
+            str_any(row, &["id", "payment_id", "paymentId"]).as_deref() == Some(id.as_str())
+        }) {
+            apply_or_retain_remote_payment(&conn, fresh)?;
+        } else {
+            // Absence is not proof of a reversal/deletion. Preserve the receipt
+            // and fence its closing order for review, rather than applying stale data.
+            conn.execute("UPDATE unresolved_remote_payments SET retry_count=6,last_error='Canonical receipt absent from fresh order ledger; review required',next_retry_at=datetime('now','+5 minutes') WHERE id=?1",[&id]).map_err(|e|e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 async fn reconcile_remote_payments(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
 ) -> Result<usize, String> {
-    let mut since_cursor =
-        sanitize_payments_since_cursor(local_setting_get(db, "sync", "payments_since"));
-    let _ = local_setting_set(db, "sync", "payments_since", &since_cursor);
-    let mut reconciled = 0usize;
-
+    let since = sanitize_payments_since_cursor(local_setting_get(db, "sync", "payments_since"));
+    retire_verified_closed_payment_parents(db, admin_url, api_key).await?;
+    let mut reconciled = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        retry_unresolved_remote_payments(&conn)?
+    };
     for _page in 0..4 {
-        let mut path = "/api/pos/payments?limit=200&since=".to_string();
-        path.push_str(&percent_encode(&since_cursor));
-
-        let resp = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
-            Ok(v) => v,
-            Err(e) => {
-                if is_backpressure_error(&e) {
-                    warn!(error = %e, "Remote payment reconciliation deferred due to backpressure");
-                    return Ok(reconciled);
-                }
-                return Err(format!("reconcile remote payments: {e}"));
-            }
+        let cursor = local_setting_get(db, "sync", "payments_cursor");
+        let path = payment_pull_path(cursor.as_deref(), &since);
+        let response = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
+            Ok(response) => response,
+            Err(error) if is_backpressure_error(&error) => return Ok(reconciled),
+            Err(error) => return Err(format!("reconcile remote payments: {error}")),
         };
-
-        let typed: Option<PaymentIncrementalSyncResponse> =
-            serde_json::from_value(resp.clone()).ok();
-        let payments = typed
-            .as_ref()
-            .map(|value| value.payments.clone())
-            .unwrap_or_else(|| {
-                resp.get("payments")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            });
-        let has_more = typed
-            .as_ref()
-            .and_then(|value| value.has_more)
-            .or_else(|| resp.get("has_more").and_then(Value::as_bool))
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
             .unwrap_or(false);
-        let sync_timestamp = typed
-            .as_ref()
-            .and_then(|value| value.sync_timestamp.clone())
-            .or_else(|| {
-                resp.get("sync_timestamp")
-                    .and_then(Value::as_str)
-                    .map(|value| value.to_string())
-            })
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-
-        let mut newest_updated_at: Option<String> = None;
+        let empty = response
+            .get("payments")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            for remote_payment in payments {
-                let updated_at = remote_payment_changed_at(&remote_payment);
-                if newest_updated_at
-                    .as_ref()
-                    .map(|current| updated_at > *current)
-                    .unwrap_or(true)
-                {
-                    newest_updated_at = Some(updated_at);
-                }
-
-                match sync_remote_payment_into_local(&conn, &remote_payment) {
-                    Ok(changed) => {
-                        reconciled += changed;
-                    }
-                    Err(error) => {
-                        let remote_payment_id =
-                            str_any(&remote_payment, &["id", "payment_id", "paymentId"])
-                                .unwrap_or_else(|| "<unknown>".to_string());
-                        warn!(
-                            remote_payment_id = %remote_payment_id,
-                            error = %error,
-                            "Failed to mirror canonical remote payment into local cache"
-                        );
-                    }
-                }
-            }
+            reconciled += apply_remote_payment_page(&conn, &response)?;
         }
-
-        let next_cursor =
-            sanitize_payments_since_cursor(newest_updated_at.or(Some(sync_timestamp)));
-        {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            let current_stored = sanitize_payments_since_cursor(crate::db::get_setting(
-                &conn,
-                "sync",
-                "payments_since",
-            ));
-            if next_cursor > current_stored {
-                since_cursor = next_cursor.clone();
-                crate::db::set_setting(&conn, "sync", "payments_since", &next_cursor)?;
-            } else if since_cursor != current_stored {
-                since_cursor = current_stored;
-            }
-        }
-
-        if !has_more {
+        if !has_more || empty {
             break;
         }
     }
-
     Ok(reconciled)
 }
 
@@ -15674,7 +16253,7 @@ fn paid_orders_missing_local_mirror_candidates(
           WHERE COALESCE(o.is_ghost, 0) = 0
             AND COALESCE(o.folio_charged, 0) = 0
             AND (
-                (COALESCE(o.payment_status, '') = 'paid'
+                (LOWER(TRIM(COALESCE(o.payment_status, ''))) IN ('paid', 'completed', 'partially_paid', 'partial')
                  AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled', 'refunded'))
                 OR (LOWER(TRIM(COALESCE(o.payment_status, '')))
                         IN ('paid', 'completed', 'partially_paid', 'partial')
@@ -15933,6 +16512,61 @@ pub(crate) async fn repair_local_payment_mirrors_for_orders(
     let api_key = load_zeroized_pos_api_key_optional()
         .ok_or("Missing POS API key for blocking payment repair")?;
     repair_local_payment_mirrors_for_orders_with_auth(db, order_ids, &admin_url, &api_key).await
+}
+
+/// Admission reads the complete order ledger, exempt from the incremental
+/// visibility horizon. It never changes the stream cursor or enqueues money.
+pub(crate) async fn refresh_canonical_payments_for_refund(
+    db: &DbState,
+    order_id: &str,
+) -> Result<(), String> {
+    let admin_url =
+        storage::get_credential("admin_dashboard_url").ok_or("Missing admin dashboard URL")?;
+    let api_key = load_zeroized_pos_api_key_optional().ok_or("Missing POS API key")?;
+    let remote_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        load_local_order_remote_lookup(&conn, order_id)?.and_then(|lookup| lookup.supabase_id)
+    };
+    let remote_id = match remote_id {
+        Some(id) => id,
+        None => {
+            match resolve_remote_order_for_local_order(db, &admin_url, &api_key, order_id).await? {
+                Some((id, _)) => id,
+                // A local order can still be waiting for its first acknowledgement.
+                None => return Ok(()),
+            }
+        }
+    };
+    let rows =
+        fetch_order_payment_ledger(&admin_url, &api_key, &remote_id, Duration::from_secs(15))
+            .await?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("SAVEPOINT refund_admission_refresh")
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        for row in rows {
+            if sync_remote_payment_into_local_with_context(&conn, &row)?.is_none()
+                && !remote_payment_empty_mirror_is_intentional(&conn, &row)?
+            {
+                return Err(
+                    "Canonical payment could not be applied before refund admission".to_string(),
+                );
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn
+            .execute_batch("RELEASE refund_admission_refresh")
+            .map_err(|e| e.to_string()),
+        Err(error) => {
+            conn.execute_batch(
+                "ROLLBACK TO refund_admission_refresh; RELEASE refund_admission_refresh",
+            )
+            .map_err(|e| e.to_string())?;
+            Err(error)
+        }
+    }
 }
 
 /// The server ledger rows of one order (`GET /api/pos/payments?order_id=`),
@@ -17501,6 +18135,24 @@ fn validate_menu_items_against_cache(db: &DbState, items: &Value) -> Result<(), 
         if is_manual {
             continue;
         }
+        // Retail products and services are not menu items: their identity is
+        // explicit on the line and the server validates organization/branch
+        // ownership. Only menu lines are checked against the menu cache.
+        let is_catalog_line = [
+            "retail_product_id",
+            "retailProductId",
+            "service_id",
+            "serviceId",
+        ]
+        .iter()
+        .any(|key| {
+            item.get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        });
+        if is_catalog_line {
+            continue;
+        }
         // Only check the primary menu_item_id fields, not "id" fallback
         let menu_item_id = str_any(item, &["menu_item_id", "menuItemId"]);
         if let Some(id) = menu_item_id {
@@ -17514,6 +18166,21 @@ fn validate_menu_items_against_cache(db: &DbState, items: &Value) -> Result<(), 
         Ok(())
     } else {
         Err(invalid_ids)
+    }
+}
+
+fn retain_vertical_order_line_fields(line: &mut Value, source: &Value) {
+    if let Some(object) = line.as_object_mut() {
+        for (snake, camel) in [
+            ("retail_product_id", "retailProductId"),
+            ("staff_id", "staffId"),
+            ("line_role", "lineRole"),
+            ("is_manual", "isManual"),
+        ] {
+            if let Some(value) = source.get(snake).or_else(|| source.get(camel)) {
+                object.insert(snake.to_string(), value.clone());
+            }
+        }
     }
 }
 
@@ -17542,15 +18209,13 @@ fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
             continue;
         }
 
-        let quantity = num_any(&item, &["quantity"])
-            .unwrap_or(1.0)
-            .max(1.0)
-            .round() as i64;
+        let quantity = num_any(&item, &["quantity"]).unwrap_or(1.0).max(0.001);
+        let quantity = (quantity * 1000.0).round() / 1000.0;
         let raw_total = num_any(&item, &["total_price", "totalPrice"]).unwrap_or(0.0);
         let unit_price = num_any(&item, &["unit_price", "unitPrice", "price"])
             .or_else(|| {
-                if raw_total > 0.0 && quantity > 0 {
-                    Some(raw_total / quantity as f64)
+                if raw_total > 0.0 && quantity > 0.0 {
+                    Some(raw_total / quantity)
                 } else {
                     None
                 }
@@ -17560,14 +18225,22 @@ fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
         let total_price = if raw_total > 0.0 {
             raw_total.max(0.0)
         } else {
-            (unit_price * quantity as f64).max(0.0)
+            (unit_price * quantity).max(0.0)
         };
         let customizations = normalize_order_customizations_for_sync(item.get("customizations"));
 
         let notes = str_any(&item, &["notes"]);
 
-        normalized.push(serde_json::json!({
+        let mut normalized_item = serde_json::json!({
             "menu_item_id": menu_item_id,
+            "retail_variant_id": item.get("retail_variant_id").or_else(|| item.get("retailVariantId")),
+            "service_id": item.get("service_id").or_else(|| item.get("serviceId")),
+            "appointment_id": item.get("appointment_id").or_else(|| item.get("appointmentId")),
+            "vat_category_code": item.get("vat_category_code").or_else(|| item.get("vatCategoryCode")),
+            "price_includes_vat": item.get("price_includes_vat").or_else(|| item.get("priceIncludesVat")),
+            "tax_exemption_reason": item.get("tax_exemption_reason").or_else(|| item.get("taxExemptionReason")),
+            "fiscal_document_profile": item.get("fiscal_document_profile").or_else(|| item.get("fiscalDocumentProfile")),
+            "metadata": item.get("metadata"),
             "menu_item_name": name,
             "name": name,
             "quantity": quantity,
@@ -17575,7 +18248,9 @@ fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
             "total_price": total_price,
             "customizations": customizations,
             "notes": notes
-        }));
+        });
+        retain_vertical_order_line_fields(&mut normalized_item, &item);
+        normalized.push(normalized_item);
     }
     normalized
 }
@@ -17846,6 +18521,7 @@ fn build_normalized_order_operation(
         "table_id": table_id,
         "table_session_id": table_session_id,
         "guest_count": guest_count,
+        "folio_id": ghost_metadata.as_ref().and_then(|meta| meta.pointer("/room_charge/folio_id")).and_then(Value::as_str),
         "room_id": str_any(source, &["roomId", "room_id"]).or_else(|| str_any(&payload_data, &["roomId", "room_id"]))
             .or_else(|| ghost_metadata.as_ref().and_then(|meta| meta.pointer("/room_charge/room_id")).and_then(Value::as_str).map(str::to_string)),
         "currency": if !local_order.is_null() { str_any(source, &["currency"]) } else { str_any(&payload_data, &["currency"]) },
@@ -18211,25 +18887,39 @@ async fn sync_order_batch_via_direct_api(
             }
             let quantity = raw_item
                 .get("quantity")
-                .and_then(Value::as_i64)
-                .unwrap_or(1)
-                .max(1);
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+                .max(0.001);
             let unit_price = raw_item
                 .get("unit_price")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0)
                 .max(0.0);
 
-            direct_items.push(serde_json::json!({
+            let mut direct_item = serde_json::json!({
                 "menu_item_id": menu_item_id,
+            "retail_variant_id": raw_item.get("retail_variant_id").or_else(|| raw_item.get("retailVariantId")),
+            "service_id": raw_item.get("service_id").or_else(|| raw_item.get("serviceId")),
+            "appointment_id": raw_item.get("appointment_id").or_else(|| raw_item.get("appointmentId")),
+            "vat_category_code": raw_item.get("vat_category_code").or_else(|| raw_item.get("vatCategoryCode")),
+            "price_includes_vat": raw_item.get("price_includes_vat").or_else(|| raw_item.get("priceIncludesVat")),
+            "tax_exemption_reason": raw_item.get("tax_exemption_reason").or_else(|| raw_item.get("taxExemptionReason")),
+            "fiscal_document_profile": raw_item.get("fiscal_document_profile").or_else(|| raw_item.get("fiscalDocumentProfile")),
+            "metadata": raw_item.get("metadata"),
                 "quantity": quantity,
                 "unit_price": unit_price,
+                "total_price": raw_item.get("total_price").cloned().unwrap_or(Value::Null),
+                "vat_category_code": raw_item.get("vat_category_code").cloned().unwrap_or(Value::Null),
+                "price_includes_vat": raw_item.get("price_includes_vat").cloned().unwrap_or(Value::Null),
+                "tax_exemption_reason": raw_item.get("tax_exemption_reason").cloned().unwrap_or(Value::Null),
                 "name": item_name,
                 "category_id": raw_item.get("category_id").cloned().unwrap_or(Value::Null),
                 "category_name": raw_item.get("category_name").cloned().unwrap_or(Value::Null),
                 "customizations": raw_item.get("customizations").cloned().unwrap_or(Value::Null),
                 "notes": raw_item.get("notes").cloned().unwrap_or(Value::Null),
-            }));
+            });
+            retain_vertical_order_line_fields(&mut direct_item, &raw_item);
+            direct_items.push(direct_item);
         }
 
         if direct_items.is_empty() {
@@ -18332,6 +19022,7 @@ async fn sync_order_batch_via_direct_api(
             "delivery_longitude": num_any(&data, &["delivery_longitude", "deliveryLongitude"]),
             "delivery_address_fingerprint": str_any(&data, &["delivery_address_fingerprint", "deliveryAddressFingerprint"]),
             "delivery_zone_id": str_any(&data, &["delivery_zone_id", "deliveryZoneId"]),
+            "folio_id": str_any(&data, &["folio_id", "folioId"]),
             "room_id": str_any(&data, &["room_id", "roomId"]),
             "currency": str_any(&data, &["currency"]),
             "cancellation_reason": str_any(&data, &["cancellation_reason", "cancellationReason"]),
@@ -19855,14 +20546,15 @@ async fn sync_financial_batch(
         "items": payload_items,
     });
 
-    let response = api::fetch_from_admin(
+    let (response, retry_after) = api::fetch_from_admin_detailed_with_retry_after(
         admin_url,
         api_key,
         "/api/pos/financial/sync",
         "POST",
         Some(body),
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
 
     // Deserialize into typed struct; fall back to extracting from Value if
     // the shape doesn't match (backwards-compatible with older admin versions).
@@ -20013,7 +20705,15 @@ async fn sync_financial_batch(
             let single = [*item];
             let error = extract_financial_result_message(result)
                 .unwrap_or_else(|| "Financial sync failed".to_string());
-            if retryable {
+            if result.get("retryable").and_then(Value::as_bool) == Some(true) {
+                let delay = result
+                    .get("retry_after_seconds")
+                    .and_then(Value::as_i64)
+                    .into_iter()
+                    .chain(retry_after)
+                    .max();
+                defer_financial_server_retry(db, item, &error, delay, None)?;
+            } else if retryable {
                 let failure = mark_batch_failed(db, &single, &error)?;
                 if !failure.backpressure_deferred {
                     outcome.had_non_backpressure_failure = true;
@@ -21464,7 +22164,35 @@ async fn sync_loyalty_items(
         ) = item;
 
         match sync_loyalty_transaction(admin_url, api_key, entity_id, payload).await {
-            Ok(_) => {
+            Ok(applied) => {
+                if !applied {
+                    let payload: Value = match serde_json::from_str(payload) {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    let Some(org_id) = payload.get("organization_id").and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if let Ok(conn) = db.conn.lock() {
+                        let retired = (|| -> Result<(), String> {
+                            conn.execute_batch("BEGIN IMMEDIATE")
+                                .map_err(|e| e.to_string())?;
+                            crate::commands::loyalty::reverse_local_loyalty_transaction(
+                                &conn, org_id, entity_id,
+                            )?;
+                            conn.execute("DELETE FROM sync_queue WHERE id = ?1", params![id])
+                                .map_err(|e| e.to_string())?;
+                            conn.execute_batch("COMMIT").map_err(|e| e.to_string())
+                        })();
+                        if retired.is_err() {
+                            let _ = conn.execute_batch("ROLLBACK");
+                        } else {
+                            synced += 1;
+                        }
+                    }
+                    continue;
+                }
                 let now = Utc::now().to_rfc3339();
                 if let Ok(conn) = db.conn.lock() {
                     let _ = conn.execute(
@@ -21606,17 +22334,23 @@ pub(crate) async fn dispatch_pending_z_reports_for_test(
     sync_z_report_items(admin_url, api_key, terminal_id, branch_id, db, &refs).await
 }
 
+fn loyalty_order_ended_error(error: &api::AdminFetchError) -> bool {
+    error.status() == Some(409)
+        && error.code() == Some("LOYALTY_ORDER_ENDED")
+        && error.app_error_field("success").and_then(Value::as_bool) == Some(false)
+}
+
 /// Sync a single loyalty transaction to the admin dashboard.
 ///
 /// Routes the transaction to `/api/pos/loyalty/earn` or `/api/pos/loyalty/redeem`
-/// based on the `transaction_type` field in the payload. Returns `Ok(())` on
-/// success or an error string describing the failure.
+/// based on the transaction type. Returns false only for a definitive ended-order
+/// refusal, so the caller compensates the local balance and retires the row.
 async fn sync_loyalty_transaction(
     admin_url: &str,
     api_key: &str,
     entity_id: &str,
     raw_payload: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let payload: Value = serde_json::from_str(raw_payload)
         .map_err(|e| format!("Invalid loyalty sync payload: {e}"))?;
 
@@ -21675,9 +22409,19 @@ async fn sync_loyalty_transaction(
         _ => unreachable!(),
     };
 
-    let resp = api::fetch_from_admin(admin_url, api_key, endpoint, "POST", Some(body))
-        .await
-        .map_err(|e| format!("Loyalty sync HTTP error for {entity_id}: {e}"))?;
+    let resp = match api::fetch_from_admin_detailed(
+        admin_url,
+        api_key,
+        endpoint,
+        "POST",
+        Some(body),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if loyalty_order_ended_error(&error) => return Ok(false),
+        Err(error) => return Err(format!("Loyalty sync HTTP error for {entity_id}: {error}")),
+    };
 
     let success = resp
         .get("success")
@@ -21691,7 +22435,7 @@ async fn sync_loyalty_transaction(
         return Err(format!("Loyalty sync rejected: {error_msg}"));
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Mark a batch of items as failed/deferred.
@@ -21755,14 +22499,18 @@ fn mark_order_batch_failures(
     Ok(had_non_backpressure_failure)
 }
 
-/// A proven remote lock refusal has not consumed the original financial attempt.
-/// Keep both mirrors retryable atomically; never infer this from display text.
+/// Only typed transient refusals defer an original receipt without spending its budget.
 fn defer_remote_handover_payment_retry(
     db: &DbState,
     item: &SyncItem,
     error: &api::AdminFetchError,
 ) -> Result<bool, String> {
-    if error.status() != Some(503) || error.code() != Some("REMOTE_HANDOVER_RETRY") {
+    let code = error.code();
+    if error.status() != Some(503)
+        || !(code == Some("REMOTE_HANDOVER_RETRY")
+            || (code == Some("PAYMENT_REPLAY_CONFLICT")
+                && error.app_error_field("retryable").and_then(Value::as_bool) == Some(true)))
+    {
         return Ok(false);
     }
     let table = match item.1.as_str() {
@@ -21770,41 +22518,58 @@ fn defer_remote_handover_payment_retry(
         "payment_adjustment" => "payment_adjustments",
         _ => return Ok(false),
     };
+    defer_financial_server_retry(
+        db,
+        item,
+        code.unwrap(),
+        error.retry_after_seconds(),
+        Some(table),
+    )?;
+    Ok(true)
+}
+
+fn defer_financial_server_retry(
+    db: &DbState,
+    item: &SyncItem,
+    error: &str,
+    retry_after_seconds: Option<i64>,
+    mirror: Option<&str>,
+) -> Result<(), String> {
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let tx = conn
         .transaction()
-        .map_err(|e| format!("begin remote lock retry: {e}"))?;
+        .map_err(|e| format!("begin financial retry: {e}"))?;
     let delay = tx.query_row(
         "SELECT retry_delay_ms FROM sync_queue WHERE id = ?1 AND entity_type = ?2 AND entity_id = ?3
          AND status IN ('pending', 'in_progress')",
         params![item.0, item.1, item.2],
         |row| row.get::<_, i64>(0),
-    ).optional().map_err(|e| format!("read remote lock retry: {e}"))?;
+    ).optional().map_err(|e| format!("read financial retry: {e}"))?;
     if let Some(delay) = delay {
         let delay = delay
             .max(DEFAULT_RETRY_DELAY_MS)
             .saturating_mul(2)
             .min(MAX_RETRY_DELAY_MS);
-        let next_retry = schedule_next_retry(delay, item.0);
+        // Retry-After is a lower bound, including when it exceeds our normal backoff cap.
+        let delay = delay.max(retry_after_seconds.unwrap_or(0).max(0).saturating_mul(1000));
+        let next_retry = (Utc::now() + chrono::Duration::milliseconds(delay)).to_rfc3339();
         tx.execute(
             "UPDATE sync_queue SET status = 'pending', next_retry_at = ?1, retry_delay_ms = ?2,
-             last_error = 'REMOTE_HANDOVER_RETRY', updated_at = datetime('now') WHERE id = ?3",
-            params![next_retry, delay, item.0],
+             last_error = ?3, updated_at = datetime('now') WHERE id = ?4",
+            params![next_retry, delay, error, item.0],
         )
-        .map_err(|e| format!("defer remote lock queue: {e}"))?;
-        tx.execute(
-            &format!(
-                "UPDATE {table} SET sync_state = 'pending', sync_next_retry_at = ?1,
-              sync_last_error = 'REMOTE_HANDOVER_RETRY', updated_at = datetime('now')
-              WHERE id = ?2 AND sync_state <> 'applied'"
-            ),
-            params![next_retry, item.2],
-        )
-        .map_err(|e| format!("defer remote lock financial row: {e}"))?;
+        .map_err(|e| format!("defer financial queue: {e}"))?;
+        if let Some(table) = mirror {
+            tx.execute(
+                &format!("UPDATE {table} SET sync_state = 'pending', sync_next_retry_at = ?1,
+                  sync_last_error = ?2, updated_at = datetime('now') WHERE id = ?3 AND sync_state <> 'applied'"),
+                params![next_retry, error, item.2],
+            ).map_err(|e| format!("defer financial mirror: {e}"))?;
+        }
     }
     tx.commit()
-        .map_err(|e| format!("commit remote lock retry: {e}"))?;
-    Ok(true)
+        .map_err(|e| format!("commit financial retry: {e}"))?;
+    Ok(())
 }
 
 fn mark_batch_failed(
@@ -23927,8 +24692,26 @@ fn bool_field(v: &Value, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::db;
     use rusqlite::{params, types::ValueRef, Connection};
+
+    #[test]
+    fn legacy_loyalty_ended_refusal_requires_the_typed_server_code() {
+        let ended = api::AdminFetchError::from_http_response_for_test(
+            409,
+            r#"{"success":false,"code":"LOYALTY_ORDER_ENDED"}"#,
+        );
+        assert!(loyalty_order_ended_error(&ended));
+        let refused = api::AdminFetchError::from_http_response_for_test(
+            409,
+            r#"{"success":false,"code":"INSUFFICIENT_POINTS"}"#,
+        );
+        assert!(!loyalty_order_ended_error(&refused));
+        assert!(!loyalty_order_ended_error(
+            &api::AdminFetchError::statusless("LOYALTY_ORDER_ENDED")
+        ));
+    }
 
     fn payment_sync_metadata_fixture(data: &Value) -> Value {
         merge_recorded_payment_sync_metadata(
@@ -24153,6 +24936,683 @@ mod tests {
         fn count(&self) -> usize {
             self.0.load(std::sync::atomic::Ordering::Acquire)
         }
+    }
+
+    #[test]
+    fn canonical_edit_refund_context_matches_local_and_upgrades_legacy_import() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        for (order, payment) in [
+            ("context-local", "context-local-payment"),
+            ("context-import", "context-import-payment"),
+        ] {
+            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,currency,status,payment_status,created_at,updated_at) VALUES(?1,'[]',10,1000,'CHF','completed','paid','now','now')", [order]).unwrap();
+            conn.execute("INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,created_at,updated_at) VALUES(?1,?2,'cash',10,1000,'CHF','completed','now','now')", params![payment,order]).unwrap();
+        }
+        let local = crate::refunds::refund_payment_in_connection(&conn, &serde_json::json!({"paymentId":"context-local-payment","amount":6,"reason":"edit return","adjustmentContext":"edit_settlement","refundMethod":"cash"})).unwrap();
+        let mut remote = serde_json::json!({"id":"context-canonical","order_id":"context-import","metadata":{"local_payment_id":"context-import-payment"},"payment_method":"cash","amount":10,"currency":"CHF","status":"completed","adjustments":[{"id":"context-return","adjustment_type":"refund","amount_cents":600,"currency":"CHF","created_at":"2026-10-20T10:00:00Z"}]});
+        // An old API reply defaulted this imported copy to manual.
+        sync_remote_payment_into_local_with_context(&conn, &remote).unwrap();
+        assert_eq!(
+            payments::load_order_payment_balance_snapshot(&conn, "context-import")
+                .unwrap()
+                .outstanding_amount,
+            6.0
+        );
+        remote["adjustments"][0]["adjustment_context"] = serde_json::json!("edit_settlement");
+        for _ in 0..2 {
+            sync_remote_payment_into_local_with_context(&conn, &remote).unwrap();
+        }
+        let a = payments::load_order_payment_balance_snapshot(&conn, "context-local").unwrap();
+        let b = payments::load_order_payment_balance_snapshot(&conn, "context-import").unwrap();
+        assert_eq!((a.net_paid, a.outstanding_amount), (4.0, 6.0));
+        assert_eq!(
+            (a.net_paid, a.outstanding_amount),
+            (b.net_paid, b.outstanding_amount)
+        );
+        for order in ["context-local", "context-import"] {
+            assert_eq!(
+                Cents::round_half_even(
+                    payments::load_principal_paid_for_order(&conn, order).unwrap()
+                )
+                .as_i64(),
+                400
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT payment_status FROM orders WHERE id=?1",
+                    [order],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "partially_paid"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT 1000-SUM(amount_cents) FROM payment_adjustments WHERE order_id=?1",
+                    [order],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                400
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM payment_adjustments WHERE order_id='context-import'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='payment_adjustments' AND record_id='context-return'", [], |r|r.get::<_,i64>(0)).unwrap(),0);
+        for (order, payment) in [
+            ("context-local", "context-local-payment"),
+            ("context-import", "context-import-payment"),
+        ] {
+            conn.execute(
+                "UPDATE orders SET total_amount=4,total_amount_cents=400 WHERE id=?1",
+                [order],
+            )
+            .unwrap();
+            payments::recompute_order_payment_state(&conn, order, "now", payment).unwrap();
+            let edited = payments::load_order_payment_balance_snapshot(&conn, order).unwrap();
+            assert_eq!((edited.net_paid, edited.outstanding_amount), (4.0, 0.0));
+        }
+        // An own original keeps its attribution and its original queue entry.
+        let own_id = local["adjustmentId"].as_str().unwrap();
+        remote["id"] = serde_json::json!("own-canonical");
+        remote["order_id"] = serde_json::json!("context-local");
+        remote["metadata"]["local_payment_id"] = serde_json::json!("context-local-payment");
+        remote["adjustments"][0]["id"] = serde_json::json!(own_id);
+        sync_remote_payment_into_local_with_context(&conn, &remote).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT imported_remote FROM payment_adjustments WHERE id=?1",
+                [own_id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        remote["adjustments"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjustment_context");
+        sync_remote_payment_into_local_with_context(&conn, &remote).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT adjustment_context FROM payment_adjustments WHERE id=?1",
+                [own_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "edit_settlement"
+        );
+        remote["adjustments"][0]["adjustment_context"] = serde_json::json!("manual");
+        assert!(sync_remote_payment_into_local_with_context(&conn, &remote)
+            .unwrap_err()
+            .contains("context conflicts with local original"));
+    }
+
+    #[test]
+    fn canonical_adjustment_context_rejects_invalid_values_without_applying_the_page_row() {
+        assert_eq!(
+            canonical_adjustment_context(&serde_json::json!({})).unwrap(),
+            "manual"
+        );
+        assert_eq!(
+            canonical_adjustment_context(&serde_json::json!({"adjustment_context":null})).unwrap(),
+            "manual"
+        );
+        for value in [
+            serde_json::json!("unsupported"),
+            serde_json::json!(42),
+            serde_json::json!(""),
+        ] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,created_at,updated_at) VALUES('bad-context-parent','[]',10,1000,'completed','now','now');").unwrap();
+            let remote = serde_json::json!({"id":"bad-context-payment","order_id":"bad-context-parent","payment_method":"cash","amount":10,"currency":"CHF","status":"completed","adjustments":[{"id":"bad-context-return","adjustment_type":"refund","amount_cents":600,"currency":"CHF","created_at":"now","adjustment_context":value}]});
+            assert_eq!(apply_or_retain_remote_payment(&conn, &remote).unwrap(), 0);
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM payment_adjustments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            let error: String = conn
+                .query_row(
+                    "SELECT last_error FROM unresolved_remote_payments",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(error.contains("invalid adjustment_context"), "{error}");
+        }
+    }
+
+    #[test]
+    fn closure_marker_cache_is_bounded_and_pins_only_existing_local_parents() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("INSERT INTO orders(id,supabase_id,items,total_amount,status,created_at,updated_at) VALUES('pinned-local','pinned-parent','[]',10,'completed','now','now');").unwrap();
+        remember_closed_payment_parent(
+            &conn,
+            &serde_json::json!({"id":"pinned-parent","is_closed":true}),
+        )
+        .unwrap();
+        for n in 0..300 {
+            remember_closed_payment_parent(
+                &conn,
+                &serde_json::json!({"id":format!("cache-parent-{n}"),"is_closed":true}),
+            )
+            .unwrap();
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM local_settings WHERE setting_category='sync' AND setting_key GLOB 'payments_closed_parent:*'", [], |r|r.get::<_,i64>(0)).unwrap(), CLOSED_PAYMENT_PARENT_CACHE_LIMIT+1);
+        assert!(remote_payment_intentionally_excluded(
+            &conn,
+            &serde_json::json!({"order_id":"pinned-parent"})
+        )
+        .unwrap());
+        conn.execute("DELETE FROM orders WHERE id='pinned-local'", [])
+            .unwrap();
+        compact_closed_payment_parent_markers(&conn).unwrap();
+        assert!(db::get_setting(&conn, "sync", "payments_closed_parent:pinned-parent").is_none());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM local_settings WHERE setting_category='sync' AND setting_key GLOB 'payments_closed_parent:*'", [], |r|r.get::<_,i64>(0)).unwrap(), CLOSED_PAYMENT_PARENT_CACHE_LIMIT);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn evicted_closure_marker_requires_fresh_verified_parent_evidence() {
+        // The parent check sends this till's terminal id. Without a seeded keyring the
+        // test read the developer machine's real POS credentials: green locally,
+        // "missing terminal_id" on CI (1.4.134, 21/10/2026).
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-closure-check")]);
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            remember_closed_payment_parent(
+                &conn,
+                &serde_json::json!({"id":"evicted-parent","is_closed":true}),
+            )
+            .unwrap();
+            for n in 0..256 {
+                remember_closed_payment_parent(
+                    &conn,
+                    &serde_json::json!({"id":format!("new-parent-{n}"),"is_closed":true}),
+                )
+                .unwrap();
+            }
+            let old = serde_json::json!({"id":"old-payment","order_id":"evicted-parent","payment_method":"cash","amount":10,"currency":"CHF","status":"completed"});
+            assert!(!remote_payment_intentionally_excluded(&conn, &old).unwrap());
+            apply_or_retain_remote_payment(&conn, &old).unwrap();
+            conn.execute(
+                "UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','-1 day')",
+                [],
+            )
+            .unwrap();
+        }
+        let unknown = crate::tests::fake_http::MockServer::new("{}");
+        retire_verified_closed_payment_parents(&db, &unknown.url, "fixture-key")
+            .await
+            .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT retry_count FROM unresolved_remote_payments",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            conn.execute(
+                "UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','-1 day')",
+                [],
+            )
+            .unwrap();
+        }
+        let closed = crate::tests::fake_http::MockServer::new(
+            serde_json::json!({"orders":[{"id":"evicted-parent","is_closed":true}]}).to_string(),
+        );
+        retire_verified_closed_payment_parents(&db, &closed.url, "fixture-key")
+            .await
+            .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn malformed_closure_evidence_never_retires_a_payment_snapshot() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        apply_or_retain_remote_payment(&conn,&serde_json::json!({"id":"unverified-receipt","order_id":"unverified-parent","payment_method":"cash","amount":10})).unwrap();
+        assert!(remember_closed_payment_parent(
+            &conn,
+            &serde_json::json!({"id":"unverified-parent","is_closed":false,"z_report_id":{}})
+        )
+        .is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn canonical_return_without_adjustment_details_is_still_non_counting_history() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,created_at,updated_at) VALUES('empty-details-parent','[]',10,1000,'completed','now','now');").unwrap();
+        let remote = serde_json::json!({"id":"empty-details-receipt","order_id":"empty-details-parent","payment_method":"cash","amount":10,"currency":"CHF","status":"refunded","adjustments":[]});
+        assert_eq!(apply_or_retain_remote_payment(&conn, &remote).unwrap(), 1);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM order_payments WHERE remote_payment_id='empty-details-receipt'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "refunded"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn retained_parent_closure_is_verified_and_retires_a_paused_snapshot() {
+        // The parent check sends this till's terminal id. Without a seeded keyring the
+        // test read the developer machine's real POS credentials: green locally,
+        // "missing terminal_id" on CI (1.4.134, 21/10/2026).
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-closure-check")]);
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            apply_or_retain_remote_payment(&conn,&serde_json::json!({"id":"closed-receipt","order_id":"closed-exact","amount":10,"payment_method":"cash"})).unwrap();
+            conn.execute("UPDATE unresolved_remote_payments SET retry_count=6,next_retry_at=datetime('now','-1 day')",[]).unwrap();
+        }
+        let server=crate::tests::fake_http::MockServer::new(serde_json::json!({"orders":[{"id":"closed-exact","is_closed":true,"z_report_id":"canonical-z"}]}).to_string());
+        retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unavailable_retained_payment_proof_preserves_retry_budget() {
+        // The parent check sends this till's terminal id. Without a seeded keyring the
+        // test read the developer machine's real POS credentials: green locally,
+        // "missing terminal_id" on CI (1.4.134, 21/10/2026).
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-closure-check")]);
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            apply_or_retain_remote_payment(&conn,&serde_json::json!({"id":"unknown-receipt","order_id":"unknown-parent","amount":10,"payment_method":"cash"})).unwrap();
+            conn.execute(
+                "UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','-1 day')",
+                [],
+            )
+            .unwrap();
+        }
+        let server = crate::tests::fake_http::MockServer::new("{}");
+        retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT retry_count FROM unresolved_remote_payments",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn operator_retry_reads_fresh_canonical_payment_instead_of_stale_payload() {
+        // The parent check sends this till's terminal id. Without a seeded keyring the
+        // test read the developer machine's real POS credentials: green locally,
+        // "missing terminal_id" on CI (1.4.134, 21/10/2026).
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "terminal-closure-check")]);
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,created_at,updated_at) VALUES('fresh-parent','[]',10,1000,'completed','now','now');").unwrap();
+            apply_or_retain_remote_payment(&conn,&serde_json::json!({"id":"fresh-receipt","order_id":"fresh-parent","amount":10,"payment_method":"cash","currency":"INVALID"})).unwrap();
+            resume_unresolved_remote_payment_recovery(&conn).unwrap();
+        }
+        let server=crate::tests::fake_http::MockServer::new(serde_json::json!({"orders":[{"id":"fresh-parent","is_closed":false}],"payments":[{"id":"fresh-receipt","order_id":"fresh-parent","amount":10,"currency":"CHF","payment_method":"cash","status":"completed"}]}).to_string());
+        retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
+            .await
+            .unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT currency FROM order_payments WHERE remote_payment_id='fresh-receipt'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "CHF"
+        );
+    }
+
+    #[test]
+    fn returned_reconstructed_receipt_is_non_counting_history() {
+        for status in ["refunded", "voided"] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,created_at,updated_at) VALUES('history-parent','[]',10,1000,'completed','now','now');").unwrap();
+            let remote = serde_json::json!({"id":"history-receipt","order_id":"history-parent","payment_method":"cash","amount":10,"currency":"CHF","status":status,"adjustments":[{"id":"returned","adjustment_type":if status=="refunded" {"refund"} else {"void"},"amount_cents":1000,"currency":"CHF","created_at":"2026-10-20T10:00:00Z"}]});
+            assert_eq!(apply_or_retain_remote_payment(&conn, &remote).unwrap(), 1);
+            let (stored,origin):(String,String)=conn.query_row("SELECT status,payment_origin FROM order_payments WHERE remote_payment_id='history-receipt'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert_eq!(stored, status);
+            assert_eq!(origin, "sync_reconstructed");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM order_payments WHERE status='completed'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn generic_adjustment_pull_leaves_gift_returns_to_dedicated_owner() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("INSERT INTO orders(id,items,total_amount,status,created_at,updated_at) VALUES('gift-parent','[]',10,'completed','now','now');
+            INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,created_at,updated_at) VALUES('gift-receipt','gift-parent','gift_card',10,1000,'CHF','completed','now','now');").unwrap();
+        let remote = serde_json::json!({"status":"completed","adjustments":[{"id":"pending-gift-return","adjustment_type":"refund","amount_cents":600,"currency":"CHF","created_at":"2026-10-20T10:00:00Z"}]});
+        import_canonical_payment_adjustments(&conn, "gift-parent", "gift-receipt", &remote)
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM payment_adjustments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn final_gift_and_verified_closed_parent_skips_do_not_remain_unresolved() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let gift = serde_json::json!({"id":"returned-gift","order_id":"absent-gift-parent","payment_method":"gift_card","status":"refunded","amount":10});
+        apply_or_retain_remote_payment(&conn, &gift).unwrap();
+        let missing = serde_json::json!({"id":"closed-payment","order_id":"closed-parent","payment_method":"cash","amount":10});
+        apply_or_retain_remote_payment(&conn, &missing).unwrap();
+        let closed =
+            serde_json::json!({"id":"closed-parent","is_closed":true,"z_report_id":"verified-z"});
+        materialize_remote_order(&conn, &closed).unwrap();
+        apply_or_retain_remote_payment(&conn, &missing).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn unresolved_mirror_pauses_then_operator_retry_preserves_original_payload() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let missing = serde_json::json!({"id":"blocked-receipt","order_id":"not-here","amount":10,"payment_method":"cash"});
+        for _ in 0..6 {
+            apply_or_retain_remote_payment(&conn, &missing).unwrap();
+        }
+        let before: String = conn
+            .query_row("SELECT payload FROM unresolved_remote_payments", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','-1 day')",
+            [],
+        )
+        .unwrap();
+        retry_unresolved_remote_payments(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT retry_count FROM unresolved_remote_payments",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            6
+        );
+        assert_eq!(resume_unresolved_remote_payment_recovery(&conn).unwrap(), 1);
+        let (after, retries): (String, i64) = conn
+            .query_row(
+                "SELECT payload,retry_count FROM unresolved_remote_payments",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(retries, 0);
+    }
+
+    #[test]
+    fn already_refunded_remote_receipt_imports_history_without_new_money() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,created_at,updated_at) VALUES('returned-parent','[]',10,1000,'completed',datetime('now'),datetime('now'));").unwrap();
+            let remote = serde_json::json!({"id":"returned-receipt","order_id":"returned-parent","payment_method":"cash","amount":10,"currency":"EUR","status":"refunded","created_at":"2026-10-20T10:00:00Z","updated_at":"2026-10-20T11:00:00Z","adjustments":[{"id":"final-return","adjustment_type":"refund","amount_cents":600,"currency":"EUR","created_at":"2026-10-20T11:00:00Z"}]});
+            assert_eq!(sync_remote_payment_into_local(&conn, &remote).unwrap(), 1);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM parity_sync_queue WHERE table_name IN ('payments','payment_adjustments')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            let (status, origin): (String, String) = conn
+                .query_row(
+                    "SELECT status, payment_origin FROM order_payments WHERE remote_payment_id='returned-receipt'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "refunded");
+            assert_eq!(origin, "sync_reconstructed");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM order_payments WHERE status='completed'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        }
+        let local: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM order_payments WHERE remote_payment_id='returned-receipt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let balance = crate::refunds::get_payment_balance(&db, &local).unwrap();
+        assert_eq!(balance["balance"], 0.0);
+        assert_eq!(balance["remaining"], 0.0);
+        assert_eq!(balance["status"], "refunded");
+    }
+
+    #[test]
+    fn payment_cursor_is_opaque_and_empty_pages_never_advance() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        assert!(payment_pull_path(None, "2026-10-20T10:00:00Z").contains("&since="));
+        assert_eq!(
+            payment_pull_path(Some("opaque+/="), "ignored"),
+            "/api/pos/payments?limit=200&cursor=opaque%2B%2F%3D"
+        );
+        crate::db::set_setting(&conn, "sync", "payments_cursor", "original").unwrap();
+        apply_remote_payment_page(&conn,&serde_json::json!({"payments":[],"next_cursor":"must-not-advance","sync_timestamp":"2099-01-01T00:00:00Z"})).unwrap();
+        assert_eq!(
+            crate::db::get_setting(&conn, "sync", "payments_cursor").as_deref(),
+            Some("original")
+        );
+    }
+
+    #[test]
+    fn payment_page_retains_missing_parent_then_retries_after_parent_arrives() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let remote = serde_json::json!({"id":"canonical-pay","order_id":"late-parent","payment_method":"cash","amount":10,"currency":"EUR","created_at":"2026-10-20T10:00:00Z","updated_at":"2026-10-20T10:00:00Z"});
+        assert_eq!(
+            apply_remote_payment_page(
+                &conn,
+                &serde_json::json!({"payments":[remote],"next_cursor":"opaque-page-1"})
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::db::get_setting(&conn, "sync", "payments_cursor").as_deref(),
+            Some("opaque-page-1")
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        // The checkpoint survives the end of the page. The retained snapshot
+        // repairs without replaying that page or creating a collection.
+        conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,sync_status,created_at,updated_at) VALUES('late-parent','[]',10,1000,'completed','synced',datetime('now'),datetime('now'));
+            UPDATE unresolved_remote_payments SET next_retry_at=datetime('now','-1 second');").unwrap();
+        assert_eq!(retry_unresolved_remote_payments(&conn).unwrap(), 1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE remote_payment_id='canonical-pay'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name='payments'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn payment_page_failed_retention_rolls_back_page_and_cursor() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        crate::db::set_setting(&conn, "sync", "payments_cursor", "before").unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_payment_retention BEFORE INSERT ON unresolved_remote_payments WHEN NEW.id='second' BEGIN SELECT RAISE(ABORT,'disk failure fixture'); END;").unwrap();
+        let response = serde_json::json!({"payments":[{"id":"first","order_id":"absent"},{"id":"second","order_id":"absent"}],"next_cursor":"after"});
+        assert!(apply_remote_payment_page(&conn, &response).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::db::get_setting(&conn, "sync", "payments_cursor").as_deref(),
+            Some("before")
+        );
+    }
+
+    #[test]
+    fn payment_page_mirror_error_is_retained_without_stalling_next_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // Currency validation is an application error, not a missing parent.
+        conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,created_at,updated_at) VALUES('parent','[]',10,1000,'completed',datetime('now'),datetime('now'));").unwrap();
+        let response = serde_json::json!({"payments":[
+            {"id":"invalid-currency","order_id":"parent","amount":10,"payment_method":"cash","currency":"INVALID"},
+            {"id":"next-parent-missing","order_id":"absent","amount":10,"payment_method":"cash","currency":"EUR"}
+        ],"next_cursor":"after-both"});
+        assert_eq!(apply_remote_payment_page(&conn, &response).unwrap(), 0);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::db::get_setting(&conn, "sync", "payments_cursor").as_deref(),
+            Some("after-both")
+        );
+    }
+
+    #[test]
+    fn partially_paid_order_without_mirror_is_a_repair_candidate() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("INSERT INTO orders(id,items,total_amount,total_amount_cents,status,payment_status,created_at,updated_at) VALUES('partial-no-mirror','[]',10,1000,'pending','partially_paid',datetime('now'),datetime('now'));").unwrap();
+        assert!(paid_orders_missing_local_mirror_candidates(&conn)
+            .unwrap()
+            .contains(&"partial-no-mirror".into()));
     }
 
     fn test_db() -> DbState {
@@ -25250,6 +26710,58 @@ mod tests {
     }
 
     #[test]
+    fn retail_replay_preserves_variant_and_fractional_quantity() {
+        let items = serde_json::json!([{
+            "menu_item_id": "11111111-1111-4111-8111-111111111111",
+            "retail_variant_id": "22222222-2222-4222-8222-222222222222",
+            "name": "Brown rice", "quantity": 0.333,
+            "unit_price": 1.0 / 0.333, "total_price": 1.0,
+            "vat_category_code": "VAT_13", "price_includes_vat": true
+        }]);
+        let replay = normalize_order_items_for_sync(&items);
+        assert_eq!(
+            replay[0]["retail_variant_id"],
+            items[0]["retail_variant_id"]
+        );
+        assert_eq!(replay[0]["quantity"], 0.333);
+        assert_eq!(replay[0]["total_price"], 1.0);
+        assert_eq!(replay[0]["vat_category_code"], "VAT_13");
+        assert_eq!(
+            normalize_order_items_customizations_for_sync(&items)[0]["retail_variant_id"],
+            items[0]["retail_variant_id"]
+        );
+
+        let db = test_db();
+        seed_active_cashier(&db, "retail-branch", "retail-terminal");
+        let payload = serde_json::json!({
+            "clientRequestId": "retail-variant-create", "organizationId": "retail-org",
+            "branchId": "retail-branch", "terminalId": "retail-terminal", "currency": "EUR",
+            "items": items, "subtotal": 1.0, "totalAmount": 1.0,
+            "orderType": "pickup", "status": "pending"
+        });
+        let created =
+            create_order(&db, &payload, &CountingPrintQueueInvalidator::default()).unwrap();
+        let id = created["orderId"].as_str().unwrap();
+        let saved = get_order_by_id(&db, id).unwrap();
+        let saved_items: Value = match &saved["items"] {
+            Value::String(raw) => serde_json::from_str(raw).unwrap(),
+            other => other.clone(),
+        };
+        assert_eq!(
+            saved_items[0]["retail_variant_id"],
+            items[0]["retail_variant_id"]
+        );
+        assert_eq!(saved_items[0]["quantity"], 0.333);
+        let queued =
+            build_normalized_order_operation(&db, id, "insert", &payload, "retail-branch").unwrap();
+        assert_eq!(
+            queued["items"][0]["retail_variant_id"],
+            items[0]["retail_variant_id"]
+        );
+        assert_eq!(queued["items"][0]["quantity"], 0.333);
+    }
+
+    #[test]
     fn normalize_order_items_customizations_for_sync_converts_arrays_to_objects() {
         let items = serde_json::json!([{
             "menu_item_id": "00000000-0000-0000-0000-000000000001",
@@ -25584,6 +27096,74 @@ mod tests {
         assert_eq!(
             validate_menu_items_against_cache(&db, &invalid_items).unwrap_err(),
             vec!["manual".to_string()]
+        );
+    }
+
+    #[test]
+    fn vertical_readiness_legacy_replay_keeps_catalog_staff_and_deposit_roles() {
+        let input = serde_json::json!([
+            {"menu_item_id":"33333333-3333-4333-8333-333333333333", "retail_product_id":"33333333-3333-4333-8333-333333333333", "name":"Rice", "quantity":1, "unit_price":10, "vat_category_code":"gr_reduced_13"},
+            {"service_id":"44444444-4444-4444-8444-444444444444", "staff_id":"stylist", "name":"Haircut", "quantity":1, "unit_price":25},
+            {"is_manual":true, "line_role":"deposit", "name":"Deposit", "quantity":1, "unit_price":2}
+        ]);
+        let output = normalize_order_items_for_sync(&input);
+        assert_eq!(
+            output[0]["retail_product_id"],
+            input[0]["retail_product_id"]
+        );
+        assert_eq!(output[0]["vat_category_code"], "gr_reduced_13");
+        assert_eq!(output[1]["staff_id"], "stylist");
+        assert_eq!(output[2]["line_role"], "deposit");
+        assert_eq!(output[2]["is_manual"], true);
+        assert!(output[0].get("line_role").is_none());
+        assert!(output[0].get("is_manual").is_none());
+        let mut direct = serde_json::json!({});
+        retain_vertical_order_line_fields(
+            &mut direct,
+            &serde_json::json!({"retailProductId":"product", "staffId":"staff", "lineRole":"deposit", "isManual":true}),
+        );
+        assert_eq!(direct["retail_product_id"], "product");
+        assert_eq!(direct["staff_id"], "staff");
+        assert_eq!(direct["line_role"], "deposit");
+        assert_eq!(direct["is_manual"], true);
+    }
+
+    #[test]
+    fn validate_menu_items_against_cache_admits_retail_and_service_lines_with_a_menu_cache() {
+        // A store with both a menu and products (bakery, salon selling
+        // shampoo) used to have every retail line rejected once the menu
+        // cache held any item, because retail ids never enter the menu cache.
+        let db = test_db();
+        cache_menu_section(
+            &db,
+            "subcategories",
+            serde_json::json!([
+                { "id": "11111111-1111-4111-8111-111111111111", "name": "Croissant" }
+            ]),
+        );
+
+        let mixed = serde_json::json!([
+            { "menu_item_id": "11111111-1111-4111-8111-111111111111", "name": "Croissant" },
+            {
+                "menu_item_id": "33333333-3333-4333-8333-333333333333",
+                "retail_product_id": "33333333-3333-4333-8333-333333333333",
+                "name": "Shampoo"
+            },
+            {
+                "menu_item_id": null,
+                "service_id": "44444444-4444-4444-8444-444444444444",
+                "name": "Haircut"
+            }
+        ]);
+        assert!(validate_menu_items_against_cache(&db, &mixed).is_ok());
+
+        // An unmarked unknown id is still refused.
+        let stale = serde_json::json!([
+            { "menu_item_id": "33333333-3333-4333-8333-333333333333", "name": "Shampoo" }
+        ]);
+        assert_eq!(
+            validate_menu_items_against_cache(&db, &stale).unwrap_err(),
+            vec!["33333333-3333-4333-8333-333333333333".to_string()]
         );
     }
 
@@ -31652,6 +33232,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn payment_replay_conflict_preserves_last_attempt_and_honours_retry_after() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "term-replay-retry")]);
+        for dated_header in [false, true] {
+            let (db, queue_id, payload) = legacy_lock_retry_fixture(false);
+            let item = claim_pending_sync_items(&db.conn.lock().unwrap(), 1)
+                .unwrap()
+                .remove(0);
+            let before = Utc::now();
+            let header = if dated_header {
+                (before + ChronoDuration::seconds(602))
+                    .format("%a, %d %b %Y %H:%M:%S GMT")
+                    .to_string()
+            } else {
+                "601".to_string()
+            };
+            let (url, server) = spawn_status_json_server_with_retry_after(
+                503,
+                r#"{"success":false,"code":"PAYMENT_REPLAY_CONFLICT","retryable":true}"#,
+                Some(header),
+            );
+            assert_eq!(
+                sync_payment_items(&url, "test-key", "term-replay-retry", &db, &[&item]).await,
+                0
+            );
+            server.join().unwrap();
+            let after = load_sync_item(&db, queue_id);
+            assert_eq!(after.6, after.7 - 1);
+            assert_eq!(after.4, payload);
+            assert_eq!(after.5, "original-lock-key");
+            let next = chrono::DateTime::parse_from_rfc3339(after.8.as_deref().unwrap()).unwrap();
+            assert!(next.with_timezone(&Utc) >= before + ChronoDuration::seconds(600));
+            let conn = db.conn.lock().unwrap();
+            let mirror: (String, i64, String) = conn.query_row(
+                "SELECT sync_state,sync_retry_count,sync_next_retry_at FROM order_payments WHERE id='lock-payment'", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+            assert_eq!(mirror, ("pending".to_string(), 4, after.8.unwrap()));
+            assert!(claim_pending_sync_items(&conn, 1).unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn financial_retryable_insert_race_preserves_last_attempt_and_honours_retry_after() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "term-financial-race")]);
+        let (db, queue_id, _) = legacy_lock_retry_fixture(false);
+        db.conn.lock().unwrap().execute(
+            "UPDATE sync_queue SET entity_type='driver_earning',entity_id='race-earning',payload=?2 WHERE id=?1", params![queue_id, r#"{"amount":6}"#]).unwrap();
+        for _ in 0..3 {
+            let item = claim_pending_sync_items(&db.conn.lock().unwrap(), 1)
+                .unwrap()
+                .remove(0);
+            let before = Utc::now();
+            let (url, server) = spawn_status_json_server_with_retry_after(
+                200,
+                r#"{"success":false,"results":[{"idempotency_key":"original-lock-key","success":false,"status":"error","retryable":true,"retry_after_seconds":30,"message":"Insert race"}]}"#,
+                Some("601".to_string()),
+            );
+            let outcome = sync_financial_batch(
+                &url,
+                "test-key",
+                "term-financial-race",
+                "branch-1",
+                &db,
+                &[&item],
+            )
+            .await
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(outcome.synced, 0);
+            assert!(!outcome.had_non_backpressure_failure);
+            let after = load_sync_item(&db, queue_id);
+            assert_eq!(after.6, after.7 - 1);
+            assert_eq!((after.4, after.5), (item.4, item.5));
+            let next = chrono::DateTime::parse_from_rfc3339(after.8.as_deref().unwrap()).unwrap();
+            assert!(next.with_timezone(&Utc) >= before + ChronoDuration::seconds(601));
+            let conn = db.conn.lock().unwrap();
+            assert!(claim_pending_sync_items(&conn, 1).unwrap().is_empty());
+            conn.execute(
+                "UPDATE sync_queue SET next_retry_at=NULL WHERE id=?1",
+                [queue_id],
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn legacy_remote_lock_retries_preserve_originals_at_budget_ceiling_then_apply() {
         let _keyring =
             crate::tests::fake_keyring::install_seeded([("terminal_id", "term-lock-retry")]);
@@ -31803,6 +33470,18 @@ mod tests {
         let item = load_sync_item(&db, queue_id);
         for error in [
             api::AdminFetchError::statusless("REMOTE_HANDOVER_RETRY HTTP 503"),
+            api::AdminFetchError::from_http_response_for_test(
+                503,
+                r#"{"code":"PAYMENT_REPLAY_CONFLICT","retryable":false}"#,
+            ),
+            api::AdminFetchError::from_http_response_for_test(
+                503,
+                r#"{"code":"PAYMENT_REPLAY_CONFLICT"}"#,
+            ),
+            api::AdminFetchError::from_http_response_for_test(
+                409,
+                r#"{"code":"PAYMENT_REPLAY_CONFLICT","retryable":true}"#,
+            ),
             api::AdminFetchError::from_http_response_for_test(
                 503,
                 r#"{"error":"REMOTE_HANDOVER_RETRY"}"#,
@@ -34233,6 +35912,14 @@ mod tests {
         status: u16,
         body: &'static str,
     ) -> (String, std::thread::JoinHandle<()>) {
+        spawn_status_json_server_with_retry_after(status, body, None)
+    }
+
+    fn spawn_status_json_server_with_retry_after(
+        status: u16,
+        body: &'static str,
+        retry_after: Option<String>,
+    ) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -34242,8 +35929,11 @@ mod tests {
             let (mut stream, _) = listener.accept().expect("accept status mock request");
             let mut buffer = vec![0u8; 16 * 1024];
             let _ = stream.read(&mut buffer).expect("read status mock request");
+            let retry_header = retry_after
+                .map(|value| format!("Retry-After: {value}\r\n"))
+                .unwrap_or_default();
             let response = format!(
-                "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status} Mock\r\n{retry_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -40528,5 +42218,18 @@ mod tests {
                 .unwrap();
             assert_eq!(money, (7.25, 725, 645, 80));
         }
+    }
+}
+
+#[cfg(test)]
+mod hotel_sync_tests {
+    use super::*;
+    #[test]
+    fn hotel_settled_room_charge_cancel_is_not_retried() {
+        assert!(is_permanent_order_sync_error(
+            "HTTP 409: ROOM_CHARGE_IN_SETTLEMENT"
+        ));
+        assert!(is_permanent_order_sync_error("FOLIO_SETTLEMENT_IMMUTABLE"));
+        assert!(!is_permanent_order_sync_error("network timeout"));
     }
 }

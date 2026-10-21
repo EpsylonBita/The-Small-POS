@@ -12,6 +12,8 @@
       "draftRecoveryUnavailable": "La validation initiale ne peut pas être vérifiée. Son panier enregistré reste protégé.",
       "draftPending": "La validation initiale est conservée. Confirmez son résultat avant de lancer un autre paiement.",
       "draftLoading": "Chargement du panier enregistré…",
+      "twintRecoveryPaid": "Le client a payé – terminer le reçu initial",
+      "twintRecoveryNotPaid": "Non payé – annuler le paiement",
       "draftRecover": "Vérifier la validation initiale",
       "draftRecovered": "La commande initiale a été restaurée.",
       "draftExistingTable": "Cette table a déjà une addition ouverte. Ouvrez-la pour ajouter des articles.",

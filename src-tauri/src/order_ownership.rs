@@ -499,6 +499,7 @@ pub(crate) fn courier_order_tender_cents(
                 FROM payment_adjustments pa
                 WHERE pa.payment_id = op.id
                   AND pa.adjustment_type = 'refund'
+                  AND COALESCE(pa.imported_remote, 0) = 0
                   AND {filter}
             ), 0)"
         )
@@ -518,6 +519,7 @@ pub(crate) fn courier_order_tender_cents(
                         SELECT 1 FROM payment_adjustments local_refund
                          WHERE local_refund.payment_id = op.id
                            AND local_refund.adjustment_type = 'refund'
+                           AND COALESCE(local_refund.imported_remote, 0) = 0
                     ))
            )",
         courier_cash = sum_refunds(&format!(

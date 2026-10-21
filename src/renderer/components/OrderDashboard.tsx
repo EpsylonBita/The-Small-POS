@@ -1,3 +1,4 @@
+import { saveOrderWithLoyalty, LoyaltyCheckoutRefused } from '../services/LoyaltyCheckout';
 import React, {
   lazy,
   memo,
@@ -514,6 +515,22 @@ export function OrderPrimaryActionLauncher({
       aria-label={t("primaryActions.trigger")}
     />
   );
+}
+
+export function TableBookingChoice({ reservation, busy, onClose, onWalkIn, onSeat }: {
+  reservation: Reservation | null; busy: boolean; onClose: () => void;
+  onWalkIn: () => void | Promise<void>; onSeat: () => void | Promise<void>;
+}) {
+  const { t } = useI18n();
+  return <LiquidGlassModal isOpen={Boolean(reservation)} onClose={() => { if (!busy) onClose(); }} title={t('verticalReadinessDesk.chooseParty')}>
+    {reservation && <div className="space-y-4 p-4 text-slate-900 dark:text-white">
+      <p>{t('verticalReadinessDesk.bookingDetails', { name: reservation.customerName, time: reservation.reservationTime.slice(0, 5) })}</p>
+      <div className="flex gap-3">
+        <button type="button" disabled={busy} className="min-h-11 rounded-xl border p-3" onClick={onWalkIn}>{t('verticalReadinessDesk.walkIn')}</button>
+        <button type="button" disabled={busy} className="min-h-11 rounded-xl border p-3" onClick={onSeat}>{t('verticalReadinessDesk.seatBooking')}</button>
+      </div>
+    </div>}
+  </LiquidGlassModal>;
 }
 
 export const OrderDashboard = memo<OrderDashboardProps>(
@@ -1330,6 +1347,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       null,
     );
     const [customerInfo, setCustomerInfo] = useState<CustomerInfo | null>(null);
+    const seatedReservationCustomer = useRef<{ tableId: string; sessionId: string; customerId?: string } | null>(null);
     const [orderType, setOrderType] = useState<
       "dine-in" | "pickup" | "delivery"
     >("pickup");
@@ -2355,6 +2373,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowTableCheckManager(true);
     }, []);
 
+    useEffect(() => {
+      const openSeated = () => {
+        const reservation = reservationsService.takeSeatedReservation(effectiveBranchId || branchId || '', organizationId || '');
+        if (!reservation?.tableId || !reservation.tableSessionId) return;
+        const table = tables.find(row => row.id === reservation.tableId);
+        if (!table) {
+          // Keep the intent until this branch's tables are loaded.
+          reservationsService.retainSeatedReservation(reservation);
+          return;
+        }
+        seatedReservationCustomer.current = { tableId: reservation.tableId, sessionId: reservation.tableSessionId, customerId: reservation.customerId || undefined };
+        openTableCheckManager({ ...table, status: 'occupied', tableSessionId: reservation.tableSessionId,
+          guestCount: reservation.partySize, customerName: reservation.customerName });
+        void refetchTables();
+      };
+      openSeated();
+      window.addEventListener('pos:reservation-seated', openSeated);
+      return () => window.removeEventListener('pos:reservation-seated', openSeated);
+    }, [tables, effectiveBranchId, branchId, organizationId, openTableCheckManager, refetchTables]);
+
     // Item D1 (fix review 30/09/2026): releasing a table whose order still
     // owes money asks first (collect, cancel with approval, or keep it as an
     // open tab) instead of leaving the order to linger as an orphan.
@@ -2380,9 +2418,38 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setShowTableActionModal(true);
     }, [openTableCheckManager, tableHasOpenCheck]);
 
+    const selectedTableForNewOrder = selectedTable;
+    const [tableCustomerId, setTableCustomerId] = useState<string | undefined>();
+    const [bookingChoice, setBookingChoice] = useState<{ table: RestaurantTable; guestCount: number; reservation: Reservation } | null>(null);
+    const [bookingChoiceBusy, setBookingChoiceBusy] = useState(false);
+
     // Handle New Order action from TableActionModal
-    const handleTableNewOrder = useCallback((guestCount = 1) => {
+    const handleTableNewOrder = useCallback(async (guestCount = 1, tableOverride?: RestaurantTable, guest?: { id?: string; name?: string; phone?: string; email?: string }, walkInChosen = false) => {
+      const selectedTable = tableOverride || selectedTableForNewOrder;
+      if (hasReservationsModule && selectedTable && !selectedTable.tableSessionId && !guest) {
+        try {
+          reservationsService.setContext(effectiveBranchId || branchId || '', organizationId || '');
+          if (!walkInChosen) {
+            const reservation = await reservationsService.getTodayReservationForTable(selectedTable.id);
+            if (reservation) {
+              setBookingChoice({ table: selectedTable, guestCount, reservation });
+              setShowTableActionModal(false);
+              return;
+            }
+          }
+          // A prior app version may have reserved this table for the whole day.
+          // Only this explicit order action may release that stale projection.
+          if ((selectedTable.status === 'reserved' || (selectedTable as RestaurantTable & { reservationCanonicalStatus?: string }).reservationCanonicalStatus === 'reserved') &&
+              !await updateTableStatus(selectedTable.id, 'available', { __release: true })) throw new Error('TABLE_RELEASE_FAILED');
+        } catch {
+          toast.error(t('tableActionModal.reservationLoadFailed'));
+          return false;
+        }
+      }
       if (selectedTable) {
+        setTableCustomerId(guest?.id);
+        setExistingCustomer(null);
+        setSelectedTable({ ...selectedTable, status: 'occupied' === selectedTable.status ? 'occupied' : 'available' });
         setSelectedOrderType("dine-in");
         setOrderType("dine-in");
         setTableGuestCount(Math.max(1, Math.min(99, Math.trunc(Number(guestCount) || 1))));
@@ -2392,12 +2459,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           // Visible dine-in label only: use the shared display helper so the
           // MenuModal header chip reads "Table #TB01" like the grid/action modal,
           // instead of the raw "P01". The locale string adds no "#" of its own.
-          name:
+          name: guest?.name || selectedTable.customerName ||
             t("orderFlow.tableCustomer", {
               table: formatTableDisplayNumber(selectedTable.tableNumber),
             }) || `Table ${formatTableDisplayNumber(selectedTable.tableNumber)}`,
-          phone: "",
-          email: "",
+          phone: guest?.phone || "",
+          email: guest?.email || "",
           address: {
             street: "",
             city: "",
@@ -2407,8 +2474,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         });
         setShowTableActionModal(false);
         setShowMenuModal(true);
+        return true;
       }
-    }, [selectedTable, t]);
+      return false;
+    }, [selectedTable, t, effectiveBranchId, branchId, organizationId, updateTableStatus, hasReservationsModule]);
 
     // Handle New Reservation action from TableActionModal
     const handleTableNewReservation = useCallback(() => {
@@ -2732,7 +2801,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return;
       }
 
-      handleTableNewOrder(guestCount);
+      handleTableNewOrder(guestCount, { ...table, tableSessionId: session?.id || table.tableSessionId || null }, {
+        id: session?.metadata?.customer_id || session?.customer_id ||
+          (seatedReservationCustomer.current?.tableId === table.id && seatedReservationCustomer.current?.sessionId === session?.id
+            ? seatedReservationCustomer.current.customerId : undefined),
+        name: session?.metadata?.customer_name || table.customerName,
+        phone: session?.metadata?.customer_phone,
+        email: session?.metadata?.customer_email,
+      });
     }, [handleTableNewOrder, orders, silentRefresh, t]);
 
     // Handle menu modal close
@@ -2746,6 +2822,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       // Reset all state
       setPhoneNumber("");
       setCustomerInfo(null);
+      setTableCustomerId(undefined);
       setExistingCustomer(null);
       setSpecialInstructions("");
       setTableNumber("");
@@ -3537,6 +3614,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         return result;
       } else if (customerInfo) {
         const result = {
+          id: orderType === 'dine-in' ? tableCustomerId : undefined,
           name: customerInfo.name,
           phone: customerInfo.phone,
           phone_number: customerInfo.phone,
@@ -4337,6 +4415,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         const persistedCustomerId = resolvePersistedCustomerId(
           orderData.customer?.id,
           existingCustomer?.id,
+          isTableOrder ? tableCustomerId : undefined,
         );
         const askBeforeReceiptPrint =
           !isSplitPayment && !isTableOrder && (Boolean(initialPayment) || isGhostOrder)
@@ -4383,6 +4462,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             ? null
             : paymentMethod || "cash",
           room_id: isRoomChargePayment ? roomId : null,
+          folio_id: isRoomChargePayment ? orderData.paymentData?.folio_id ?? orderData.paymentData?.roomCharge?.activeFolioId ?? null : null,
           roomId: isRoomChargePayment ? roomId : null,
           ...tableOrderCreateFields,
           initialPayment,
@@ -4409,7 +4489,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           orderToCreate,
         );
 
-        const result = await createOrder(orderToCreate as any);
+        const result = await saveOrderWithLoyalty(
+          orderToCreate, hasLoyaltyModule && !isGhostOrder ? loyaltyRedemption : null,
+          bridge.loyalty, () => createOrder(orderToCreate as any),
+          { redemptionSecured: orderData.loyalty_checkout_secured === true, receiptConfirmed: orderData.paymentData?.method === 'twint' },
+        );
 
         if (result.success) {
           createdOrderId = result.orderId;
@@ -4616,54 +4700,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               });
           }
 
-          if (hasLoyaltyModule && !isGhostOrder && loyaltyRedemption && result.orderId) {
-            const redeemCustomerId = resolvePersistedCustomerId(
-              loyaltyRedemption.customer_id,
-              orderToCreate.customer_id,
-              orderToCreate.customerId,
-            );
-            const redeemPoints = Math.max(
-              0,
-              Math.trunc(Number(loyaltyRedemption.points_redeemed || 0)),
-            );
 
-            if (redeemCustomerId && redeemPoints > 0) {
-              bridge.loyalty
-                .redeemPoints({
-                  customerId: redeemCustomerId,
-                  points: redeemPoints,
-                  orderId: result.orderId,
-                })
-                .then((res: any) => {
-                  if (res?.success) {
-                    toast.success(
-                      t("loyalty.redeemSuccess", {
-                        points: redeemPoints,
-                        discount: formatCurrency(
-                          Number(res.discountValue ?? loyaltyDiscountAmount),
-                        ),
-                        defaultValue:
-                          "Redeemed {{points}} points for {{discount}} discount",
-                      }),
-                    );
-                    return undefined;
-                  }
-                  throw new Error(res?.error || "Loyalty redemption failed");
-                })
-                .catch((error: any) => {
-                  console.warn(
-                    "[OrderDashboard] Loyalty redemption failed:",
-                    error,
-                  );
-                  toast.error(
-                    t("loyalty.redeemFailed", {
-                      defaultValue:
-                        "Order saved, but loyalty points were not redeemed",
-                    }),
-                  );
-                });
-            }
-          }
 
           if (result.orderId && !isSplitPayment && !isTableOrder) {
             if (initialPayment) {
@@ -4757,6 +4794,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           return finishOrderCompletion(false);
         }
       } catch (error) {
+        if (error instanceof LoyaltyCheckoutRefused) {
+          toast.error(t('loyalty.checkoutRefused'));
+          return finishOrderCompletion(false);
+        }
         console.error("Error creating order:", error);
         toast.error(t("orderDashboard.orderCreateFailed"));
         // If the order persisted before the throw, finishOrderCompletion still
@@ -8743,6 +8784,25 @@ export const OrderDashboard = memo<OrderDashboardProps>(
             viewOnly={false}
           />
         )}
+
+        <TableBookingChoice reservation={bookingChoice?.reservation || null} busy={bookingChoiceBusy}
+          onClose={() => setBookingChoice(null)}
+          onWalkIn={async () => {
+            if (!bookingChoice) return;
+            setBookingChoiceBusy(true);
+            try { if (await handleTableNewOrder(bookingChoice.guestCount, bookingChoice.table, undefined, true)) setBookingChoice(null); }
+            finally { setBookingChoiceBusy(false); }
+          }}
+          onSeat={async () => {
+            if (!bookingChoice) return;
+            setBookingChoiceBusy(true);
+            try {
+              const seated = await reservationsService.seatReservation(bookingChoice.reservation.id);
+              reservationsService.continueSeatedReservation(seated);
+              setBookingChoice(null);
+            } catch { toast.error(t('reservationInfoPanel.seatError')); }
+            finally { setBookingChoiceBusy(false); }
+          }} />
 
         {/* Existing Modals */}
         <DriverAssignmentModal

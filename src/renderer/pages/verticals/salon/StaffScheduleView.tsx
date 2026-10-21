@@ -38,6 +38,7 @@ import {
   evaluateShiftDuration,
   shouldRollEndToNextDay,
 } from '../../../utils/staff-shift-duration';
+import { branchWallTime, branchWallTimeToIso } from '../../../utils/branch-time';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 interface StaffMember {
@@ -163,18 +164,6 @@ const localDateKey = (date: Date): string =>
 
 const toDateInputValue = (date: Date): string => localDateKey(date);
 
-const toIsoFromDateAndTimeParts = (dateValue: string, hourValue: string, minuteValue: string): string | null => {
-  if (!dateValue || hourValue === '' || minuteValue === '') {
-    return null;
-  }
-  const iso = new Date(`${dateValue}T${hourValue}:${minuteValue}:00`);
-  if (Number.isNaN(iso.getTime()) || localDateKey(iso) !== dateValue ||
-    pad(iso.getHours()) !== hourValue || pad(iso.getMinutes()) !== minuteValue) {
-    return null;
-  }
-  return iso.toISOString();
-};
-
 const parseDate = (value?: string | null): Date | null => {
   if (!value) {
     return null;
@@ -195,12 +184,12 @@ const startOfWeekMonday = (date: Date): Date => {
   return local;
 };
 
-const formatTimeRange = (start: Date, end: Date | null): string => {
-  const startLabel = formatTime(start, { hour: '2-digit', minute: '2-digit' });
+const formatTimeRange = (start: Date, end: Date | null, timeZone: string): string => {
+  const startLabel = formatTime(start, { timeZone, hour: '2-digit', minute: '2-digit' });
   if (!end) {
     return `${startLabel} - ?`;
   }
-  const endLabel = formatTime(end, { hour: '2-digit', minute: '2-digit' });
+  const endLabel = formatTime(end, { timeZone, hour: '2-digit', minute: '2-digit' });
   return `${startLabel} - ${endLabel}`;
 };
 
@@ -288,6 +277,19 @@ export const StaffScheduleView: React.FC = memo(() => {
   const isDark = resolvedTheme === 'dark';
   const bridge = getBridge();
   const branchId = getSetting<string>('terminal', 'branch_id', '');
+  const retainedZone = getSetting<string>('terminal', 'hotel_timezone', '');
+  const zoneBranch = getSetting<string>('terminal', 'hotel_timezone_branch_id', '');
+  const timeZone = useMemo(() => {
+    if (!retainedZone || zoneBranch !== branchId) return '';
+    try { branchWallTime(new Date(), retainedZone); return retainedZone; } catch { return ''; }
+  }, [retainedZone, zoneBranch, branchId]);
+  const businessDateKey = (date: Date) => timeZone ? branchWallTime(date, timeZone).slice(0, 10) : '';
+  const toIsoFromDateAndTimeParts = (date: string, hour: string, minute: string): string | null => {
+    try { return branchWallTimeToIso(`${date}T${hour}:${minute}:00`, timeZone); } catch { return null; }
+  };
+  useEffect(() => {
+    if (timeZone) setCurrentWeekStart(startOfWeekMonday(new Date(`${branchWallTime(new Date(), timeZone).slice(0, 10)}T12:00:00`)));
+  }, [timeZone]);
 
   const weekDays = useMemo(() => {
     return Array.from({ length: 7 }, (_, i) => {
@@ -300,6 +302,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   const weekDateSet = useMemo(() => new Set(weekDays.map(localDateKey)), [weekDays]);
 
   const fetchStaffData = useCallback(async () => {
+    if (!timeZone) return;
     setLoading(true);
     setError(null);
 
@@ -308,9 +311,11 @@ export const StaffScheduleView: React.FC = memo(() => {
       weekEnd.setDate(weekEnd.getDate() + 6);
       weekEnd.setHours(23, 59, 59, 999);
 
+      const startBound = branchWallTimeToIso(`${localDateKey(currentWeekStart)}T00:00:00`, timeZone);
+      const endBound = branchWallTimeToIso(`${localDateKey(weekEnd)}T23:59:59`, timeZone);
       const params = new URLSearchParams({
-        start_date: currentWeekStart.toISOString(),
-        end_date: weekEnd.toISOString(),
+        start_date: startBound,
+        end_date: endBound,
       });
 
       if (branchId) {
@@ -322,8 +327,8 @@ export const StaffScheduleView: React.FC = memo(() => {
       const response = isBrowser()
         ? await posApiGet<ApiResponse>(`/pos/staff-schedule?${params.toString()}`)
         : await bridge.staffSchedule.list({
-            start_date: currentWeekStart.toISOString(),
-            end_date: weekEnd.toISOString(),
+            start_date: startBound,
+            end_date: endBound,
             branch_id: branchId || undefined,
             role: roleFilter === 'all' ? undefined : roleFilter,
           }) as ApiResponse;
@@ -352,7 +357,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     } finally {
       setLoading(false);
     }
-  }, [branchId, currentWeekStart, roleFilter, t]);
+  }, [branchId, currentWeekStart, roleFilter, t, timeZone]);
 
   useEffect(() => {
     fetchStaffData();
@@ -479,7 +484,7 @@ export const StaffScheduleView: React.FC = memo(() => {
         continue;
       }
 
-      if (!weekDateSet.has(localDateKey(start))) {
+      if (!weekDateSet.has(businessDateKey(start))) {
         continue;
       }
 
@@ -506,7 +511,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
     normalized.sort((a, b) => a.start.getTime() - b.start.getTime());
     return normalized;
-  }, [roleFilter, displayShifts, staffMap, t, weekDateSet]);
+  }, [roleFilter, displayShifts, staffMap, t, weekDateSet, timeZone]);
 
   const shiftsByDay = useMemo(() => {
     const grouped: Record<string, WeeklyShift[]> = {};
@@ -516,7 +521,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     }
 
     for (const shift of weeklyShifts) {
-      const key = localDateKey(shift.start);
+      const key = businessDateKey(shift.start);
       if (!grouped[key]) {
         grouped[key] = [];
       }
@@ -524,7 +529,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     }
 
     return grouped;
-  }, [weekDays, weeklyShifts]);
+  }, [weekDays, weeklyShifts, timeZone]);
 
   const weekLabel = useMemo(() => {
     const startLabel = formatDate(currentWeekStart, { day: 'numeric', month: 'short' });
@@ -533,7 +538,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     return `${startLabel} - ${endLabel}`;
   }, [currentWeekStart, weekDays]);
 
-  const todayKey = localDateKey(new Date());
+  const todayKey = businessDateKey(new Date());
   const todayShiftsCount = (shiftsByDay[todayKey] || []).length;
   const scheduledStaffCount = useMemo(() => new Set(weeklyShifts.map(shift => shift.staffId)).size, [weeklyShifts]);
   const scheduledStaffSet = useMemo(() => new Set(weeklyShifts.map(shift => shift.staffId)), [weeklyShifts]);
@@ -545,14 +550,14 @@ export const StaffScheduleView: React.FC = memo(() => {
         shiftsByDay: Object.fromEntries(
           weekDays.map(day => [
             localDateKey(day),
-            weeklyShifts.filter(shift => shift.staffId === member.id && localDateKey(shift.start) === localDateKey(day)),
+            weeklyShifts.filter(shift => shift.staffId === member.id && businessDateKey(shift.start) === localDateKey(day)),
           ]),
         ) as Record<string, WeeklyShift[]>,
       }))
       .filter(row => weekDays.some(day => row.shiftsByDay[localDateKey(day)]?.length > 0));
-  }, [filteredStaff, weekDays, weeklyShifts]);
+  }, [filteredStaff, weekDays, weeklyShifts, timeZone]);
   const defaultCreateDate = useMemo(
-    () => (weekDateSet.has(todayKey) ? new Date() : new Date(currentWeekStart)),
+    () => (weekDateSet.has(todayKey) ? new Date(`${todayKey}T12:00:00`) : new Date(currentWeekStart)),
     [currentWeekStart, todayKey, weekDateSet],
   );
   const refreshScheduleLabel = t('staffSchedule.actions.refresh', 'Refresh schedule');
@@ -592,14 +597,17 @@ export const StaffScheduleView: React.FC = memo(() => {
       toast.error(t('staffSchedule.workflow.identityPending', 'Wait for this schedule to sync, then refresh before editing.'));
       return;
     }
-    openCreateModal(shift.start, shift.staffId);
+    if (!timeZone) return;
+    const startWall = branchWallTime(shift.start, timeZone);
+    openCreateModal(new Date(`${startWall.slice(0, 10)}T12:00:00`), shift.staffId);
     setEditingShiftId(shift.id);
-    setCreateStartHour(pad(shift.start.getHours()));
-    setCreateStartMinute(pad(shift.start.getMinutes()));
+    setCreateStartHour(startWall.slice(11, 13));
+    setCreateStartMinute(startWall.slice(14, 16));
     if (shift.end) {
-      setCreateEndDate(toDateInputValue(shift.end));
-      setCreateEndHour(pad(shift.end.getHours()));
-      setCreateEndMinute(pad(shift.end.getMinutes()));
+      const endWall = branchWallTime(shift.end, timeZone);
+      setCreateEndDate(endWall.slice(0, 10));
+      setCreateEndHour(endWall.slice(11, 13));
+      setCreateEndMinute(endWall.slice(14, 16));
     }
     setCreateNotes(original.notes || '');
     setConfirmDelete(deleting);
@@ -781,6 +789,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     setImportingSchedule(true);
     try {
       const result = await importStaffScheduleFile(file, {
+        timeZone,
         staffList: staff.map(member => ({
           id: member.id,
           firstName: member.firstName,
@@ -1003,9 +1012,9 @@ export const StaffScheduleView: React.FC = memo(() => {
       : t('shift.duration', '{{hours}}h {{minutes}}m', { hours, minutes });
     return {
       valid: true,
-      message: `${formatDate(start, { day: '2-digit', month: 'short' })} ${formatTime(start, { hour: '2-digit', minute: '2-digit' })} -> ${formatDate(end, { day: '2-digit', month: 'short' })} ${formatTime(end, { hour: '2-digit', minute: '2-digit' })} (${durationLabel})`,
+      message: `${formatDate(start, { timeZone, day: '2-digit', month: 'short' })} ${formatTime(start, { timeZone, hour: '2-digit', minute: '2-digit' })} -> ${formatDate(end, { timeZone, day: '2-digit', month: 'short' })} ${formatTime(end, { timeZone, hour: '2-digit', minute: '2-digit' })} (${durationLabel})`,
     };
-  }, [createStartDate, createStartHour, createStartMinute, createEndDate, createEndHour, createEndMinute, t]);
+  }, [createStartDate, createStartHour, createStartMinute, createEndDate, createEndHour, createEndMinute, t, timeZone]);
 
   const panelClass = isDark
     ? 'bg-zinc-950/95 border-zinc-800 text-zinc-100'
@@ -1035,6 +1044,8 @@ export const StaffScheduleView: React.FC = memo(() => {
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100 active:bg-zinc-800'
       : 'bg-white border-slate-300 text-slate-800 active:bg-slate-100'
   }`;
+
+  if (!timeZone) return <p role="status" className="p-6">{t('verticalReadinessDesk.timezoneUnavailable')}</p>;
 
   if (loading) {
     return (
@@ -1346,7 +1357,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                               </p>
                               <p className={`mt-1 inline-flex items-center gap-1 text-base font-bold ${isDark ? 'text-zinc-100' : 'text-slate-950'}`}>
                                 <Clock className="h-4 w-4" />
-                                {formatTimeRange(shift.start, shift.end)}
+                                {formatTimeRange(shift.start, shift.end, timeZone)}
                               </p>
                             </motion.div>
                           ))
@@ -1499,7 +1510,7 @@ export const StaffScheduleView: React.FC = memo(() => {
                                       className={`rounded-2xl border-l-4 px-2 py-2 ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-slate-50 border-slate-200'}`}
                                       style={{ borderLeftColor: shift.roleColor }}
                                     >
-                                      <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end)}</p>
+                                      <p className="text-base font-bold leading-tight">{formatTimeRange(shift.start, shift.end, timeZone)}</p>
                                     </div>
                                   ))}
                                 </div>

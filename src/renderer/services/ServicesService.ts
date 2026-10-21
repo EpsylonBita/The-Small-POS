@@ -19,6 +19,10 @@ export interface Service {
   price: number;
   isActive: boolean;
   staffIds: string[];
+  vatCategoryCode: string | null;
+  priceIncludesVat: boolean;
+  taxExemptionReason: string | null;
+  fiscalDocumentProfile: string | null;
   createdAt: string;
   updatedAt: string;
   category?: ServiceCategory | null;
@@ -77,6 +81,10 @@ function transformFromAPI(data: any): Service {
     price: parseFloat(data.price) || 0,
     isActive: data.is_active,
     staffIds: data.staff_ids || [],
+    vatCategoryCode: data.vat_category_code ?? null,
+    priceIncludesVat: data.price_includes_vat ?? true,
+    taxExemptionReason: data.tax_exemption_reason ?? null,
+    fiscalDocumentProfile: data.fiscal_document_profile ?? null,
     createdAt: data.created_at,
     updatedAt: data.updated_at,
     category: data.category ? transformCategoryFromAPI(data.category) : null,

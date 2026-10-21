@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../../lib', () => ({ getBridge: () => ({}) }));
 vi.mock('../terminal-credentials', () => ({ refreshTerminalCredentialCache: vi.fn() }));
-import { CheckoutDraftStore, createCheckoutDraft, getCheckoutDraftStore } from '../CheckoutDraftStore';
+import { confirmPaymentAdmission, CheckoutDraftStore, createCheckoutDraft, getCheckoutDraftStore } from '../CheckoutDraftStore';
 import { refreshTerminalCredentialCache } from '../terminal-credentials';
 import { buildOrderServiceTableMetadata } from '../../utils/tableOrderFlow';
 const scope = { organizationId: 'org', branchId: 'branch', terminalId: 'terminal' };
@@ -203,4 +203,94 @@ describe('CheckoutDraftStore durable identity', () => {
     expect(await owner.load()).toEqual(pending);
     await expect(owner.clear(pending.draftId)).rejects.toThrow('AWAITING_RECONCILIATION');
   });
+});
+
+
+it('only adds confirmation evidence to the durably admitted payment', async () => {
+  let saved: any = null; let generation = 0;
+  const owner = new CheckoutDraftStore(scope, async (command, input) => {
+    if (command === 'checkout_draft_put') { saved = input.draft; generation++; }
+    return { success: true, scope, generation, draft: saved };
+  });
+  const admitted = { ...cart(), phase: 'checkout_pending' as const, state: { paymentAdmission: 'admitted' },
+    submission: { clientRequestId: 'original', total: 7.2, coupon_discount_amount: 0.8,
+      paymentData: { method: 'twint', amount: 7.2, currency: 'CHF', idempotencyKey: 'receipt-1' } } };
+  await owner.save(admitted);
+  const confirmed = confirmPaymentAdmission(admitted, { ...admitted.submission.paymentData, metadata: { confirmation_action: 'confirm' } });
+  await owner.save(confirmed);
+  expect(saved.submission.total).toBe(7.2);
+  expect(saved.submission.paymentData.metadata.confirmation_action).toBe('confirm');
+  expect(() => confirmPaymentAdmission(admitted, { ...admitted.submission.paymentData, amount: 8 })).toThrow('PAYMENT_CHANGED');
+  await expect(owner.save({ ...confirmed, submission: { ...confirmed.submission, total: 8 } })).rejects.toThrow('AWAITING_RECONCILIATION');
+});
+
+
+it.each(['before_commit', 'lost_reply'])('recovers admission confirmation with its original totals after %s', async failure => {
+  let saved: any = null; let generation = 0; let fail = true;
+  const native = vi.fn(async (command: string, input: any) => {
+    if (command === 'checkout_draft_put') {
+      const confirmation = input.draft.state.paymentAdmission === 'confirmed';
+      if (confirmation && fail && failure === 'before_commit') { fail = false; throw new Error('DISK_UNAVAILABLE'); }
+      saved = input.draft; generation++;
+      if (confirmation && fail) { fail = false; throw new Error('IPC_REPLY_LOST'); }
+    }
+    return { success: true, scope, generation, draft: saved };
+  });
+  const owner = new CheckoutDraftStore(scope, native);
+  const admitted = { ...cart(), phase: 'checkout_pending' as const, state: { paymentAdmission: 'admitted' },
+    submission: { total: 7.2, paymentData: { method: 'twint', amount: 7.2, currency: 'CHF', idempotencyKey: 'original' } } };
+  await owner.save(admitted);
+  const confirmed = confirmPaymentAdmission(admitted, { ...admitted.submission.paymentData, metadata: { confirmation_action: 'confirm' } });
+  await expect(owner.save(confirmed)).rejects.toThrow();
+  expect(await owner.retryFrozenSave(confirmed, () => true)).toEqual(confirmed);
+  expect(saved.submission.total).toBe(7.2);
+  expect(saved.submission.paymentData.idempotencyKey).toBe('original');
+});
+
+it.each(['not_found', 'held'])('only cancels an unconfirmed admission with a no-write inspection: %s', async outcome => {
+  let saved: any = null; let generation = 0;
+  const native = vi.fn(async (command: string, input: any) => {
+    if (command === 'checkout_draft_inspect') return { success: true, outcome, canCollect: false };
+    if (command === 'checkout_draft_put') { saved = input.draft; generation++; }
+    return { success: true, scope, generation, draft: saved };
+  });
+  const owner = new CheckoutDraftStore(scope, native);
+  const admitted = { ...cart(), phase: 'checkout_pending' as const, state: { paymentAdmission: 'admitted' }, submission: { paymentData: { method: 'twint', amount: 7.2 } } };
+  await owner.save(admitted);
+  if (outcome === 'held') {
+    await expect(owner.cancelPaymentAdmission()).rejects.toThrow('AWAITING_RECONCILIATION');
+    expect(saved.phase).toBe('checkout_pending');
+  } else {
+    expect((await owner.cancelPaymentAdmission()).phase).toBe('editing');
+    expect(saved.checkoutRequestId).toBe(admitted.checkoutRequestId);
+    expect(saved.submission).toBeUndefined();
+  }
+});
+
+
+it.each(['write-fails', 'release-fails', 'ok'])('invalidates a cancelled admission durably before releasing its debit: %s', async failure => {
+  let saved: any = null; let generation = 0; let cancel = false;
+  const native = vi.fn(async (command: string, input: any) => {
+    if (command === 'checkout_draft_inspect') return { success: true, outcome: 'not_found', canCollect: false };
+    if (command === 'checkout_draft_put') {
+      if (cancel && failure === 'write-fails') throw new Error('DISK_UNAVAILABLE');
+      saved = input.draft; generation++;
+    }
+    if (command === 'loyalty_release_redemption') {
+      expect(saved.phase).toBe('editing');
+      expect(saved.submission).toBeUndefined();
+      if (failure === 'release-fails') throw new Error('IPC_LOST');
+    }
+    return { success: true, scope, generation, draft: saved };
+  });
+  const owner = new CheckoutDraftStore(scope, native);
+  await owner.save({ ...cart(), phase: 'checkout_pending', state: { paymentAdmission: 'admitted', appliedLoyaltyRedemption: { pointsRedeemed: 100 } },
+    submission: { loyalty_checkout_secured: true, paymentData: { method: 'twint', amount: 7 } } });
+  cancel = true;
+  if (failure === 'ok') await owner.cancelPaymentAdmission();
+  else await expect(owner.cancelPaymentAdmission()).rejects.toThrow(failure === 'write-fails' ? 'DISK_UNAVAILABLE' : 'IPC_LOST');
+  if (failure === 'write-fails') {
+    expect(native.mock.calls.some(([command]) => command === 'loyalty_release_redemption')).toBe(false);
+    expect(saved.phase).toBe('checkout_pending');
+  } else expect(saved.submission).toBeUndefined();
 });

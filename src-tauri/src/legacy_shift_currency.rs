@@ -209,7 +209,9 @@ pub(crate) fn confirm(
         (session_staff.to_string(), "cash_drawer_control")
     };
     {
-        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let conn = db
+            .lock_traced("shift_confirm_legacy_currency")
+            .map_err(|error| error.to_string())?;
         let proposal = proposal(&conn, shift_id)?;
         if proposal.currency != currency {
             return Err("LEGACY_SHIFT_CURRENCY_CONFLICT".into());

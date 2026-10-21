@@ -951,6 +951,128 @@ fn debit_local_loyalty_balance(
     Ok(changed == 1)
 }
 
+/// Called inside the owning transaction. The marker makes balance compensation
+/// idempotent while retaining the original local ledger evidence.
+pub(crate) fn reverse_local_loyalty_transaction(
+    conn: &rusqlite::Connection,
+    org_id: &str,
+    tx_id: &str,
+) -> Result<bool, String> {
+    let original: Option<(String, i64, String)> = conn
+        .query_row(
+            "SELECT customer_id, points, transaction_type FROM loyalty_transactions
+         WHERE id = ?1 AND organization_id = ?2
+           AND COALESCE(sync_last_error, '') != 'LOYALTY_LOCAL_REVERSED'",
+            params![tx_id, org_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("loyalty reversal read: {e}"))?;
+    let Some((customer_id, points, tx_type)) = original else {
+        return Ok(false);
+    };
+    let changed = conn
+        .execute(
+            "UPDATE loyalty_customers SET points_balance = points_balance - ?1,
+         total_redeemed = MAX(0, total_redeemed - ?2),
+         total_earned = MAX(0, total_earned - ?3), updated_at = ?4
+         WHERE customer_id = ?5 AND organization_id = ?6",
+            params![
+                points,
+                if tx_type == "redeem" { -points } else { 0 },
+                if tx_type == "earn" { points } else { 0 },
+                Utc::now().to_rfc3339(),
+                customer_id,
+                org_id
+            ],
+        )
+        .map_err(|e| format!("loyalty reversal balance: {e}"))?;
+    if changed != 1 {
+        return Err("Loyalty reversal customer missing".into());
+    }
+    if tx_type == "earn" {
+        conn.execute(
+            "UPDATE loyalty_customers SET tier = CASE
+             WHEN total_earned >= COALESCE((SELECT tier_platinum_threshold FROM loyalty_settings WHERE organization_id = ?1), 5000) THEN 'platinum'
+             WHEN total_earned >= COALESCE((SELECT tier_gold_threshold FROM loyalty_settings WHERE organization_id = ?1), 2000) THEN 'gold'
+             WHEN total_earned >= COALESCE((SELECT tier_silver_threshold FROM loyalty_settings WHERE organization_id = ?1), 500) THEN 'silver'
+             WHEN total_earned >= COALESCE((SELECT tier_bronze_threshold FROM loyalty_settings WHERE organization_id = ?1), 0) THEN 'bronze'
+             ELSE 'none' END WHERE organization_id = ?1 AND customer_id = ?2",
+            params![org_id, customer_id],
+        ).map_err(|e| format!("loyalty reversal tier: {e}"))?;
+    }
+    conn.execute(
+        "UPDATE loyalty_transactions SET sync_state = 'applied', sync_last_error = 'LOYALTY_LOCAL_REVERSED'
+         WHERE id = ?1 AND organization_id = ?2", params![tx_id, org_id],
+    ).map_err(|e| format!("loyalty reversal ledger: {e}"))?;
+    Ok(true)
+}
+
+fn release_checkout_redemption(
+    conn: &rusqlite::Connection,
+    org_id: &str,
+    checkout_id: &str,
+) -> Result<(), String> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
+        // A lost save acknowledgement must never release a persisted sale's debit.
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE organization_id = ?1 AND (id = ?2 OR client_request_id = ?2))",
+            params![org_id, checkout_id], |row| row.get(0),
+        ).map_err(|e| format!("loyalty release order: {e}"))?;
+        if exists {
+            return Ok(());
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM loyalty_transactions WHERE organization_id = ?1 AND order_id = ?2
+             AND transaction_type = 'redeem' AND sync_state = 'pending'",
+            )
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map(params![org_id, checkout_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for id in ids {
+            // Only checkout reservations wait locally before an order exists.
+            let reserved: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name = 'loyalty_transactions'
+                 AND record_id = ?1 AND organization_id = ?2 AND json_extract(data, '$.checkout_reservation') = 1)",
+                params![id, org_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if !reserved {
+                return Err("Loyalty redemption is not a checkout reservation".into());
+            }
+            reverse_local_loyalty_transaction(conn, org_id, &id)?;
+            conn.execute("DELETE FROM parity_sync_queue WHERE table_name = 'loyalty_transactions' AND record_id = ?1 AND organization_id = ?2", params![id, org_id])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| e.to_string()),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn loyalty_release_redemption(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    let payload = arg0.unwrap_or(serde_json::json!({}));
+    let order_id = value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
+    let org_id = get_organization_id(&db).ok_or("Organization not configured")?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    release_checkout_redemption(&conn, &org_id, &order_id)?;
+    Ok(serde_json::json!({ "success": true }))
+}
+
 /// Redeem points from a customer's balance for a discount. Creates a pending
 /// transaction in loyalty_transactions and enqueues it for sync.
 #[tauri::command]
@@ -966,6 +1088,20 @@ pub async fn loyalty_redeem_points(
         .and_then(|v| v.as_i64())
         .ok_or_else(|| "Missing points".to_string())?;
     let order_id = value_str(&payload, &["orderId", "order_id"]);
+
+    let checkout_reservation = payload
+        .get("checkoutReservation")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if checkout_reservation
+        && order_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Err("Missing checkout identity".into());
+    }
 
     if points <= 0 {
         return Err("Points to redeem must be positive".into());
@@ -1023,6 +1159,7 @@ pub async fn loyalty_redeem_points(
                    AND organization_id = ?2
                    AND order_id = ?3
                    AND transaction_type = 'redeem'
+                   AND COALESCE(sync_last_error, '') != 'LOYALTY_LOCAL_REVERSED'
                  ORDER BY created_at ASC
                  LIMIT 1",
                 params![
@@ -1111,6 +1248,7 @@ pub async fn loyalty_redeem_points(
             "order_id": order_id,
             "description": description,
             "discount_value": discount_value,
+            "checkout_reservation": checkout_reservation,
             "created_at": now,
         });
         // In the redemption's transaction: a refused row (a full queue)
@@ -1217,6 +1355,116 @@ mod tests {
             &Some("2".to_string())
         ));
         assert!(loyalty_snapshot_revision_confirmed(&None, &None));
+    }
+
+    fn checkout_redemption_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations_for_test(&conn);
+        sync_queue::create_tables(&conn).unwrap();
+        conn.execute_batch("INSERT INTO loyalty_customers (id, user_profile_id, customer_id, organization_id, points_balance, total_redeemed)
+            VALUES ('balance', 'profile-1', 'customer-1', 'org-1', 20, 100);
+            INSERT INTO loyalty_transactions (id, customer_id, organization_id, points, transaction_type, order_id)
+            VALUES ('redemption', 'customer-1', 'org-1', -100, 'redeem', 'checkout-1');
+            INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id)
+            VALUES ('redemption-queue', 'loyalty_transactions', 'redemption', 'INSERT',
+                '{\"checkout_reservation\":true}', 'org-1');").unwrap();
+        conn
+    }
+
+    #[test]
+    fn checkout_redemption_release_is_idempotent_and_org_scoped() {
+        let conn = checkout_redemption_connection();
+        release_checkout_redemption(&conn, "other-org", "checkout-1").unwrap();
+        assert_eq!(
+            conn.query_row("SELECT points_balance FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+        release_checkout_redemption(&conn, "org-1", "checkout-1").unwrap();
+        release_checkout_redemption(&conn, "org-1", "checkout-1").unwrap();
+        assert_eq!(
+            conn.query_row("SELECT points_balance FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            120
+        );
+        assert_eq!(
+            conn.query_row("SELECT total_redeemed FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn checkout_redemption_release_keeps_a_persisted_orders_debit() {
+        let conn = checkout_redemption_connection();
+        conn.execute("INSERT INTO orders (id, organization_id, client_request_id, items, total_amount) VALUES ('order-1', 'org-1', 'checkout-1', '[]', 10)", []).unwrap();
+        release_checkout_redemption(&conn, "org-1", "checkout-1").unwrap();
+        assert_eq!(
+            conn.query_row("SELECT points_balance FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn checkout_redemption_release_rolls_back_if_queue_removal_fails() {
+        let conn = checkout_redemption_connection();
+        conn.execute_batch("CREATE TRIGGER refuse_queue_delete BEFORE DELETE ON parity_sync_queue BEGIN SELECT RAISE(ABORT, 'disk failure'); END;").unwrap();
+        assert!(release_checkout_redemption(&conn, "org-1", "checkout-1").is_err());
+        assert_eq!(
+            conn.query_row("SELECT points_balance FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+        assert_eq!(
+            conn.query_row("SELECT sync_state FROM loyalty_transactions", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "pending"
+        );
+    }
+
+    #[test]
+    fn ended_earn_reversal_removes_cached_credit_and_recalculates_tier_once() {
+        let conn = checkout_redemption_connection();
+        conn.execute_batch("UPDATE loyalty_transactions SET points = 100, transaction_type = 'earn';
+            UPDATE loyalty_customers SET points_balance = 120, total_earned = 550, total_redeemed = 0, tier = 'silver';").unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        reverse_local_loyalty_transaction(&conn, "org-1", "redemption").unwrap();
+        assert!(!reverse_local_loyalty_transaction(&conn, "org-1", "redemption").unwrap());
+        conn.execute_batch("COMMIT").unwrap();
+        let cached = conn
+            .query_row(
+                "SELECT points_balance, total_earned, tier FROM loyalty_customers",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(cached, (20, 450, "bronze".into()));
     }
 
     fn setup_loyalty_customers_table(conn: &Connection) {

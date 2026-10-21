@@ -33,13 +33,13 @@ test('ReservationInfoPanel is touch-first with labelled close and semantic actio
   assert.match(source, /type="button"/);
 });
 
-test('ReservationInfoPanel preserves seating behavior and removes legacy blue hover chrome', () => {
+test('ReservationInfoPanel requires a canonical seating acknowledgement and removes legacy blue hover chrome', () => {
   const source = readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /await reservationsService\.updateStatus\(reservation\.id, 'seated'\)/);
-  assert.match(source, /await reservationsService\.updateTableStatus\(tableId, 'occupied'\)/);
-  assert.match(source, /onSeatGuest\?\.\(reservation\)/);
-  assert.match(source, /onNavigateToMenu\(tableId, tableNumber\)/);
+  assert.match(source, /await reservationsService\.seatReservation\(reservation\.id\)/);
+  assert.doesNotMatch(source, /updateTableStatus\(tableId, 'occupied'\)/);
+  assert.match(source, /onSeatGuest\?\.\(seated\)/);
+  assert.match(source, /reservationsService\.continueSeatedReservation\(seated\)/);
   assert.match(source, /onClose\(\)/);
   assert.match(source, /<Loader2 className="w-8 h-8 animate-spin text-yellow-400" \/>/);
   assert.doesNotMatch(source, /hover:|dark:hover:|group-hover:/);

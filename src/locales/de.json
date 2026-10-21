@@ -3563,6 +3563,8 @@
       "manage": "Verwalten"
     },
     "financial": {
+      "incomingRecovery": "Zahlungskopien müssen wiederhergestellt werden: {{count}}. Nach wiederholten Fehlern pausiert der Download. Lesen Sie die aktuellen Serverdaten erneut; es wird nichts belastet oder verworfen.",
+      "incomingRetry": "Zahlungen erneut herunterladen",
       "title": "Finanztransaktionen",
       "subtitle": "Ausstehende und fehlgeschlagene Finanzsync-Einträge verwalten",
       "driver": "Fahrereinnahmen-Sync",
@@ -5837,6 +5839,8 @@
         "noCapture": "Die letzte Anfrage hat keine Rückgabe auf der Geschenkkarte hinterlassen: Es wurde nichts zurückgegeben. Sie können sie erneut starten."
       },
       "statusSetAside": "Zur Prüfung zurückgestellt",
+      "canonicalRefreshRequired": "Der aktuelle Zahlungsstand konnte nicht gelesen werden. Versuchen Sie es erneut, bevor Sie Geld zurückgeben.",
+      "canonicalReturnFinal": "Diese Zahlung wurde bereits zurückerstattet und kann nicht erneut erstattet werden.",
       "placeholderNotMoney": "Diese Zahlungszeile erfasst kein Geld (die Kasse hat sie aus der Kennzeichnung der Bestellung abgeleitet): Sie kann weder erstattet noch storniert werden. Stellen Sie die Zahlungen der Bestellung mit „Jetzt synchronisieren“ vom Server wieder her.",
       "otherRefund": "Gleiche Zahlungsart (andere)",
       "tenderRequired": "Wählen Sie, wie die Erstattung ausgezahlt wurde",
@@ -7261,6 +7265,14 @@
     "connect": "Verbinden & Synchronisieren"
   },
   "productCatalog": {
+    "retailReadiness": {
+      "chooseVariant": "Variante auswählen — {{name}}",
+      "stock": "Bestand: {{quantity}}",
+      "readScale": "Waage ablesen",
+      "scaleNotReady": "Kein aktuelles, stabiles Gewicht. Prüfe die Waage oder gib die Menge manuell ein.",
+      "variantUnavailable": "Diese Variante ist nicht verfügbar. Aktualisiere den Katalog und versuche es erneut.",
+      "invalidScaleLabel": "Dieses Waagenetikett kann nicht verwendet werden. Prüfe den Einheitspreis und gib die Menge manuell ein."
+    },
     "title": "Produktkatalog",
     "scanBarcode": "Barcode scannen oder SKU eingeben...",
     "scanning": "Scannen...",
@@ -7842,6 +7854,7 @@
     "insufficientPoints": "Mindestens {{min}} Punkte erforderlich",
     "redeemSuccess": "{{points}} Punkte für {{discount}} Rabatt eingelöst",
     "redeemFailed": "Bestellung gespeichert, aber Treuepunkte wurden nicht eingelöst",
+    "checkoutRefused": "Treuepunkte konnten nicht reserviert werden. Die Bestellung wurde nicht gespeichert. Entfernen Sie die Einlösung oder versuchen Sie es erneut.",
     "redeemPrepared": "{{points}} Punkte bereit für {{discount}} Rabatt",
     "noCustomerSelected": "Wählen Sie einen gespeicherten Kunden aus, um Punkte einzulösen",
     "moduleUnavailable": "Das Treuemodul ist auf diesem Terminal nicht aktiviert",
@@ -10152,5 +10165,66 @@
     "refusal": "Ohne Verbindung lässt sich der Tag nicht abschließen. Verkaufen Sie weiter: Der Tag bleibt offen, und Sie schließen ihn, sobald die Verbindung zurück ist. Um die Kasse jetzt zu zählen, nutzen Sie den Kassiererabschluss, der auch ohne Internet druckt, und die Vorschau auf diesem Bildschirm.",
     "status": "Keine Verbindung: Der Tag wird abgeschlossen, sobald sie zurück ist",
     "checklist": "Keine Verbindung zum Server. Verkaufen Sie weiter und schließen Sie den Tag, sobald die Verbindung zurück ist."
+  },
+  "salonSale": {
+    "newSale": "Neuer Dienstleistungsverkauf",
+    "existingTicket": "Für diesen Termin gibt es bereits einen Beleg. Öffne ihn unter Bestellungen, um die Zahlung zu prüfen.",
+    "checkout": "Kassieren",
+    "add": "Zum Beleg hinzufügen",
+    "title": "Dienstleistungsverkauf",
+    "search": "Dienstleistungen und Produkte suchen…",
+    "pendingSync": "Warte vor dem Kassieren, bis dieser Termin synchronisiert ist.",
+    "unavailable": "Die Leistungsdetails sind nicht verfügbar. Aktualisiere und versuche es erneut."
+  },
+  "hotelDeskArrival": { "guestCount": "Anzahl der Gäste" },
+  "hotelDeskService": {
+    "title": "Dienstleistung bezahlen",
+    "room": "Auf ein belegtes Zimmer buchen",
+    "chooseRoom": "Zimmer auswählen",
+    "loading": "Belegte Zimmer werden geladen…",
+    "noRooms": "Kein belegtes Zimmer mit aktiver Gästerechnung in der Ladenwährung verfügbar. Du kannst jetzt kassieren.",
+    "hint": "Wähle das Zimmer des Gastes, um beim Bezahlen die Zimmerbuchung anzubieten.",
+    "collectNow": "Jetzt kassieren",
+    "useRoom": "Dieses Zimmer verwenden"
+  },
+  "hotelMoney": {
+    "refund": "Erstattung",
+    "collect": "Gästekonto kassieren",
+    "statement": "Gästekontoauszug",
+    "vatCategory": "MwSt.-Kategorie",
+    "chooseVat": "MwSt.-Kategorie wählen",
+    "nightlyRate": "Vereinbarter Preis pro Nacht: {{amount}}",
+    "vat": {
+      "gr_exempt": "Steuerbefreit",
+      "gr_out_of_scope": "Außerhalb der MwSt.",
+      "gr_article_39_small_business": "Kleinunternehmerbefreiung"
+    },
+    "errors": {
+      "FOLIO_SETTLEMENT_OPEN": "Setze den offenen Einzug fort.",
+      "NOTHING_TO_COLLECT": "Es ist kein Betrag einzuziehen.",
+      "AMOUNT_EXCEEDS_COLLECTIBLE": "Der Betrag übersteigt den aktuell einziehbaren Saldo.",
+      "FOLIO_NOT_COLLECTIBLE": "Dieses Gästekonto ist für Einzüge geschlossen.",
+      "FOLIO_CURRENCY_MISMATCH": "Die Währung stimmt nicht mit dem Gästekonto überein.",
+      "FOLIO_CURRENCY_UNAVAILABLE": "Die Währung des Gästekontos ist nicht verfügbar.",
+      "SETTLEMENT_REQUEST_CONFLICT": "Der ursprüngliche Einzug hat andere Angaben. Setze diesen Auftrag fort.",
+      "INVALID_INPUT": "Prüfe Betrag und Angaben.",
+      "FOLIO_NOT_FOUND": "Das Gästekonto wurde nicht gefunden oder ist nicht mehr zugänglich.",
+      "SETTLEMENT_HAS_PAYMENTS": "Dieser Einzug enthält Zahlungen. Ziehe den Rest ein oder erstatte die ursprünglichen Zahlungen.",
+      "FOLIO_SETTLEMENT_REQUIRED": "Ziehe dieses Gästekonto über den Zahlungsbildschirm ein.",
+      "FOLIO_SETTLEMENT_IMMUTABLE": "Positionen und Summen der Abrechnung können nicht geändert werden.",
+      "CHARGE_REQUEST_CONFLICT": "Eine Belastung wartet auf Bestätigung. Wiederhole die ursprünglichen Angaben.",
+      "ROOM_CHECKOUT_REQUIRED": "Checke den Gast aus, bevor du dieses Zimmer freigibst.",
+      "ROOM_RESERVATION_DATES_MISMATCH": "Für diese Daten besteht eine Buchung. Lade sie und verwende ihre Anreise- und Abreisedaten.",
+      "PAYMENT_MIRROR_PENDING": "Zahlungen werden noch wiederhergestellt. Synchronisiere und setze fort, bevor du erneut kassierst.",
+      "CONNECTION_REQUIRED": "Verbinde dich, um einen Einzug vorzubereiten oder abzubrechen.",
+      "ACTION_FAILED": "Die Aktion konnte nicht abgeschlossen werden. Wiederhole denselben Auftrag."
+    }
+  },
+  "verticalReadinessDesk": {
+    "chooseParty": "Für welche Gäste ist dieser Tisch?",
+    "bookingDetails": "Reservierung: {{name}} um {{time}}",
+    "walkIn": "Ohne Reservierung",
+    "seatBooking": "Reservierte Gäste platzieren",
+    "timezoneUnavailable": "Die Zeitzone des Geschäfts ist nicht verfügbar. Aktualisiere die Terminaleinstellungen, bevor du den Dienstplan änderst."
   }
 }

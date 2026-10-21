@@ -271,8 +271,9 @@ pub(crate) struct EvidenceNeeds {
 pub(crate) fn evidence_needs(conn: &Connection, order_id: &str) -> Result<EvidenceNeeds, String> {
     let mirrored_receipts: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id=?1 AND status IN ('completed','refunded')
+            &format!("SELECT EXISTS(SELECT 1 FROM order_payments WHERE order_id=?1 AND ({status}) IN ('completed','refunded')
                AND LOWER(TRIM(COALESCE(payment_origin,'')))=?2 AND LOWER(TRIM(COALESCE(method,''))) IN ('cash','card'))",
+               status=payments::financial_payment_status_sql(conn,"order_payments")?),
             params![order_id, MIRRORED_RECEIPT_ORIGIN],
             |r| r.get(0),
         )
@@ -332,10 +333,11 @@ pub(crate) fn canonical_receipts_from_snapshot(
     }
     let mut statement = conn
         .prepare(
-            "SELECT id,COALESCE(remote_payment_id,''),LOWER(TRIM(method)),status,COALESCE(currency,''),
+            &format!("SELECT id,COALESCE(remote_payment_id,''),LOWER(TRIM(method)),({status}),COALESCE(currency,''),
                COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0)
-             FROM order_payments WHERE order_id=?1 AND status IN ('completed','refunded')
+             FROM order_payments WHERE order_id=?1 AND ({status}) IN ('completed','refunded')
                AND LOWER(TRIM(COALESCE(payment_origin,'')))=?2",
+               status=payments::financial_payment_status_sql(conn,"order_payments")?),
         )
         .map_err(|e| e.to_string())?;
     let mirrors = statement
@@ -636,7 +638,7 @@ pub(crate) fn prepare_validated(
         // placeholders do not. A receipt tip covers only the tip the order
         // total contains (tip-inclusive rule, `payments::load_principal_paid_for_order`):
         // a 22.00 order with its 2.00 tip, paid by one 22.00 receipt, is paid.
-        let (principal, receipt_tips): (i64, i64) = conn.query_row(&format!("SELECT COALESCE(SUM(MAX(gross-tip,0)),0),COALESCE(SUM(MIN(tip,gross)),0) FROM (SELECT MAX(COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0),0) AS gross,MAX(COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),0) AS tip FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') AND NOT {})",payments::placeholder_payment_sql("p")),[&id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        let (principal, receipt_tips): (i64, i64) = conn.query_row(&format!("SELECT COALESCE(SUM(MAX(gross-tip,0)),0),COALESCE(SUM(MIN(tip,gross)),0) FROM (SELECT MAX(COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0),0) AS gross,MAX(COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),0) AS tip FROM order_payments p WHERE order_id=?1 AND ({status}) IN ('completed','refunded') AND NOT {})",payments::placeholder_payment_sql("p"),status=payments::financial_payment_status_sql(conn,"p")?),[&id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
         let covered =
             principal + receipt_tips.min(payments::load_order_tip_inside_total_cents(conn, id)?);
         if covered < total_cents {
@@ -653,9 +655,9 @@ pub(crate) fn prepare_validated(
     if provider_attempt {
         return Err(PROVIDER_REQUIRED.into());
     }
-    let mut stmt = conn.prepare("SELECT id,currency,
+    let mut stmt = conn.prepare(&format!("SELECT id,currency,
         COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER),0) - COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER))) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type='refund'),0)
-        FROM order_payments p WHERE order_id=?1 AND status='completed' ORDER BY id").map_err(|e|e.to_string())?;
+        FROM order_payments p WHERE order_id=?1 AND ({status})='completed' ORDER BY id",status=payments::financial_payment_status_sql(conn,"p")?)).map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([&id], |r| {
             Ok((
@@ -1164,6 +1166,32 @@ pub(crate) mod tests {
     }
     fn commit(conn: &Connection, input: &Value, actor: &str) -> Result<Value, String> {
         super::commit(conn, input, &test_actor(actor), &admitted(conn))
+    }
+
+    #[test]
+    fn imported_void_in_a_split_cancels_only_the_same_remaining_money_as_local_void() {
+        let mut results = Vec::new();
+        for imported in [false, true] {
+            let conn = setup();
+            conn.execute_batch("UPDATE orders SET total_amount=10,total_amount_cents=1000,payment_status='partially_paid';
+                INSERT INTO order_payments(id,order_id,method,amount,amount_cents,currency,status,payment_origin,transaction_ref,sync_state,sync_status,remote_payment_id,created_at,updated_at)
+                VALUES('remaining-receipt','order','card',4,400,'EUR','completed','manual','CASH-1791199138333','applied','synced','33333333-3333-4333-8333-333333333333','now','now');").unwrap();
+            if imported {
+                conn.execute("UPDATE order_payments SET metadata=json_object('canonical_return_status','voided') WHERE id='payment'", []).unwrap();
+            } else {
+                conn.execute(
+                    "UPDATE order_payments SET status='voided' WHERE id='payment'",
+                    [],
+                )
+                .unwrap();
+            }
+            let plan = prepare(&conn, "order").unwrap();
+            assert_eq!(plan["requiresReturn"], true);
+            assert_eq!(plan["amountCents"], 400);
+            assert_eq!(plan["payments"].as_array().unwrap().len(), 1);
+            results.push(plan["payments"].clone());
+        }
+        assert_eq!(results[0], results[1]);
     }
 
     #[test]

@@ -1,3 +1,6 @@
+import OrderFlow from '../../../components/OrderFlow';
+import { serviceSaleLine, serviceVatDefaults, type SalonSale } from './salon-sale';
+import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
 import React, { memo, useState, useEffect, useMemo, useCallback, useId, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
@@ -53,6 +56,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
+  const { getSetting } = useTerminalSettings();
 
   // Get branchId and organizationId from terminal config (same pattern as AppointmentsView)
   const [branchId, setBranchId] = useState<string | null>(null);
@@ -96,6 +100,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
 
   const effectiveOrgId = organizationId || localOrgId || '';
 
+  const [sale, setSale] = useState<SalonSale | null>(null);
   const [activeTab, setActiveTab] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -316,6 +321,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
         </h1>
       </motion.div>
 
+      {sale && <OrderFlow salonSale={sale} showFab={false} restoreDraftOnMount={false} onSalonClose={() => setSale(null)} />}
       {/* Header */}
       <motion.div variants={pageMotionItem} className={`rounded-2xl border p-4 mb-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
@@ -476,6 +482,9 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   <span className={`text-lg font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{formatPrice(service.price)}</span>
                 </div>
 
+                {service.isActive && <button type="button" className="w-full mt-3 rounded-xl bg-amber-400 text-black p-2" onClick={event => {
+                  event.stopPropagation(); setSale({ items: [serviceSaleLine(service, undefined, undefined, serviceVatDefaults(getSetting))], customer: { id: '', name: '', phone: '' } });
+                }}>{t('salonSale.add')}</button>}
                 {/* Quick Actions */}
                 <div className={`flex gap-2 mt-3 pt-3 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
                   <button

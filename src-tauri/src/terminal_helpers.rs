@@ -457,6 +457,7 @@ pub(crate) fn cache_terminal_settings_snapshot(
                     normalized_category.as_str(),
                     "restaurant" | "organization" | "payment" | "terminal" | "general"
                 ) && key == "currency")
+                    || key.starts_with("hotel_timezone")
                     || key.starts_with("store_currency_")
                 {
                     continue;
@@ -496,6 +497,29 @@ pub(crate) fn cache_terminal_settings_snapshot(
                 updated.push(format!("{category}.{key}"));
             }
         }
+    }
+
+    // Hotel business dates use only the authenticated branch-location zone.
+    // An unresolved branch verdict clears it; generic organisation settings cannot admit dates.
+    if resp.get("branch_info").is_some() {
+        let branch = db::get_setting(&transaction, "terminal", "branch_id")
+            .or_else(|| crate::storage::get_credential("branch_id"))
+            .unwrap_or_default();
+        let zone = resp
+            .pointer("/branch_info/timezone")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        db::set_setting(&transaction, "terminal", "hotel_timezone", zone)?;
+        db::set_setting(
+            &transaction,
+            "terminal",
+            "hotel_timezone_branch_id",
+            &branch,
+        )?;
+        updated.extend([
+            "terminal.hotel_timezone".to_string(),
+            "terminal.hotel_timezone_branch_id".to_string(),
+        ]);
     }
 
     // Country-derived currency is authoritative, including an explicit unknown.
@@ -1494,6 +1518,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(&db).0.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn hotel_timezone_snapshot_comes_only_from_branch_location() {
+        let db = test_db();
+        set_terminal_setting(&db, "branch_id", "hotel-branch");
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"branch_info":{"timezone":"Europe/Athens"}}),
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                db::get_setting(&conn, "terminal", "hotel_timezone").as_deref(),
+                Some("Europe/Athens")
+            );
+            assert_eq!(
+                db::get_setting(&conn, "terminal", "hotel_timezone_branch_id").as_deref(),
+                Some("hotel-branch")
+            );
+        }
+        cache_terminal_settings_snapshot(
+            &db,
+            &serde_json::json!({"settings":{"terminal":{"hotel_timezone":"America/New_York"}}}),
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                db::get_setting(&conn, "terminal", "hotel_timezone").as_deref(),
+                Some("Europe/Athens")
+            );
+        }
+        cache_terminal_settings_snapshot(&db, &serde_json::json!({"branch_info":{}})).unwrap();
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "hotel_timezone").as_deref(),
+            Some("")
+        );
     }
 
     #[test]

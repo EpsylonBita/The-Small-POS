@@ -4447,6 +4447,15 @@ pub async fn ecr_fiscal_print(
     mgr: tauri::State<'_, ecr::DeviceManager>,
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_required_order_id(arg0)?;
+    let folio_lines = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::fiscal::payload_builder::folio_fiscal_lines(&conn, &order_id)?
+    };
+    if folio_lines.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(
+            serde_json::json!({"success":true,"skipped":true,"reason":"FOLIO_SETTLEMENT_NO_REVENUE"}),
+        );
+    }
 
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -4595,13 +4604,27 @@ pub async fn ecr_fiscal_print(
         .and_then(|v| v.as_str())
         .unwrap_or("register_prints");
 
-    let fiscal_data = ecr::fiscal::build_fiscal_data(
-        &order,
-        &payments,
-        &tax_rates,
-        operator_id.as_deref(),
-        &line_context,
-    )?;
+    let fiscal_data = if let Some(lines) = folio_lines {
+        let total = order
+            .get("totalAmount")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or("Order total required")?;
+        ecr::fiscal::build_folio_fiscal_data(
+            &lines,
+            &payments,
+            crate::money::Cents::round_half_even(total).as_i64(),
+            &tax_rates,
+            operator_id.as_deref(),
+        )?
+    } else {
+        ecr::fiscal::build_fiscal_data(
+            &order,
+            &payments,
+            &tax_rates,
+            operator_id.as_deref(),
+            &line_context,
+        )?
+    };
 
     if !mgr.is_connected(&device_id) {
         return Ok(serde_json::json!({

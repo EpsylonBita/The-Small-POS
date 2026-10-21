@@ -12,6 +12,8 @@
       "draftRecoveryUnavailable": "Der ursprüngliche Abschluss konnte nicht bestätigt werden. Der gespeicherte Warenkorb bleibt geschützt.",
       "draftPending": "Der ursprüngliche Abschluss bleibt erhalten. Bestätigen Sie das Ergebnis, bevor Sie eine weitere Zahlung starten.",
       "draftLoading": "Gespeicherten Warenkorb laden…",
+      "twintRecoveryPaid": "Kunde hat bezahlt – ursprünglichen Beleg abschließen",
+      "twintRecoveryNotPaid": "Nicht bezahlt – Zahlung abbrechen",
       "draftRecover": "Ursprünglichen Abschluss prüfen",
       "draftRecovered": "Die ursprüngliche Bestellung wurde wiederhergestellt.",
       "draftExistingTable": "Dieser Tisch hat bereits eine offene Rechnung. Öffnen Sie diese, um Artikel hinzuzufügen.",

@@ -11,6 +11,10 @@ const t = (key: string, options?: Record<string, unknown>) =>
   typeof options?.defaultValue === 'string' ? `[${key}] ${options.defaultValue}` : key;
 
 describe('refundVoidErrorMessage', () => {
+  it('localizes canonical refresh and final-return refusals without exposing technical details', () => {
+    expect(refundVoidErrorMessage('PAYMENT_CANONICAL_REFRESH_REQUIRED: HTTP 503', t, 'Refund failed')).toBe('modals.refund.canonicalRefreshRequired');
+    expect(refundVoidErrorMessage('PAYMENT_CANONICAL_RETURN_FINAL: already returned', t, 'Refund failed')).toBe('modals.refund.canonicalReturnFinal');
+  });
   it('explains a placeholder row in the operator language, as a string or an error', () => {
     const raw =
       "PAYMENT_PLACEHOLDER_NOT_MONEY: this payment row records no money (the till guessed it from the order's label).";

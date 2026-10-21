@@ -529,6 +529,38 @@ async fn original_cap_and_command_validation_refuse_before_capture() {
 }
 
 #[tokio::test]
+async fn lost_gift_reply_adopts_exact_generic_import_without_double_counting() {
+    let _serial = opening::hosted_auth_test_serial();
+    let fx = Fixture::new(1000, 0);
+    fx.authorize_as(STAFF);
+    let lost = MockServer::new("{}");
+    let creds = seed_keys(&lost.url);
+    let out = begin(&fx.db, &refund(&fx.payment, 600)).await.unwrap();
+    let key = out["return"]["returnKey"].as_str().unwrap().to_string();
+    drop(creds);
+    let returned_ids = ids();
+    fx.conn().execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,imported_remote,created_at,updated_at) VALUES(?1,?2,?3,'refund',6,600,'','applied',1,?4,?4)",params![returned_ids[2],fx.payment,LOCAL_ORDER,AT]).unwrap();
+    let server = MockServer::new(
+        fx.reply("refund", 600, 600, &returned_ids, true)
+            .to_string(),
+    );
+    let creds = seed_keys(&server.url);
+    let out = recover(&fx.db, &json!({"returnKey":key})).await.unwrap();
+    drop(creds);
+    assert_eq!(out["outcome"], "completed", "{out}");
+    assert_eq!(fx.count("SELECT COUNT(*) FROM payment_adjustments"), 1);
+    assert_eq!(
+        fx.count("SELECT SUM(amount_cents) FROM payment_adjustments"),
+        600
+    );
+    assert_eq!(
+        fx.count("SELECT imported_remote FROM payment_adjustments"),
+        0
+    );
+    assert!(close(fx.net_paid(), 4.0));
+}
+
+#[tokio::test]
 async fn lost_reply_and_restart_resend_the_identical_original() {
     let _serial = opening::hosted_auth_test_serial();
     let fx = Fixture::new(3000, 0);

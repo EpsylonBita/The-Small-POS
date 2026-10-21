@@ -53,7 +53,7 @@ describe('room payment confirmation and immutable currency', () => {
     render(<PaymentModal isOpen onClose={vi.fn()} orderTotal={3} allowTips={false} roomChargeContext={room} onPaymentComplete={onPaymentComplete} />);
     fireEvent.click(screen.getByRole('button',{name:/ROOM/}));
     await waitFor(() => expect(onPaymentComplete).toHaveBeenCalledTimes(1));
-    expect(onPaymentComplete).toHaveBeenCalledWith(expect.objectContaining({method:'room_charge',currency:'CHF'}));
+    expect(onPaymentComplete).toHaveBeenCalledWith(expect.objectContaining({method:'room_charge',currency:'CHF',room_id:'room-1',folio_id:'folio-1'}));
     expect(notices.toast).toHaveBeenCalledWith('guestBilling.roomChargePending');
     expect(notices.toast.success).not.toHaveBeenCalled();
   });

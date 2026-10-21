@@ -41,13 +41,23 @@ use tracing::{error, info, warn};
 /// blocking UI reads — consider migrating to an `r2d2` connection pool with
 /// separate read-only and read-write connections, or switching to
 /// `tokio::sync::Mutex` with `spawn_blocking` for DB calls.
+///
+/// # Never on the window thread
+///
+/// A Tauri command that locks this mutex must be an `async fn` that locks it
+/// on the blocking pool (`database_lock::run_blocking_command`): a plain `fn`
+/// command runs on the main thread, where a wait here froze the whole till
+/// (Tomikro 20/10/2026), and a `fn` marked `#[tauri::command(async)]` runs on a
+/// Tokio runtime worker, where such waits stall the runtime. Sites that may
+/// wait or hold long use `DbState::lock_traced` (`database_lock.rs`), which
+/// names the waiter and the holder in the support bundle.
 pub struct DbState {
     pub conn: Mutex<Connection>,
     pub db_path: PathBuf,
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 98;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 102;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -75,6 +85,7 @@ pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
     };
 
     run_migrations(&conn)?;
+    crate::fiscal::active_cache::initialize(&conn, &db_path)?;
 
     let quarantined = crate::sync_queue::quarantine_reserved_repair_lookalikes(&conn)?;
     if quarantined > 0 {
@@ -382,12 +393,24 @@ where
     let needs_v81_backfill = needs_v81_payment_identity_backfill(conn, current)?;
     let needs_v83_backfill = needs_v83_gift_payment_backfill(conn, current)?;
     let needs_v95_backfill = needs_v95_twint_payment_backfill(conn, current)?;
+    let needs_v101_backfill = current >= 101
+        && conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (
+          'folio_settlement_tenders_only','folio_settlement_no_order_outbox',
+          'folio_settlement_no_legacy_outbox','folio_settlement_fixed_lines')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("check v101 hotel guards: {error}"))?
+            != 4;
     if current == CURRENT_SCHEMA_VERSION
         && !needs_v56_backfill
         && !needs_v79_backfill
         && !needs_v81_backfill
         && !needs_v83_backfill
         && !needs_v95_backfill
+        && !needs_v101_backfill
     {
         info!("Database schema up to date (v{current})");
         return Ok(());
@@ -401,6 +424,12 @@ where
     );
     if needs_v95_backfill {
         pending_migrations.push(95);
+        pending_migrations.sort_unstable();
+        pending_migrations.dedup();
+    }
+
+    if needs_v101_backfill {
+        pending_migrations.push(101);
         pending_migrations.sort_unstable();
         pending_migrations.dedup();
     }
@@ -741,6 +770,51 @@ where
     }
     if current < 98 {
         run_migration_tx(conn, 98, migrate_v98)?;
+    }
+    if current < 99 {
+        run_migration_tx(conn, 99, |conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS reservation_local_identity (
+              local_id TEXT PRIMARY KEY, server_id TEXT, organization_id TEXT NOT NULL,
+              branch_id TEXT NOT NULL, data TEXT NOT NULL);
+              INSERT OR IGNORE INTO schema_version(version) VALUES(99);",
+            )
+            .map_err(|error| error.to_string())
+        })?;
+    }
+    if current < 100 {
+        run_migration_tx(conn, 100, |conn| {
+            conn.execute_batch(crate::fiscal::active_cache::SCHEMA_SQL)
+                .map_err(|e| e.to_string())?;
+            conn.execute_batch("INSERT OR IGNORE INTO schema_version(version) VALUES(100)")
+                .map_err(|e| e.to_string())
+        })?;
+    }
+    if current < 101 || needs_v101_backfill {
+        run_migration_tx(conn, 101, |conn| {
+            conn.execute_batch(crate::hotel_folio::SCHEMA_SQL)
+                .map_err(|e| e.to_string())?;
+            conn.execute_batch("INSERT OR IGNORE INTO schema_version(version) VALUES(101)")
+                .map_err(|e| e.to_string())
+        })?;
+    }
+    if current < 102 {
+        run_migration_tx(conn, 102, |conn| {
+            if !column_exists(conn, "payment_adjustments", "imported_remote")? {
+                conn.execute_batch("ALTER TABLE payment_adjustments ADD COLUMN imported_remote INTEGER NOT NULL DEFAULT 0;")
+                    .map_err(|error| format!("v102 adjustment provenance: {error}"))?;
+            }
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS unresolved_remote_payments (
+                    id TEXT PRIMARY KEY, payload TEXT NOT NULL,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    next_retry_at TEXT NOT NULL
+                 );
+                 INSERT OR IGNORE INTO schema_version(version) VALUES(102);",
+            )
+            .map_err(|error| format!("v102 canonical payment pull recovery: {error}"))
+        })?;
     }
 
     Ok(())
@@ -2035,7 +2109,7 @@ enum PreMigrationRecoveryMode {
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98,
+    98, 99, 100, 101, 102,
 ];
 
 fn computed_pending_migrations(
@@ -9179,8 +9253,14 @@ mod tests {
             [],
         )
         .expect("seed representative master-v75 order");
+        // A real v75 database predates the v101 folio-settlement triggers that
+        // read orders.order_context; drop them with the rest of the rewind.
         conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
+            "DROP TRIGGER IF EXISTS folio_settlement_tenders_only;
+             DROP TRIGGER IF EXISTS folio_settlement_no_order_outbox;
+             DROP TRIGGER IF EXISTS folio_settlement_no_legacy_outbox;
+             DROP TRIGGER IF EXISTS folio_settlement_fixed_lines;
+             DROP INDEX IF EXISTS idx_parity_sync_queue_repair_aggregate_order;
              DROP INDEX IF EXISTS idx_parity_sync_queue_repair_dependencies;
              DROP TABLE IF EXISTS repair_conflicts;
              DROP TABLE IF EXISTS repair_attachment_staging;
@@ -9463,8 +9543,90 @@ mod tests {
         );
     }
 
-    /// v98 (13/10/2026): a register migrated before the index existed gets
-    /// it, and a fresh one has it from the newest queue schema.
+    /// Re-entry preserves the incoming journal and imported provenance.
+    #[test]
+    fn migration_v102_retains_import_provenance_and_recovery_on_reentry() {
+        let (_tmp, conn) = current_file_fixture();
+        assert!(column_exists(&conn, "payment_adjustments", "imported_remote").unwrap());
+        conn.execute("INSERT INTO unresolved_remote_payments(id,payload,last_error,updated_at,next_retry_at) VALUES('retained','{}','missing parent',datetime('now'),datetime('now'))",[]).unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version=102", [])
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM unresolved_remote_payments WHERE id='retained'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_v102_upgrades_v98_and_v101_preserving_registered_versions() {
+        for starting_version in [98, 101] {
+            let (_tmp, conn) = current_file_fixture();
+            let release_versions: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_version WHERE version IN (99,100)",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let release_v101: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_version WHERE version=101",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            conn.execute("DELETE FROM schema_version WHERE version > 98", [])
+                .unwrap();
+            conn.execute_batch("DROP TABLE unresolved_remote_payments; ALTER TABLE payment_adjustments DROP COLUMN imported_remote;").unwrap();
+            if starting_version == 101 {
+                // The release branch owns these migrations; its version stamps
+                // suffice here to exercise admission of v102 after that merge.
+                conn.execute("INSERT INTO schema_version(version) VALUES(101)", [])
+                    .unwrap();
+            }
+            assert_eq!(
+                computed_pending_migrations(starting_version, false, false, false, false).last(),
+                Some(&102)
+            );
+            run_migrations(&conn).unwrap();
+            assert_eq!(max_schema_version(&conn), 102);
+            assert!(column_exists(&conn, "payment_adjustments", "imported_remote").unwrap());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM schema_version WHERE version IN (99,100)",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                if starting_version == 98 {
+                    release_versions
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM schema_version WHERE version=101",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                if starting_version == 101 {
+                    1
+                } else {
+                    release_v101
+                }
+            );
+        }
+    }
+
     #[test]
     fn migration_v98_indexes_the_parity_queue_by_table_and_record() {
         let (_tmp, conn) = current_file_fixture();
@@ -9569,16 +9731,22 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97, 98
+                96, 97, 98, 99, 100, 101, 102
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+            vec![
+                79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+                100, 101, 102
+            ]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
-            vec![79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+            vec![
+                79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+                100, 101, 102
+            ]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
         // the newest version and MAX(schema_version) says the database is current.
@@ -9608,7 +9776,16 @@ mod tests {
         // v98 only adds an index on the parity queue (table, record); like
         // v95's index it neither reads nor rewrites native repair data.
         assert!(native_repair_atomic_only_allowed(97, &[98]));
-        assert!(!native_repair_atomic_only_allowed(98, &[99]));
+        // v99 only creates the reservation local-identity map and v100 only the
+        // fiscal branch-status table; neither reads nor rewrites native repair data.
+        assert!(native_repair_atomic_only_allowed(98, &[99]));
+        assert!(native_repair_atomic_only_allowed(99, &[100]));
+        // v101 only creates the folio-settlement guard triggers; no native repair data.
+        assert!(native_repair_atomic_only_allowed(100, &[101]));
+        // v102 adds incoming-payment recovery tables/provenance only.
+        assert!(native_repair_atomic_only_allowed(101, &[102]));
+        assert!(native_repair_atomic_only_allowed(98, &[99, 100, 101, 102]));
+        assert!(!native_repair_atomic_only_allowed(102, &[103]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -9891,7 +10068,7 @@ mod tests {
         // guard trigger; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(85, false, false, false, false),
-            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
     }
@@ -9902,7 +10079,7 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -10008,7 +10185,7 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -10048,7 +10225,7 @@ mod tests {
         gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
         assert_eq!(
             computed_pending_migrations(83, false, false, false, true),
-            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]
+            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
         );
         let error = run_migrations_with_preflight(
             &conn,

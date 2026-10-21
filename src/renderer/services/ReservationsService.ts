@@ -8,6 +8,17 @@
 import { getBridge, isBrowser } from '../../lib';
 import { posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
 import { toLocalDateString } from '../utils/date';
+import { branchWallTime, branchWallTimeToIso, retainedBranchTimeZone } from '../utils/branch-time';
+import type { RestaurantTable } from '../types/tables';
+
+export const RESERVATION_ARRIVAL_LEAD_MINUTES = 60;
+
+export function reservationArrivalWindow(reservation: Reservation, timeZone: string, now = new Date()): { active: boolean; upcoming: boolean } {
+  const raw = reservation.reservationDatetime;
+  const start = Date.parse(raw && /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw) ? raw : branchWallTimeToIso(`${reservation.reservationDate}T${reservation.reservationTime.slice(0, 5)}:00`, timeZone));
+  const end = start + (reservation.durationMinutes || 90) * 60000;
+  return { active: now.getTime() >= start - RESERVATION_ARRIVAL_LEAD_MINUTES * 60000 && now.getTime() < end, upcoming: now.getTime() < end };
+}
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -76,6 +87,7 @@ export type ReservationStatus =
 
 export interface Reservation {
   id: string;
+  tableSessionId?: string;
   organizationId: string;
   branchId: string;
   reservationNumber: string;
@@ -166,6 +178,7 @@ export interface UpdateReservationDto {
 function transformFromAPI(data: any): Reservation {
   return {
     id: data.id,
+    tableSessionId: data.table_session_id || undefined,
     organizationId: data.organization_id,
     branchId: data.branch_id,
     reservationNumber: data.reservation_number,
@@ -383,14 +396,18 @@ class ReservationsService {
 
   private async listReservations(params?: {
     date?: string;
+    date_from?: string;
+    date_to?: string;
     status?: string;
     search?: string;
     table_id?: string;
     room_id?: string;
     kind?: 'all' | 'table' | 'room';
-  }): Promise<{ reservations: any[]; error?: string }> {
+  }): Promise<{ reservations: any[]; incomplete?: boolean; error?: string }> {
     const query = buildQueryString({
       date: params?.date,
+      date_from: params?.date_from,
+      date_to: params?.date_to,
       status: params?.status,
       search: params?.search,
       table_id: params?.table_id,
@@ -412,7 +429,12 @@ class ReservationsService {
       success?: boolean;
       reservations?: any[];
       error?: string;
+      truncated?: boolean;
+      has_more?: boolean;
+      hasMore?: boolean;
+      pagination?: { truncated?: boolean; has_more?: boolean; hasMore?: boolean };
     };
+    const meta = (result as { meta?: { source?: string; offlineFallback?: boolean } }).meta;
 
     if (payload.success === false) {
       return { reservations: [], error: payload.error || 'Failed to fetch reservations' };
@@ -420,6 +442,10 @@ class ReservationsService {
 
     return {
       reservations: Array.isArray(payload.reservations) ? payload.reservations : [],
+      incomplete: meta?.offlineFallback === true || meta?.source === 'local' ||
+        !Array.isArray(payload.reservations) || payload.truncated === true ||
+        payload.has_more === true || payload.hasMore === true || payload.pagination?.truncated === true ||
+        payload.pagination?.has_more === true || payload.pagination?.hasMore === true,
     };
   }
 
@@ -491,6 +517,7 @@ class ReservationsService {
     const body = (result.data ?? {}) as {
       success?: boolean;
       reservation?: any;
+      session_id?: string;
       error?: string;
       message?: string;
     };
@@ -499,7 +526,7 @@ class ReservationsService {
       throw new Error(reservationApiErrorMessage({ data: body }, 'Failed to update reservation'));
     }
 
-    return body.reservation;
+    return { ...body.reservation, table_session_id: body.session_id };
   }
 
   async fetchReservations(filters?: ReservationFilters): Promise<Reservation[]> {
@@ -655,6 +682,29 @@ class ReservationsService {
     return transformFromAPI(reservation);
   }
 
+  private seatedIntent: Reservation | null = null;
+
+  retainSeatedReservation(reservation: Reservation): void { this.seatedIntent = reservation; }
+
+  continueSeatedReservation(reservation: Reservation): void {
+    this.seatedIntent = reservation;
+    window.dispatchEvent(new CustomEvent('pos:reservation-seated'));
+    window.dispatchEvent(new CustomEvent('pos:navigate-view', { detail: { view: 'dashboard' } }));
+  }
+
+  takeSeatedReservation(branchId: string, organizationId: string): Reservation | null {
+    const intent = this.seatedIntent;
+    if (!intent || intent.branchId !== branchId || intent.organizationId !== organizationId) return null;
+    this.seatedIntent = null;
+    return intent;
+  }
+
+  async seatReservation(reservationId: string): Promise<Reservation> {
+    const reservation = await this.updateStatus(reservationId, 'seated');
+    if (!reservation.tableSessionId) throw new Error('RESERVATION_SEAT_ACK_MISSING');
+    return reservation;
+  }
+
   async assignTable(reservationId: string, tableId: string): Promise<Reservation> {
     const reservation = await this.updateReservationRequest(reservationId, {
       table_id: tableId,
@@ -755,16 +805,9 @@ class ReservationsService {
   }
 
   async createReservationWithTableUpdate(data: CreateReservationDto): Promise<Reservation> {
-    const reservation = await this.createReservation(data);
-
-    if (data.tableId) {
-      const today = toLocalDateString();
-      if (data.reservationDate === today) {
-        await this.updateTableStatusToReserved(data.tableId);
-      }
-    }
-
-    return reservation;
+    // Arrival decoration belongs to the read-only table projection, not writes
+    // after the durable booking acknowledgement (which could look like failure).
+    return this.createReservation(data);
   }
 
   async updateTableStatusToReserved(tableId: string): Promise<boolean> {
@@ -795,28 +838,29 @@ class ReservationsService {
 
   async getTodayReservationForTable(tableId: string): Promise<Reservation | null> {
     try {
-      const today = toLocalDateString();
-      const response = await this.listReservations({ date: today, table_id: tableId });
+      const zone = await retainedBranchTimeZone(this.branchId);
+      const today = branchWallTime(new Date(), zone).slice(0, 10);
+      const response = await this.listReservations({ table_id: tableId, kind: 'table' });
       if (response.error) {
         console.error(
           '[ReservationsService] Error fetching today reservation for table:',
           response.error,
         );
-        return null;
+        throw new Error(response.error);
       }
 
       const filtered = response.reservations
         .filter((reservation) => ['pending', 'confirmed'].includes(reservation?.status))
-        .sort(
-          (a, b) =>
-            new Date(a?.reservation_datetime || '').getTime() -
-            new Date(b?.reservation_datetime || '').getTime(),
-        );
-
-      return filtered.length > 0 ? transformFromAPI(filtered[0]) : null;
+        .map(transformFromAPI)
+        .filter(reservation => {
+          const window = reservationArrivalWindow(reservation, zone);
+          return window.upcoming && (reservation.reservationDate === today || window.active);
+        })
+        .sort((a, b) => `${a.reservationDate}T${a.reservationTime}`.localeCompare(`${b.reservationDate}T${b.reservationTime}`));
+      return filtered[0] || null;
     } catch (error) {
       console.error('[ReservationsService] Failed to fetch today reservation for table:', formatError(error));
-      return null;
+      throw error;
     }
   }
 
@@ -867,44 +911,33 @@ class ReservationsService {
     return this.updateStatus(reservationId, 'cancelled', { cancellationReason: reason });
   }
 
-  async syncTableStatusesForToday(): Promise<void> {
-    try {
-      const today = toLocalDateString();
-      const response = await this.listReservations({ date: today });
-      if (response.error) {
-        console.error('[ReservationsService] Error fetching today reservations:', response.error);
-        return;
-      }
-
-      const tableIds = [
-        ...new Set(
-          response.reservations
-            .filter(
-              (reservation) =>
-                reservation?.table_id &&
-                reservation?.reservation_date === today &&
-                ['pending', 'confirmed'].includes(reservation?.status),
-            )
-            .map((reservation) => String(reservation.table_id)),
-        ),
-      ];
-
-      for (const tableId of tableIds) {
-        await this.updateTableStatusToReserved(tableId);
-      }
-
-      if (tableIds.length > 0) {
-        console.log(
-          `[ReservationsService] Synced ${tableIds.length} table(s) to reserved status for today's reservations`,
-        );
-      }
-    } catch (error) {
-      console.error(
-        '[ReservationsService] Failed to sync table statuses for today:',
-        formatError(error),
-      );
-    }
+  /** Read-only presentation: a booking never occupies a table or creates a session. */
+  async projectArrivalTables(tables: RestaurantTable[]): Promise<RestaurantTable[]> {
+    // An incomplete/unknown read cannot release a previously decorated table.
+    let zone: string;
+    try { zone = await retainedBranchTimeZone(this.branchId); } catch { return tables; }
+    const now = new Date();
+    const today = branchWallTime(now, zone).slice(0, 10);
+    const previousDay = new Date(`${today}T00:00:00Z`);
+    previousDay.setUTCDate(previousDay.getUTCDate() - 1);
+    const date_from = previousDay.toISOString().slice(0, 10);
+    const date_to = branchWallTime(new Date(now.getTime() + RESERVATION_ARRIVAL_LEAD_MINUTES * 60000), zone).slice(0, 10);
+    let response: Awaited<ReturnType<ReservationsService['listReservations']>>;
+    try { response = await this.listReservations({ kind: 'table', date_from, date_to }); } catch { return tables; }
+    if (response.error || response.incomplete || response.reservations.some(row =>
+      !row || typeof row.reservation_date !== 'string' || row.reservation_date < date_from || row.reservation_date > date_to)) return tables;
+    const arrivals = new Set(response.reservations
+      .filter(row => ['pending', 'confirmed'].includes(row.status) && row.table_id)
+      .map(transformFromAPI)
+      .filter(row => reservationArrivalWindow(row, zone, now).active)
+      .map(row => row.tableId));
+    return tables.map(table => {
+      if (table.currentOrderId || table.tableSessionId || !['available', 'reserved'].includes(table.status)) return table;
+      return { ...table, status: arrivals.has(table.id) ? 'reserved' : 'available', reservationCanonicalStatus: table.reservationCanonicalStatus ?? table.status };
+    });
   }
+
+
 }
 
 export const reservationsService = new ReservationsService();

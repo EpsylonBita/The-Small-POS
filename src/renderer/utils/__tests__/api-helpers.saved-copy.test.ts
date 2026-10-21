@@ -111,6 +111,12 @@ describe('posApiFetch over the native bridge', () => {
     const result = await posApiPost('/api/pos/table-sessions/check/items/transfer', { client_event_id: 'original' });
     expect(result.tableMutationQuarantinedCount).toBeUndefined();
   });
+  it('preserves the booking on a hotel date conflict, including older IPC embedded errors', async () => {
+    const body={code:'ROOM_RESERVATION_DATES_MISMATCH',reservation:{id:'booking',check_in_date:'2026-10-19',check_out_date:'2026-10-23',customer_name:'Guest',status:'confirmed'}};
+    bridge.fetchFromAdmin.mockResolvedValue({success:false,error:`Date conflict (HTTP 409): ${JSON.stringify(body)}`});
+    const result=await posApiPost('/pos/rooms/101/checkin',{});
+    expect(result.success).toBe(false);expect(result.errorBody).toEqual(body);
+  });
 });
 
 describe('posApiFetch in a browser', () => {

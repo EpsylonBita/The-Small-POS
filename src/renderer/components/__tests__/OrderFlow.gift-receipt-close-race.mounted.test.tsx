@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { serviceSaleLine } from '../../pages/verticals/salon/salon-sale';
 
 // The real OrderFlow host, Outstanding/Payment modals, gift card Tender,
 // checkout service and ordinary collection controller; only the native
@@ -31,6 +32,7 @@ const h = vi.hoisted(() => {
 
   const state = {
     orderId: '',
+    hotelEnabled: false,
     checkoutDraft: null as any,
     returnedCustomer: null as any,
     menuProps: null as any,
@@ -263,7 +265,8 @@ vi.mock('../../hooks/useAcquiredModules', async (importOriginal) => {
       modules: [],
       hasDeliveryModule: false,
       hasTablesModule: false,
-      hasModule: (id: string) => id === actual.MODULE_IDS.GIFT_CARDS,
+      hasModule: (id: string) => id === actual.MODULE_IDS.GIFT_CARDS ||
+        (h.state.hotelEnabled && ['rooms', 'orders', 'guest_billing'].includes(id)),
     }),
   };
 });
@@ -292,6 +295,13 @@ vi.mock('../../services/ActivityTracker', () => ({
 vi.mock('../../services/ReservationsService', () => ({
   reservationsService: {},
   buildChangedReservationUpdate: vi.fn(),
+}));
+vi.mock('../../services/RoomsService', () => ({
+  getRoomEffectiveStatus: (room: any) => room.status,
+  roomsService: { setContext: vi.fn(), fetchRooms: vi.fn(async () => [{
+    id: 'room-spa', roomNumber: '201', organizationId: 'org-1', branchId: 'branch-1', status: 'occupied',
+    activeFolio: { id: 'folio-spa', guestName: 'Spa Guest', currency: 'EUR' },
+  }]) },
 }));
 vi.mock('../../services/terminal-credentials', () => ({
   getCachedTerminalCredentials: () => ({ branchId: 'branch-1', organizationId: 'org-1' }),
@@ -341,6 +351,7 @@ vi.mock('../delivery/ZoneValidationAlert', () => ({ ZoneValidationAlert: () => n
 vi.mock('../tables', () => ({ TableSelector: () => null, TableActionModal: () => null, ReservationForm: () => null }));
 
 import OrderFlow from '../OrderFlow';
+import { setStoreCurrencyFromSettings } from '../../utils/store-currency';
 import {
   claimOrdinaryCollectionOwner,
   releaseOrdinaryOwnerBeforeSend,
@@ -428,6 +439,7 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
   beforeEach(() => {
     Object.assign(h.state, {
       orderId: '',
+      hotelEnabled: false,
       checkoutDraft: null,
       returnedCustomer: null,
       menuProps: null,
@@ -452,6 +464,51 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it('offers new service sales an occupied folio and forwards its pin with the service and appointment identities', async () => {
+    h.state.hotelEnabled = true;
+    setStoreCurrencyFromSettings({'terminal.branch_id':'branch-1','restaurant.store_currency_branch_id':'branch-1',
+      'restaurant.store_currency_available':true,'restaurant.store_currency_source':'branch_country','restaurant.currency':'EUR'});
+    const item = serviceSaleLine({ id:'10000000-0000-4000-8000-000000000001', name:'Massage',
+      price:25, vatCategoryCode:'gr_standard_24', priceIncludesVat:false, fiscalDocumentProfile:'service' } as any,
+      { id:'20000000-0000-4000-8000-000000000001', totalPrice:25 } as any);
+    expect(item).toMatchObject({price:31,totalPrice:31,price_includes_vat:true});
+    render(<OrderFlow restoreDraftOnMount={false} salonSale={{items:[item],customer:{id:'',name:'Spa Guest',phone:''}}} />);
+    await screen.findByRole('option', {name:'201 · Spa Guest'});
+    fireEvent.change(screen.getByRole('combobox'), {target:{value:'room-spa'}});
+    fireEvent.click(screen.getByRole('button', {name:'hotelDeskService.useRoom'}));
+    await screen.findByTestId('menu-complete');
+    expect(h.state.menuProps.roomChargeContext).toMatchObject({roomId:'room-spa',activeFolioId:'folio-spa',currency:'EUR'});
+    expect(h.state.menuProps.initialCartItems).toEqual([item]);
+    const context = h.state.menuProps.roomChargeContext;
+    h.store.createOrder.mockResolvedValueOnce({success:true,orderId:'spa-order',orderNumber:'43',roomCharge:{applied:true}} as any);
+    await act(async () => {
+      await h.state.menuProps.onOrderComplete({items:[item],total:31,paymentData:{method:'room_charge',amount:31,
+        room_id:context.roomId,folio_id:context.activeFolioId,currency:context.currency,roomCharge:context}});
+    });
+    expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({room_id:'room-spa',folio_id:'folio-spa',payment_method:'room_charge',
+      total_amount:31,items:expect.arrayContaining([expect.objectContaining({service_id:item.service_id,appointment_id:item.appointment_id,
+        price:31,price_includes_vat:true})])}));
+    expect(h.native.recordPayment).not.toHaveBeenCalled();
+  });
+
+  it('opens a service cart directly when hotel modules are absent', async () => {
+    render(<OrderFlow restoreDraftOnMount={false} salonSale={{items:[],customer:{id:'',name:'Guest',phone:''}}} />);
+    await screen.findByTestId('menu-complete');
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(h.state.menuProps.roomChargeContext).toBeNull();
+  });
+
+  it('restores the service draft original folio without selecting the room next guest', async () => {
+    h.state.hotelEnabled = true;
+    const roomChargeContext = {roomId:'room-spa',activeFolioId:'original-folio',currency:'EUR'};
+    h.state.checkoutDraft = {phase:'editing',checkoutRequestId:'spa-draft',cartItems:[{service_id:'service-1'}],
+      context:{salonMode:true,orderType:'pickup',roomChargeContext,selectedCustomer:{id:'',name:'Original Guest',phone:''}}};
+    render(<OrderFlow />);
+    await screen.findByTestId('menu-complete');
+    expect(h.state.menuProps.roomChargeContext).toEqual(roomChargeContext);
+    expect(screen.queryByRole('combobox')).toBeNull();
   });
 
   it.each([false, true])('keeps the current delivery verdict only for an unchanged destination (changed=%s)', async changed => {

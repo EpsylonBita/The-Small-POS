@@ -210,6 +210,8 @@ pub enum DeliverySlipMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrderReceiptDoc {
+    #[serde(default)]
+    pub currency: Option<String>,
     pub order_id: String,
     pub order_number: String,
     pub order_type: String,
@@ -846,6 +848,8 @@ pub struct ZReportPlatformEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZReportDoc {
     #[serde(default)]
+    pub hotel_report: serde_json::Value,
+    #[serde(default)]
     pub currency: Option<String>,
     pub report_id: String,
     pub report_date: String,
@@ -1056,6 +1060,42 @@ impl Default for LayoutConfig {
 /// Translate a receipt label to the given language.
 /// Returns the translated string for known keys, or the original key unchanged.
 pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
+    let hotel_label = match (lang, key) {
+        ("en", "Room service") => Some("Room service"),
+        ("en", "Drive-through") => Some("Drive-through"),
+        ("en", "Charged to room") => Some("Charged to room"),
+        ("en", "Room charges collected") => Some("Room charges collected"),
+        ("en", "Accommodation tax") => Some("Accommodation tax"),
+        ("el", "Room service") => Some("Υπηρεσία δωματίου"),
+        ("el", "Drive-through") => Some("Εξυπηρέτηση αυτοκινήτου"),
+        ("el", "Charged to room") => Some("Χρέωση στο δωμάτιο"),
+        ("el", "Room charges collected") => Some("Εισπράξεις χρεώσεων δωματίου"),
+        ("el", "Accommodation tax") => Some("Τέλος διαμονής"),
+        ("de", "Room service") => Some("Zimmerservice"),
+        ("de", "Drive-through") => Some("Drive-through"),
+        ("de", "Charged to room") => Some("Auf das Zimmer gebucht"),
+        ("de", "Room charges collected") => Some("Eingezogene Zimmerbuchungen"),
+        ("de", "Accommodation tax") => Some("Beherbergungsabgabe"),
+        ("fr", "Room service") => Some("Service en chambre"),
+        ("fr", "Drive-through") => Some("Service au volant"),
+        ("fr", "Charged to room") => Some("Porté sur la chambre"),
+        ("fr", "Room charges collected") => Some("Encaissements des charges de chambre"),
+        ("fr", "Accommodation tax") => Some("Taxe de séjour"),
+        ("it", "Room service") => Some("Servizio in camera"),
+        ("it", "Drive-through") => Some("Servizio in auto"),
+        ("it", "Charged to room") => Some("Addebitato alla camera"),
+        ("it", "Room charges collected") => Some("Addebiti camera incassati"),
+        ("it", "Accommodation tax") => Some("Imposta di soggiorno"),
+        ("sq", "Room service") => Some("Shërbim në dhomë"),
+        ("sq", "Drive-through") => Some("Shërbim në makinë"),
+        ("sq", "Charged to room") => Some("Ngarkuar në dhomë"),
+        ("sq", "Room charges collected") => Some("Pagesa të mbledhura për dhomën"),
+        ("sq", "Accommodation tax") => Some("Taksa e qëndrimit"),
+        _ => None,
+    };
+    if let Some(label) = hotel_label {
+        return label;
+    }
     match lang {
         "el" => match key {
             "Order" => "\u{03A0}\u{03B1}\u{03C1}\u{03B1}\u{03B3}\u{03B3}\u{03B5}\u{03BB}\u{03AF}\u{03B1}",
@@ -2481,6 +2521,36 @@ fn z_report_order_type_rows(doc: &ZReportDoc) -> Vec<(&'static str, i64, f64)> {
             sections.delivery,
         ),
         (
+            "Room service",
+            doc.hotel_report
+                .pointer("/sales/roomServiceOrders")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            doc.hotel_report
+                .pointer("/sales/roomServiceSales")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0),
+            doc.hotel_report
+                .pointer("/sales/roomServiceSales")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(has_print_money),
+        ),
+        (
+            "Drive-through",
+            doc.hotel_report
+                .pointer("/sales/driveThroughOrders")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            doc.hotel_report
+                .pointer("/sales/driveThroughSales")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0),
+            doc.hotel_report
+                .pointer("/sales/driveThroughSales")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(has_print_money),
+        ),
+        (
             "Repairs",
             doc.repair_orders,
             doc.repair_sales,
@@ -2512,6 +2582,16 @@ fn z_report_payment_rows(doc: &ZReportDoc) -> Vec<(&'static str, f64)> {
     }
     if has_print_money(doc.platform_cod_sales) {
         rows.push(("Platform COD", doc.platform_cod_sales));
+    }
+    for (key, label) in [
+        ("chargedToRoom", "Charged to room"),
+        ("roomChargesCollected", "Room charges collected"),
+        ("accommodationTax", "Accommodation tax"),
+    ] {
+        let amount = doc.hotel_report["hotel"][key].as_f64().unwrap_or(0.0);
+        if has_print_money(amount) {
+            rows.push((label, amount));
+        }
     }
     rows
 }
@@ -2645,6 +2725,9 @@ pub(crate) fn z_report_print_comparable_lines(doc: &ZReportDoc) -> Vec<(&'static
             "TWINT" => "payments.twint",
             "Platform Online" => "payments.platformOnline",
             "Platform COD" => "payments.platformCod",
+            "Charged to room" => "hotel.chargedToRoom",
+            "Room charges collected" => "hotel.roomChargesCollected",
+            "Accommodation tax" => "hotel.accommodationTax",
             other => panic!("payment row {other:?} has no comparable key"),
         };
         lines.push((key, cents(amount)));
@@ -2658,6 +2741,8 @@ pub(crate) fn z_report_print_comparable_lines(doc: &ZReportDoc) -> Vec<(&'static
             "Takeaway" => "orderTypes.takeaway",
             "Delivery" => "orderTypes.delivery",
             "Repairs" => "orderTypes.repairs",
+            "Room service" => "orderTypes.roomService",
+            "Drive-through" => "orderTypes.driveThrough",
             other => panic!("order type row {other:?} has no comparable key"),
         };
         lines.push((key, cents(amount)));
@@ -4470,6 +4555,7 @@ fn status_label_text(lang: &str, label: &str) -> String {
 /// Checkout amounts belong to the frozen shift, never to a later store setting.
 pub(crate) fn apply_document_currency(document: &ReceiptDocument, cfg: &mut LayoutConfig) {
     let currency = match document {
+        ReceiptDocument::OrderReceipt(doc) if doc.currency.is_some() => doc.currency.as_deref(),
         ReceiptDocument::ShiftCheckout(doc) => doc.currency.as_deref(),
         ReceiptDocument::ZReport(doc) => doc.currency.as_deref(),
         _ => return,
@@ -4488,7 +4574,12 @@ fn document_layout<'a>(
 ) -> std::borrow::Cow<'a, LayoutConfig> {
     if matches!(
         document,
-        ReceiptDocument::ShiftCheckout(_) | ReceiptDocument::ZReport(_)
+        ReceiptDocument::ShiftCheckout(_)
+            | ReceiptDocument::ZReport(_)
+            | ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+                currency: Some(_),
+                ..
+            })
     ) {
         let mut recorded = cfg.clone();
         apply_document_currency(document, &mut recorded);
@@ -17623,6 +17714,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Opening", "Till Cash Sales"]
         );
+    }
+
+    #[test]
+    fn hotel_z_money_rows_survive_missing_disabled_or_enabled_module_flags() {
+        for presentation in [
+            serde_json::json!({}),
+            serde_json::json!({"guestBillingModuleEnabled":false,"roomsModuleEnabled":false,"driveThroughModuleEnabled":false}),
+            serde_json::json!({"guestBillingModuleEnabled":true,"roomsModuleEnabled":true,"driveThroughModuleEnabled":true}),
+        ] {
+            for sign in [1.0, -1.0] {
+                let mut doc = lpp_z_report();
+                doc.hotel_report = serde_json::json!({"presentation":presentation,
+                    "hotel":{"chargedToRoom":50.0*sign,"roomChargesCollected":30.0*sign,"accommodationTax":5.0*sign},
+                    "sales":{"roomServiceOrders":1,"roomServiceSales":30.0*sign,"driveThroughOrders":2,"driveThroughSales":20.0*sign}});
+                let types = z_report_order_type_rows(&doc);
+                assert!(types.contains(&("Room service", 1, 30.0 * sign)));
+                assert!(types.contains(&("Drive-through", 2, 20.0 * sign)));
+                let payments = z_report_payment_rows(&doc);
+                for row in [
+                    ("Charged to room", 50.0 * sign),
+                    ("Room charges collected", 30.0 * sign),
+                    ("Accommodation tax", 5.0 * sign),
+                ] {
+                    assert!(payments.contains(&row));
+                }
+                for output in html_and_text(&ReceiptDocument::ZReport(doc), &slip_cfg("en", "CHF"))
+                {
+                    for label in [
+                        "Room service",
+                        "Drive-through",
+                        "Charged to room",
+                        "Room charges collected",
+                        "Accommodation tax",
+                    ] {
+                        assert!(output.contains(label), "missing {label}");
+                    }
+                }
+            }
+            let mut empty = lpp_z_report();
+            empty.hotel_report = serde_json::json!({"presentation":presentation,
+                "hotel":{"chargedToRoom":0,"roomChargesCollected":0,"accommodationTax":0},
+                "sales":{"roomServiceOrders":1,"roomServiceSales":0,"driveThroughOrders":2,"driveThroughSales":0}});
+            assert!(z_report_order_type_rows(&empty)
+                .iter()
+                .all(|(label, _, _)| !["Room service", "Drive-through"].contains(label)));
+            assert!(z_report_payment_rows(&empty).iter().all(|(label, _)| ![
+                "Charged to room",
+                "Room charges collected",
+                "Accommodation tax"
+            ]
+            .contains(label)));
+        }
     }
 
     #[test]

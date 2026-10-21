@@ -49,7 +49,6 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
   organizationId,
   onClose,
   onSeatGuest,
-  onNavigateToMenu,
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -121,23 +120,10 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
     
     setIsSeating(true);
     try {
-      // Update reservation status to 'seated'
-      await reservationsService.updateStatus(reservation.id, 'seated');
-
-      const tableUpdated = await reservationsService.updateTableStatus(tableId, 'occupied');
-      if (!tableUpdated) {
-        console.warn('[ReservationInfoPanel] Failed to update table status to occupied');
-      }
-
-      // Callback to parent
-      onSeatGuest?.(reservation);
-      
-      // Navigate to menu if callback provided
-      if (onNavigateToMenu) {
-        onNavigateToMenu(tableId, tableNumber);
-      }
-      
+      const seated = await reservationsService.seatReservation(reservation.id);
+      onSeatGuest?.(seated);
       onClose();
+      reservationsService.continueSeatedReservation(seated);
     } catch (err) {
       console.error('Error seating guest:', err);
       setError(t('reservationInfoPanel.seatError', { defaultValue: 'Failed to seat guest' }));

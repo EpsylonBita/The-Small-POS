@@ -106,6 +106,7 @@ export interface AppointmentStats {
 }
 
 export interface CreateAppointmentInput {
+  clientRequestId?: string;
   customerId?: string | null;
   customerName?: string;
   customerPhone?: string;
@@ -211,7 +212,7 @@ function transformFromAPI(data: any): Appointment {
     updatedAt: data.updated_at,
     isMultiService: data.is_multi_service || false,
     totalDurationMinutes: data.total_duration_minutes || null,
-    totalPrice: data.total_price || null,
+    totalPrice: data.total_price == null ? null : Number(data.total_price),
     confirmedAt: data.confirmed_at || null,
     checkedInAt: data.checked_in_at || null,
     completedAt: data.completed_at || null,
@@ -379,6 +380,7 @@ class AppointmentsService {
     try {
       const isMultiService = !!(data.services && data.services.length > 0);
       const body: Record<string, unknown> = {
+        client_request_id: data.clientRequestId || `local-appointment-${crypto.randomUUID()}`,
         customer_id: data.customerId || null,
         customer_name: data.customerName || null,
         customer_phone: data.customerPhone || null,

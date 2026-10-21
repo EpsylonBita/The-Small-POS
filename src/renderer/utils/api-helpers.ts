@@ -169,6 +169,8 @@ export interface PosApiResult<T = any> {
   status?: number;
   /** The office's machine code on a refusal, e.g. `SUPPLIER_INVOICE_AMOUNT_HAS_PAYMENTS`. */
   code?: string;
+  /** Booking details on the hotel date-conflict refusal; never a successful snapshot. */
+  errorBody?: unknown;
   /** Native transaction proof; absent for generic server/transport failures. */
   tableMutationQuarantinedCount?: number;
   source?: 'remote' | 'cache';
@@ -240,6 +242,11 @@ export async function posApiFetch<T = any>(
           ),
           status: ipcResult?.status,
           ...(code ? { code } : {}),
+          ...((code === 'ROOM_RESERVATION_DATES_MISMATCH' || String(ipcResult?.error).includes('ROOM_RESERVATION_DATES_MISMATCH')) ? { errorBody: (() => {
+            if (ipcResult?.data && typeof ipcResult.data === 'object') return ipcResult.data;
+            const raw=String(ipcResult?.error ?? '');
+            try { return JSON.parse(raw.slice(raw.indexOf('{'))); } catch { return undefined; }
+          })() } : {}),
           ...(hasRefusedBatchProof ? { tableMutationQuarantinedCount: quarantinedCount } : {}),
         };
       }
@@ -268,6 +275,7 @@ export async function posApiFetch<T = any>(
         error: errorData.error || errorData.message || `HTTP ${response.status}`,
         status: response.status,
         ...(code ? { code } : {}),
+        ...(code === 'ROOM_RESERVATION_DATES_MISMATCH' ? { errorBody: errorData } : {}),
       };
     }
 

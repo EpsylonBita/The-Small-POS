@@ -7,6 +7,7 @@
  * Task 17.1: Create POS rooms interface
  */
 
+import { roomWorkflowError } from '../utils/room-workflow';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
@@ -155,6 +156,10 @@ export function useRooms({
   // Update room status
   const updateStatus = useCallback(async (roomId: string, status: RoomStatus): Promise<Room | null> => {
     try {
+      const room = allRooms.find(room => room.id === roomId);
+      if (room && status !== 'occupied' && (getRoomEffectiveStatus(room) === 'occupied' || room.activeFolio)) {
+        throw new Error('ROOM_CHECKOUT_REQUIRED');
+      }
       const updated = await roomsService.updateStatus(roomId, status);
 
       // An explicit manual status change is authoritative for display. Align the
@@ -179,11 +184,11 @@ export function useRooms({
       return normalized;
     } catch (err) {
       toast.error(
-        t('roomsView.toasts.statusUpdateFailed', { defaultValue: 'Failed to update room status' }),
+        String(err).includes('ROOM_CHECKOUT_REQUIRED') ? roomWorkflowError(err, t) : t('roomsView.toasts.statusUpdateFailed', { defaultValue: 'Failed to update room status' }),
       );
       return null;
     }
-  }, [t]);
+  }, [t, allRooms]);
 
   return {
     rooms,

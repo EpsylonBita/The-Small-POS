@@ -216,6 +216,11 @@ pub(crate) async fn try_post(
 /// answer, and a branch without a plugin drains its row as `skipped`. A
 /// FRESH inactive verdict only keeps the queued row from holding the Z.
 pub fn enqueue_for_order(conn: &Connection, order_id: &str) -> Result<(), String> {
+    if super::payload_builder::folio_fiscal_lines(conn, order_id)?
+        .is_some_and(|lines| lines.is_empty())
+    {
+        return Ok(());
+    }
     if is_protected_repair_order(conn, order_id)? {
         info!("[fiscal.dispatcher] skipping generic fiscal queue for protected repair settlement {order_id}");
         return Ok(());

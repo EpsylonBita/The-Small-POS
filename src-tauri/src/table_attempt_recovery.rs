@@ -1,6 +1,7 @@
 //! Crash recovery for exact canonical edits and committed cancellations.
 //! No PIN/approval token or payment collection is ever dispatched by this owner.
 use crate::{
+    database_lock::run_blocking_command,
     db::DbState,
     table_session_cache::{self, Scope},
 };
@@ -8,7 +9,7 @@ use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{future::Future, pin::Pin};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[derive(Debug, Clone)]
 struct Attempt {
@@ -609,11 +610,19 @@ pub(crate) fn status(conn: &Connection) -> Result<Value, String> {
         .map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     Ok(json!({"success":true,"attempts":attempts}))
 }
+// On the blocking pool, never the window thread or a runtime worker (Tomikro
+// 20/10/2026, see database_lock.rs).
 #[tauri::command]
-pub fn table_attempt_recovery_status(db: tauri::State<'_, DbState>) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    status(&conn)
+pub async fn table_attempt_recovery_status(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("table_attempt_recovery_status", move || {
+        let db = app.state::<DbState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db
+            .lock_traced("table_attempt_recovery_status")
+            .map_err(|e| e.to_string())?;
+        status(&conn)
+    })
+    .await
 }
 
 /// An operator may read a selected original cancellation receipt after a

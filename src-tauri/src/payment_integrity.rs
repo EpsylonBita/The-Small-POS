@@ -873,7 +873,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
     })
 }
 
-fn order_blocker_row_select() -> String {
+fn order_blocker_row_select(conn: &Connection) -> Result<String, String> {
     // W6: column 5 (payment_method) is derived via a subquery matching
     // `payments::derive_payment_method`. The stored `orders.payment_method`
     // column was dropped in migration v55. Semantic consequence: for
@@ -895,7 +895,7 @@ fn order_blocker_row_select() -> String {
     // row written between v51/v53/v54 backfill and 4c landing that still
     // has NULL `_cents`) be read without silently zeroing money. 4e
     // removes the COALESCE arms when the REAL columns are dropped.
-    "SELECT
+    Ok(    "SELECT
         o.id,
         COALESCE(NULLIF(TRIM(o.order_number), ''), o.id),
         COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0),
@@ -1120,12 +1120,12 @@ fn order_blocker_row_select() -> String {
         // that has only one is named `missing_local_payment_row`.
         .replace(
             "$COUNTED_OP",
-            &crate::payments::counted_completed_payment_sql("op"),
+            &crate::payments::counted_financial_payment_sql(conn, "op")?,
         )
         .replace(
             "$PLATFORM_SETTLEMENT_OP",
             &crate::payments::platform_settlement_row_sql("op"),
-        )
+        ))
 }
 
 /// Reads the 20 columns of [`order_blocker_row_select`] into a [`RawBlockerRow`].
@@ -1214,7 +1214,7 @@ pub fn load_order_payment_blockers(
            AND COALESCE(o.folio_charged, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            AND NOT {}",
-        order_blocker_row_select(),
+        order_blocker_row_select(conn)?,
         box_closure_exempt_from_blockers_expr("o")
     );
     let mut stmt = conn
@@ -1282,7 +1282,7 @@ pub fn load_branch_window_payment_blockers(
            AND NOT {swept_by_last_z_expr}
            AND NOT {box_closure_exempt_expr}
          ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
-        order_blocker_row_select()
+        order_blocker_row_select(conn)?
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -1346,7 +1346,7 @@ pub fn load_cancelled_order_claims_payment_findings(
                 WHERE op.order_id = o.id AND {counted}
            )
          ORDER BY COALESCE(o.updated_at, o.created_at) ASC, o.id ASC",
-        counted = crate::payments::counted_completed_payment_sql("op"),
+        counted = crate::payments::counted_financial_payment_sql(conn, "op")?,
     );
     let mut stmt = conn
         .prepare(&sql)

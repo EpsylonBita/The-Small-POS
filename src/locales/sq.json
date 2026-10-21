@@ -3563,6 +3563,8 @@
       "manage": "Menaxho"
     },
     "financial": {
+      "incomingRecovery": "Kopje pagesash për rikuperim: {{count}}. Shkarkimet ndalojnë pas dështimeve të përsëritura. Provoni përsëri për të lexuar të dhënat më të fundit të serverit; asgjë nuk tarifohet apo fshihet.",
+      "incomingRetry": "Riprovo shkarkimin e pagesave",
       "title": "Transaksione financiare",
       "subtitle": "Menaxho elementet financiare në pritje dhe ato që dështuan në sinkronizim",
       "driver": "Fitimet e korrierëve",
@@ -5837,6 +5839,8 @@
         "noCapture": "Kërkesa e fundit nuk la asnjë kthim në kartën dhuratë: nuk u kthye asgjë. Mund ta nisësh përsëri."
       },
       "statusSetAside": "Lënë mënjanë për kontroll",
+      "canonicalRefreshRequired": "Bilanci më i fundit i pagesës nuk mund të lexohej. Provoni përsëri para se të ktheni para.",
+      "canonicalReturnFinal": "Kjo pagesë është kthyer tashmë dhe nuk mund të rimbursohet përsëri.",
       "placeholderNotMoney": "Ky rresht pagese nuk regjistron para (arka e nxori nga etiketa e porosisë): nuk mund të rimbursohet as të anulohet. Rikthe pagesat e porosisë nga serveri me «Sinkronizo tani».",
       "otherRefund": "E njëjta mënyrë (tjetër)",
       "tenderRequired": "Zgjidh si u kthye rimbursimi",
@@ -7261,6 +7265,14 @@
     "connect": "Lidh dhe sinkronizo"
   },
   "productCatalog": {
+    "retailReadiness": {
+      "chooseVariant": "Zgjidh variantin — {{name}}",
+      "stock": "Gjendja: {{quantity}}",
+      "readScale": "Lexo peshoren",
+      "scaleNotReady": "Nuk ka peshë të fundit dhe të qëndrueshme. Kontrollo peshoren ose shkruaje sasinë vetë.",
+      "variantUnavailable": "Ky variant nuk është i disponueshëm. Rifresko katalogun dhe provo përsëri.",
+      "invalidScaleLabel": "Kjo etiketë peshoreje nuk mund të përdoret. Kontrollo çmimin për njësi dhe shkruaje sasinë vetë."
+    },
     "title": "Katalogu i produkteve",
     "scanBarcode": "Skano barkodin ose shkruaj SKU-në...",
     "scanning": "Duke skanuar...",
@@ -7842,6 +7854,7 @@
     "insufficientPoints": "Duhen të paktën {{min}} pikë",
     "redeemSuccess": "U përdorën {{points}} pikë për ulje {{discount}}",
     "redeemFailed": "Porosia u ruajt, por pikët e besnikërisë nuk u përdorën",
+    "checkoutRefused": "Pikët e besnikërisë nuk mund të rezervoheshin. Porosia nuk u ruajt. Hiqni përdorimin e pikëve ose provoni përsëri.",
     "redeemPrepared": "{{points}} pikë gati për ulje {{discount}}",
     "noCustomerSelected": "Zgjidh një klient të ruajtur për të përdorur pikët",
     "moduleUnavailable": "Moduli i besnikërisë s'është aktivizuar për këtë terminal",
@@ -10152,5 +10165,66 @@
     "refusal": "Pa lidhje dita nuk mbyllet dot. Vazhdo të shesësh: dita mbetet e hapur dhe e mbyll sapo të kthehet lidhja. Për ta numëruar arkën tani, bëj mbylljen e turnit të arkëtarit, që printohet edhe pa internet, dhe shiko paraparjen në këtë ekran.",
     "status": "Pa lidhje: dita mbyllet sapo të kthehet",
     "checklist": "Nuk ka lidhje me serverin. Vazhdo të shesësh dhe mbyll ditën sapo të kthehet lidhja."
+  },
+  "salonSale": {
+    "newSale": "Shitje e re shërbimi",
+    "existingTicket": "Ky takim ka tashmë një faturë. Hape te Porositë për të kontrolluar pagesën.",
+    "checkout": "Pagesa",
+    "add": "Shto në faturë",
+    "title": "Shitje shërbimesh",
+    "search": "Kërko shërbime dhe produkte…",
+    "pendingSync": "Prit të sinkronizohet ky takim para se të marrësh pagesën.",
+    "unavailable": "Të dhënat e shërbimit nuk janë gati. Rifresko dhe provo përsëri."
+  },
+  "hotelDeskArrival": { "guestCount": "Numri i mysafirëve" },
+  "hotelDeskService": {
+    "title": "Pagesa e shërbimit",
+    "room": "Ngarkoje te një dhomë e zënë",
+    "chooseRoom": "Zgjidh një dhomë",
+    "loading": "Po ngarkohen dhomat e zëna…",
+    "noRooms": "Nuk ka dhomë të zënë me llogari aktive në monedhën e dyqanit. Mund ta marrësh pagesën tani.",
+    "hint": "Zgjidh dhomën e mysafirit që të ofrosh pagesën në llogarinë e dhomës.",
+    "collectNow": "Merr pagesën tani",
+    "useRoom": "Përdor këtë dhomë"
+  },
+  "hotelMoney": {
+    "refund": "Kthim parash",
+    "collect": "Merr pagesën e llogarisë",
+    "statement": "Pasqyra e llogarisë",
+    "vatCategory": "Kategoria e TVSH-së",
+    "chooseVat": "Zgjidh kategorinë e TVSH-së",
+    "nightlyRate": "Çmimi i rënë dakord për natë: {{amount}}",
+    "vat": {
+      "gr_exempt": "Pa TVSH",
+      "gr_out_of_scope": "Jashtë fushës së TVSH-së",
+      "gr_article_39_small_business": "Përjashtim për bizneset e vogla"
+    },
+    "errors": {
+      "FOLIO_SETTLEMENT_OPEN": "Vazhdo pagesën që ke lënë hapur.",
+      "NOTHING_TO_COLLECT": "Nuk ka asgjë për të mbledhur.",
+      "AMOUNT_EXCEEDS_COLLECTIBLE": "Shuma është më e madhe se gjendja që mund të paguhet tani.",
+      "FOLIO_NOT_COLLECTIBLE": "Kjo llogari e mysafirit nuk pranon më pagesa.",
+      "FOLIO_CURRENCY_MISMATCH": "Monedha nuk përputhet me llogarinë e mysafirit.",
+      "FOLIO_CURRENCY_UNAVAILABLE": "Monedha e llogarisë nuk është e disponueshme.",
+      "SETTLEMENT_REQUEST_CONFLICT": "Kërkesa fillestare ka të dhëna të tjera. Vazhdo me atë kërkesë.",
+      "INVALID_INPUT": "Kontrollo shumën dhe të dhënat.",
+      "FOLIO_NOT_FOUND": "Llogaria nuk u gjet ose nuk mund ta hapësh më.",
+      "SETTLEMENT_HAS_PAYMENTS": "Këtu ka pagesa të marra. Merr pjesën e mbetur ose kthe pagesat fillestare.",
+      "FOLIO_SETTLEMENT_REQUIRED": "Merr pagesën e kësaj llogarie nga ekrani i pagesave.",
+      "FOLIO_SETTLEMENT_IMMUTABLE": "Rreshtat dhe shumat e shlyerjes nuk mund të ndryshohen.",
+      "CHARGE_REQUEST_CONFLICT": "Një tarifë po pret konfirmim. Provo përsëri me të dhënat fillestare.",
+      "ROOM_CHECKOUT_REQUIRED": "Bëj daljen e mysafirit para se ta lirosh dhomën.",
+      "ROOM_RESERVATION_DATES_MISMATCH": "Ka një rezervim për këto data. Hape dhe përdor datat e tij të mbërritjes dhe largimit.",
+      "PAYMENT_MIRROR_PENDING": "Pagesat po rikthehen ende. Sinkronizo dhe vazhdo para se të marrësh pagesë tjetër.",
+      "CONNECTION_REQUIRED": "Lidhu për të përgatitur ose anuluar pagesën.",
+      "ACTION_FAILED": "Veprimi nuk u krye. Provo përsëri të njëjtën kërkesë."
+    }
+  },
+  "verticalReadinessDesk": {
+    "chooseParty": "Për cilët klientë është kjo tavolinë?",
+    "bookingDetails": "Rezervimi: {{name}} në {{time}}",
+    "walkIn": "Pa rezervim",
+    "seatBooking": "Uli klientët e rezervimit",
+    "timezoneUnavailable": "Zona kohore e dyqanit nuk është e disponueshme. Rifresko cilësimet e terminalit para se të ndryshosh orarin."
   }
 }

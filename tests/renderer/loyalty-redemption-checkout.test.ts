@@ -64,7 +64,7 @@ test('loyalty redemption is an explicit checkout discount, not an immediate moda
   assert.match(redeemModal, /onRedeem\(discountPreview, pointsToRedeem\)/);
 });
 
-test('orders redeem prepared loyalty points only after a persisted order id exists', () => {
+test('orders secure prepared loyalty points before saving under the checkout identity', () => {
   const orderDashboard = source(orderDashboardPath);
   const orderFlow = source(orderFlowPath);
 
@@ -73,9 +73,10 @@ test('orders redeem prepared loyalty points only after a persisted order id exis
     assert.match(checkoutSource, /hasLoyaltyModule/);
     assert.match(checkoutSource, /orderData\.loyalty_redemption/);
     assert.match(checkoutSource, /loyalty_discount_amount/);
-    assert.match(checkoutSource, /bridge\.loyalty\s*\n?\s*\.redeemPoints\(\{/);
-    assert.match(checkoutSource, /orderId: result\.orderId/);
-    assert.match(checkoutSource, /loyalty\.redeemFailed/);
+    assert.match(checkoutSource, /await saveOrderWithLoyalty\(/);
+    assert.match(checkoutSource, /takeCheckoutRequestId\(orderData\.clientRequestId\)/);
+    assert.doesNotMatch(checkoutSource, /bridge\.loyalty\s*\.redeemPoints/);
+    assert.match(checkoutSource, /loyalty\.checkoutRefused/);
   }
 });
 
@@ -92,6 +93,7 @@ test('loyalty redemption checkout translations exist in every POS locale', () =>
   ];
   const requiredLoyaltyKeys = [
     'redeemFailed',
+    'checkoutRefused',
     'redeemPrepared',
     'noCustomerSelected',
     'moduleUnavailable',

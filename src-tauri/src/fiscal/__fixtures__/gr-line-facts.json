@@ -1,0 +1,114 @@
+[
+  {
+    "name": "goods",
+    "rateBasisPoints": 2400,
+    "taxExemptionReason": null,
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1"
+    }
+  },
+  {
+    "name": "service identity",
+    "rateBasisPoints": 2400,
+    "taxExemptionReason": null,
+    "fiscalDocumentProfile": null,
+    "serviceId": "svc-1",
+    "expected": {
+      "incomeClassificationCategory": "category1_3"
+    }
+  },
+  {
+    "name": "service profile",
+    "rateBasisPoints": 1300,
+    "taxExemptionReason": null,
+    "fiscalDocumentProfile": "service",
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_3"
+    }
+  },
+  {
+    "name": "service fee",
+    "rateBasisPoints": 2400,
+    "taxExemptionReason": null,
+    "fiscalDocumentProfile": "service_fee",
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_3"
+    }
+  },
+  {
+    "name": "explicit zero VAT code",
+    "rateBasisPoints": 0,
+    "taxExemptionReason": "1",
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1",
+      "vatExemptionCategory": 1
+    }
+  },
+  {
+    "name": "highest explicit zero VAT code",
+    "rateBasisPoints": 0,
+    "taxExemptionReason": "31",
+    "fiscalDocumentProfile": "service",
+    "serviceId": "svc-1",
+    "expected": {
+      "incomeClassificationCategory": "category1_3",
+      "vatExemptionCategory": 31
+    }
+  },
+  {
+    "name": "nonzero VAT has no exemption",
+    "rateBasisPoints": 2400,
+    "taxExemptionReason": "1",
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1"
+    }
+  },
+  {
+    "name": "unknown article reason",
+    "rateBasisPoints": 0,
+    "taxExemptionReason": "article39",
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1"
+    }
+  },
+  {
+    "name": "unknown text",
+    "rateBasisPoints": 0,
+    "taxExemptionReason": "tip",
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1"
+    }
+  },
+  {
+    "name": "out of range code",
+    "rateBasisPoints": 0,
+    "taxExemptionReason": "32",
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1"
+    }
+  },
+  {
+    "name": "ambiguous number",
+    "rateBasisPoints": 0,
+    "taxExemptionReason": "01",
+    "fiscalDocumentProfile": null,
+    "serviceId": null,
+    "expected": {
+      "incomeClassificationCategory": "category1_1"
+    }
+  }
+]

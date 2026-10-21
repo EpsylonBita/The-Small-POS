@@ -1,3 +1,5 @@
+import { toCents } from '../../shared/utils/money';
+
 // Coupon-validation failures arrive in two different shapes depending on the
 // runtime path, and both were previously echoed to the user verbatim:
 //   - Browser/admin API (`pos/coupons/validate`) returns machine codes, e.g.
@@ -71,4 +73,29 @@ export function resolveCouponErrorKey(serverError?: string | null): CouponErrorK
   }
 
   return 'menu.cart.couponInvalid';
+}
+
+export interface CouponEligibility {
+  min_order_amount?: number;
+  minimum_order_amount?: number;
+  expires_at?: string | null;
+  is_active?: boolean;
+  usage_limit?: number | null;
+  usage_count?: number;
+}
+
+// Validation qualifies the raw basket, before order discounts or delivery fees.
+export function couponEligibilityError(
+  coupon: CouponEligibility,
+  basketValue: number,
+  now = Date.now(),
+): CouponErrorKey | null {
+  if (coupon.is_active === false) return 'menu.cart.couponInactive';
+  if (coupon.expires_at && Date.parse(coupon.expires_at) < now) return 'menu.cart.couponExpired';
+  if (Number(coupon.usage_limit) > 0 && Number(coupon.usage_count ?? 0) >= Number(coupon.usage_limit)) {
+    return 'menu.cart.couponUsageLimit';
+  }
+  const minimum = Number(coupon.min_order_amount ?? coupon.minimum_order_amount ?? 0);
+  if (toCents(basketValue) < toCents(minimum)) return 'menu.cart.couponMinOrder';
+  return null;
 }

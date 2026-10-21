@@ -1,3 +1,7 @@
+import OrderFlow from '../../../components/OrderFlow';
+import { servicesService } from '../../../services/ServicesService';
+import { appointmentSale, appointmentWallTimes, branchWallClock, appointmentCanCheckIn, hasAppointmentTicket, serviceVatDefaults, type SalonSale } from './salon-sale';
+import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
 /**
  * AppointmentsView - POS Today's Appointments
  * 
@@ -15,7 +19,7 @@ import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAppointments } from '../../../hooks/useAppointments';
-import { formatDate, formatTime } from '../../../utils/format';
+import { formatDate } from '../../../utils/format';
 import { parseLocalDateString } from '../../../utils/date';
 import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, ChevronDown, RefreshCw, CheckCircle, Check, Play, XCircle, X, Plus, Ban } from 'lucide-react';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
@@ -80,6 +84,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
+  const { getSetting } = useTerminalSettings();
   
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
@@ -120,6 +125,10 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
     };
   }, []);
 
+  const [zoneRefresh, setZoneRefresh] = useState(0);
+  const [zoneError, setZoneError] = useState(false);
+  const [timeZone, setTimeZone] = useState<string | null>(null);
+  const [sale, setSale] = useState<SalonSale | null>(null);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('timeline');
@@ -138,6 +147,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   }, [openCreateSignal]);
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([]);
   const [servicesList, setServicesList] = useState<{ id: string; name: string; duration: number }[]>([]);
+  const createRequestId = useRef<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showCustomerSearch, setShowCustomerSearch] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState<{ id: string; name: string; phone: string; email?: string; is_banned?: boolean; ban_reason?: string } | null>(null);
@@ -155,6 +165,26 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
 
   const isDark = resolvedTheme === 'dark';
   const effectiveOrgId = organizationId || localOrgId || '';
+
+  useEffect(() => {
+    if (!branchId || !effectiveOrgId) return;
+    let disposed = false;
+    setTimeZone(null);
+    setZoneError(false);
+    const date = new Date().toISOString().slice(0, 10);
+    const { start, end } = appointmentWallTimes(date, '00:00', 1440);
+    void posApiGet<{ timeZone?: string }>(`/api/pos/staff-schedule/check?${new URLSearchParams({ start_time: start, end_time: end })}`)
+      .then(result => {
+        const zone = result.success && result.data?.timeZone;
+        if (disposed) return;
+        if (!zone) { setZoneError(true); return; }
+        const today = branchWallClock(new Date(), zone).slice(0, 10);
+        setTimeZone(zone);
+        setSelectedDate(parseLocalDateString(today));
+        setFormData(previous => ({ ...previous, date: today }));
+      }).catch(() => { if (!disposed) setZoneError(true); });
+    return () => { disposed = true; };
+  }, [branchId, effectiveOrgId, zoneRefresh]);
 
   // Handle customer selected from CustomerSearchModal
   const handleCustomerSelected = useCallback((customer: any) => {
@@ -179,6 +209,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   // Load staff and services for the create modal
   useEffect(() => {
     const loadDropdownData = async () => {
+      if (!timeZone) return;
       console.log('[AppointmentsView] Loading staff and services for branch:', branchId, 'org:', effectiveOrgId);
 
       try {
@@ -265,7 +296,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
     // modal is open, so the page-level staff filter has branch staff to choose from
     // even on days with no appointments.
     loadDropdownData();
-  }, [bridge, branchId, effectiveOrgId, formData.date, t]);
+  }, [bridge, branchId, effectiveOrgId, formData.date, t, timeZone]);
 
   // Helper: format a Date as YYYY-MM-DD using local timezone
   const toLocalDateStr = (d: Date): string => {
@@ -279,7 +310,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   // IMPORTANT: Use local date strings (YYYY-MM-DD) to avoid timezone bugs
   // where .toISOString() shifts the date by UTC offset
   const filters: AppointmentFilters = useMemo(() => {
-    const baseFilters: AppointmentFilters = {};
+    const baseFilters: AppointmentFilters = { includeServices: true };
 
     if (quickFilter === 'week') {
       const weekStart = new Date(selectedDate);
@@ -314,9 +345,8 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
     createAppointment,
     updateStatus,
     checkIn,
-    complete,
   } = useAppointments({
-    branchId: branchId || '',
+    branchId: timeZone ? branchId || '' : '',
     organizationId: effectiveOrgId,
     filters,
     enableRealtime: true,
@@ -345,8 +375,8 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
 
   const handleQuickFilter = (filter: QuickFilter) => {
     setQuickFilter(filter);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    if (!timeZone) return;
+    const today = parseLocalDateString(branchWallClock(new Date(), timeZone).slice(0, 10));
     
     if (filter === 'today') {
       setSelectedDate(today);
@@ -369,13 +399,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
       const service = servicesList.find(s => s.id === formData.serviceId);
       const duration = service?.duration || 30;
 
-      // Build start and end times
-      const [hours, minutes] = formData.startTime.split(':').map(Number);
-      const startDate = new Date(formData.date);
-      startDate.setHours(hours, minutes, 0, 0);
-
-      const endDate = new Date(startDate);
-      endDate.setMinutes(endDate.getMinutes() + duration);
+      const { start: startTime, end: endTime } = appointmentWallTimes(formData.date, formData.startTime, duration);
 
       const availabilityResult = isBrowser()
         ? await posApiGet<{
@@ -384,11 +408,11 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
             unavailable?: Array<{ staffId?: string; reason?: string }>;
             error?: string;
           }>(
-            `/api/pos/staff-schedule/check?start_time=${encodeURIComponent(startDate.toISOString())}&end_time=${encodeURIComponent(endDate.toISOString())}&staff_id=${encodeURIComponent(formData.staffId)}&service_id=${encodeURIComponent(formData.serviceId)}`,
+            `/api/pos/staff-schedule/check?start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}&staff_id=${encodeURIComponent(formData.staffId)}&service_id=${encodeURIComponent(formData.serviceId)}`,
           )
         : await bridge.staffSchedule.checkAvailability({
-            start_time: startDate.toISOString(),
-            end_time: endDate.toISOString(),
+            start_time: startTime,
+            end_time: endTime,
             staff_id: formData.staffId,
             service_id: formData.serviceId,
           });
@@ -426,14 +450,16 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         return;
       }
 
+      createRequestId.current ??= `local-appointment-${crypto.randomUUID()}`;
       const created = await createAppointment({
+        clientRequestId: createRequestId.current,
         customerId: formData.customerId || undefined,
         customerName: formData.customerName || undefined,
         customerPhone: formData.customerPhone || undefined,
         staffId: formData.staffId,
         serviceId: formData.serviceId,
-        startTime: startDate.toISOString(),
-        endTime: endDate.toISOString(),
+        startTime: startTime,
+        endTime: endTime,
         notes: formData.notes || undefined,
       });
 
@@ -447,11 +473,12 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         customerEmail: '',
         staffId: '',
         serviceId: '',
-        date: toLocalDateStr(new Date()),
+        date: timeZone ? branchWallClock(new Date(), timeZone).slice(0, 10) : '',
         startTime: '',
         notes: '',
       });
       setSelectedCustomer(null);
+      createRequestId.current = null;
       setShowCreateModal(false);
 
       // Refresh to show new appointment
@@ -473,7 +500,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
   const getQuickActions = (appointment: Appointment) => {
     const actions: { label: string; action: () => void; variant: string; icon: typeof CheckCircle }[] = [];
 
-    if (appointment.status === 'scheduled' || appointment.status === 'confirmed') {
+    if (appointmentCanCheckIn(appointment.status)) {
       actions.push({
         label: t('appointments.actions.checkIn', 'Check In'),
         action: () => checkIn(appointment.id),
@@ -481,10 +508,18 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         icon: Play,
       });
     }
-    if (appointment.status === 'in_progress') {
+    if (['scheduled', 'confirmed', 'in_progress'].includes(appointment.status)) {
       actions.push({
-        label: t('appointments.actions.complete', 'Complete'),
-        action: () => complete(appointment.id),
+        label: t('salonSale.checkout'),
+        action: async () => {
+          try {
+            if (hasAppointmentTicket(await bridge.orders.getAll(), appointment)) { toast.error(t('salonSale.existingTicket')); return; }
+            servicesService.setContext(branchId || '', effectiveOrgId);
+            setSale(appointmentSale(appointment, await servicesService.fetchServices(), serviceVatDefaults(getSetting)));
+          } catch (error) {
+            toast.error(t(error instanceof Error && error.message === 'SALON_APPOINTMENT_PENDING' ? 'salonSale.pendingSync' : 'salonSale.unavailable'));
+          }
+        },
         variant: 'success',
         icon: CheckCircle,
       });
@@ -508,14 +543,14 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
     timeSlots.forEach(hour => { grouped[hour] = []; });
     
     appointments.forEach(apt => {
-      const hour = new Date(apt.startTime).getHours();
+      const hour = timeZone ? Number(branchWallClock(apt.startTime, timeZone).slice(11, 13)) : -1;
       if (grouped[hour]) {
         grouped[hour].push(apt);
       }
     });
     
     return grouped;
-  }, [appointments, timeSlots]);
+  }, [appointments, timeSlots, timeZone]);
 
   if (!branchId || !effectiveOrgId) {
     return (
@@ -524,6 +559,11 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
       </motion.div>
     );
   }
+
+  if (!timeZone) return <div role="status" className="p-8 text-slate-900 dark:text-white">
+    {zoneError ? t('salonSale.unavailable') : t('common.loading')}
+    {zoneError && <button type="button" className="ml-3 rounded-xl border p-2" onClick={() => setZoneRefresh(value => value + 1)}>{t('common.refresh', 'Refresh')}</button>}
+  </div>;
 
   return (
     <motion.div initial="hidden" animate="show" variants={pageMotionContainer} className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-[#fdfaf5] text-gray-900'}`}>
@@ -647,6 +687,9 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         </div>
       </motion.div>
 
+      <div className="px-4 py-2"><button type="button" className="rounded-xl bg-amber-400 px-4 py-2 font-semibold text-black"
+        onClick={() => setSale({ items: [], customer: { id: '', name: '', phone: '' } })}>{t('salonSale.newSale')}</button></div>
+
       {/* Loading State */}
       {isLoading && appointments.length === 0 && (
         <motion.div variants={pageMotionItem} className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -736,7 +779,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                       <div className="flex items-center gap-4 mt-1 text-sm">
                         <span className="flex items-center gap-1">
                           <Clock className="w-3 h-3" />
-                          {formatTime(apt.startTime, { hour: '2-digit', minute: '2-digit' })}
+                          {timeZone ? branchWallClock(apt.startTime, timeZone).slice(11, 16) : '-'}
                         </span>
                         <span className="flex items-center gap-1">
                           <Scissors className="w-3 h-3" />
@@ -796,9 +839,12 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         />
       )}
 
+      {sale && <OrderFlow salonSale={sale} showFab={false} restoreDraftOnMount={false} onSalonClose={() => { setSale(null); void refetch(); }} />}
+
       {/* Create Appointment Modal */}
       {showCreateModal && (
         <CreateAppointmentModalContent
+          timeZone={timeZone}
           isDark={isDark}
           formData={formData}
           setFormData={setFormData}
@@ -822,7 +868,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
               customerEmail: '',
               staffId: '',
               serviceId: '',
-              date: toLocalDateStr(new Date()),
+              date: timeZone ? branchWallClock(new Date(), timeZone).slice(0, 10) : '',
               startTime: '',
               notes: '',
             });
@@ -863,6 +909,7 @@ interface AppointmentFormData {
 }
 
 interface CreateAppointmentModalContentProps {
+  timeZone: string | null;
   isDark: boolean;
   formData: AppointmentFormData;
   setFormData: React.Dispatch<React.SetStateAction<AppointmentFormData>>;
@@ -985,6 +1032,7 @@ const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, pla
 };
 
 const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps> = ({
+  timeZone,
   isDark,
   formData,
   setFormData,
@@ -1105,29 +1153,24 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
       return;
     }
     setLoadingSlots(true);
-    const start = new Date(selectedDay);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
-    const query = new URLSearchParams({ start_time: start.toISOString(), end_time: end.toISOString(),
+    const { start, end } = appointmentWallTimes(formData.date, '00:00', 1440);
+    const query = new URLSearchParams({ start_time: start, end_time: end,
       staff_id: formData.staffId, service_id: service.id, slot_duration_minutes: String(service.duration) });
     void posApiGet<{ success?: boolean; availableSlots?: string[] }>(`/api/pos/staff-schedule/check?${query}`)
       .then(result => {
         if (disposed) return;
         if (!result.success || result.data?.success === false || !Array.isArray(result.data?.availableSlots)) throw new Error('Availability unavailable');
-        setAvailableSlots(result.data.availableSlots);
+        if (!timeZone) throw new Error('Store timezone unavailable');
+        setAvailableSlots(result.data.availableSlots.map(instant => branchWallClock(instant, timeZone)));
       })
       .catch(() => { if (!disposed) setAvailabilityError(true); })
       .finally(() => { if (!disposed) setLoadingSlots(false); });
     return () => { disposed = true; };
-  }, [selectedDay, branchId, formData.staffId, formData.serviceId, servicesList, setFormData, availabilityRefresh]);
+  }, [selectedDay, branchId, formData.staffId, formData.serviceId, servicesList, setFormData, availabilityRefresh, timeZone]);
 
   const isTimeSlotBooked = (time: string): boolean => {
     if (!selectedDay || !formData.staffId || loadingSlots || availabilityError) return true;
-    const [hour, minute] = time.split(':').map(Number);
-    const start = new Date(selectedDay);
-    start.setHours(hour, minute, 0, 0);
-    return start <= new Date() || !availableSlots.includes(start.toISOString());
+    return !timeZone || !availableSlots.includes(`${formData.date}T${time}`);
   };
 
   const handleDateSelect = (day: Date) => {
@@ -1346,8 +1389,9 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               {calendarDays.map((day, idx) => {
                 const isCurrentMonth = day.getMonth() === calendarDate.getMonth();
                 const isSelected = selectedDay?.toDateString() === day.toDateString();
-                const isToday = day.toDateString() === new Date().toDateString();
-                const isPast = day < new Date(new Date().setHours(0, 0, 0, 0));
+                const today = timeZone ? parseLocalDateString(branchWallClock(new Date(), timeZone).slice(0, 10)) : null;
+                const isToday = today?.toDateString() === day.toDateString();
+                const isPast = !today || day < today;
                 return (
                   <button
                     key={idx}
@@ -1481,9 +1525,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                 <span className={`font-semibold ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
                   {(() => {
                     const [h, m] = formData.startTime.split(':').map(Number);
-                    const end = new Date(selectedDay);
-                    end.setHours(h, m + selectedService.duration, 0, 0);
-                    return formatTime(end, { hour: '2-digit', minute: '2-digit' });
+                    return appointmentWallTimes(formData.date, formData.startTime, selectedService.duration).end.slice(11, 16);
                   })()}
                 </span>
                 <span className={isDark ? 'text-zinc-500' : 'text-gray-500'}>({selectedService.duration}{t('common.minutes', 'min')})</span>

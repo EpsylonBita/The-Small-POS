@@ -13,6 +13,11 @@ import type { Order } from '../../types/orders';
 
 export type BusinessCategory = 'food' | 'service' | 'product';
 
+/** Older terminal snapshots use the API's convenience_store alias. */
+export function normalizeBusinessTypeAlias<T>(value: T): T | 'convenience' {
+  return value === 'convenience_store' ? 'convenience' : value;
+}
+
 /**
  * Maps business types to their business categories.
  * This mapping determines which dashboard layout is used.
@@ -57,11 +62,11 @@ export const BUSINESS_TYPE_TO_CATEGORY: Record<BusinessType, BusinessCategory> =
 /**
  * Get the business category for a given business type
  */
-export function getBusinessCategory(businessType: BusinessType | null | undefined): BusinessCategory {
+export function getBusinessCategory(businessType: BusinessType | 'convenience_store' | null | undefined): BusinessCategory {
   if (!businessType) {
     return 'food'; // Default to food dashboard
   }
-  return BUSINESS_TYPE_TO_CATEGORY[businessType] || 'food';
+  return BUSINESS_TYPE_TO_CATEGORY[normalizeBusinessTypeAlias(businessType) as BusinessType] || 'food';
 }
 
 /**

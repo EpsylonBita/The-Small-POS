@@ -205,6 +205,25 @@ describe('StaffShiftModal ordinary cashier ledger and confirmation', { timeout: 
     expect(bridge.shifts.close).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])('keeps inherited float out of expected cash (returned: %s)', async (returned) => {
+    fixture.activeShift = shift({ currency: 'EUR', opening_cash_amount: 80 });
+    bridge.shifts.getSummary.mockResolvedValue({ success: true, data: {
+      ...summary(0), currency: 'EUR', shift: fixture.activeShift,
+      cashDrawer: { driver_cash_given: 0, driver_cash_returned: returned ? 20 : 0 },
+      driverDeliveries: [{ shift_id: 'inherited-driver', driver_id: 'driver-1', starting_amount: 20 }],
+      transferredDrivers: returned ? [] : [{ shift_id: 'inherited-driver', driver_id: 'driver-1', starting_amount: 20, net_cash_amount: 20 }],
+    } });
+    render(<StaffShiftModal {...props} />);
+    await screen.findByTestId('staff-checkout-confirm-button');
+    const expected = returned ? /100[,.]00/ : /80[,.]00/;
+    await waitFor(() => {
+      for (const label of screen.getAllByText('Expected In Drawer')) {
+        expect(label.parentElement).toHaveTextContent(expected);
+      }
+    });
+    expect(bridge.shifts.close).not.toHaveBeenCalled();
+  });
+
   it('holds Main close while a self-closed waiter till still awaits receipt', async () => {
     bridge.shifts.getSummary.mockResolvedValue({success:true,data:{...summary(0),currency:'EUR',cashierCash:{cashCollections:0,cashRefunds:0,currency:'EUR'}}});
     bridge.shifts.pendingCashReturns.mockResolvedValue({success:true,requires_receipt_check:true,active_waiter_count:0,returns:[{

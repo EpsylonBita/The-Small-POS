@@ -33,6 +33,8 @@ import {
   type TipSelection,
 } from './TipModal';
 
+const formatMoney = formatCurrency;
+
 export interface RoomChargeContext {
   currency?: string | null;
   roomId: string;
@@ -69,6 +71,7 @@ export interface PaymentCompletionData {
   tipRecipientStaffShiftId?: string;
   roomId?: string;
   room_id?: string;
+  folio_id?: string;
   roomCharge?: RoomChargeContext;
   existingOrderId?: string;
   existingOrderNumber?: string;
@@ -108,11 +111,14 @@ interface PaymentModalProps {
   isOpen: boolean;
   onClose: () => void;
   orderTotal: number;
+  currency?: string;
   discountAmount?: number;
   deliveryFee?: number;
   isProcessing?: boolean;
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   minimumOrderAmount?: number; // From delivery zone settings in admin dashboard
+  onBeforePayment?: (paymentData: PaymentCompletionData) => Promise<boolean>;
+  onPaymentAdmissionCancelled?: () => Promise<boolean>;
   onPaymentComplete: (
     paymentData: PaymentCompletionData,
   ) => PaymentCompletionResult | Promise<PaymentCompletionResult>;
@@ -235,12 +241,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   isOpen,
   onClose,
   orderTotal,
+  currency,
   discountAmount = 0,
   deliveryFee = 0,
   isProcessing = false,
   orderType,
   minimumOrderAmount = 0, // Default to 0 (no minimum) if not provided
   onPaymentComplete,
+  onBeforePayment,
+  onPaymentAdmissionCancelled,
   onSplitPayment,
   roomChargeContext = null,
   allowTips = true,
@@ -259,6 +268,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   // configuration, durable receipts, the order's native admission and its
   // ordinary claim). An existing order's claim is held while the QR is shown,
   // so no other collection can start on it, and the confirm reuses it.
+  const twintPaymentRef = useRef<PaymentCompletionData | null>(null);
   const [twintAdmitting, setTwintAdmitting] = useState(false);
   const twintAdmissionRef = useRef<{ owner?: OrdinaryCollectionOwner } | null>(null);
   const twintModule = hasModule('plugin_integrations');
@@ -282,6 +292,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [isProcessingPayment, setIsProcessingPayment] = useState(isProcessing);
   const [cashReceived, setCashReceived] = useState<string>('');
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethodSelection | null>(null);
+  const formatCurrency = (value: number) => formatMoney(value, currency ?? getStoreCurrency());
   const [roomChargeFallback, setRoomChargeFallback] = useState<RoomChargeFallbackPrompt | null>(null);
   const [showTipModal, setShowTipModal] = useState(false);
   const [tipSelection, setTipSelection] = useState<TipSelection | null>(null);
@@ -512,12 +523,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setTwintAdmitting(true);
     let admittedHere = false;
     try {
+      const paymentData: PaymentCompletionData = { method: 'twint', amount: payableTotal, currency: 'CHF',
+        idempotencyKey: crypto.randomUUID(), tipAmount: tipSelection?.amount, tipRecipientRole: tipSelection?.recipientRole };
+      if (onBeforePayment && !await onBeforePayment(paymentData)) return;
       const admission = await admitTwintCollection({
         orderId: existingOrder?.orderId,
         amount: payableTotal,
         hold: owner?.hold ?? null,
       });
       if (!admission.admitted) {
+        await onPaymentAdmissionCancelled?.();
         toast.error(twintRefusalText(admission.code));
         if (admission.code === 'TWINT_RECEIPT_PENDING') {
           const pending = await loadPendingTwintReceipts(existingOrder?.orderId).catch(() => []);
@@ -525,6 +540,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         }
         return;
       }
+      twintPaymentRef.current = paymentData;
       twintAdmissionRef.current = { owner };
       admittedHere = true;
       setTwintConfiguration(admission.configuration);
@@ -537,9 +553,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
-  const handleTwintCancel = () => {
+  const handleTwintCancel = async () => {
     releaseTwintAdmission();
     setCurrentStep('payment_selection');
+    twintPaymentRef.current = null;
+    await onPaymentAdmissionCancelled?.();
   };
 
   const handleTwintConfirm = async (action: TwintConfirmationAction, idempotencyKey: string): Promise<boolean> => {
@@ -556,9 +574,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
     twintSendRef.current = true; setIsProcessingPayment(true);
     try {
-      const result = await onPaymentComplete({ method: 'twint', amount: payableTotal, currency: 'CHF',
+      const result = await onPaymentComplete({ ...(twintPaymentRef.current || { method: 'twint', amount: payableTotal, currency: 'CHF' }),
         idempotencyKey, metadata: twintManualMetadata(action),
-        tipAmount: tipSelection?.amount, tipRecipientRole: tipSelection?.recipientRole,
         ...(ordinaryOwner ? { ordinaryOwner } : {}) });
       if (result === false) {
         const pending=await loadPendingTwintReceipts(existingOrder?.orderId).catch(()=>[]);
@@ -603,12 +620,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
     setIsProcessingPayment(true);
     try {
-      // Intentional 500ms delay: gives the user visible feedback that the
-      // payment is being processed (the spinner / "processing" state) before
-      // the modal closes.  Without this, quick cash payments feel like the
-      // button did nothing because the modal dismisses instantly.
-      await new Promise(resolve => setTimeout(resolve, 500));
-
       const txId = `${method.toUpperCase().replace('_', '-')}-${Date.now()}`;
 
       const paymentPayload: PaymentCompletionData = {
@@ -625,6 +636,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               currency: roomChargeContext.currency ?? undefined,
               roomId: roomChargeContext.roomId,
               room_id: roomChargeContext.roomId,
+              folio_id: roomChargeContext.activeFolioId ?? undefined,
               roomCharge: roomChargeContext,
             }
           : {}),
@@ -637,6 +649,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           : {}),
         ...(ordinaryOwner ? { ordinaryOwner } : {}),
       };
+
+      if (onBeforePayment && !await onBeforePayment(paymentPayload)) return;
+      // Intentional 500ms delay: gives the user visible feedback that the
+      // payment is being processed (the spinner / "processing" state) before
+      // the modal closes.  Without this, quick cash payments feel like the
+      // button did nothing because the modal dismisses instantly.
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const completionResult = await onPaymentComplete(paymentPayload);
 
@@ -1146,7 +1165,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
         {/* Step: Cash Input (only for pickup/in-store) */}
         {pendingTwintReceipts.length===0 && currentStep === 'twint' && twintConfiguration && (
-          <TwintManualQrTender configuration={twintConfiguration} amount={payableTotal}
+          <TwintManualQrTender configuration={twintConfiguration} amount={twintPaymentRef.current?.amount ?? payableTotal}
+            idempotencyKey={twintPaymentRef.current?.idempotencyKey}
             externalEnabled={hasModule('customer_display')} onConfirm={handleTwintConfirm}
             onCancel={handleTwintCancel} />
         )}

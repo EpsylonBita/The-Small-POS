@@ -1,5 +1,9 @@
 use chrono::Utc;
+use rusqlite::OptionalExtension;
+use serde_json::Value;
+use tauri::Manager;
 
+use crate::database_lock::run_blocking_command;
 use crate::{api, db, read_local_json, value_str, write_local_json};
 
 const ADMIN_API_CACHE_PREFIX: &str = "admin_api_get::";
@@ -857,6 +861,89 @@ fn read_admin_get_fallback_after_error(
     read_cached_admin_get_response(db, path)
 }
 
+fn overlay_pending_reservations(
+    db: &db::DbState,
+    path: &str,
+    data: &mut Value,
+    only_pending: bool,
+) -> Result<(), String> {
+    if !path.starts_with("/api/pos/reservations") {
+        return Ok(());
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let org = crate::db::get_setting(&conn, "terminal", "organization_id")
+        .or_else(|| crate::storage::get_credential("organization_id"))
+        .unwrap_or_default();
+    let branch = crate::db::get_setting(&conn, "terminal", "branch_id")
+        .or_else(|| crate::storage::get_credential("branch_id"))
+        .unwrap_or_default();
+    let mut stmt=conn.prepare("SELECT l.local_id,l.server_id,l.data FROM reservation_local_identity l WHERE l.organization_id=?1 AND l.branch_id=?2
+      AND (?3=0 OR EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.organization_id=l.organization_id AND q.table_name='reservations'
+        AND q.record_id IN (l.local_id,l.server_id)))").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![org, branch, only_pending], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse(&format!("http://local{path}")).map_err(|e| e.to_string())?;
+    for row in rows {
+        let (local, server, text) = row.map_err(|e| e.to_string())?;
+        let reservation: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        if let Some(items) = data.get_mut("reservations").and_then(Value::as_array_mut) {
+            items.retain(|v| {
+                v["id"] != local && server.as_ref().map(|id| v["id"] != *id).unwrap_or(true)
+            });
+            let matches = url.query_pairs().all(|(key, value)| match key.as_ref() {
+                "date" => reservation["reservation_date"].as_str() == Some(value.as_ref()),
+                "date_from" => reservation["reservation_date"]
+                    .as_str()
+                    .map(|d| d >= value.as_ref())
+                    .unwrap_or(false),
+                "date_to" => reservation["reservation_date"]
+                    .as_str()
+                    .map(|d| d <= value.as_ref())
+                    .unwrap_or(false),
+                "status" => {
+                    value == "all" || reservation["status"].as_str() == Some(value.as_ref())
+                }
+                "table_id" => reservation["table_id"].as_str() == Some(value.as_ref()),
+                "room_id" => reservation["room_id"].as_str() == Some(value.as_ref()),
+                "kind" if value == "table" => reservation["room_id"].is_null(),
+                "kind" if value == "room" => !reservation["room_id"].is_null(),
+                "search" => format!(
+                    "{} {}",
+                    reservation["customer_name"].as_str().unwrap_or(""),
+                    reservation["customer_phone"].as_str().unwrap_or("")
+                )
+                .to_lowercase()
+                .contains(&value.to_lowercase()),
+                _ => true,
+            });
+            if matches {
+                items.push(reservation);
+            }
+        } else if path
+            .split('?')
+            .next()
+            .map(|p| {
+                p.ends_with(&format!("/{local}"))
+                    || server
+                        .as_ref()
+                        .map(|id| p.ends_with(&format!("/{id}")))
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false)
+        {
+            data["reservation"] = reservation;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedAdminPathQuery {
@@ -868,7 +955,9 @@ pub(crate) fn list_cached_admin_get_paths(
     db: &db::DbState,
     prefixes: &[String],
 ) -> Result<Vec<String>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db
+        .lock_traced("admin_cache_list_paths")
+        .map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT setting_key
@@ -952,7 +1041,7 @@ pub async fn api_fetch_from_admin(
     // same normalized value, before either may dispatch the request.
     let body = normalize_admin_fetch_body(opts.get("body").cloned());
     let query = opts.get("query").or_else(|| opts.get("params"));
-    let final_path = if let Some(q) = query {
+    let mut final_path = if let Some(q) = query {
         crate::build_admin_query(&path, Some(q))
     } else {
         path.clone()
@@ -979,6 +1068,38 @@ pub async fn api_fetch_from_admin(
     }
 
     crate::hydrate_terminal_credentials_from_local_settings(&db);
+
+    if let Some(id) = final_path
+        .strip_prefix("/api/pos/reservations/")
+        .map(str::to_string)
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let org = crate::db::get_setting(&conn, "terminal", "organization_id")
+            .or_else(|| crate::storage::get_credential("organization_id"))
+            .unwrap_or_default();
+        let branch = crate::db::get_setting(&conn, "terminal", "branch_id")
+            .or_else(|| crate::storage::get_credential("branch_id"))
+            .unwrap_or_default();
+        let identity=conn.query_row("SELECT server_id FROM reservation_local_identity WHERE local_id=?1 AND organization_id=?2 AND branch_id=?3",
+          rusqlite::params![id,org,branch],|r|r.get::<_,Option<String>>(0)).optional().map_err(|e|e.to_string())?;
+        match identity {
+            Some(Some(remote)) => final_path = format!("/api/pos/reservations/{remote}"),
+            Some(None) if method != "GET" => {
+                return Ok(
+                    serde_json::json!({"success":false,"error":"RESERVATION_CREATE_PENDING"}),
+                )
+            }
+            Some(None) => {
+                let text:String=conn.query_row("SELECT data FROM reservation_local_identity WHERE local_id=?1 AND organization_id=?2 AND branch_id=?3",
+              rusqlite::params![id,org,branch],|r|r.get(0)).map_err(|e|e.to_string())?;
+                let reservation: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                return Ok(
+                    serde_json::json!({"success":true,"data":{"success":true,"reservation":reservation},"meta":{"source":"local"}}),
+                );
+            }
+            _ => {}
+        }
+    }
 
     let cacheable_get = is_cacheable_admin_get(&method, &final_path);
 
@@ -1040,6 +1161,7 @@ pub async fn api_fetch_from_admin(
                 }
             }
             if cacheable_get {
+                overlay_pending_reservations(&db, &final_path, &mut v, true)?;
                 let _ = cache_admin_get_response(&db, &final_path, &v);
             }
 
@@ -1064,6 +1186,7 @@ pub async fn api_fetch_from_admin(
                 read_admin_get_fallback_after_error(&db, &final_path, cacheable_get, &e)
             {
                 crate::staff_pin_vault::redact_pin_hashes(&mut cached_data);
+                overlay_pending_reservations(&db, &final_path, &mut cached_data, false)?;
                 return Ok(serde_json::json!({
                     "success": true,
                     "data": cached_data,
@@ -1077,6 +1200,21 @@ pub async fn api_fetch_from_admin(
                 }));
             }
 
+            if cacheable_get
+                && final_path.starts_with("/api/pos/reservations")
+                && matches!(e.status(), None | Some(502 | 503 | 504))
+            {
+                let mut local = serde_json::json!({"success":true,"reservations":[]});
+                overlay_pending_reservations(&db, &final_path, &mut local, false)?;
+                if local["reservations"]
+                    .as_array()
+                    .is_some_and(|rows| !rows.is_empty())
+                {
+                    return Ok(
+                        serde_json::json!({"success":true,"data":local,"meta":{"source":"local","offlineFallback":true}}),
+                    );
+                }
+            }
             Ok(admin_fetch_error_payload(
                 &e,
                 cacheable_get && !matches!(e.status(), Some(401 | 403)),
@@ -1150,21 +1288,27 @@ pub async fn customer_messaging_request(
     .map_err(|error| error.to_string())
 }
 
+// On the blocking pool, never the window thread or a runtime worker: it reads
+// the main connection (Tomikro 20/10/2026, see database_lock.rs).
 #[tauri::command]
-pub fn api_list_cached_paths(
+pub async fn api_list_cached_paths(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let query: CachedAdminPathQuery = arg0
-        .map(serde_json::from_value)
-        .transpose()
-        .unwrap_or_default()
-        .unwrap_or_default();
-    let paths = list_cached_admin_get_paths(&db, &query.prefixes)?;
-    Ok(serde_json::json!({
-        "success": true,
-        "paths": paths,
-    }))
+    run_blocking_command("api_list_cached_paths", move || {
+        let db = app.state::<db::DbState>();
+        let query: CachedAdminPathQuery = arg0
+            .map(serde_json::from_value)
+            .transpose()
+            .unwrap_or_default()
+            .unwrap_or_default();
+        let paths = list_cached_admin_get_paths(&db, &query.prefixes)?;
+        Ok(serde_json::json!({
+            "success": true,
+            "paths": paths,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]

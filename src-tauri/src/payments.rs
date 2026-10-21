@@ -970,6 +970,52 @@ pub(crate) fn counted_completed_payment_sql(alias: &str) -> String {
     )
 }
 
+/// Only the canonical importer writes this financial status. Keep the original
+/// receipt status for this till's custody/Z; financial readers exclude final
+/// canonical returns just as master excludes locally voided/refunded rows.
+/// Minimal fiscal/legacy schemas have no metadata column and use master SQL.
+pub(crate) fn counted_financial_payment_sql(
+    conn: &Connection,
+    alias: &str,
+) -> Result<String, String> {
+    let counted = counted_completed_payment_sql(alias);
+    if !crate::db::column_exists(conn, "order_payments", "metadata")? {
+        return Ok(counted);
+    }
+    Ok(format!("({counted} AND ({alias}.method = 'gift_card' OR COALESCE(CASE WHEN json_valid({alias}.metadata)
+        THEN json_extract({alias}.metadata,'$.canonical_return_status') END,'') NOT IN ('voided','refunded')))"))
+}
+
+pub(crate) fn canonical_return_status(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<Option<String>, String> {
+    if !crate::db::column_exists(conn, "order_payments", "metadata")? {
+        return Ok(None);
+    }
+    let status:Option<String> = conn.query_row(
+        "SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.canonical_return_status') END FROM order_payments WHERE id=?1",
+        [payment_id], |r| r.get(0),
+    ).optional().map_err(|e| format!("read imported return status: {e}"))?.flatten();
+    Ok(status.filter(|s| matches!(s.as_str(), "voided" | "refunded")))
+}
+
+/// Financial consumers that also read refunded receipt history need the
+/// canonical status, without changing the stored status used by custody.
+pub(crate) fn financial_payment_status_sql(
+    conn: &Connection,
+    alias: &str,
+) -> Result<String, String> {
+    if !crate::db::column_exists(conn, "order_payments", "metadata")? {
+        return Ok(format!("{alias}.status"));
+    }
+    let canonical = format!("CASE WHEN json_valid({alias}.metadata) THEN json_extract({alias}.metadata,'$.canonical_return_status') END");
+    Ok(format!(
+        "CASE WHEN {alias}.status='completed' AND {alias}.method <> 'gift_card'
+        AND ({canonical}) IN ('voided','refunded') THEN ({canonical}) ELSE {alias}.status END"
+    ))
+}
+
 /// SQL predicate: the server already holds this row (it answered with its id,
 /// or the row was mirrored from it). An unsynced row is money this till took
 /// that the server has not recorded yet.
@@ -1082,8 +1128,13 @@ pub(crate) fn load_net_paid_for_order(
     conn: &rusqlite::Connection,
     order_id: &str,
 ) -> Result<f64, String> {
-    load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"), false)
-        .map(|cents| Cents::new(cents).to_f64_dp2())
+    load_net_paid_cents_matching(
+        conn,
+        order_id,
+        &counted_financial_payment_sql(conn, "op")?,
+        false,
+    )
+    .map(|cents| Cents::new(cents).to_f64_dp2())
 }
 
 /// What the order's counted receipts cover, after effective refunds, under
@@ -1109,8 +1160,13 @@ pub(crate) fn load_principal_paid_for_order(
     conn: &Connection,
     order_id: &str,
 ) -> Result<f64, String> {
-    load_net_paid_cents_matching(conn, order_id, &counted_completed_payment_sql("op"), true)
-        .map(|cents| Cents::new(cents).to_f64_dp2())
+    load_net_paid_cents_matching(
+        conn,
+        order_id,
+        &counted_financial_payment_sql(conn, "op")?,
+        true,
+    )
+    .map(|cents| Cents::new(cents).to_f64_dp2())
 }
 
 /// `orders.tip_amount`, the tip the order total already contains, in cents:
@@ -1142,7 +1198,7 @@ pub(crate) fn load_order_tip_capacity_cents(
     order_id: &str,
 ) -> Result<i64, String> {
     let coverage =
-        load_coverage_cents_matching(conn, order_id, &counted_completed_payment_sql("op"))?;
+        load_coverage_cents_matching(conn, order_id, &counted_financial_payment_sql(conn, "op")?)?;
     Ok((coverage.order_tip_cents - coverage.retained_tip_cents).max(0))
 }
 
@@ -1278,7 +1334,7 @@ pub(crate) fn order_is_folio_charged(conn: &Connection, order_id: &str) -> Resul
                     AND LOWER(TRIM(COALESCE(op.method, ''))) = 'room_charge'
                     AND {}
              )",
-            counted_completed_payment_sql("op")
+            counted_financial_payment_sql(conn, "op")?
         ),
         params![order_id],
         |row| row.get(0),
@@ -1296,7 +1352,7 @@ pub(crate) fn load_store_taken_net_paid_cents(
 ) -> Result<i64, String> {
     let filter = format!(
         "{} AND NOT {}",
-        counted_completed_payment_sql("op"),
+        counted_financial_payment_sql(conn, "op")?,
         platform_settlement_row_sql("op")
     );
     load_net_paid_cents_matching(conn, order_id, &filter, false)
@@ -1479,7 +1535,7 @@ pub(crate) fn load_order_payment_balance_snapshot(
         .query_row(
             &format!(
                 "SELECT COUNT(*) FROM order_payments op WHERE op.order_id = ?1 AND {}",
-                counted_completed_payment_sql("op")
+                counted_financial_payment_sql(conn, "op")?
             ),
             params![order_id],
             |row| row.get::<_, i64>(0),
@@ -1518,7 +1574,7 @@ fn load_completed_payment_ledger_generation(
              WHERE op.order_id = ?1
                AND $COUNTED
              ORDER BY op.id ASC"
-                .replace("$COUNTED", &counted_completed_payment_sql("op")),
+                .replace("$COUNTED", &counted_financial_payment_sql(conn, "op")?),
         )
         .map_err(|error| format!("prepare payment-ledger generation for {order_id}: {error}"))?;
     let rows = statement
@@ -1705,13 +1761,14 @@ pub(crate) fn derive_payment_method(
     // Distinct completed methods for the order, lowercased so "Cash"/"CASH"
     // don't produce a false "split" classification.
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT DISTINCT LOWER(TRIM(COALESCE(method, '')))
              FROM order_payments
              WHERE order_id = ?1
-               AND status = 'completed'
+               AND ({status}) = 'completed'
                AND TRIM(COALESCE(method, '')) != ''",
-        )
+            status = financial_payment_status_sql(conn, "order_payments")?
+        ))
         .map_err(|e| format!("prepare derive_payment_method: {e}"))?;
     let methods: Vec<String> = stmt
         .query_map(params![order_id], |row| row.get::<_, String>(0))
@@ -2021,7 +2078,7 @@ pub(crate) fn server_ledger_backs_claimed_status(
         order_id,
         &format!(
             "{} AND {}",
-            counted_completed_payment_sql("op"),
+            counted_financial_payment_sql(conn, "op")?,
             server_held_payment_sql("op")
         ),
         true,
@@ -2457,6 +2514,12 @@ pub(crate) fn record_payment_in_connection(
     input: &PaymentRecordInput,
     options: &PaymentInsertOptions,
 ) -> Result<RecordedPayment, String> {
+    let is_folio = crate::hotel_folio::is_local(conn, &input.order_id)?;
+    let mut folio_options = options.clone();
+    if is_folio {
+        folio_options.mark_order_sync_pending_on_owner_change = false;
+    }
+    let options = if is_folio { &folio_options } else { options };
     if let Some(provenance) = options.applied_canonical_provenance.as_ref() {
         if input.payment_origin != "sync_reconstructed"
             || options
@@ -3015,6 +3078,12 @@ pub(crate) fn record_payment_in_connection(
     }
 
     recompute_order_payment_state(conn, &input.order_id, &updated_at, &payment_id)?;
+    if is_folio && options.enqueue_sync {
+        let balance = load_order_payment_balance_snapshot(conn, &input.order_id)?;
+        if balance.outstanding_amount <= 0.0 {
+            crate::fiscal::dispatcher::enqueue_for_order(conn, &input.order_id)?;
+        }
+    }
 
     if order_type.eq_ignore_ascii_case("delivery")
         && options.applied_canonical_provenance.is_none()
@@ -5139,6 +5208,11 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
     rows.into_iter()
         .map(|row| {
             let items = load_payment_items_for_payment(conn, &row.0)?;
+            let financial_status = if row.5 == "completed" && row.2 != GIFT_CARD_METHOD {
+                canonical_return_status(conn, &row.0)?.unwrap_or_else(|| row.5.clone())
+            } else {
+                row.5.clone()
+            };
             // Read-only coverage view: a gift row's refunded amount is its
             // effective reversal, proven return floor included, not a payout.
             let refunded_amount = if row.2 == GIFT_CARD_METHOD {
@@ -5177,7 +5251,7 @@ fn load_order_payment_rows(conn: &Connection, order_id: &str) -> Result<Vec<Valu
                 "method": row.2,
                 "amount": row.3,
                 "currency": row.4,
-                "status": row.5,
+                "status": financial_status,
                 "cashReceived": row.6,
                 "changeGiven": row.7,
                 "transactionRef": row.8,
@@ -5262,7 +5336,7 @@ pub(crate) fn load_settled_fiscal_tenders(
 ) -> Result<Vec<SettledFiscalTender>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT op.id, op.method, op.currency,
+            &format!("SELECT op.id, op.method, op.currency,
                     COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER)),
                     COALESCE((
                         SELECT SUM(COALESCE(pa.amount_cents, CAST(ROUND(pa.amount * 100) AS INTEGER)))
@@ -5271,8 +5345,8 @@ pub(crate) fn load_settled_fiscal_tenders(
                           AND pa.adjustment_type IN ('refund', 'void')
                     ), 0)
              FROM order_payments op
-             WHERE op.order_id = ?1 AND op.status = 'completed'
-             ORDER BY op.created_at ASC, op.id ASC",
+             WHERE op.order_id = ?1 AND ({status}) = 'completed'
+             ORDER BY op.created_at ASC, op.id ASC",status=financial_payment_status_sql(conn,"op")?),
         )
         .map_err(|error| format!("prepare settled fiscal tenders: {error}"))?;
     let rows = stmt
@@ -10602,6 +10676,163 @@ mod tests {
             )
             .expect("seed payment");
         }
+    }
+
+    #[test]
+    fn local_and_imported_voids_match_master_pending_status_and_due() {
+        let mut generations = Vec::new();
+        for imported in [false, true] {
+            let db = test_db();
+            {
+                let conn = db.conn.lock().unwrap();
+                seed_order_with_payments(
+                    &conn,
+                    "void-equivalence",
+                    &[("void-equivalence-payment", "cash", 10.0, "completed")],
+                );
+                if imported {
+                    crate::sync::sync_remote_payment_into_local_for_test(&conn,&serde_json::json!({"id":"void-canonical","order_id":"void-equivalence","metadata":{"local_payment_id":"void-equivalence-payment"},"payment_method":"cash","amount":10,"currency":"EUR","status":"voided","adjustments":[{"id":"void-equivalence-adjustment","adjustment_type":"void","amount_cents":1000,"currency":"EUR","created_at":"2026-10-20T12:00:00Z"}]})).unwrap();
+                }
+            }
+            if !imported {
+                crate::refunds::void_payment_with_adjustment(
+                    &db,
+                    "void-equivalence-payment",
+                    "void",
+                    None,
+                    None,
+                )
+                .unwrap();
+            }
+            let conn = db.conn.lock().unwrap();
+            let balance = load_order_payment_balance_snapshot(&conn, "void-equivalence").unwrap();
+            assert_eq!((balance.net_paid, balance.outstanding_amount), (0.0, 10.0));
+            assert_eq!(stored_payment_status(&conn, "void-equivalence"), "pending");
+            assert_eq!(
+                derive_payment_method(&conn, "void-equivalence").unwrap(),
+                None
+            );
+            assert!(!ledger_backs_claimed_status(&conn, "void-equivalence", "paid").unwrap());
+            generations.push(balance.ledger_generation);
+        }
+        assert_eq!(generations[0], generations[1]);
+    }
+
+    #[test]
+    fn local_and_imported_refunds_match_master_balances_remainders_and_fingerprints() {
+        for context in ["manual", "edit_settlement"] {
+            for amount in [6.0, 10.0] {
+                let mut states = Vec::new();
+                for imported in [false, true] {
+                    let db = test_db();
+                    {
+                        let conn = db.conn.lock().unwrap();
+                        seed_order_with_payments(
+                            &conn,
+                            "refund-equivalence",
+                            &[("refund-equivalence-payment", "cash", 10.0, "completed")],
+                        );
+                        if imported {
+                            crate::sync::sync_remote_payment_into_local_for_test(&conn,&serde_json::json!({"id":"refund-canonical","order_id":"refund-equivalence","metadata":{"local_payment_id":"refund-equivalence-payment"},"payment_method":"cash","amount":10,"currency":"EUR","status":if amount==10.0 {"refunded"}else{"completed"},"adjustments":[{"id":"refund-equivalence-adjustment","adjustment_type":"refund","adjustment_context":context,"amount_cents":Cents::round_half_even(amount).as_i64(),"currency":"EUR","created_at":"2026-10-20T12:00:00Z"}]})).unwrap();
+                        }
+                    }
+                    if !imported {
+                        crate::refunds::refund_payment(&db,&serde_json::json!({"paymentId":"refund-equivalence-payment","amount":amount,"reason":"return","refundMethod":"cash","adjustmentContext":context})).unwrap();
+                    }
+                    let remainder =
+                        crate::refunds::get_payment_balance(&db, "refund-equivalence-payment")
+                            .unwrap()["balance"]
+                            .as_f64()
+                            .unwrap();
+                    let conn = db.conn.lock().unwrap();
+                    let balance =
+                        load_order_payment_balance_snapshot(&conn, "refund-equivalence").unwrap();
+                    let snapshot =
+                        load_order_settlement_snapshot(&conn, "refund-equivalence").unwrap();
+                    let status = stored_payment_status(&conn, "refund-equivalence");
+                    assert_eq!(
+                        (balance.net_paid, balance.outstanding_amount, remainder),
+                        (10.0 - amount, amount, 10.0 - amount)
+                    );
+                    assert_eq!(
+                        status,
+                        if amount == 10.0 {
+                            "pending"
+                        } else {
+                            "partially_paid"
+                        }
+                    );
+                    assert_eq!(
+                        snapshot.completed_payments.len(),
+                        if amount == 10.0 { 0 } else { 1 }
+                    );
+                    states.push((
+                        balance.net_paid,
+                        balance.outstanding_amount,
+                        balance.ledger_generation,
+                        status,
+                        remainder,
+                    ));
+                }
+                assert_eq!(states[0], states[1], "{context} return {amount}");
+            }
+        }
+    }
+
+    #[test]
+    fn imported_void_reduces_coverage_and_invalidates_settlement_generation() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order_with_payments(
+            &conn,
+            "remote-void-order",
+            &[("void-receipt", "cash", 10.0, "completed")],
+        );
+        let before = load_order_payment_balance_snapshot(&conn, "remote-void-order").unwrap();
+        conn.execute("INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,amount,amount_cents,reason,sync_state,imported_remote,created_at,updated_at) VALUES('imported-void','void-receipt','remote-void-order','void',10,1000,'','applied',1,'now','now')",[]).unwrap();
+        conn.execute("UPDATE order_payments SET metadata=json_object('canonical_return_status','voided') WHERE id='void-receipt'", []).unwrap();
+        let after = load_order_payment_balance_snapshot(&conn, "remote-void-order").unwrap();
+        assert_eq!(after.net_paid, 0.0);
+        assert_eq!(after.outstanding_amount, 10.0);
+        assert_ne!(before.ledger_generation, after.ledger_generation);
+    }
+
+    #[test]
+    fn canonical_final_return_matches_master_exclusion_with_incomplete_details() {
+        for status in ["refunded", "voided"] {
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            seed_order_with_payments(
+                &conn,
+                "final-return-order",
+                &[("final-receipt", "cash", 10.0, "completed")],
+            );
+            let before = load_order_payment_balance_snapshot(&conn, "final-return-order").unwrap();
+            conn.execute("UPDATE order_payments SET metadata=json_object('canonical_return_status',?1) WHERE id='final-receipt'",[status]).unwrap();
+            let after = load_order_payment_balance_snapshot(&conn, "final-return-order").unwrap();
+            assert_eq!(after.net_paid, 0.0);
+            assert_ne!(before.ledger_generation, after.ledger_generation);
+        }
+    }
+
+    #[test]
+    fn ordinary_return_readers_preserve_master_without_payment_metadata() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE order_payments(id TEXT, order_id TEXT);")
+            .unwrap();
+        assert_eq!(
+            counted_financial_payment_sql(&conn, "op").unwrap(),
+            counted_completed_payment_sql("op")
+        );
+        assert_eq!(canonical_return_status(&conn, "p").unwrap(), None);
+        assert_eq!(
+            financial_payment_status_sql(&conn, "op").unwrap(),
+            "op.status"
+        );
+        assert_eq!(
+            effective_reversed_cents(&conn, "p", "o", "cash", 1000, 600).unwrap(),
+            600
+        );
     }
 
     #[test]
