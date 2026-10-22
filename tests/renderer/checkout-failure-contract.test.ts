@@ -274,9 +274,12 @@ test('MenuModal keeps the cart and reports failure when onOrderComplete resolves
     'const handlePaymentComplete = async',
     'const handleSplitPayment',
   );
+  // Tomikro 21/10/2026: an order never written may end its admission and
+  // return the editable cart (releaseUnwrittenAdmission); either way the
+  // handler answers false and keeps the keyed-in order.
   assert.match(
     paymentHandler,
-    /if \(completionResult === false\) \{\s*setIsLocalProcessing\(false\);\s*setCheckoutPhase\('payment'\);\s*return false;\s*\}/,
+    /if \(completionResult === false\) \{\s*setIsLocalProcessing\(false\);\s*if \([^\n]*await releaseUnwrittenAdmission\(\)\) \{\s*setShowPaymentModal\(false\);\s*setCheckoutPhase\('editing'\);\s*return false;\s*\}\s*setCheckoutPhase\('payment'\);\s*return false;\s*\}/,
     'a false completion must abort before the cart-clearing success path',
   );
   const guardIndex = paymentHandler.indexOf('if (completionResult === false)');

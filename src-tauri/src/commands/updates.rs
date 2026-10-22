@@ -8,6 +8,7 @@ use reqwest::header;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, UpdaterRuntimeState};
 
 const UPDATER_ARTIFACT_DIR: &str = "updater";
@@ -599,10 +600,12 @@ pub async fn reconcile_update_state_on_startup(app: AppHandle) {
 }
 
 #[tauri::command]
-pub async fn update_get_state(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    reconcile_persisted_update_state(&db)
+pub async fn update_get_state(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("update_get_state", move || {
+        let db = app.state::<db::DbState>();
+        reconcile_persisted_update_state(&db)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -897,24 +900,26 @@ pub async fn update_cancel_download(app: tauri::AppHandle) -> Result<serde_json:
 }
 
 #[tauri::command]
-pub async fn update_schedule_install(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let mut state = crate::read_update_state(&db)?;
-    let artifact_path = update_state_path(&state, "downloadedArtifactPath");
-    let downloaded_version = update_state_string(&state, "downloadedVersion");
+pub async fn update_schedule_install(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("update_schedule_install", move || {
+        let db = app.state::<db::DbState>();
+        let mut state = crate::read_update_state(&db)?;
+        let artifact_path = update_state_path(&state, "downloadedArtifactPath");
+        let downloaded_version = update_state_string(&state, "downloadedVersion");
 
-    if downloaded_version.is_none() || !artifact_exists(artifact_path.as_deref()) {
-        return Ok(serde_json::json!({
-            "success": false,
-            "error": "Update payload is missing. Download the update again."
-        }));
-    }
+        if downloaded_version.is_none() || !artifact_exists(artifact_path.as_deref()) {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "Update payload is missing. Download the update again."
+            }));
+        }
 
-    set_state_value(&mut state, "installPending", serde_json::json!(true));
-    crate::write_update_state(&db, &state)?;
+        set_state_value(&mut state, "installPending", serde_json::json!(true));
+        crate::write_update_state(&db, &state)?;
 
-    Ok(serde_json::json!({ "success": true }))
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1000,15 +1005,19 @@ pub async fn update_install(
 #[tauri::command]
 pub async fn update_set_channel(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let channel = parse_update_channel_payload(arg0);
-    if channel != "stable" && channel != "beta" {
-        return Err("Invalid update channel".into());
-    }
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "general", "update_channel", &channel)?;
-    Ok(serde_json::json!({ "success": true, "channel": channel }))
+    run_blocking_command("update_set_channel", move || {
+        let db = app.state::<db::DbState>();
+        let channel = parse_update_channel_payload(arg0);
+        if channel != "stable" && channel != "beta" {
+            return Err("Invalid update channel".into());
+        }
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "general", "update_channel", &channel)?;
+        Ok(serde_json::json!({ "success": true, "channel": channel }))
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -3,9 +3,10 @@ use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::database_lock::run_blocking_command;
 use crate::{api, db, diagnostics, incident_reporting, sync};
 
 /// Export options from the renderer. `redactSensitive` is accepted for the
@@ -357,55 +358,60 @@ pub fn start_system_health_monitor(
 }
 
 #[tauri::command]
-pub async fn database_health_check(
-    db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
-) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    // Verify core tables exist
-    let mut stmt = conn
-        .prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        )
-        .map_err(|e| e.to_string())?;
-    let tables: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    let payload = serde_json::json!({
-        "success": true,
-        "data": { "status": "ok", "tables": tables }
-    });
-    let _ = app.emit("database_health_update", payload.clone());
-    Ok(payload)
+pub async fn database_health_check(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("database_health_check", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // Verify core tables exist
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .map_err(|e| e.to_string())?;
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        let payload = serde_json::json!({
+            "success": true,
+            "data": { "status": "ok", "tables": tables }
+        });
+        let _ = app.emit("database_health_update", payload.clone());
+        Ok(payload)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn database_get_stats(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let total_orders: i64 = conn
-        .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
-        .unwrap_or(0);
-    let pending_sync: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sync_queue WHERE status = 'pending'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let active_sessions: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM staff_sessions WHERE is_active = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    Ok(serde_json::json!({
-        "totalOrders": total_orders,
-        "pendingSync": pending_sync,
-        "activeSessions": active_sessions,
-    }))
+pub async fn database_get_stats(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("database_get_stats", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let total_orders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap_or(0);
+        let pending_sync: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let active_sessions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_sessions WHERE is_active = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(serde_json::json!({
+            "totalOrders": total_orders,
+            "pendingSync": pending_sync,
+            "activeSessions": active_sessions,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -492,106 +498,113 @@ where
 }
 
 #[tauri::command]
-pub async fn diagnostic_check_delivered_orders(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+pub async fn diagnostic_check_delivered_orders(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("diagnostic_check_delivered_orders", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    let mut delivered_stmt = conn
-        .prepare(
-            "SELECT id, order_number, status, driver_id, created_at
+        let mut delivered_stmt = conn
+            .prepare(
+                "SELECT id, order_number, status, driver_id, created_at
              FROM orders
              WHERE LOWER(COALESCE(order_type, '')) = 'delivery'
                AND LOWER(COALESCE(status, '')) IN ('delivered', 'completed')
              ORDER BY created_at DESC",
-        )
-        .map_err(|e| e.to_string())?;
-    let delivered_rows = delivered_stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?;
-    type Row = (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let delivered: Vec<Row> = delivered_rows.filter_map(|r| r.ok()).collect();
+            )
+            .map_err(|e| e.to_string())?;
+        let delivered_rows = delivered_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        type Row = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let delivered: Vec<Row> = delivered_rows.filter_map(|r| r.ok()).collect();
 
-    let mut with_driver = 0usize;
-    let mut orders_without_driver = Vec::new();
-    for (id, order_number, status, driver_id, created_at) in &delivered {
-        let has_driver = driver_id
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        if has_driver {
-            with_driver += 1;
-        } else {
-            orders_without_driver.push(serde_json::json!({
-                "id": id,
-                "orderNumber": order_number.clone().unwrap_or_default(),
-                "status": status.clone().unwrap_or_default(),
-                "createdAt": created_at.clone().unwrap_or_default(),
-            }));
+        let mut with_driver = 0usize;
+        let mut orders_without_driver = Vec::new();
+        for (id, order_number, status, driver_id, created_at) in &delivered {
+            let has_driver = driver_id
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            if has_driver {
+                with_driver += 1;
+            } else {
+                orders_without_driver.push(serde_json::json!({
+                    "id": id,
+                    "orderNumber": order_number.clone().unwrap_or_default(),
+                    "status": status.clone().unwrap_or_default(),
+                    "createdAt": created_at.clone().unwrap_or_default(),
+                }));
+            }
         }
-    }
 
-    let earnings_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row.get(0))
-        .unwrap_or(0);
+        let earnings_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM driver_earnings", [], |row| row.get(0))
+            .unwrap_or(0);
 
-    let mut shifts_stmt = conn
-        .prepare(
-            "SELECT id, staff_id, status, check_in_time, check_out_time
+        let mut shifts_stmt = conn
+            .prepare(
+                "SELECT id, staff_id, status, check_in_time, check_out_time
              FROM staff_shifts
              WHERE role_type = 'driver'
              ORDER BY check_in_time DESC
              LIMIT 5",
-        )
-        .map_err(|e| e.to_string())?;
-    let shifts_rows = shifts_stmt
-        .query_map([], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "staff_id": row.get::<_, String>(1)?,
-                "status": row.get::<_, String>(2)?,
-                "check_in_time": row.get::<_, String>(3)?,
-                "check_out_time": row.get::<_, Option<String>>(4)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let recent_driver_shifts: Vec<serde_json::Value> = shifts_rows.filter_map(|r| r.ok()).collect();
+            )
+            .map_err(|e| e.to_string())?;
+        let shifts_rows = shifts_stmt
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "staff_id": row.get::<_, String>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                    "check_in_time": row.get::<_, String>(3)?,
+                    "check_out_time": row.get::<_, Option<String>>(4)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?;
+        let recent_driver_shifts: Vec<serde_json::Value> =
+            shifts_rows.filter_map(|r| r.ok()).collect();
 
-    Ok(serde_json::json!({
-        "success": true,
-        "data": {
-            "total": delivered.len(),
-            "withDriver": with_driver,
-            "withoutDriver": delivered.len().saturating_sub(with_driver),
-            "earningsCount": earnings_count,
-            "ordersWithoutDriver": orders_without_driver,
-            "recentDriverShifts": recent_driver_shifts,
-        }
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "total": delivered.len(),
+                "withDriver": with_driver,
+                "withoutDriver": delivered.len().saturating_sub(with_driver),
+                "earningsCount": earnings_count,
+                "ordersWithoutDriver": orders_without_driver,
+                "recentDriverShifts": recent_driver_shifts,
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn diagnostic_fix_missing_driver_ids(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let driver_id = parse_diagnostic_fix_driver_payload(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    fix_missing_driver_ids_in_connection(&conn, &driver_id)
+    run_blocking_command("diagnostic_fix_missing_driver_ids", move || {
+        let db = app.state::<db::DbState>();
+        let driver_id = parse_diagnostic_fix_driver_payload(arg0)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        fix_missing_driver_ids_in_connection(&conn, &driver_id)
+    })
+    .await
 }
 
 /// Attach delivered delivery orders that carry no driver to `driver_id` and
@@ -738,29 +751,32 @@ pub async fn diagnostics_get_system_health(
 #[tauri::command]
 pub async fn diagnostics_export(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    use tauri::Manager;
-    let options = parse_diagnostics_export_payload(arg0.clone());
-    let health_view = parse_diagnostics_export_health_view(&arg0);
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    let zip_path = if arg0.is_none() {
-        diagnostics::export_diagnostics(&db, &data_dir)?
-    } else {
-        diagnostics::export_diagnostics_bundle(&db, &data_dir, options, health_view)?
-    };
-    Ok(serde_json::json!({
-        "success": true,
-        "path": zip_path,
-        "options": {
-            "includeLogs": options.include_logs,
-            "redactSensitive": options.redact_sensitive,
-        }
-    }))
+    run_blocking_command("diagnostics_export", move || {
+        let db = app.state::<db::DbState>();
+        use tauri::Manager;
+        let options = parse_diagnostics_export_payload(arg0.clone());
+        let health_view = parse_diagnostics_export_health_view(&arg0);
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        let zip_path = if arg0.is_none() {
+            diagnostics::export_diagnostics(&db, &data_dir)?
+        } else {
+            diagnostics::export_diagnostics_bundle(&db, &data_dir, options, health_view)?
+        };
+        Ok(serde_json::json!({
+            "success": true,
+            "path": zip_path,
+            "options": {
+                "includeLogs": options.include_logs,
+                "redactSensitive": options.redact_sensitive,
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -810,32 +826,35 @@ pub async fn diagnostics_open_export_dir(
     arg0: Option<Value>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    use tauri::Manager;
+    run_blocking_command("diagnostics_open_export_dir", move || {
+        use tauri::Manager;
 
-    let export_path = parse_diagnostics_open_export_dir_payload(arg0)?;
-    let canonical_export_path = std::fs::canonicalize(&export_path)
-        .map_err(|e| format!("Invalid diagnostics export path: {e}"))?;
+        let export_path = parse_diagnostics_open_export_dir_payload(arg0)?;
+        let canonical_export_path = std::fs::canonicalize(&export_path)
+            .map_err(|e| format!("Invalid diagnostics export path: {e}"))?;
 
-    let export_parent = canonical_export_path
-        .parent()
-        .ok_or_else(|| "Diagnostics export directory could not be resolved".to_string())?;
+        let export_parent = canonical_export_path
+            .parent()
+            .ok_or_else(|| "Diagnostics export directory could not be resolved".to_string())?;
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    let canonical_app_data_dir = std::fs::canonicalize(&app_data_dir).unwrap_or(app_data_dir);
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        let canonical_app_data_dir = std::fs::canonicalize(&app_data_dir).unwrap_or(app_data_dir);
 
-    if !export_parent.starts_with(&canonical_app_data_dir) {
-        return Err("Diagnostics export path is outside the app data directory".into());
-    }
+        if !export_parent.starts_with(&canonical_app_data_dir) {
+            return Err("Diagnostics export path is outside the app data directory".into());
+        }
 
-    open_directory(export_parent)?;
+        open_directory(export_parent)?;
 
-    Ok(serde_json::json!({
-        "success": true,
-        "path": export_parent.to_string_lossy(),
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "path": export_parent.to_string_lossy(),
+        }))
+    })
+    .await
 }
 
 /// Gap review 2026-07-10 P0: static audit that every renderer-callable
@@ -902,15 +921,209 @@ mod destructive_command_auth_audit {
 /// must therefore be an `async fn`, with a blocking body on the blocking pool
 /// (`database_lock::run_blocking_command`). This parses every source file with
 /// `syn`, so neither attribute spacing nor line breaks hide a command.
+///
+/// An `async fn` command that locks `DbState.conn` in its own body, outside the
+/// closure of `run_blocking_command` or `spawn_blocking`, waits on a runtime
+/// worker too (21/10/2026). Only `RUNTIME_LOCK_ALLOWLIST` may still do so.
 #[cfg(test)]
 mod main_thread_command_audit {
     use proc_macro2::TokenTree;
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use syn::spanned::Spanned;
-    use syn::{Attribute, ImplItem, Item, Meta, Signature};
+    use syn::visit::{self, Visit};
+    use syn::{
+        Attribute, Block, Expr, ExprAwait, ExprCall, ExprMethodCall, ImplItem, Item, Member, Meta,
+        Signature,
+    };
 
     const MAIN_THREAD: &str = "runs on the main thread";
     const RUNTIME_WORKER: &str = "is marked (async) and runs on a Tokio runtime worker";
+
+    /// Calls whose closure argument runs on Tokio's blocking pool.
+    const BLOCKING_POOL: [&str; 2] = ["run_blocking_command", "spawn_blocking"];
+
+    /// Commands that still lock `DbState.conn` on a runtime worker because they
+    /// await between their database steps; moving them needs a split by hand.
+    const RUNTIME_LOCK_ALLOWLIST: &[(&str, &str)] = &[
+        (
+            "api_fetch_from_admin",
+            "awaits the admin HTTP fetch between cache reads and writes",
+        ),
+        (
+            "capture_attach_rendered_pages",
+            "awaits files::write_page between its DB steps",
+        ),
+        (
+            "capture_scanner_acquire",
+            "awaits the WIA scan (on spawn_blocking) between DB steps",
+        ),
+        (
+            "customer_lookup_by_phone",
+            "awaits two server fetches before its cache read",
+        ),
+        (
+            "ecr_connect_device",
+            "awaits connect_device_offloaded between its DB steps",
+        ),
+        (
+            "ecr_discover_devices",
+            "awaits network terminal discovery after its DB read",
+        ),
+        ("ecr_fiscal_print", "awaits device I/O between six DB steps"),
+        (
+            "ecr_get_device_admission",
+            "awaits device_admission::refresh before its DB read",
+        ),
+        (
+            "ecr_process_payment",
+            "awaits the card exchange between its DB steps",
+        ),
+        (
+            "ecr_process_refund",
+            "awaits process_transaction_offloaded between DB steps",
+        ),
+        (
+            "ecr_test_connection",
+            "awaits test_connection_offloaded after its DB read",
+        ),
+        (
+            "ecr_test_print",
+            "awaits the device print and X report after its DB read",
+        ),
+        (
+            "ecr_void_transaction",
+            "awaits process_transaction_offloaded after its DB read",
+        ),
+        (
+            "loyalty_sync_customers",
+            "awaits admin fetches and snapshot versions between DB writes",
+        ),
+        (
+            "loyalty_sync_settings",
+            "awaits the admin fetch before its DB write",
+        ),
+        (
+            "order_approve",
+            "awaits the room-charge and box confirmations before its DB step",
+        ),
+        (
+            "order_cancel_manual_refund",
+            "awaits fetch_return_evidence between DB steps",
+        ),
+        (
+            "order_cancel_with_approval",
+            "awaits server reads and writes between seven DB steps",
+        ),
+        (
+            "order_prepare_manual_cancel",
+            "awaits staff and server reads between five DB steps",
+        ),
+        (
+            "offline_reservation_create",
+            "awaits the online reservation POST before its offline DB write",
+        ),
+        (
+            "offline_reservation_update",
+            "awaits the online reservation PATCH before its offline DB write",
+        ),
+        (
+            "order_process_retry_queue",
+            "awaits the parity queue run between two DB reads",
+        ),
+        (
+            "order_save_from_remote",
+            "awaits the payment mirror repair between its DB steps",
+        ),
+        (
+            "order_update_customer_info",
+            "awaits prepare_header_edit_preflight between DB steps",
+        ),
+        (
+            "order_update_financials",
+            "awaits the payment ledger restore before its DB step",
+        ),
+        (
+            "order_update_items",
+            "awaits the preflight, a server PATCH and table recovery",
+        ),
+        (
+            "orders_apply_edit_settlement",
+            "awaits the payment ledger restore before its DB step",
+        ),
+        (
+            "orders_preview_edit_settlement",
+            "awaits the ledger restore, preflight and server call",
+        ),
+        (
+            "payment_record",
+            "awaits payment saves and fiscal steps between eight DB steps",
+        ),
+        (
+            "repairs_enqueue_print",
+            "awaits the server read before its DB step",
+        ),
+        (
+            "repairs_execute_command",
+            "awaits the producer guard and server call between DB steps",
+        ),
+        (
+            "repairs_list",
+            "awaits the server read (read_disposition) before its DB steps",
+        ),
+        (
+            "repairs_resolve_conflict",
+            "awaits acquire_renderer_producer_guard before its DB step",
+        ),
+        (
+            "repairs_settings",
+            "awaits the server read (read_disposition) before its DB steps",
+        ),
+        (
+            "repairs_stage_attachment",
+            "awaits acquire_renderer_producer_guard before its DB step",
+        ),
+        (
+            "repairs_workspace",
+            "awaits the server read (read_disposition) before its DB steps",
+        ),
+        (
+            "report_submit_z_report",
+            "records the closeout attempt after awaiting the Z stages",
+        ),
+        (
+            "shift_satellite_handover_recovery",
+            "awaits close_without_handover_at after DB reads",
+        ),
+        (
+            "sync_cleanup_deleted_orders",
+            "awaits the server order list before its DB write",
+        ),
+        (
+            "sync_clear_all",
+            "awaits emit_sync_status_snapshot after its DB write",
+        ),
+        (
+            "sync_clear_all_orders",
+            "awaits emit_sync_status_snapshot after its DB write",
+        ),
+        (
+            "sync_clear_failed",
+            "awaits emit_sync_status_snapshot after its DB write",
+        ),
+        (
+            "sync_clear_old_orders",
+            "awaits emit_sync_status_snapshot after its DB write",
+        ),
+        (
+            "sync_get_inter_terminal_status",
+            "awaits api::test_connectivity after its DB read",
+        ),
+        (
+            "sync_retry_all_failed_financial",
+            "awaits emit_sync_status_snapshot after DB writes",
+        ),
+    ];
 
     #[derive(Default)]
     struct Audit {
@@ -918,6 +1131,62 @@ mod main_thread_command_audit {
         commands: usize,
         /// `file:line: fn name ...` of every command that is not an `async fn`.
         offenders: Vec<String>,
+        /// `(name, "file:line: fn name ...")` of every command that locks
+        /// `DbState.conn` outside the blocking pool.
+        runtime_locks: Vec<(String, String)>,
+    }
+
+    /// Lines where a command body locks `DbState.conn` (`.conn.lock()` or
+    /// `lock_traced`) on the thread that polls the command: anywhere but inside
+    /// the arguments of a `BLOCKING_POOL` call. A spawned task or a closure run
+    /// in place counts, nested items do not.
+    #[derive(Default)]
+    struct RuntimeLocks {
+        pool_depth: usize,
+        /// Method calls that are `.await`ed: an async mutex, not `DbState.conn`.
+        awaited: HashSet<usize>,
+        lines: Vec<usize>,
+    }
+
+    impl<'ast> Visit<'ast> for RuntimeLocks {
+        fn visit_item(&mut self, _item: &'ast Item) {}
+
+        fn visit_expr_await(&mut self, node: &'ast ExprAwait) {
+            if let Expr::MethodCall(call) = &*node.base {
+                self.awaited.insert(call as *const ExprMethodCall as usize);
+            }
+            visit::visit_expr_await(self, node);
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+            let pool = matches!(&*node.func, Expr::Path(path)
+            if path.path.segments.last().is_some_and(|segment| {
+                BLOCKING_POOL.iter().any(|name| segment.ident == name)
+            }));
+            if !pool {
+                return visit::visit_expr_call(self, node);
+            }
+            self.visit_expr(&node.func);
+            self.pool_depth += 1;
+            for argument in &node.args {
+                self.visit_expr(argument);
+            }
+            self.pool_depth -= 1;
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+            let conn_lock = node.method == "lock"
+                && node.args.is_empty()
+                && matches!(&*node.receiver, Expr::Field(field)
+                    if matches!(&field.member, Member::Named(name) if name == "conn"))
+                && !self
+                    .awaited
+                    .contains(&(node as *const ExprMethodCall as usize));
+            if self.pool_depth == 0 && (conn_lock || node.method == "lock_traced") {
+                self.lines.push(node.method.span().start().line);
+            }
+            visit::visit_expr_method_call(self, node);
+        }
     }
 
     /// The `#[tauri::command]` attribute, whatever its spacing or line breaks.
@@ -940,7 +1209,13 @@ mod main_thread_command_audit {
         }
     }
 
-    fn check(path: &Path, attrs: &[Attribute], signature: &Signature, audit: &mut Audit) {
+    fn check(
+        path: &Path,
+        attrs: &[Attribute],
+        signature: &Signature,
+        body: &Block,
+        audit: &mut Audit,
+    ) {
         let Some(attr) = command_attribute(attrs) else {
             return;
         };
@@ -957,6 +1232,22 @@ mod main_thread_command_audit {
                     MAIN_THREAD
                 }
             ));
+            return;
+        }
+        let mut locks = RuntimeLocks::default();
+        locks.visit_block(body);
+        if !locks.lines.is_empty() {
+            let lines: Vec<String> = locks.lines.iter().map(usize::to_string).collect();
+            audit.runtime_locks.push((
+                signature.ident.to_string(),
+                format!(
+                    "{}:{}: fn {} locks DbState.conn on a runtime worker (line {})",
+                    path.display(),
+                    attr.span().start().line,
+                    signature.ident,
+                    lines.join(", ")
+                ),
+            ));
         }
     }
 
@@ -964,7 +1255,9 @@ mod main_thread_command_audit {
     fn walk(path: &Path, items: &[Item], audit: &mut Audit) {
         for item in items {
             match item {
-                Item::Fn(function) => check(path, &function.attrs, &function.sig, audit),
+                Item::Fn(function) => {
+                    check(path, &function.attrs, &function.sig, &function.block, audit)
+                }
                 Item::Mod(module) => {
                     if let Some((_, items)) = &module.content {
                         walk(path, items, audit);
@@ -973,7 +1266,7 @@ mod main_thread_command_audit {
                 Item::Impl(block) => {
                     for item in &block.items {
                         if let ImplItem::Fn(function) = item {
-                            check(path, &function.attrs, &function.sig, audit);
+                            check(path, &function.attrs, &function.sig, &function.block, audit);
                         }
                     }
                 }
@@ -1003,35 +1296,160 @@ mod main_thread_command_audit {
         }
     }
 
-    #[test]
-    fn no_tauri_command_is_a_synchronous_fn() {
+    /// Every `src/**/*.rs` file of the crate.
+    fn audit_crate() -> Audit {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         rust_files(&root, &mut files);
-        let mut commands = 0;
-        let mut offenders = Vec::new();
+        let mut audit = Audit::default();
         for path in files {
             let source = std::fs::read_to_string(&path).expect("read source file");
-            let audit = audit_source(&path, &source);
-            commands += audit.commands;
-            offenders.extend(audit.offenders);
+            let found = audit_source(&path, &source);
+            audit.commands += found.commands;
+            audit.offenders.extend(found.offenders);
+            audit.runtime_locks.extend(found.runtime_locks);
         }
+        audit
+    }
+
+    #[test]
+    fn no_tauri_command_is_a_synchronous_fn() {
+        let audit = audit_crate();
         // The scan must see the command surface (518 commands on 20/10/2026).
-        assert!(commands > 400, "only {commands} commands found");
         assert!(
-            offenders.is_empty(),
+            audit.commands > 400,
+            "only {} commands found",
+            audit.commands
+        );
+        assert!(
+            audit.offenders.is_empty(),
             "these Tauri commands are synchronous fns: on the main thread a wait \
              freezes the window, on a runtime worker it stalls the runtime; make \
              them `async fn` and run a blocking body through \
              `database_lock::run_blocking_command`:\n{}",
-            offenders.join("\n")
+            audit.offenders.join("\n")
         );
     }
 
-    /// Spells `#[tauri::command` from `#[cmd`, so that a text search for
-    /// commands (`grep '#\[tauri::command'`) never hits this test.
+    #[test]
+    fn no_async_command_locks_the_database_on_a_runtime_worker() {
+        let audit = audit_crate();
+        let allowed = |name: &str| {
+            RUNTIME_LOCK_ALLOWLIST
+                .iter()
+                .any(|(entry, _)| *entry == name)
+        };
+        let unexpected: Vec<&str> = audit
+            .runtime_locks
+            .iter()
+            .filter(|(name, _)| !allowed(name))
+            .map(|(_, offence)| offence.as_str())
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "these async Tauri commands lock DbState.conn on a Tokio runtime worker, \
+             where a long hold elsewhere parks the worker and, with a few more such \
+             waits, stalls HTTP, timers and every other command; run the body through \
+             `database_lock::run_blocking_command` with the state re-acquired from an \
+             `AppHandle`:\n{}",
+            unexpected.join("\n")
+        );
+        let stale: Vec<&str> = RUNTIME_LOCK_ALLOWLIST
+            .iter()
+            .map(|(entry, _)| *entry)
+            .filter(|entry| !audit.runtime_locks.iter().any(|(name, _)| name == entry))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these RUNTIME_LOCK_ALLOWLIST commands no longer lock DbState.conn on a \
+             runtime worker (or no longer exist); remove them from the list: {stale:?}"
+        );
+        let unique: HashSet<&str> = RUNTIME_LOCK_ALLOWLIST
+            .iter()
+            .map(|(entry, _)| *entry)
+            .collect();
+        assert_eq!(
+            unique.len(),
+            RUNTIME_LOCK_ALLOWLIST.len(),
+            "duplicate allowlist entry"
+        );
+        assert!(
+            RUNTIME_LOCK_ALLOWLIST
+                .iter()
+                .all(|(_, reason)| !reason.trim().is_empty()),
+            "every allowlist entry gives its reason"
+        );
+    }
+
+    #[test]
+    fn the_audit_flags_database_locks_outside_the_blocking_pool() {
+        let path = Path::new("example.rs");
+        let locks = |text: &str| -> Vec<String> {
+            audit_source(path, &source(text))
+                .runtime_locks
+                .into_iter()
+                .map(|(_, offence)| offence)
+                .collect()
+        };
+        let flagged = |name: &str, lines: &str| {
+            vec![format!(
+                "example.rs:1: fn {name} locks DbState.conn on a runtime worker (line {lines})"
+            )]
+        };
+        for (text, expected) in [
+            (
+                "#[cmd]\npub async fn direct(db: State<'_, DbState>) -> Result<(), String> {\n    let conn = db.conn.lock().map_err(|e| e.to_string())?;\n    Ok(())\n}\n",
+                flagged("direct", "3"),
+            ),
+            (
+                "#[cmd]\npub async fn traced(db: State<'_, DbState>) {\n    let _conn = db.traced_lock(\"traced\");\n}\n",
+                flagged("traced", "3"),
+            ),
+            // After an await, in a closure run in place and in a spawned task:
+            // all still on a runtime worker.
+            (
+                "#[cmd]\npub async fn after_await(db: State<'_, DbState>) {\n    fetch().await;\n    let _ = db.conn.lock();\n}\n",
+                flagged("after_await", "4"),
+            ),
+            (
+                "#[cmd]\npub async fn in_closure(db: State<'_, DbState>) {\n    let read = || db.conn.lock().map(|_| ());\n    read();\n}\n",
+                flagged("in_closure", "3"),
+            ),
+            (
+                "#[cmd]\npub async fn spawned(app: AppHandle) {\n    tauri::async_runtime::spawn(async move {\n        let db = app.state::<DbState>();\n        let _ = db.conn.lock();\n    });\n}\n",
+                flagged("spawned", "5"),
+            ),
+            (
+                "#[cmd]\npub async fn half(app: AppHandle) {\n    run_blocking_command(\"half\", move || Ok::<_, String>(())).await;\n    let db = app.state::<DbState>();\n    let _ = db.conn.lock();\n    let _ = db.inner().conn.lock();\n}\n",
+                flagged("half", "5, 6"),
+            ),
+        ] {
+            assert_eq!(locks(text), expected, "{text}");
+        }
+        for text in [
+            // The 26 freeze-fix commands' shape.
+            "#[cmd]\npub async fn pooled(app: AppHandle) -> Result<(), String> {\n    run_blocking_command(\"pooled\", move || {\n        let db = app.state::<DbState>();\n        let _conn = db.traced_lock(\"pooled\");\n        Ok(())\n    })\n    .await\n}\n",
+            "#[cmd]\npub async fn turbofish(app: AppHandle) {\n    crate::database_lock::run_blocking_command::<_, String, _>(\"t\", move || {\n        let _ = app.state::<DbState>().conn.lock();\n        Ok(())\n    })\n    .await;\n}\n",
+            "#[cmd]\npub async fn tokio_pool(app: AppHandle) {\n    tokio::task::spawn_blocking(move || {\n        let _ = app.state::<DbState>().conn.lock();\n    })\n    .await;\n}\n",
+            // An async mutex, a try-lock, another field and a helper are not
+            // `DbState.conn` waits this rule can see.
+            "#[cmd]\npub async fn other(state: State<'_, Other>, db: State<'_, DbState>) {\n    let _ = state.conn.lock().await;\n    let _ = db.conn.try_lock();\n    let _ = state.queue.lock();\n    let _ = read_settings(&db);\n}\n",
+            // A nested item and a non-command fn are not the command body.
+            "#[cmd]\npub async fn nested() {\n    fn helper(db: &DbState) {\n        let _ = db.conn.lock();\n    }\n}\n",
+            "pub async fn helper(db: &DbState) {\n    let _ = db.conn.lock();\n}\n",
+        ] {
+            assert!(locks(text).is_empty(), "{text}: {:?}", locks(text));
+        }
+    }
+
+    /// Spells `#[tauri::command` from `#[cmd` and the traced lock call from
+    /// `traced_lock(`, so that the text searches for commands
+    /// (`grep '#\[tauri::command'`) and for traced lock sites
+    /// (`database_lock_every_site_uses_a_listed_literal_label`) never hit
+    /// this test.
     fn source(text: &str) -> String {
         text.replace("#[cmd", concat!("#[tauri", "::command"))
+            .replace("traced_lock(", concat!("lock", "_traced("))
     }
 
     #[test]

@@ -14326,6 +14326,22 @@ fn resume_table_opens_waiting_for_parent(conn: &Connection) -> Result<usize, Str
     let Ok(scope) = crate::table_session_cache::current_scope(conn) else {
         return Ok(0);
     };
+    // Tomikro 21/10/2026: this took the file's write lock on every queue pass,
+    // even on a till without tables, while the checkout waited for it. Without
+    // a candidate it now takes no lock at all.
+    let candidate: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE organization_id=?1
+            AND module_type='table_service' AND table_name='restaurant_table_sessions'
+            AND operation='INSERT' AND status='failed' AND attempts=1 AND claim_generation=1
+            AND error_message LIKE 'HTTP 409: TABLE_MUTATION_FIRST_DISPATCH_REFUSED %')",
+            [&scope.organization],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !candidate {
+        return Ok(0);
+    }
     retry_transaction(conn, |conn| {
         let mut statement = conn.prepare("SELECT id,table_name,record_id,operation,data,organization_id,created_at,attempts,last_attempt,error_message,next_retry_at,retry_delay_ms,priority,module_type,conflict_strategy,version,claim_generation,status
             FROM parity_sync_queue WHERE organization_id=?1 AND module_type='table_service'
@@ -30063,6 +30079,29 @@ mod tests {
             let (conn,_) = table_open_parent_wait_fixture();conn.execute_batch(change).unwrap();
             assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(),0,"{change}");
         }
+    }
+
+    #[test]
+    fn table_open_resume_takes_no_write_lock_without_a_candidate() {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        for (key, value) in [
+            ("organization_id", "org"),
+            ("branch_id", "branch"),
+            ("terminal_id", "11111111-1111-4111-8111-111111111111"),
+        ] {
+            crate::db::set_setting(&conn, "terminal", key, value).unwrap();
+        }
+        // Another connection is writing (the checkout): a pass without a
+        // candidate must not queue behind it for busy_timeout.
+        let other = Connection::open(&db.state.db_path).unwrap();
+        other
+            .execute_batch("CREATE TABLE IF NOT EXISTS lock_probe(x); BEGIN IMMEDIATE; INSERT INTO lock_probe VALUES(1);")
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(resume_table_opens_waiting_for_parent(&conn).unwrap(), 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        other.execute_batch("COMMIT").unwrap();
     }
 
     #[test]

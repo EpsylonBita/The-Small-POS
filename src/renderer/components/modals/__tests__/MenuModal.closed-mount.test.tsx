@@ -472,7 +472,11 @@ describe('MenuModal durable checkout recovery', () => {
     await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(draftStorage.draft).toBeNull());
   });
-  it('retains failed or ambiguous checkout across reopening and blocks another collection', async () => {
+  // A failure whose press may still write its order is ambiguous: it is
+  // retained. A plain refusal with nothing written returns the editable cart
+  // (Tomikro 21/10/2026, MenuModal.money-settings).
+  it('retains an ambiguous checkout (its press still running) across reopening and blocks another collection', async () => {
+    draftStorage.inspection = { success: true, outcome: 'not_found', canCollect: false, checkoutInProgress: true };
     const complete = vi.fn(async () => false);
     const props = { ...baseProps, isOpen: true, onOrderComplete: complete };
     const view = render(<MenuModal {...props} />); await act(async () => {});
@@ -483,6 +487,7 @@ describe('MenuModal durable checkout recovery', () => {
     view.rerender(<MenuModal {...props} isOpen={false} />); view.rerender(<MenuModal {...props} />);
     await screen.findByText('The original checkout is retained. Confirm its result before starting another payment.');
     fireEvent.click(screen.getByText('Checkout')); expect(complete).toHaveBeenCalledTimes(1);
+    draftStorage.inspection = { success: true, outcome: 'not_found', canCollect: false, checkoutInProgress: false };
     fireEvent.click(screen.getByText('Check original checkout'));
     await act(async () => {});
     expect(draftStorage.draft.checkoutRequestId).toBe(retainedId);

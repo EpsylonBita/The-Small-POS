@@ -1,8 +1,9 @@
 use chrono::Local;
 use serde::Deserialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use zeroize::Zeroizing;
 
+use crate::database_lock::run_blocking_command;
 use crate::{api, db, storage, sync, value_i64};
 
 #[derive(Debug, Deserialize, Default)]
@@ -884,11 +885,13 @@ async fn emit_sync_status_snapshot(
 }
 
 #[tauri::command]
-pub async fn sync_get_status(
-    db: tauri::State<'_, db::DbState>,
-    sync_state: tauri::State<'_, std::sync::Arc<sync::SyncState>>,
-) -> Result<serde_json::Value, String> {
-    sync::get_sync_status(&db, &sync_state)
+pub async fn sync_get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("sync_get_status", move || {
+        let db = app.state::<db::DbState>();
+        let sync_state = app.state::<std::sync::Arc<sync::SyncState>>();
+        sync::get_sync_status(&db, &sync_state)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -918,9 +921,13 @@ pub async fn sync_force(
 
 #[tauri::command]
 pub async fn sync_validate_pending_orders(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    sync::validate_pending_orders(&db)
+    run_blocking_command("sync_validate_pending_orders", move || {
+        let db = app.state::<db::DbState>();
+        sync::validate_pending_orders(&db)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -939,28 +946,38 @@ pub async fn sync_remove_invalid_orders(
 }
 
 #[tauri::command]
-pub async fn sync_get_financial_stats(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    sync::get_financial_stats(&db)
+pub async fn sync_get_financial_stats(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("sync_get_financial_stats", move || {
+        let db = app.state::<db::DbState>();
+        sync::get_financial_stats(&db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn sync_get_failed_financial_items(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let limit = parse_failed_financial_items_limit(arg0);
-    query_financial_queue_items(limit, &db)
+    run_blocking_command("sync_get_failed_financial_items", move || {
+        let db = app.state::<db::DbState>();
+        let limit = parse_failed_financial_items_limit(arg0);
+        query_financial_queue_items(limit, &db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn sync_get_financial_queue_items(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let limit = parse_failed_financial_items_limit(arg0);
-    query_financial_queue_items(limit, &db)
+    run_blocking_command("sync_get_financial_queue_items", move || {
+        let db = app.state::<db::DbState>();
+        let limit = parse_failed_financial_items_limit(arg0);
+        query_financial_queue_items(limit, &db)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1149,26 +1166,34 @@ pub async fn sync_retry_all_failed_financial(
 
 #[tauri::command]
 pub async fn sync_get_unsynced_financial_summary(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sync_queue
+    run_blocking_command("sync_get_unsynced_financial_summary", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
              WHERE status != 'synced'
                AND entity_type IN ('payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    Ok(serde_json::json!({ "totalUnsynced": total }))
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(serde_json::json!({ "totalUnsynced": total }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn sync_validate_financial_integrity(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    collect_financial_integrity(&db)
+    run_blocking_command("sync_validate_financial_integrity", move || {
+        let db = app.state::<db::DbState>();
+        collect_financial_integrity(&db)
+    })
+    .await
 }
 
 #[tauri::command]

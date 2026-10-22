@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use tauri::Manager;
 use tracing::warn;
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, payload_arg0_as_string, zreport};
 
 #[derive(Debug, Deserialize)]
@@ -88,101 +90,124 @@ fn parse_zreport_list_payload(arg0: Option<serde_json::Value>) -> serde_json::Va
 #[tauri::command]
 pub async fn zreport_generate(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_zreport_generate_payload(arg0);
+    run_blocking_command("zreport_generate", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_zreport_generate_payload(arg0);
 
-    let has_shift_id = payload.get("shiftId").and_then(|v| v.as_str()).is_some()
-        || payload.get("shift_id").and_then(|v| v.as_str()).is_some();
-    let has_branch_date = payload.get("branchId").and_then(|v| v.as_str()).is_some()
-        || payload.get("date").and_then(|v| v.as_str()).is_some();
+        let has_shift_id = payload.get("shiftId").and_then(|v| v.as_str()).is_some()
+            || payload.get("shift_id").and_then(|v| v.as_str()).is_some();
+        let has_branch_date = payload.get("branchId").and_then(|v| v.as_str()).is_some()
+            || payload.get("date").and_then(|v| v.as_str()).is_some();
 
-    if has_shift_id && !has_branch_date {
-        // T24 (fiscalization-core): refuse the z-report close while any
-        // fiscal submission of the business window is still queued under a
-        // currently-active (or unknown) plugin (Req 4.7 + 4.7a). This legacy
-        // shift command is not what the renderer calls — the day close
-        // (`report_submit_z_report`) runs the same guard — but it keeps the
-        // same rule: the report's own window (never today's UTC date, which
-        // missed a business day's receipts after midnight UTC), the
-        // terminal's branch when the payload names none (a payload with a
-        // branchId never reaches this arm), and the typed refusal the
-        // renderer localizes (29/09/2026).
-        // A guard that cannot run holds the close too (fail closed, like the
-        // unreadable-queue refusal it would otherwise have returned).
-        match zreport::fiscal_close_blocked_response(&db, &payload) {
-            Ok(None) => {}
-            Ok(Some(blocked)) => return Err(blocked.to_string()),
-            Err(error) => {
-                warn!("[zreports.fiscal-guard] fiscal queue probe failed: {error}");
-                return Err(format!(
-                    "Cannot close day: the fiscal submissions could not be checked: {error}"
-                ));
+        if has_shift_id && !has_branch_date {
+            // T24 (fiscalization-core): refuse the z-report close while any
+            // fiscal submission of the business window is still queued under a
+            // currently-active (or unknown) plugin (Req 4.7 + 4.7a). This legacy
+            // shift command is not what the renderer calls — the day close
+            // (`report_submit_z_report`) runs the same guard — but it keeps the
+            // same rule: the report's own window (never today's UTC date, which
+            // missed a business day's receipts after midnight UTC), the
+            // terminal's branch when the payload names none (a payload with a
+            // branchId never reaches this arm), and the typed refusal the
+            // renderer localizes (29/09/2026).
+            // A guard that cannot run holds the close too (fail closed, like the
+            // unreadable-queue refusal it would otherwise have returned).
+            match zreport::fiscal_close_blocked_response(&db, &payload) {
+                Ok(None) => {}
+                Ok(Some(blocked)) => return Err(blocked.to_string()),
+                Err(error) => {
+                    warn!("[zreports.fiscal-guard] fiscal queue probe failed: {error}");
+                    return Err(format!(
+                        "Cannot close day: the fiscal submissions could not be checked: {error}"
+                    ));
+                }
             }
-        }
 
-        // Wave 1 C9: this branch used to call `discard_generated_z_report_by_id`
-        // whenever `existing: false` — which is exactly the "freshly generated"
-        // success case. The effect was that every newly-produced single-shift
-        // Z-report was silently deleted right after commit, making the entire
-        // shift-based flow a no-op. `generate_z_report` at `zreport.rs:2172`
-        // is idempotent (it returns the existing row when one exists for the
-        // shift, with `existing: true`), so there is no legitimate need to
-        // discard in the success path — the caller keeps whatever the
-        // generator returns. The preview-and-discard path lives under the
-        // `else` arm below (`preview_z_report_for_date`), not here.
-        zreport::generate_z_report(&db, &payload)
-    } else {
-        zreport::preview_z_report_for_date(&db, &payload)
-    }
+            // Wave 1 C9: this branch used to call `discard_generated_z_report_by_id`
+            // whenever `existing: false` — which is exactly the "freshly generated"
+            // success case. The effect was that every newly-produced single-shift
+            // Z-report was silently deleted right after commit, making the entire
+            // shift-based flow a no-op. `generate_z_report` at `zreport.rs:2172`
+            // is idempotent (it returns the existing row when one exists for the
+            // shift, with `existing: true`), so there is no legitimate need to
+            // discard in the success path — the caller keeps whatever the
+            // generator returns. The preview-and-discard path lives under the
+            // `else` arm below (`preview_z_report_for_date`), not here.
+            zreport::generate_z_report(&db, &payload)
+        } else {
+            zreport::preview_z_report_for_date(&db, &payload)
+        }
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn zreport_get(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = serde_json::json!({
-        "zReportId": parse_zreport_id_payload(arg0)?
-    });
-    zreport::get_z_report(&db, &payload)
+    run_blocking_command("zreport_get", move || {
+        let db = app.state::<db::DbState>();
+        let payload = serde_json::json!({
+            "zReportId": parse_zreport_id_payload(arg0)?
+        });
+        zreport::get_z_report(&db, &payload)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn zreport_list(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_zreport_list_payload(arg0);
-    zreport::list_z_reports(&db, &payload)
+    run_blocking_command("zreport_list", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_zreport_list_payload(arg0);
+        zreport::list_z_reports(&db, &payload)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn zreport_print(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = serde_json::json!({
-        "zReportId": parse_zreport_id_payload(arg0)?
-    });
-    zreport::print_z_report(&db, &payload, &app)
+    run_blocking_command("zreport_print", move || {
+        let db = app.state::<db::DbState>();
+        let payload = serde_json::json!({
+            "zReportId": parse_zreport_id_payload(arg0)?
+        });
+        zreport::print_z_report(&db, &payload, &app)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn repair_reporting_projection_apply(
     projection: zreport::RepairReportingProjection,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    zreport::apply_repair_reporting_projection(&db, &projection)
+    run_blocking_command("repair_reporting_projection_apply", move || {
+        let db = app.state::<db::DbState>();
+        zreport::apply_repair_reporting_projection(&db, &projection)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn repair_reporting_projection_invalidate(
     staff_shift_id: Option<String>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<bool, String> {
-    zreport::invalidate_repair_reporting_projection(&db, staff_shift_id.as_deref())
+    run_blocking_command("repair_reporting_projection_invalidate", move || {
+        let db = app.state::<db::DbState>();
+        zreport::invalidate_repair_reporting_projection(&db, staff_shift_id.as_deref())
+    })
+    .await
 }
 
 #[cfg(test)]

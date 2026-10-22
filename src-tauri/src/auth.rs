@@ -346,10 +346,11 @@ struct ManagerGrant {
 /// Who approved a money action ([`authorize_money_action`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoneyApprover {
-    /// The manager whose own PIN approved it; `None` when the terminal
+    /// The manager whose own PIN approved it, or the staff member on shift
+    /// whose store right did (`shift_permission`); `None` when the terminal
     /// session on a cashier or manager shift did (the session names who).
     pub manager_staff_id: Option<String>,
-    /// `shift_session` or `manager_pin`.
+    /// `shift_session`, `shift_permission` or `manager_pin`.
     pub via: &'static str,
 }
 
@@ -2214,6 +2215,118 @@ pub fn authorize_money_action(
     authorize_money_action_at(approval, db, auth, Utc::now())
 }
 
+/// Why setting money work aside asks for an approver's own PIN.
+const PERMITTED_APPROVAL_REASON: &str =
+    "Nobody on shift at this terminal holds this right: a staff member who holds it approves with their own PIN";
+
+/// The staff member checked in as cashier or manager at this terminal, when
+/// this branch's staff directory grants them `approval` (Android: the staff on
+/// shift whose store permissions include it). Default-deny.
+fn on_shift_staff_holding(
+    db: &db::DbState,
+    approval: MoneyApproval,
+) -> Result<Option<String>, String> {
+    let terminal_id = resolve_current_terminal_id(db)?;
+    let branch_id = resolve_current_branch_id(db)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let on_shift: Option<(String, String)> = conn
+        .query_row(
+            "SELECT staff_id, role_type
+             FROM staff_shifts
+             WHERE terminal_id = ?1 AND status = 'active'
+             ORDER BY check_in_time DESC
+             LIMIT 1",
+            rusqlite::params![terminal_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+    let Some((staff_id, role)) = on_shift else {
+        return Ok(None);
+    };
+    if !matches!(role.as_str(), "cashier" | "manager") {
+        return Ok(None);
+    }
+    let Some(raw) = db::get_setting(
+        &conn,
+        STAFF_AUTH_CACHE_CATEGORY,
+        &staff_auth_cache_key(&branch_id),
+    ) else {
+        return Ok(None);
+    };
+    let Ok(cache) = parse_staff_auth_cache(&raw) else {
+        return Ok(None);
+    };
+    if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id.trim() {
+        return Ok(None);
+    }
+    let staff_id = staff_id.trim().to_string();
+    let required = approval.catalogue_permissions();
+    let holds = cache.staff.iter().any(|entry| {
+        entry.id.trim() == staff_id
+            && entry.is_active == Some(true)
+            && entry.can_login_pos == Some(true)
+            && entry
+                .permissions
+                .iter()
+                .any(|name| required.contains(&name.as_str()))
+    });
+    Ok(holds.then_some(staff_id))
+}
+
+fn authorize_permitted_money_action_at(
+    approval: MoneyApproval,
+    db: &db::DbState,
+    auth: &AuthState,
+    now: DateTime<Utc>,
+) -> Result<MoneyApprover, PrivilegedActionError> {
+    let scope = PrivilegedActionScope::CashDrawerControl;
+    let Some(session) = get_current_session(auth) else {
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Active session required",
+        ));
+    };
+    if let Some(grant) = take_manager_grant_at(auth, &session.session_id, approval, now) {
+        return Ok(MoneyApprover {
+            manager_staff_id: Some(grant.approver_staff_id),
+            via: "manager_pin",
+        });
+    }
+    match on_shift_staff_holding(db, approval) {
+        Ok(Some(staff_id)) => {
+            if !has_fresh_privileged_grant_at(auth, &session.session_id, scope, now) {
+                return Err(PrivilegedActionError::reauth_required(
+                    scope,
+                    "Fresh PIN confirmation required",
+                ));
+            }
+            Ok(MoneyApprover {
+                manager_staff_id: Some(staff_id),
+                via: "shift_permission",
+            })
+        }
+        Ok(None) => Err(PrivilegedActionError::manager_approval(
+            approval,
+            PERMITTED_APPROVAL_REASON,
+        )),
+        Err(error) => Err(PrivilegedActionError::unauthorized(Some(scope), error)),
+    }
+}
+
+/// A money action only the holder of its right approves (review 22/10/2026:
+/// setting a checkout aside accepted any cashier on shift with a fresh PIN).
+/// Android's `resolvePrivilegedStaffId([approval])` boundary: the staff member
+/// on shift at this terminal whose store role grants it, with a fresh PIN, else
+/// a staff member who holds it approving with their own PIN, used once.
+/// Answers who approved it.
+pub fn authorize_permitted_money_action(
+    approval: MoneyApproval,
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<MoneyApprover, PrivilegedActionError> {
+    authorize_permitted_money_action_at(approval, db, auth, Utc::now())
+}
+
 fn confirm_privileged_action_at(
     arg0: Option<Value>,
     db: &db::DbState,
@@ -2266,7 +2379,22 @@ fn confirm_privileged_action_at(
                 ));
             };
             match current_terminal_has_cash_drawer_role(db) {
-                Ok(true) => session,
+                // The till asked for an approver's own PIN although someone is
+                // on shift: they lack the right (setting a checkout aside,
+                // review 22/10/2026). Verify that staff member, not the session.
+                Ok(true) => match extract_approval(&payload) {
+                    Some(approval) => {
+                        return confirm_manager_approval_at(
+                            &pin,
+                            approval,
+                            Some(&session),
+                            db,
+                            auth,
+                            now,
+                        );
+                    }
+                    None => session,
+                },
                 Ok(false) => {
                     // Nobody is on shift here: a manager approves with their
                     // own PIN (fix review 30/09/2026).

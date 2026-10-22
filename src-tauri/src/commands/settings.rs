@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Mutex, OnceLock};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use zeroize::Zeroizing;
 
+use crate::database_lock::run_blocking_command;
 use crate::terminal_helpers::{
     extract_enabled_features_from_terminal_settings_response,
     extract_owner_terminal_db_id_from_terminal_settings_response,
@@ -2720,15 +2721,19 @@ fn build_terminal_auth_failure_response(
 }
 
 #[tauri::command]
-pub async fn settings_is_configured(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let configured = !terminal_connection_rebind_pending_fail_closed(&db)
-        && resolve_strict_terminal_authority(&db)?.is_some();
-    let reason = if configured {
-        "all_credentials_present"
-    } else {
-        "missing_credentials"
-    };
-    Ok(serde_json::json!({ "configured": configured, "reason": reason }))
+pub async fn settings_is_configured(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("settings_is_configured", move || {
+        let db = app.state::<db::DbState>();
+        let configured = !terminal_connection_rebind_pending_fail_closed(&db)
+            && resolve_strict_terminal_authority(&db)?.is_some();
+        let reason = if configured {
+            "all_credentials_present"
+        } else {
+            "missing_credentials"
+        };
+        Ok(serde_json::json!({ "configured": configured, "reason": reason }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2746,81 +2751,85 @@ pub async fn settings_get(
     arg0: Option<Value>,
     arg1: Option<Value>,
     arg2: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = crate::parse_channel_payload(arg0.clone(), arg1.clone());
-    let mut category = crate::value_str(&payload, &["category", "settingType"]);
-    let mut key = crate::value_str(&payload, &["key", "settingKey"]);
-    let default_value = payload
-        .get("defaultValue")
-        .cloned()
-        .or_else(|| payload.get("default").cloned())
-        .or(arg2)
-        .unwrap_or(serde_json::Value::Null);
+    run_blocking_command("settings_get", move || {
+        let db = app.state::<db::DbState>();
+        let payload = crate::parse_channel_payload(arg0.clone(), arg1.clone());
+        let mut category = crate::value_str(&payload, &["category", "settingType"]);
+        let mut key = crate::value_str(&payload, &["key", "settingKey"]);
+        let default_value = payload
+            .get("defaultValue")
+            .cloned()
+            .or_else(|| payload.get("default").cloned())
+            .or(arg2)
+            .unwrap_or(serde_json::Value::Null);
 
-    if category.is_none() || key.is_none() {
-        if let (Some(serde_json::Value::String(cat)), Some(serde_json::Value::String(k))) =
-            (arg0.as_ref(), arg1.as_ref())
-        {
-            category = Some(cat.clone());
-            key = Some(k.clone());
-        }
-    }
-
-    if key.is_none() {
-        if let Some(serde_json::Value::String(single)) = arg0.as_ref() {
-            if let Some((cat, k)) = single.split_once('.') {
-                category = Some(cat.to_string());
-                key = Some(k.to_string());
-            } else {
-                key = Some(single.clone());
+        if category.is_none() || key.is_none() {
+            if let (Some(serde_json::Value::String(cat)), Some(serde_json::Value::String(k))) =
+                (arg0.as_ref(), arg1.as_ref())
+            {
+                category = Some(cat.clone());
+                key = Some(k.clone());
             }
         }
-    }
 
-    if let (Some(cat), Some(k)) = (category.clone(), key.clone()) {
-        if crate::is_sensitive_setting_path(&cat, &k) {
-            if !default_value.is_null() {
-                return Ok(default_value);
-            }
-            return Ok(serde_json::Value::Null);
-        }
-
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        if let Some(v) = db::get_setting(&conn, &cat, &k) {
-            // A staff PIN hash never reaches the renderer (a row written
-            // before the hashes moved to the OS credential store).
-            let v = crate::staff_pin_vault::redact_pin_hashes_in_text(&v).unwrap_or(v);
-            return Ok(serde_json::Value::String(v));
-        }
-        drop(conn);
-
-        if cat == "terminal" {
-            if let Some(credential_key) = crate::credential_key_for_terminal_setting(&k) {
-                if let Some(v) = storage::get_credential(credential_key) {
-                    return Ok(serde_json::Value::String(v));
+        if key.is_none() {
+            if let Some(serde_json::Value::String(single)) = arg0.as_ref() {
+                if let Some((cat, k)) = single.split_once('.') {
+                    category = Some(cat.to_string());
+                    key = Some(k.to_string());
+                } else {
+                    key = Some(single.clone());
                 }
             }
         }
 
-        if !default_value.is_null() {
-            return Ok(default_value);
-        }
-        return Ok(serde_json::Value::Null);
-    }
+        if let (Some(cat), Some(k)) = (category.clone(), key.clone()) {
+            if crate::is_sensitive_setting_path(&cat, &k) {
+                if !default_value.is_null() {
+                    return Ok(default_value);
+                }
+                return Ok(serde_json::Value::Null);
+            }
 
-    if let Some(k) = key {
-        // Legacy one-arg form: settings:get('terminal_id')
-        if crate::is_sensitive_setting_path("general", &k) {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            if let Some(v) = db::get_setting(&conn, &cat, &k) {
+                // A staff PIN hash never reaches the renderer (a row written
+                // before the hashes moved to the OS credential store).
+                let v = crate::staff_pin_vault::redact_pin_hashes_in_text(&v).unwrap_or(v);
+                return Ok(serde_json::Value::String(v));
+            }
+            drop(conn);
+
+            if cat == "terminal" {
+                if let Some(credential_key) = crate::credential_key_for_terminal_setting(&k) {
+                    if let Some(v) = storage::get_credential(credential_key) {
+                        return Ok(serde_json::Value::String(v));
+                    }
+                }
+            }
+
             if !default_value.is_null() {
                 return Ok(default_value);
             }
             return Ok(serde_json::Value::Null);
         }
-        return Ok(storage::settings_get(Some(&k)));
-    }
 
-    get_settings(db).await
+        if let Some(k) = key {
+            // Legacy one-arg form: settings:get('terminal_id')
+            if crate::is_sensitive_setting_path("general", &k) {
+                if !default_value.is_null() {
+                    return Ok(default_value);
+                }
+                return Ok(serde_json::Value::Null);
+            }
+            return Ok(storage::settings_get(Some(&k)));
+        }
+
+        merged_settings(db)
+    })
+    .await
 }
 
 fn read_local_state_setting(
@@ -2839,46 +2848,50 @@ fn read_local_state_setting(
 #[tauri::command]
 pub async fn settings_get_local(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    if arg0.is_none() {
-        return get_settings(db).await;
-    }
+    run_blocking_command("settings_get_local", move || {
+        let db = app.state::<db::DbState>();
+        if arg0.is_none() {
+            return merged_settings(db);
+        }
 
-    if let Some(serde_json::Value::String(key)) = arg0 {
-        if let Some((category, setting_key)) = key.split_once('.') {
-            if crate::is_sensitive_setting_path(category, setting_key) {
-                return Ok(serde_json::Value::Null);
-            }
+        if let Some(serde_json::Value::String(key)) = arg0 {
+            if let Some((category, setting_key)) = key.split_once('.') {
+                if crate::is_sensitive_setting_path(category, setting_key) {
+                    return Ok(serde_json::Value::Null);
+                }
 
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            if category == "local" {
-                return read_local_state_setting(&conn, setting_key)
-                    .map(|value| value.map(Value::String).unwrap_or(Value::Null));
-            }
-            if let Some(v) = db::get_setting(&conn, category, setting_key) {
-                return Ok(serde_json::Value::String(v));
-            }
-            drop(conn);
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                if category == "local" {
+                    return read_local_state_setting(&conn, setting_key)
+                        .map(|value| value.map(Value::String).unwrap_or(Value::Null));
+                }
+                if let Some(v) = db::get_setting(&conn, category, setting_key) {
+                    return Ok(serde_json::Value::String(v));
+                }
+                drop(conn);
 
-            if category == "terminal" {
-                if let Some(credential_key) =
-                    crate::credential_key_for_terminal_setting(setting_key)
-                {
-                    if let Some(v) = storage::get_credential(credential_key) {
-                        return Ok(serde_json::Value::String(v));
+                if category == "terminal" {
+                    if let Some(credential_key) =
+                        crate::credential_key_for_terminal_setting(setting_key)
+                    {
+                        if let Some(v) = storage::get_credential(credential_key) {
+                            return Ok(serde_json::Value::String(v));
+                        }
                     }
                 }
+                return Ok(serde_json::Value::Null);
             }
-            return Ok(serde_json::Value::Null);
+            if crate::is_sensitive_setting_path("general", &key) {
+                return Ok(serde_json::Value::Null);
+            }
+            return Ok(storage::settings_get(Some(&key)));
         }
-        if crate::is_sensitive_setting_path("general", &key) {
-            return Ok(serde_json::Value::Null);
-        }
-        return Ok(storage::settings_get(Some(&key)));
-    }
 
-    get_settings(db).await
+        merged_settings(db)
+    })
+    .await
 }
 
 fn prepare_repair_process_reset(
@@ -3003,13 +3016,17 @@ pub async fn settings_update_terminal_credentials(
 }
 
 #[tauri::command]
-pub async fn settings_get_admin_url(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    if terminal_connection_rebind_pending_fail_closed(&db) {
-        return Err("TERMINAL_TRANSITION_PENDING".to_string());
-    }
-    Ok(resolve_strict_terminal_authority(&db)?
-        .map(|authority| Value::String(authority.binding.admin_dashboard_url))
-        .unwrap_or(Value::Null))
+pub async fn settings_get_admin_url(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("settings_get_admin_url", move || {
+        let db = app.state::<db::DbState>();
+        if terminal_connection_rebind_pending_fail_closed(&db) {
+            return Err("TERMINAL_TRANSITION_PENDING".to_string());
+        }
+        Ok(resolve_strict_terminal_authority(&db)?
+            .map(|authority| Value::String(authority.binding.admin_dashboard_url))
+            .unwrap_or(Value::Null))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3019,10 +3036,12 @@ pub async fn settings_get_pos_api_key(db: tauri::State<'_, db::DbState>) -> Resu
 }
 
 #[tauri::command]
-pub async fn settings_get_credential_status(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    credential_status_projection(&db)
+pub async fn settings_get_credential_status(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("settings_get_credential_status", move || {
+        let db = app.state::<db::DbState>();
+        credential_status_projection(&db)
+    })
+    .await
 }
 
 fn credential_status_projection(db: &db::DbState) -> Result<Value, String> {
@@ -3047,7 +3066,17 @@ fn credential_status_projection(db: &db::DbState) -> Result<Value, String> {
 /// Returns all settings merged: local_settings DB + terminal credential store.
 /// The StaffShiftModal uses this to look up `terminal.branch_id`.
 #[tauri::command]
-pub async fn get_settings(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
+pub async fn get_settings(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("get_settings", move || {
+        let db = app.state::<db::DbState>();
+        merged_settings(db)
+    })
+    .await
+}
+
+/// The answer of `get_settings`, also given by the settings reads called
+/// without a key. Synchronous: callers run it on the blocking pool.
+fn merged_settings(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
     let mut all = renderer_settings_snapshot(&db)?;
 
     // Merge credential store values into terminal.*
@@ -3338,94 +3367,100 @@ fn clear_terminal_connection_lifecycle_under_lock(db: &db::DbState) -> Result<()
 pub async fn settings_set(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let parsed = parse_settings_set_payload(arg0, arg1)?;
-    let category = parsed.category;
-    let key = parsed.key;
-    validate_generic_setting_update(&category, &key)?;
-    let value = match parsed.value_node {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
-    };
-    apply_generic_settings_and_credentials_checked(
-        &db,
-        &[(category.clone(), key.clone(), value.clone())],
-    )?;
+    run_blocking_command("settings_set", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_settings_set_payload(arg0, arg1)?;
+        let category = parsed.category;
+        let key = parsed.key;
+        validate_generic_setting_update(&category, &key)?;
+        let value = match parsed.value_node {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        apply_generic_settings_and_credentials_checked(
+            &db,
+            &[(category.clone(), key.clone(), value.clone())],
+        )?;
 
-    if matches!(category.as_str(), "local" | "staff_auth_cache") {
-        return Ok(serde_json::json!({ "success": true }));
-    }
+        if matches!(category.as_str(), "local" | "staff_auth_cache") {
+            return Ok(serde_json::json!({ "success": true }));
+        }
 
-    let full_key = format!("{category}.{key}");
-    app.emit("settings_update", serde_json::json!({ "key": full_key }))
+        let full_key = format!("{category}.{key}");
+        app.emit("settings_update", serde_json::json!({ "key": full_key }))
+            .map_err(|error| error.to_string())?;
+        app.emit(
+            "terminal_settings_updated",
+            serde_json::json!({ "key": full_key }),
+        )
         .map_err(|error| error.to_string())?;
-    app.emit(
-        "terminal_settings_updated",
-        serde_json::json!({ "key": full_key }),
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(serde_json::json!({ "success": true }))
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn settings_update_local(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let updates = parse_settings_update_local_payload(arg0, arg1)?;
+    run_blocking_command("settings_update_local", move || {
+        let db = app.state::<db::DbState>();
+        let updates = parse_settings_update_local_payload(arg0, arg1)?;
 
-    let normalized_updates = updates;
-    apply_generic_settings_and_credentials_checked(&db, &normalized_updates)?;
+        let normalized_updates = updates;
+        apply_generic_settings_and_credentials_checked(&db, &normalized_updates)?;
 
-    let updated_keys = configuration_updated_keys(&normalized_updates);
-    // Saving a cache is not a terminal configuration change. In particular,
-    // opening the staff picker must not refresh every identity/module consumer.
-    if updated_keys.is_empty() {
-        return Ok(serde_json::json!({ "success": true }));
-    }
-    app.emit(
-        "settings_update",
-        serde_json::json!({ "updated": updated_keys.clone() }),
-    )
-    .map_err(|error| error.to_string())?;
-    app.emit(
-        "terminal_settings_updated",
-        serde_json::json!({ "updated": updated_keys.clone() }),
-    )
-    .map_err(|error| error.to_string())?;
-    if updated_keys
-        .iter()
-        .any(|full_key| is_hardware_settings_update(full_key))
-    {
+        let updated_keys = configuration_updated_keys(&normalized_updates);
+        // Saving a cache is not a terminal configuration change. In particular,
+        // opening the staff picker must not refresh every identity/module consumer.
+        if updated_keys.is_empty() {
+            return Ok(serde_json::json!({ "success": true }));
+        }
         app.emit(
-            "hardware_config_update",
-            serde_json::json!({
-                "source": "settings_update_local",
-                "updated": updated_keys.clone(),
-            }),
+            "settings_update",
+            serde_json::json!({ "updated": updated_keys.clone() }),
         )
         .map_err(|error| error.to_string())?;
-    }
-    if let Some(reason) = updated_keys
-        .iter()
-        .find_map(|full_key| restart_required_reason_for_setting(full_key))
-    {
         app.emit(
-            "app_restart_required",
-            serde_json::json!({
-                "reason": reason,
-                "hardware_type": "configuration",
-                "updated": updated_keys.clone(),
-            }),
+            "terminal_settings_updated",
+            serde_json::json!({ "updated": updated_keys.clone() }),
         )
         .map_err(|error| error.to_string())?;
-    }
-    Ok(serde_json::json!({ "success": true }))
+        if updated_keys
+            .iter()
+            .any(|full_key| is_hardware_settings_update(full_key))
+        {
+            app.emit(
+                "hardware_config_update",
+                serde_json::json!({
+                    "source": "settings_update_local",
+                    "updated": updated_keys.clone(),
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if let Some(reason) = updated_keys
+            .iter()
+            .find_map(|full_key| restart_required_reason_for_setting(full_key))
+        {
+            app.emit(
+                "app_restart_required",
+                serde_json::json!({
+                    "reason": reason,
+                    "hardware_type": "configuration",
+                    "updated": updated_keys.clone(),
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 /// The code of a money setting that could not be read (item H).
@@ -3471,160 +3506,200 @@ pub(crate) fn read_tax_rate(conn: &rusqlite::Connection) -> Result<f64, String> 
 }
 
 #[tauri::command]
-pub async fn settings_get_discount_max(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    read_discount_max(&conn).map(|value| serde_json::json!(value))
+pub async fn settings_get_discount_max(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("settings_get_discount_max", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        read_discount_max(&conn).map(|value| serde_json::json!(value))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn settings_set_discount_max(
     arg0: Option<f64>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let pct = arg0.unwrap_or(100.0);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "general", "discount_max", &pct.to_string())?;
-    Ok(serde_json::json!({ "success": true }))
+    run_blocking_command("settings_set_discount_max", move || {
+        let db = app.state::<db::DbState>();
+        let pct = arg0.unwrap_or(100.0);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "general", "discount_max", &pct.to_string())?;
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn settings_get_tax_rate(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    read_tax_rate(&conn).map(|value| serde_json::json!(value))
+pub async fn settings_get_tax_rate(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("settings_get_tax_rate", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        read_tax_rate(&conn).map(|value| serde_json::json!(value))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn settings_set_tax_rate(
     arg0: Option<f64>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let pct = arg0.unwrap_or(0.0);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "general", "tax_rate", &pct.to_string())?;
-    Ok(serde_json::json!({ "success": true }))
+    run_blocking_command("settings_set_tax_rate", move || {
+        let db = app.state::<db::DbState>();
+        let pct = arg0.unwrap_or(0.0);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "general", "tax_rate", &pct.to_string())?;
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn settings_get_language(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let val = db::get_setting(&conn, "general", "language");
-    Ok(serde_json::Value::String(
-        val.unwrap_or_else(|| "en".into()),
-    ))
+pub async fn settings_get_language(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("settings_get_language", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let val = db::get_setting(&conn, "general", "language");
+        Ok(serde_json::Value::String(
+            val.unwrap_or_else(|| "en".into()),
+        ))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn settings_set_language(
     arg0: Option<String>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    let lang = arg0.unwrap_or_else(|| "en".into());
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "general", "language", &lang)?;
-    Ok(serde_json::json!({ "success": true }))
-}
-
-#[tauri::command]
-pub async fn update_settings(
-    arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = arg0.unwrap_or(serde_json::json!({}));
-    let updates = normalize_dotted_settings_updates(&payload)?;
-    apply_generic_settings_and_credentials_checked(&db, &updates)?;
-    let updated = updates.len();
-    let configuration_keys = configuration_updated_keys(&updates);
-    if !configuration_keys.is_empty() {
-        app.emit(
-            "settings_update",
-            serde_json::json!({ "updated": configuration_keys.len() }),
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    if configuration_keys
-        .iter()
-        .any(|key| key.contains("permission"))
-    {
-        app.emit(
-            "staff_permission_update",
-            serde_json::json!({ "updated": true }),
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    Ok(serde_json::json!({ "success": true, "updated": updated }))
+    run_blocking_command("settings_set_language", move || {
+        let db = app.state::<db::DbState>();
+        let lang = arg0.unwrap_or_else(|| "en".into());
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "general", "language", &lang)?;
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_settings(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    // Keep this endpoint aligned with renderer expectations by returning the
-    // merged local settings map (nested + flat terminal keys).
-    get_settings(db).await
+pub async fn update_settings(arg0: Option<Value>, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("update_settings", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.unwrap_or(serde_json::json!({}));
+        let updates = normalize_dotted_settings_updates(&payload)?;
+        apply_generic_settings_and_credentials_checked(&db, &updates)?;
+        let updated = updates.len();
+        let configuration_keys = configuration_updated_keys(&updates);
+        if !configuration_keys.is_empty() {
+            app.emit(
+                "settings_update",
+                serde_json::json!({ "updated": configuration_keys.len() }),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        if configuration_keys
+            .iter()
+            .any(|key| key.contains("permission"))
+        {
+            app.emit(
+                "staff_permission_update",
+                serde_json::json!({ "updated": true }),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(serde_json::json!({ "success": true, "updated": updated }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn terminal_config_get_settings(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("terminal_config_get_settings", move || {
+        let db = app.state::<db::DbState>();
+        // Keep this endpoint aligned with renderer expectations by returning the
+        // merged local settings map (nested + flat terminal keys).
+        merged_settings(db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn terminal_config_get_setting(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let (category, key) = parse_terminal_config_get_setting_payload(arg0, arg1);
-    if let Some(ref terminal_key) = key {
-        let cat = category.as_deref().unwrap_or("terminal");
-        if crate::is_sensitive_setting_path(cat, terminal_key) {
-            return Ok(serde_json::Value::Null);
+    run_blocking_command("terminal_config_get_setting", move || {
+        let db = app.state::<db::DbState>();
+        let (category, key) = parse_terminal_config_get_setting_payload(arg0, arg1);
+        if let Some(ref terminal_key) = key {
+            let cat = category.as_deref().unwrap_or("terminal");
+            if crate::is_sensitive_setting_path(cat, terminal_key) {
+                return Ok(serde_json::Value::Null);
+            }
+            if let Some(local) = read_runtime_setting(&db, cat, terminal_key) {
+                return Ok(parse_json_string(&local));
+            }
         }
-        if let Some(local) = read_runtime_setting(&db, cat, terminal_key) {
-            return Ok(parse_json_string(&local));
-        }
-    }
-    Ok(storage::get_setting(category.as_deref(), key.as_deref()))
+        Ok(storage::get_setting(category.as_deref(), key.as_deref()))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_branch_id(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<String, String> {
-    storage::get_credential("branch_id")
-        .or_else(|| crate::read_local_setting(&db, "terminal", "branch_id"))
-        .ok_or_else(|| "Terminal not configured".into())
+pub async fn terminal_config_get_branch_id(app: tauri::AppHandle) -> Result<String, String> {
+    run_blocking_command("terminal_config_get_branch_id", move || {
+        let db = app.state::<db::DbState>();
+        storage::get_credential("branch_id")
+            .or_else(|| crate::read_local_setting(&db, "terminal", "branch_id"))
+            .ok_or_else(|| "Terminal not configured".into())
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_terminal_id(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<String, String> {
-    storage::get_credential("terminal_id")
-        .or_else(|| crate::read_local_setting(&db, "terminal", "terminal_id"))
-        .ok_or_else(|| "Terminal not configured".into())
+pub async fn terminal_config_get_terminal_id(app: tauri::AppHandle) -> Result<String, String> {
+    run_blocking_command("terminal_config_get_terminal_id", move || {
+        let db = app.state::<db::DbState>();
+        storage::get_credential("terminal_id")
+            .or_else(|| crate::read_local_setting(&db, "terminal", "terminal_id"))
+            .ok_or_else(|| "Terminal not configured".into())
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_organization_id(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<String, String> {
-    storage::get_credential("organization_id")
-        .or_else(|| crate::read_local_setting(&db, "terminal", "organization_id"))
-        .ok_or_else(|| "Terminal not configured".into())
+pub async fn terminal_config_get_organization_id(app: tauri::AppHandle) -> Result<String, String> {
+    run_blocking_command("terminal_config_get_organization_id", move || {
+        let db = app.state::<db::DbState>();
+        storage::get_credential("organization_id")
+            .or_else(|| crate::read_local_setting(&db, "terminal", "organization_id"))
+            .ok_or_else(|| "Terminal not configured".into())
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_business_type(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<String, String> {
-    Ok(storage::get_credential("business_type")
-        .or_else(|| crate::read_local_setting(&db, "terminal", "business_type"))
-        .or_else(|| crate::read_local_setting(&db, "general", "business_type"))
-        .unwrap_or_else(|| "food".into()))
+pub async fn terminal_config_get_business_type(app: tauri::AppHandle) -> Result<String, String> {
+    run_blocking_command("terminal_config_get_business_type", move || {
+        let db = app.state::<db::DbState>();
+        Ok(storage::get_credential("business_type")
+            .or_else(|| crate::read_local_setting(&db, "terminal", "business_type"))
+            .or_else(|| crate::read_local_setting(&db, "general", "business_type"))
+            .unwrap_or_else(|| "food".into()))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_full_config(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    Ok(build_terminal_runtime_config(&db))
+pub async fn terminal_config_get_full_config(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("terminal_config_get_full_config", move || {
+        let db = app.state::<db::DbState>();
+        Ok(build_terminal_runtime_config(&db))
+    })
+    .await
 }
 
 #[tauri::command]

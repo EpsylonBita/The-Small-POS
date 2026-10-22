@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::database_lock::run_blocking_command;
 use crate::{
     auth, db, drawer, escpos, payload_arg0_as_string, print, print_history, printers,
     read_local_json_array, receipt_renderer, resolve_order_id, value_str, write_local_json,
@@ -807,85 +808,91 @@ fn parse_label_print_batch_payload(
 pub async fn payment_print_receipt(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let entity_type = parse_requested_receipt_entity_type(arg0.as_ref(), arg1.as_ref());
-    let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), arg1.as_ref());
-    let order_id_raw = parse_order_id_payload(arg0)?;
-    // Wave 11 Item 8: scope the `MutexGuard` to a block so the borrow
-    // checker can prove the (non-Send) guard is dropped before the
-    // `.await` below. An explicit `drop(conn)` is insufficient — the
-    // future-Send analysis ignores explicit drops and only respects
-    // lexical scope ends.
-    let order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?
-    };
+    run_blocking_command("payment_print_receipt", move || {
+        let db = app.state::<db::DbState>();
+        let entity_type = parse_requested_receipt_entity_type(arg0.as_ref(), arg1.as_ref());
+        let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), arg1.as_ref());
+        let order_id_raw = parse_order_id_payload(arg0)?;
+        // Wave 11 Item 8: scope the `MutexGuard` to a block so the borrow
+        // checker can prove the (non-Send) guard is dropped before the
+        // `.await` below. An explicit `drop(conn)` is insufficient — the
+        // future-Send analysis ignores explicit drops and only respects
+        // lexical scope ends.
+        let order_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?
+        };
 
-    if !crate::print::is_print_action_enabled(&db, "payment_receipt") {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
+        if !crate::print::is_print_action_enabled(&db, "payment_receipt") {
+            return Ok(serde_json::json!({ "success": true, "skipped": true }));
+        }
 
-    let enqueue_result = print::enqueue_print_job(
-        &db,
-        entity_type,
-        &order_id,
-        printer_profile_id.as_deref(),
-        &app,
-    )?;
+        let enqueue_result = print::enqueue_print_job(
+            &db,
+            entity_type,
+            &order_id,
+            printer_profile_id.as_deref(),
+            &app,
+        )?;
 
-    // Process the job immediately instead of waiting for the background worker.
-    // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
-    // sync SQLite + TCP I/O does not park the Tokio runtime worker. Clone
-    // AppHandle so the inner closure can re-acquire `DbState` independently.
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    print::spawn_pending_job_processing(
-        app.clone(),
-        data_dir,
-        format!("payment receipt for order {order_id}"),
-    );
+        // Process the job immediately instead of waiting for the background worker.
+        // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
+        // sync SQLite + TCP I/O does not park the Tokio runtime worker. Clone
+        // AppHandle so the inner closure can re-acquire `DbState` independently.
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        print::spawn_pending_job_processing(
+            app.clone(),
+            data_dir,
+            format!("payment receipt for order {order_id}"),
+        );
 
-    Ok(enqueue_result)
+        Ok(enqueue_result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn kitchen_print_ticket(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), None);
-    let order_id = parse_order_id_payload(arg0)?;
-    if !crate::print::is_print_action_enabled(&db, "kitchen_ticket") {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
-    let enqueue_result = print::enqueue_print_job(
-        &db,
-        "kitchen_ticket",
-        &order_id,
-        printer_profile_id.as_deref(),
-        &app,
-    )?;
+    run_blocking_command("kitchen_print_ticket", move || {
+        let db = app.state::<db::DbState>();
+        let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), None);
+        let order_id = parse_order_id_payload(arg0)?;
+        if !crate::print::is_print_action_enabled(&db, "kitchen_ticket") {
+            return Ok(serde_json::json!({ "success": true, "skipped": true }));
+        }
+        let enqueue_result = print::enqueue_print_job(
+            &db,
+            "kitchen_ticket",
+            &order_id,
+            printer_profile_id.as_deref(),
+            &app,
+        )?;
 
-    // Process the job immediately instead of waiting for the background worker.
-    // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
-    // sync SQLite + TCP I/O does not park the Tokio runtime worker. Clone
-    // AppHandle so the inner closure can re-acquire `DbState` independently.
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    print::spawn_pending_job_processing(
-        app.clone(),
-        data_dir,
-        format!("kitchen ticket for order {order_id}"),
-    );
+        // Process the job immediately instead of waiting for the background worker.
+        // Wave 11 Item 8 deferred follow-up: offload to `spawn_blocking` so the
+        // sync SQLite + TCP I/O does not park the Tokio runtime worker. Clone
+        // AppHandle so the inner closure can re-acquire `DbState` independently.
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        print::spawn_pending_job_processing(
+            app.clone(),
+            data_dir,
+            format!("kitchen ticket for order {order_id}"),
+        );
 
-    Ok(enqueue_result)
+        Ok(enqueue_result)
+    })
+    .await
 }
 
 async fn run_print_list_jobs_blocking<F>(work: F) -> Result<serde_json::Value, String>
@@ -945,20 +952,23 @@ pub async fn print_list_jobs(
 #[tauri::command]
 pub async fn print_get_receipt_file(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    use tauri::Manager;
-    let order_id = parse_order_id_payload(arg0)?;
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    let path = print::generate_receipt_file(&db, &order_id, &data_dir)?;
-    Ok(serde_json::json!({
-        "success": true,
-        "path": path,
-    }))
+    run_blocking_command("print_get_receipt_file", move || {
+        let db = app.state::<db::DbState>();
+        use tauri::Manager;
+        let order_id = parse_order_id_payload(arg0)?;
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        let path = print::generate_receipt_file(&db, &order_id, &data_dir)?;
+        Ok(serde_json::json!({
+            "success": true,
+            "path": path,
+        }))
+    })
+    .await
 }
 
 // -- Printer profiles --------------------------------------------------------
@@ -972,80 +982,106 @@ pub async fn printer_list_system_printers() -> Result<serde_json::Value, String>
 #[tauri::command]
 pub async fn printer_create_profile(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing printer profile payload")?;
-    let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
-    let payload = if has_confirmed_candidate {
-        profile_payload_with_confirmed_candidate(payload)?
-    } else {
-        payload
-    };
-    if has_confirmed_candidate {
-        printers::create_printer_profile_with_validated_capabilities(&db, &payload)
-    } else {
-        printers::create_printer_profile(&db, &payload)
-    }
+    run_blocking_command("printer_create_profile", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing printer profile payload")?;
+        let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
+        let payload = if has_confirmed_candidate {
+            profile_payload_with_confirmed_candidate(payload)?
+        } else {
+            payload
+        };
+        if has_confirmed_candidate {
+            printers::create_printer_profile_with_validated_capabilities(&db, &payload)
+        } else {
+            printers::create_printer_profile(&db, &payload)
+        }
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_update_profile(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing printer profile payload")?;
-    let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
-    let payload = if has_confirmed_candidate {
-        profile_payload_with_confirmed_candidate(payload)?
-    } else {
-        payload
-    };
-    if has_confirmed_candidate {
-        printers::update_printer_profile_with_validated_capabilities(&db, &payload)
-    } else {
-        printers::update_printer_profile(&db, &payload)
-    }
+    run_blocking_command("printer_update_profile", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing printer profile payload")?;
+        let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
+        let payload = if has_confirmed_candidate {
+            profile_payload_with_confirmed_candidate(payload)?
+        } else {
+            payload
+        };
+        if has_confirmed_candidate {
+            printers::update_printer_profile_with_validated_capabilities(&db, &payload)
+        } else {
+            printers::update_printer_profile(&db, &payload)
+        }
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_delete_profile(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let id = parse_profile_id_payload(arg0)?;
-    printers::delete_printer_profile(&db, &id)
+    run_blocking_command("printer_delete_profile", move || {
+        let db = app.state::<db::DbState>();
+        let id = parse_profile_id_payload(arg0)?;
+        printers::delete_printer_profile(&db, &id)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn printer_list_profiles(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    printers::list_printer_profiles(&db)
+pub async fn printer_list_profiles(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("printer_list_profiles", move || {
+        let db = app.state::<db::DbState>();
+        printers::list_printer_profiles(&db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_get_profile(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let id = parse_profile_id_payload(arg0)?;
-    printers::get_printer_profile(&db, &id)
+    run_blocking_command("printer_get_profile", move || {
+        let db = app.state::<db::DbState>();
+        let id = parse_profile_id_payload(arg0)?;
+        printers::get_printer_profile(&db, &id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_set_default_profile(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let id = parse_profile_id_payload(arg0)?;
-    printers::set_default_printer_profile(&db, &id)
+    run_blocking_command("printer_set_default_profile", move || {
+        let db = app.state::<db::DbState>();
+        let id = parse_profile_id_payload(arg0)?;
+        printers::set_default_printer_profile(&db, &id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_get_default_profile(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    printers::get_default_printer_profile(&db)
+    run_blocking_command("printer_get_default_profile", move || {
+        let db = app.state::<db::DbState>();
+        printers::get_default_printer_profile(&db)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3322,111 +3358,126 @@ pub async fn printer_discover(
 #[tauri::command]
 pub async fn printer_add(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.unwrap_or(serde_json::json!({}));
-    let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
-    let payload = profile_payload_with_confirmed_candidate(payload)?;
-    let created = if has_confirmed_candidate {
-        printers::create_printer_profile_with_validated_capabilities(&db, &payload)?
-    } else {
-        printers::create_printer_profile(&db, &payload)?
-    };
-    let profile_id = value_str(&created, &["profileId"]).unwrap_or_default();
-    let profile = if profile_id.is_empty() {
-        serde_json::Value::Null
-    } else {
-        let raw =
-            printers::get_printer_profile(&db, &profile_id).unwrap_or(serde_json::Value::Null);
-        profile_to_electron_format(&raw)
-    };
-    let _ = app.emit(
-        "printer_status_changed",
-        serde_json::json!({
-            "printerId": profile_id,
-            "status": "configured"
-        }),
-    );
-    Ok(serde_json::json!({ "success": true, "printer": profile }))
+    run_blocking_command("printer_add", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.unwrap_or(serde_json::json!({}));
+        let has_confirmed_candidate = payload_has_confirmed_candidate(&payload);
+        let payload = profile_payload_with_confirmed_candidate(payload)?;
+        let created = if has_confirmed_candidate {
+            printers::create_printer_profile_with_validated_capabilities(&db, &payload)?
+        } else {
+            printers::create_printer_profile(&db, &payload)?
+        };
+        let profile_id = value_str(&created, &["profileId"]).unwrap_or_default();
+        let profile = if profile_id.is_empty() {
+            serde_json::Value::Null
+        } else {
+            let raw =
+                printers::get_printer_profile(&db, &profile_id).unwrap_or(serde_json::Value::Null);
+            profile_to_electron_format(&raw)
+        };
+        let _ = app.emit(
+            "printer_status_changed",
+            serde_json::json!({
+                "printerId": profile_id,
+                "status": "configured"
+            }),
+        );
+        Ok(serde_json::json!({ "success": true, "printer": profile }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_update(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_printer_update_payload(arg0, arg1)?;
-    let printer_id = parsed.printer_id;
-    let has_confirmed_candidate = payload_has_confirmed_candidate(&parsed.updates);
-    let mut payload = if has_confirmed_candidate {
-        profile_payload_with_confirmed_candidate(parsed.updates)?
-    } else {
-        electron_to_profile_input(Some(printer_id.clone()), parsed.updates)
-    };
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("id".to_string(), serde_json::json!(printer_id.clone()));
-    }
-    if has_confirmed_candidate {
-        let _ = printers::update_printer_profile_with_validated_capabilities(&db, &payload)?;
-    } else {
-        let _ = printers::update_printer_profile(&db, &payload)?;
-    }
-    let raw = printers::get_printer_profile(&db, &printer_id)?;
-    let profile = profile_to_electron_format(&raw);
-    let _ = app.emit(
-        "printer_status_changed",
-        serde_json::json!({
-            "printerId": printer_id,
-            "status": "updated"
-        }),
-    );
-    Ok(serde_json::json!({ "success": true, "printer": profile }))
+    run_blocking_command("printer_update", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_printer_update_payload(arg0, arg1)?;
+        let printer_id = parsed.printer_id;
+        let has_confirmed_candidate = payload_has_confirmed_candidate(&parsed.updates);
+        let mut payload = if has_confirmed_candidate {
+            profile_payload_with_confirmed_candidate(parsed.updates)?
+        } else {
+            electron_to_profile_input(Some(printer_id.clone()), parsed.updates)
+        };
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("id".to_string(), serde_json::json!(printer_id.clone()));
+        }
+        if has_confirmed_candidate {
+            let _ = printers::update_printer_profile_with_validated_capabilities(&db, &payload)?;
+        } else {
+            let _ = printers::update_printer_profile(&db, &payload)?;
+        }
+        let raw = printers::get_printer_profile(&db, &printer_id)?;
+        let profile = profile_to_electron_format(&raw);
+        let _ = app.emit(
+            "printer_status_changed",
+            serde_json::json!({
+                "printerId": printer_id,
+                "status": "updated"
+            }),
+        );
+        Ok(serde_json::json!({ "success": true, "printer": profile }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_remove(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let printer_id = parse_printer_id_payload(arg0)?;
-    let result = printers::delete_printer_profile(&db, &printer_id)?;
-    let _ = app.emit(
-        "printer_status_changed",
-        serde_json::json!({
-            "printerId": printer_id,
-            "status": "removed"
-        }),
-    );
-    Ok(result)
+    run_blocking_command("printer_remove", move || {
+        let db = app.state::<db::DbState>();
+        let printer_id = parse_printer_id_payload(arg0)?;
+        let result = printers::delete_printer_profile(&db, &printer_id)?;
+        let _ = app.emit(
+            "printer_status_changed",
+            serde_json::json!({
+                "printerId": printer_id,
+                "status": "removed"
+            }),
+        );
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn printer_get_all(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let profiles = printers::list_printer_profiles(&db)?;
-    let electron_profiles: Vec<serde_json::Value> = profiles
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .map(profile_to_electron_format)
-        .collect();
-    Ok(serde_json::json!({ "success": true, "printers": electron_profiles }))
+pub async fn printer_get_all(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("printer_get_all", move || {
+        let db = app.state::<db::DbState>();
+        let profiles = printers::list_printer_profiles(&db)?;
+        let electron_profiles: Vec<serde_json::Value> = profiles
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .map(profile_to_electron_format)
+            .collect();
+        Ok(serde_json::json!({ "success": true, "printers": electron_profiles }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_get(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let printer_id = parse_printer_id_payload(arg0)?;
-    let raw = printers::get_printer_profile(&db, &printer_id)?;
-    let profile = profile_to_electron_format(&raw);
-    Ok(serde_json::json!({ "success": true, "printer": profile }))
+    run_blocking_command("printer_get", move || {
+        let db = app.state::<db::DbState>();
+        let printer_id = parse_printer_id_payload(arg0)?;
+        let raw = printers::get_printer_profile(&db, &printer_id)?;
+        let profile = profile_to_electron_format(&raw);
+        Ok(serde_json::json!({ "success": true, "printer": profile }))
+    })
+    .await
 }
 
 fn execute_printer_get_status_with_probe<P>(
@@ -3508,57 +3559,60 @@ pub async fn printer_get_all_statuses(
 #[tauri::command]
 pub async fn printer_submit_job(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.unwrap_or(serde_json::json!({}));
-    let entity_type = value_str(&payload, &["entityType", "entity_type"])
-        .unwrap_or_else(|| "order_receipt".to_string());
-    let entity_id = value_str(&payload, &["entityId", "entity_id", "orderId", "order_id"])
-        .unwrap_or_else(|| format!("entity-{}", uuid::Uuid::new_v4()));
-    let printer_profile_id = value_str(&payload, &["printerProfileId", "printer_profile_id"]);
+    run_blocking_command("printer_submit_job", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.unwrap_or(serde_json::json!({}));
+        let entity_type = value_str(&payload, &["entityType", "entity_type"])
+            .unwrap_or_else(|| "order_receipt".to_string());
+        let entity_id = value_str(&payload, &["entityId", "entity_id", "orderId", "order_id"])
+            .unwrap_or_else(|| format!("entity-{}", uuid::Uuid::new_v4()));
+        let printer_profile_id = value_str(&payload, &["printerProfileId", "printer_profile_id"]);
 
-    if entity_type == "folio_statement" {
-        let statement = payload
-            .get("document")
-            .ok_or("Folio statement document required")?;
-        return print::enqueue_print_job_with_payload(
-            &db,
-            &entity_type,
-            &entity_id,
-            printer_profile_id.as_deref(),
-            Some(statement),
-            &app,
+        if entity_type == "folio_statement" {
+            let statement = payload
+                .get("document")
+                .ok_or("Folio statement document required")?;
+            return print::enqueue_print_job_with_payload(
+                &db,
+                &entity_type,
+                &entity_id,
+                printer_profile_id.as_deref(),
+                Some(statement),
+                &app,
+            );
+        }
+        let allowed = matches!(
+            entity_type.as_str(),
+            "order_receipt" | "kitchen_ticket" | "z_report" | "shift_checkout"
         );
-    }
-    let allowed = matches!(
-        entity_type.as_str(),
-        "order_receipt" | "kitchen_ticket" | "z_report" | "shift_checkout"
-    );
-    if allowed {
-        return print::enqueue_print_job(
-            &db,
-            &entity_type,
-            &entity_id,
-            printer_profile_id.as_deref(),
-            &app,
-        );
-    }
+        if allowed {
+            return print::enqueue_print_job(
+                &db,
+                &entity_type,
+                &entity_id,
+                printer_profile_id.as_deref(),
+                &app,
+            );
+        }
 
-    let mut jobs = read_local_json_array(&db, "virtual_print_jobs_v1")?;
-    let job_id = format!("vjob-{}", uuid::Uuid::new_v4());
-    jobs.push(serde_json::json!({
-        "id": job_id,
-        "payload": payload,
-        "status": "queued",
-        "createdAt": Utc::now().to_rfc3339()
-    }));
-    write_local_json(
-        &db,
-        "virtual_print_jobs_v1",
-        &serde_json::Value::Array(jobs),
-    )?;
-    Ok(serde_json::json!({ "success": true, "jobId": job_id }))
+        let mut jobs = read_local_json_array(&db, "virtual_print_jobs_v1")?;
+        let job_id = format!("vjob-{}", uuid::Uuid::new_v4());
+        jobs.push(serde_json::json!({
+            "id": job_id,
+            "payload": payload,
+            "status": "queued",
+            "createdAt": Utc::now().to_rfc3339()
+        }));
+        write_local_json(
+            &db,
+            "virtual_print_jobs_v1",
+            &serde_json::Value::Array(jobs),
+        )?;
+        Ok(serde_json::json!({ "success": true, "jobId": job_id }))
+    })
+    .await
 }
 
 fn take_print_queue_durable_changed(result: &mut serde_json::Value) -> bool {
@@ -4283,68 +4337,76 @@ pub async fn printer_test_greek_direct(
 #[tauri::command]
 pub async fn printer_get_auto_config(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let printer_id = parse_printer_id_payload(arg0)?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
+    run_blocking_command("printer_get_auto_config", move || {
+        let db = app.state::<db::DbState>();
+        let printer_id = parse_printer_id_payload(arg0)?;
+        let profile = printers::get_printer_profile(&db, &printer_id)?;
 
-    let printer_name = profile
-        .get("printerName")
-        .or_else(|| profile.get("printer_name"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
+        let printer_name = profile
+            .get("printerName")
+            .or_else(|| profile.get("printer_name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
 
-    let brand = printers::detect_printer_brand_for_profile(&profile);
+        let brand = printers::detect_printer_brand_for_profile(&profile);
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let app_language = db::get_setting(&conn, "general", "language")
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "en".to_string());
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let app_language = db::get_setting(&conn, "general", "language")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "en".to_string());
 
-    let auto_character_set = receipt_renderer::language_to_character_set(&app_language);
-    let code_page_brand = if printers::profile_uses_star_line_mode(&profile) {
-        printers::PrinterBrand::Star
-    } else if brand == printers::PrinterBrand::Star {
-        printers::PrinterBrand::Unknown
-    } else {
-        brand
-    };
-    let auto_code_page =
-        receipt_renderer::resolve_auto_code_page(code_page_brand, auto_character_set);
+        let auto_character_set = receipt_renderer::language_to_character_set(&app_language);
+        let code_page_brand = if printers::profile_uses_star_line_mode(&profile) {
+            printers::PrinterBrand::Star
+        } else if brand == printers::PrinterBrand::Star {
+            printers::PrinterBrand::Unknown
+        } else {
+            brand
+        };
+        let auto_code_page =
+            receipt_renderer::resolve_auto_code_page(code_page_brand, auto_character_set);
 
-    Ok(serde_json::json!({
-        "printerId": printer_id,
-        "printerName": printer_name,
-        "detectedBrand": brand.label(),
-        "appLanguage": app_language,
-        "autoCharacterSet": auto_character_set,
-        "autoCodePage": auto_code_page,
-    }))
+        Ok(serde_json::json!({
+            "printerId": printer_id,
+            "printerName": printer_name,
+            "detectedBrand": brand.label(),
+            "appLanguage": app_language,
+            "autoCharacterSet": auto_character_set,
+            "autoCodePage": auto_code_page,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn printer_recommend_profile(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let input = parse_printer_recommendation_input(arg0);
+    run_blocking_command("printer_recommend_profile", move || {
+        let db = app.state::<db::DbState>();
+        let input = parse_printer_recommendation_input(arg0);
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let app_language = db::get_setting(&conn, "general", "language")
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "en".to_string());
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let app_language = db::get_setting(&conn, "general", "language")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "en".to_string());
 
-    let recommendation = build_printer_recommendation(&input, &app_language);
-    Ok(serde_json::json!({
-        "detectedBrand": recommendation.detected_brand,
-        "recommended": recommendation.recommended,
-        "probeHints": recommendation.probe_hints,
-        "confidence": recommendation.confidence,
-        "reasons": recommendation.reasons,
-        "appLanguage": app_language
-    }))
+        let recommendation = build_printer_recommendation(&input, &app_language);
+        Ok(serde_json::json!({
+            "detectedBrand": recommendation.detected_brand,
+            "recommended": recommendation.recommended,
+            "probeHints": recommendation.probe_hints,
+            "confidence": recommendation.confidence,
+            "reasons": recommendation.reasons,
+            "appLanguage": app_language
+        }))
+    })
+    .await
 }
 
 fn execute_printer_diagnostics_with_probe<P>(
@@ -4472,19 +4534,23 @@ pub async fn printer_open_cash_drawer(
 pub async fn label_print(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_label_print_payload(arg0, arg1);
-    let mut jobs = read_local_json_array(&db, "label_print_jobs_v1")?;
-    let job_id = format!("label-{}", uuid::Uuid::new_v4());
-    jobs.push(serde_json::json!({
-        "id": job_id,
-        "request": parsed.request,
-        "printerId": parsed.printer_id,
-        "createdAt": Utc::now().to_rfc3339()
-    }));
-    write_local_json(&db, "label_print_jobs_v1", &serde_json::Value::Array(jobs))?;
-    Ok(serde_json::json!({ "success": true, "jobId": job_id }))
+    run_blocking_command("label_print", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_label_print_payload(arg0, arg1);
+        let mut jobs = read_local_json_array(&db, "label_print_jobs_v1")?;
+        let job_id = format!("label-{}", uuid::Uuid::new_v4());
+        jobs.push(serde_json::json!({
+            "id": job_id,
+            "request": parsed.request,
+            "printerId": parsed.printer_id,
+            "createdAt": Utc::now().to_rfc3339()
+        }));
+        write_local_json(&db, "label_print_jobs_v1", &serde_json::Value::Array(jobs))?;
+        Ok(serde_json::json!({ "success": true, "jobId": job_id }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -4492,20 +4558,24 @@ pub async fn label_print_batch(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
     arg2: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_label_print_batch_payload(arg0, arg1, arg2);
-    let mut jobs = read_local_json_array(&db, "label_print_jobs_v1")?;
-    let job_id = format!("label-batch-{}", uuid::Uuid::new_v4());
-    jobs.push(serde_json::json!({
-        "id": job_id,
-        "items": parsed.items,
-        "labelType": parsed.label_type,
-        "printerId": parsed.printer_id,
-        "createdAt": Utc::now().to_rfc3339()
-    }));
-    write_local_json(&db, "label_print_jobs_v1", &serde_json::Value::Array(jobs))?;
-    Ok(serde_json::json!({ "success": true, "jobId": job_id }))
+    run_blocking_command("label_print_batch", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_label_print_batch_payload(arg0, arg1, arg2);
+        let mut jobs = read_local_json_array(&db, "label_print_jobs_v1")?;
+        let job_id = format!("label-batch-{}", uuid::Uuid::new_v4());
+        jobs.push(serde_json::json!({
+            "id": job_id,
+            "items": parsed.items,
+            "labelType": parsed.label_type,
+            "printerId": parsed.printer_id,
+            "createdAt": Utc::now().to_rfc3339()
+        }));
+        write_local_json(&db, "label_print_jobs_v1", &serde_json::Value::Array(jobs))?;
+        Ok(serde_json::json!({ "success": true, "jobId": job_id }))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -4597,10 +4667,14 @@ fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
 #[tauri::command]
 pub async fn receipt_sample_preview(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
-    build_receipt_sample_preview_response(&db, &payload)
+    run_blocking_command("receipt_sample_preview", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+        build_receipt_sample_preview_response(&db, &payload)
+    })
+    .await
 }
 
 fn preview_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {

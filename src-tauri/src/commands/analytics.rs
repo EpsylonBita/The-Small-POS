@@ -3,9 +3,10 @@ use rusqlite::params;
 use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::Ordering;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, order_ownership, payment_integrity, payments, print, value_str, zreport};
 
 #[derive(Debug, Deserialize)]
@@ -971,57 +972,69 @@ fn driver_record_earning_inner(
 #[tauri::command]
 pub async fn driver_record_earning(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.unwrap_or(serde_json::json!({}));
-    let driver_id =
-        crate::value_str(&payload, &["driverId", "driver_id"]).ok_or("Missing driverId")?;
-    let shift_id = crate::value_str(
-        &payload,
-        &["shiftId", "shift_id", "staffShiftId", "staff_shift_id"],
-    );
-    let order_id = crate::value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
-    let now = Utc::now().to_rfc3339();
+    run_blocking_command("driver_record_earning", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.unwrap_or(serde_json::json!({}));
+        let driver_id =
+            crate::value_str(&payload, &["driverId", "driver_id"]).ok_or("Missing driverId")?;
+        let shift_id = crate::value_str(
+            &payload,
+            &["shiftId", "shift_id", "staffShiftId", "staff_shift_id"],
+        );
+        let order_id =
+            crate::value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
+        let now = Utc::now().to_rfc3339();
 
-    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let (earning_id, assignment) =
-        driver_record_earning_inner(&mut conn, &driver_id, shift_id.as_deref(), &order_id, &now)?;
-    let resolved_shift_id = assignment.driver_shift_id.clone();
+        let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (earning_id, assignment) = driver_record_earning_inner(
+            &mut conn,
+            &driver_id,
+            shift_id.as_deref(),
+            &order_id,
+            &now,
+        )?;
+        let resolved_shift_id = assignment.driver_shift_id.clone();
 
-    info!("Recorded driver earning {earning_id} for order {order_id}");
+        info!("Recorded driver earning {earning_id} for order {order_id}");
 
-    Ok(serde_json::json!({
-        "success": true,
-        "data": {
-            "id": earning_id,
-            "driverId": driver_id,
-            "shiftId": resolved_shift_id,
-            "orderId": order_id,
-            "branchId": assignment.branch_id,
-            "deliveryFee": assignment.delivery_fee,
-            "tipAmount": assignment.tip_amount,
-            "totalEarning": assignment.delivery_fee + assignment.tip_amount,
-            "paymentMethod": assignment.payment_method,
-            "cashCollected": assignment.cash_collected,
-            "cardAmount": assignment.card_amount,
-            "cashToReturn": assignment.cash_collected,
-            "settled": false,
-            "createdAt": now,
-            "updatedAt": now
-        }
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "id": earning_id,
+                "driverId": driver_id,
+                "shiftId": resolved_shift_id,
+                "orderId": order_id,
+                "branchId": assignment.branch_id,
+                "deliveryFee": assignment.delivery_fee,
+                "tipAmount": assignment.tip_amount,
+                "totalEarning": assignment.delivery_fee + assignment.tip_amount,
+                "paymentMethod": assignment.payment_method,
+                "cashCollected": assignment.cash_collected,
+                "cardAmount": assignment.card_amount,
+                "cashToReturn": assignment.cash_collected,
+                "settled": false,
+                "createdAt": now,
+                "updatedAt": now
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn driver_get_earnings(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let shift_id = parse_driver_shift_payload(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, driver_id, staff_shift_id, order_id, branch_id,
+    run_blocking_command("driver_get_earnings", move || {
+        let db = app.state::<db::DbState>();
+        let shift_id = parse_driver_shift_payload(arg0)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, driver_id, staff_shift_id, order_id, branch_id,
                     delivery_fee, tip_amount, total_earning,
                     payment_method, cash_collected, card_amount, cash_to_return,
                     order_details, settled, settled_at, settlement_batch_id,
@@ -1029,65 +1042,69 @@ pub async fn driver_get_earnings(
              FROM driver_earnings
              WHERE staff_shift_id = ?1
              ORDER BY created_at DESC",
-        )
-        .map_err(|e| format!("driver_get_earnings prepare: {e}"))?;
+            )
+            .map_err(|e| format!("driver_get_earnings prepare: {e}"))?;
 
-    let rows = stmt
-        .query_map(params![shift_id], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "driver_id": row.get::<_, String>(1)?,
-                "staff_shift_id": row.get::<_, Option<String>>(2)?,
-                "order_id": row.get::<_, String>(3)?,
-                "branch_id": row.get::<_, String>(4)?,
-                "delivery_fee": row.get::<_, f64>(5)?,
-                "tip_amount": row.get::<_, f64>(6)?,
-                "total_earning": row.get::<_, f64>(7)?,
-                "payment_method": row.get::<_, String>(8)?,
-                "cash_collected": row.get::<_, f64>(9)?,
-                "card_amount": row.get::<_, f64>(10)?,
-                "cash_to_return": row.get::<_, f64>(11)?,
-                "order_details": row.get::<_, Option<String>>(12)?,
-                "settled": row.get::<_, i32>(13)? != 0,
-                "settled_at": row.get::<_, Option<String>>(14)?,
-                "settlement_batch_id": row.get::<_, Option<String>>(15)?,
-                "is_transferred": row.get::<_, i32>(16)? != 0,
-                "supabase_id": row.get::<_, Option<String>>(17)?,
-                "created_at": row.get::<_, String>(18)?,
-                "updated_at": row.get::<_, String>(19)?,
-            }))
-        })
-        .map_err(|e| format!("driver_get_earnings query: {e}"))?;
+        let rows = stmt
+            .query_map(params![shift_id], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "driver_id": row.get::<_, String>(1)?,
+                    "staff_shift_id": row.get::<_, Option<String>>(2)?,
+                    "order_id": row.get::<_, String>(3)?,
+                    "branch_id": row.get::<_, String>(4)?,
+                    "delivery_fee": row.get::<_, f64>(5)?,
+                    "tip_amount": row.get::<_, f64>(6)?,
+                    "total_earning": row.get::<_, f64>(7)?,
+                    "payment_method": row.get::<_, String>(8)?,
+                    "cash_collected": row.get::<_, f64>(9)?,
+                    "card_amount": row.get::<_, f64>(10)?,
+                    "cash_to_return": row.get::<_, f64>(11)?,
+                    "order_details": row.get::<_, Option<String>>(12)?,
+                    "settled": row.get::<_, i32>(13)? != 0,
+                    "settled_at": row.get::<_, Option<String>>(14)?,
+                    "settlement_batch_id": row.get::<_, Option<String>>(15)?,
+                    "is_transferred": row.get::<_, i32>(16)? != 0,
+                    "supabase_id": row.get::<_, Option<String>>(17)?,
+                    "created_at": row.get::<_, String>(18)?,
+                    "updated_at": row.get::<_, String>(19)?,
+                }))
+            })
+            .map_err(|e| format!("driver_get_earnings query: {e}"))?;
 
-    let mut result = Vec::new();
-    for row in rows {
-        match row {
-            Ok(v) => result.push(v),
-            Err(e) => warn!("driver_get_earnings row error: {e}"),
+        let mut result = Vec::new();
+        for row in rows {
+            match row {
+                Ok(v) => result.push(v),
+                Err(e) => warn!("driver_get_earnings row error: {e}"),
+            }
         }
-    }
-    Ok(serde_json::json!(result))
+        Ok(serde_json::json!(result))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn driver_get_shift_summary(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let shift_id = parse_driver_shift_payload(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    run_blocking_command("driver_get_shift_summary", move || {
+        let db = app.state::<db::DbState>();
+        let shift_id = parse_driver_shift_payload(arg0)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    let (
-        count,
-        total_fees,
-        total_tips,
-        total_earnings,
-        cash_collected,
-        card_amount,
-        cash_to_return,
-    ): (i64, f64, f64, f64, f64, f64, f64) = conn
-        .query_row(
-            "SELECT
+        let (
+            count,
+            total_fees,
+            total_tips,
+            total_earnings,
+            cash_collected,
+            card_amount,
+            cash_to_return,
+        ): (i64, f64, f64, f64, f64, f64, f64) = conn
+            .query_row(
+                "SELECT
                 COUNT(*),
                 COALESCE(SUM(delivery_fee), 0),
                 COALESCE(SUM(tip_amount), 0),
@@ -1097,49 +1114,53 @@ pub async fn driver_get_shift_summary(
                 COALESCE(SUM(cash_to_return), 0)
              FROM driver_earnings
              WHERE staff_shift_id = ?1",
-            params![shift_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .map_err(|e| format!("driver_get_shift_summary query: {e}"))?;
+                params![shift_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .map_err(|e| format!("driver_get_shift_summary query: {e}"))?;
 
-    Ok(serde_json::json!({
-        "success": true,
-        "data": {
-            "shiftId": shift_id,
-            "entries": count,
-            "totalDeliveries": count,
-            "totalDeliveryFees": total_fees,
-            "totalTips": total_tips,
-            "totalEarnings": total_earnings,
-            "cashCollected": cash_collected,
-            "totalCashCollected": cash_collected,
-            "cardAmount": card_amount,
-            "totalCardAmount": card_amount,
-            "totalCashToReturn": cash_to_return
-        }
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "shiftId": shift_id,
+                "entries": count,
+                "totalDeliveries": count,
+                "totalDeliveryFees": total_fees,
+                "totalTips": total_tips,
+                "totalEarnings": total_earnings,
+                "cashCollected": cash_collected,
+                "totalCashCollected": cash_collected,
+                "cardAmount": card_amount,
+                "totalCardAmount": card_amount,
+                "totalCashToReturn": cash_to_return
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn driver_get_active(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let branch_id = parse_driver_branch_payload(arg0);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT ss.id, ss.staff_id,
+    run_blocking_command("driver_get_active", move || {
+        let db = app.state::<db::DbState>();
+        let branch_id = parse_driver_branch_payload(arg0);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ss.id, ss.staff_id,
                     COALESCE(
                         NULLIF(TRIM(ss.staff_name), ''),
                         (SELECT s2.staff_name FROM staff_shifts s2
@@ -1161,107 +1182,117 @@ pub async fn driver_get_active(
              WHERE ss.role_type = 'driver' AND ss.status = 'active'
                AND (?1 = '' OR ss.branch_id = ?1)
              ORDER BY ss.check_in_time ASC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params![branch_id], |row| {
-            let staff_id: String = row.get(1)?;
-            let staff_name: Option<String> = row.get(2)?;
-            let active_count: i64 = row.get(5)?;
-            let status = if active_count > 0 {
-                "busy"
-            } else {
-                "available"
-            };
-            Ok(serde_json::json!({
-                // Fields matching the frontend Driver interface
-                "id": &staff_id,
-                "name": staff_name.as_deref().unwrap_or(""),
-                "phone": "",
-                "status": status,
-                "current_orders": active_count,
-                "assignable": true,
-                "availabilityReason": "active",
-                // Backward-compatible fields
-                "shiftId": row.get::<_, String>(0)?,
-                "staffId": &staff_id,
-                "staffName": &staff_name,
-                "branchId": row.get::<_, Option<String>>(3)?,
-                "checkInTime": row.get::<_, String>(4)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let data: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
-    Ok(serde_json::json!({ "success": true, "data": data }))
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![branch_id], |row| {
+                let staff_id: String = row.get(1)?;
+                let staff_name: Option<String> = row.get(2)?;
+                let active_count: i64 = row.get(5)?;
+                let status = if active_count > 0 {
+                    "busy"
+                } else {
+                    "available"
+                };
+                Ok(serde_json::json!({
+                    // Fields matching the frontend Driver interface
+                    "id": &staff_id,
+                    "name": staff_name.as_deref().unwrap_or(""),
+                    "phone": "",
+                    "status": status,
+                    "current_orders": active_count,
+                    "assignable": true,
+                    "availabilityReason": "active",
+                    // Backward-compatible fields
+                    "shiftId": row.get::<_, String>(0)?,
+                    "staffId": &staff_id,
+                    "staffName": &staff_name,
+                    "branchId": row.get::<_, Option<String>>(3)?,
+                    "checkInTime": row.get::<_, String>(4)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?;
+        let data: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({ "success": true, "data": data }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn delivery_zone_track_validation(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let mut payload = arg0.unwrap_or(serde_json::json!({}));
-    let id = crate::value_str(&payload, &["id"])
-        .unwrap_or_else(|| format!("dzv-{}", uuid::Uuid::new_v4()));
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("id".to_string(), serde_json::json!(id));
-        obj.entry("timestamp".to_string())
-            .or_insert(serde_json::json!(Utc::now().to_rfc3339()));
-    }
-    let mut logs = crate::read_local_json_array(&db, "delivery_validation_logs_v1")?;
-    logs.push(payload.clone());
-    crate::write_local_json(
-        &db,
-        "delivery_validation_logs_v1",
-        &serde_json::Value::Array(logs),
-    )?;
-    Ok(serde_json::json!({ "success": true, "data": payload, "aggregated": false }))
+    run_blocking_command("delivery_zone_track_validation", move || {
+        let db = app.state::<db::DbState>();
+        let mut payload = arg0.unwrap_or(serde_json::json!({}));
+        let id = crate::value_str(&payload, &["id"])
+            .unwrap_or_else(|| format!("dzv-{}", uuid::Uuid::new_v4()));
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(id));
+            obj.entry("timestamp".to_string())
+                .or_insert(serde_json::json!(Utc::now().to_rfc3339()));
+        }
+        let mut logs = crate::read_local_json_array(&db, "delivery_validation_logs_v1")?;
+        logs.push(payload.clone());
+        crate::write_local_json(
+            &db,
+            "delivery_validation_logs_v1",
+            &serde_json::Value::Array(logs),
+        )?;
+        Ok(serde_json::json!({ "success": true, "data": payload, "aggregated": false }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn delivery_zone_get_analytics(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let zone_filter = parse_delivery_zone_analytics_payload(arg0);
-    let logs = crate::read_local_json_array(&db, "delivery_validation_logs_v1")?;
-    let mut total = 0i64;
-    let mut valid = 0i64;
-    let mut overrides = 0i64;
-    for row in logs {
-        if let Some(zone) = zone_filter.as_ref() {
-            let zid = crate::value_str(&row, &["zoneId", "zone_id"]).unwrap_or_default();
-            if &zid != zone {
-                continue;
+    run_blocking_command("delivery_zone_get_analytics", move || {
+        let db = app.state::<db::DbState>();
+        let zone_filter = parse_delivery_zone_analytics_payload(arg0);
+        let logs = crate::read_local_json_array(&db, "delivery_validation_logs_v1")?;
+        let mut total = 0i64;
+        let mut valid = 0i64;
+        let mut overrides = 0i64;
+        for row in logs {
+            if let Some(zone) = zone_filter.as_ref() {
+                let zid = crate::value_str(&row, &["zoneId", "zone_id"]).unwrap_or_default();
+                if &zid != zone {
+                    continue;
+                }
+            }
+            total += 1;
+            let result = crate::value_str(&row, &["result"])
+                .unwrap_or_default()
+                .to_lowercase();
+            if matches!(result.as_str(), "valid" | "ok" | "success" | "inside_zone") {
+                valid += 1;
+            }
+            if row
+                .get("overrideApplied")
+                .or_else(|| row.get("override_applied"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                overrides += 1;
             }
         }
-        total += 1;
-        let result = crate::value_str(&row, &["result"])
-            .unwrap_or_default()
-            .to_lowercase();
-        if matches!(result.as_str(), "valid" | "ok" | "success" | "inside_zone") {
-            valid += 1;
-        }
-        if row
-            .get("overrideApplied")
-            .or_else(|| row.get("override_applied"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            overrides += 1;
-        }
-    }
-    Ok(serde_json::json!({
-        "success": true,
-        "data": [{
-            "zoneId": zone_filter,
-            "totalValidations": total,
-            "validCount": valid,
-            "invalidCount": total - valid,
-            "overrideCount": overrides,
-            "validRate": if total > 0 { (valid as f64) / (total as f64) } else { 0.0 }
-        }]
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "data": [{
+                "zoneId": zone_filter,
+                "totalValidations": total,
+                "validCount": valid,
+                "invalidCount": total - valid,
+                "overrideCount": overrides,
+                "validRate": if total > 0 { (valid as f64) / (total as f64) } else { 0.0 }
+            }]
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1282,237 +1313,262 @@ pub async fn delivery_zone_request_override(
 #[tauri::command]
 pub async fn report_get_today_statistics(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_today_statistics_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let date = payload
-        .date
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-    let mut total_sales = 0.0f64;
-    let mut completed = 0i64;
-    let mut cancelled = 0i64;
-    for (_id, status, _created_at, items_json, _staff, _payment_method) in &orders {
-        let (order_total, _) = crate::parse_item_totals(items_json);
-        total_sales += order_total;
-        let st = status.to_lowercase();
-        if matches!(
-            st.as_str(),
-            "completed" | "delivered" | "approved" | "ready"
-        ) {
-            completed += 1;
+    run_blocking_command("report_get_today_statistics", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_today_statistics_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let date = payload
+            .date
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
+        let mut total_sales = 0.0f64;
+        let mut completed = 0i64;
+        let mut cancelled = 0i64;
+        for (_id, status, _created_at, items_json, _staff, _payment_method) in &orders {
+            let (order_total, _) = crate::parse_item_totals(items_json);
+            total_sales += order_total;
+            let st = status.to_lowercase();
+            if matches!(
+                st.as_str(),
+                "completed" | "delivered" | "approved" | "ready"
+            ) {
+                completed += 1;
+            }
+            if matches!(st.as_str(), "cancelled" | "canceled" | "declined") {
+                cancelled += 1;
+            }
         }
-        if matches!(st.as_str(), "cancelled" | "canceled" | "declined") {
-            cancelled += 1;
-        }
-    }
-    let total_orders = orders.len() as i64;
-    let avg = if total_orders > 0 {
-        total_sales / (total_orders as f64)
-    } else {
-        0.0
-    };
-    Ok(serde_json::json!({
-        "success": true,
-        "totalOrders": total_orders,
-        "completedOrders": completed,
-        "cancelledOrders": cancelled,
-        "totalSales": total_sales,
-        "averageOrderValue": avg
-    }))
+        let total_orders = orders.len() as i64;
+        let avg = if total_orders > 0 {
+            total_sales / (total_orders as f64)
+        } else {
+            0.0
+        };
+        Ok(serde_json::json!({
+            "success": true,
+            "totalOrders": total_orders,
+            "completedOrders": completed,
+            "cancelledOrders": cancelled,
+            "totalSales": total_sales,
+            "averageOrderValue": avg
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_get_sales_trend(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_sales_trend_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let days = payload.days.unwrap_or(7).clamp(1, 60);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut points: Vec<serde_json::Value> = Vec::new();
-    for i in (0..days).rev() {
-        let date = (Local::now() - chrono::Duration::days(i))
-            .format("%Y-%m-%d")
-            .to_string();
-        let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-        let mut total = 0.0f64;
-        for (_id, _status, _created, items, _staff, _payment_method) in orders.iter() {
-            let (order_total, _) = crate::parse_item_totals(items);
-            total += order_total;
+    run_blocking_command("report_get_sales_trend", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_sales_trend_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let days = payload.days.unwrap_or(7).clamp(1, 60);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut points: Vec<serde_json::Value> = Vec::new();
+        for i in (0..days).rev() {
+            let date = (Local::now() - chrono::Duration::days(i))
+                .format("%Y-%m-%d")
+                .to_string();
+            let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
+            let mut total = 0.0f64;
+            for (_id, _status, _created, items, _staff, _payment_method) in orders.iter() {
+                let (order_total, _) = crate::parse_item_totals(items);
+                total += order_total;
+            }
+            points.push(serde_json::json!({
+                "date": date,
+                "sales": total,
+                "orders": orders.len()
+            }));
         }
-        points.push(serde_json::json!({
-            "date": date,
-            "sales": total,
-            "orders": orders.len()
-        }));
-    }
-    Ok(serde_json::json!({ "success": true, "data": points }))
+        Ok(serde_json::json!({ "success": true, "data": points }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_get_top_items(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_top_items_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let date = payload
-        .date
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-    let live = aggregate_top_items_from_order_rows(
-        orders
-            .into_iter()
-            .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
-    );
-    // Merge only archived sales from the requested day. Lifetime totals must
-    // not leak into this daily ranking.
-    let archived = load_daily_top_items(&conn, &branch_id, &date, &date).unwrap_or_default();
-    let merged = merge_aggregated_top_items(live, archived);
-    let top = top_items_to_json(merged, limit);
-    Ok(serde_json::json!({ "success": true, "data": top }))
+    run_blocking_command("report_get_top_items", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_top_items_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let date = payload
+            .date
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
+        let live = aggregate_top_items_from_order_rows(
+            orders
+                .into_iter()
+                .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
+        );
+        // Merge only archived sales from the requested day. Lifetime totals must
+        // not leak into this daily ranking.
+        let archived = load_daily_top_items(&conn, &branch_id, &date, &date).unwrap_or_default();
+        let merged = merge_aggregated_top_items(live, archived);
+        let top = top_items_to_json(merged, limit);
+        Ok(serde_json::json!({ "success": true, "data": top }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_get_weekly_top_items(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_weekly_top_items_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
-    let today = Local::now().format("%Y-%m-%d").to_string();
-    let from = (Local::now() - chrono::Duration::days(6))
-        .format("%Y-%m-%d")
-        .to_string();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let orders = crate::load_orders_for_period(&conn, &branch_id, &from, &today)?;
-    let live = aggregate_top_items_from_order_rows(
-        orders
-            .into_iter()
-            .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
-    );
-    // Merge only the archived daily buckets inside this exact seven-day
-    // window. The former lifetime aggregate made old favorites outrank
-    // what customers actually bought this week.
-    let archived = load_daily_top_items(&conn, &branch_id, &from, &today).unwrap_or_default();
-    let merged = merge_aggregated_top_items(live, archived);
-    let top = top_items_to_json(merged, limit);
-    Ok(serde_json::json!({ "success": true, "data": top }))
+    run_blocking_command("report_get_weekly_top_items", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_weekly_top_items_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let from = (Local::now() - chrono::Duration::days(6))
+            .format("%Y-%m-%d")
+            .to_string();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let orders = crate::load_orders_for_period(&conn, &branch_id, &from, &today)?;
+        let live = aggregate_top_items_from_order_rows(
+            orders
+                .into_iter()
+                .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
+        );
+        // Merge only the archived daily buckets inside this exact seven-day
+        // window. The former lifetime aggregate made old favorites outrank
+        // what customers actually bought this week.
+        let archived = load_daily_top_items(&conn, &branch_id, &from, &today).unwrap_or_default();
+        let merged = merge_aggregated_top_items(live, archived);
+        let top = top_items_to_json(merged, limit);
+        Ok(serde_json::json!({ "success": true, "data": top }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_get_daily_staff_performance(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_daily_staff_performance_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let date = payload
-        .date
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-    let mut perf: std::collections::HashMap<String, (i64, f64)> = std::collections::HashMap::new();
-    for (_id, _status, _created, items, staff, _payment_method) in orders {
-        let staff_id = staff.unwrap_or_else(|| "unknown".to_string());
-        let (total, _) = crate::parse_item_totals(&items);
-        let entry = perf.entry(staff_id).or_insert((0, 0.0));
-        entry.0 += 1;
-        entry.1 += total;
-    }
-    let data: Vec<serde_json::Value> = perf
-        .into_iter()
-        .map(|(staff_id, (orders_count, sales_total))| {
-            serde_json::json!({
-                "staffId": staff_id,
-                "orders": orders_count,
-                "sales": sales_total
+    run_blocking_command("report_get_daily_staff_performance", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_daily_staff_performance_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let date = payload
+            .date
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
+        let mut perf: std::collections::HashMap<String, (i64, f64)> =
+            std::collections::HashMap::new();
+        for (_id, _status, _created, items, staff, _payment_method) in orders {
+            let staff_id = staff.unwrap_or_else(|| "unknown".to_string());
+            let (total, _) = crate::parse_item_totals(&items);
+            let entry = perf.entry(staff_id).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += total;
+        }
+        let data: Vec<serde_json::Value> = perf
+            .into_iter()
+            .map(|(staff_id, (orders_count, sales_total))| {
+                serde_json::json!({
+                    "staffId": staff_id,
+                    "orders": orders_count,
+                    "sales": sales_total
+                })
             })
-        })
-        .collect();
-    Ok(serde_json::json!({ "success": true, "data": data }))
+            .collect();
+        Ok(serde_json::json!({ "success": true, "data": data }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_get_hourly_sales(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_today_statistics_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let date = resolve_report_date(payload.date);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
+    run_blocking_command("report_get_hourly_sales", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_today_statistics_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let date = resolve_report_date(payload.date);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
 
-    let mut hourly_orders = [0i64; 24];
-    let mut hourly_revenue = [0.0f64; 24];
+        let mut hourly_orders = [0i64; 24];
+        let mut hourly_revenue = [0.0f64; 24];
 
-    for (status, created_at, _payment_method, _order_type, total_amount, items) in rows {
-        if is_cancelled_status(&status) {
-            continue;
+        for (status, created_at, _payment_method, _order_type, total_amount, items) in rows {
+            if is_cancelled_status(&status) {
+                continue;
+            }
+            let hour = created_at
+                .get(11..13)
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .filter(|h| *h < 24)
+                .unwrap_or(0);
+            let revenue = if total_amount > 0.0 {
+                total_amount
+            } else {
+                crate::parse_item_totals(&items).0
+            };
+            hourly_orders[hour] += 1;
+            hourly_revenue[hour] += revenue;
         }
-        let hour = created_at
-            .get(11..13)
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .filter(|h| *h < 24)
-            .unwrap_or(0);
-        let revenue = if total_amount > 0.0 {
-            total_amount
-        } else {
-            crate::parse_item_totals(&items).0
-        };
-        hourly_orders[hour] += 1;
-        hourly_revenue[hour] += revenue;
-    }
 
-    let data: Vec<serde_json::Value> = (0..24)
-        .map(|hour| {
-            serde_json::json!({
-                "hour": hour,
-                "orders": hourly_orders[hour],
-                "revenue": hourly_revenue[hour],
+        let data: Vec<serde_json::Value> = (0..24)
+            .map(|hour| {
+                serde_json::json!({
+                    "hour": hour,
+                    "orders": hourly_orders[hour],
+                    "revenue": hourly_revenue[hour],
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    Ok(serde_json::json!({ "success": true, "data": data }))
+        Ok(serde_json::json!({ "success": true, "data": data }))
+    })
+    .await
 }
 
 pub(crate) fn load_payment_method_breakdown_for_day(
@@ -1566,131 +1622,142 @@ pub(crate) fn load_payment_method_breakdown_for_day(
 #[tauri::command]
 pub async fn report_get_payment_method_breakdown(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_today_statistics_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let date = resolve_report_date(payload.date);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let data = load_payment_method_breakdown_for_day(&conn, &branch_id, &date)?;
-    Ok(serde_json::json!({"success": true, "data": data}))
+    run_blocking_command("report_get_payment_method_breakdown", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_today_statistics_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let date = resolve_report_date(payload.date);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let data = load_payment_method_breakdown_for_day(&conn, &branch_id, &date)?;
+        Ok(serde_json::json!({"success": true, "data": data}))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_get_order_type_breakdown(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_report_today_statistics_payload(arg0);
-    let branch_id = payload
-        .branch_id
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
-    let date = resolve_report_date(payload.date);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
+    run_blocking_command("report_get_order_type_breakdown", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_report_today_statistics_payload(arg0);
+        let branch_id = payload
+            .branch_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+        let date = resolve_report_date(payload.date);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let rows = load_report_rows_for_day(&conn, &branch_id, &date)?;
 
-    let mut delivery_count = 0i64;
-    let mut delivery_total = 0.0f64;
-    let mut instore_count = 0i64;
-    let mut instore_total = 0.0f64;
+        let mut delivery_count = 0i64;
+        let mut delivery_total = 0.0f64;
+        let mut instore_count = 0i64;
+        let mut instore_total = 0.0f64;
 
-    for (status, _created_at, _payment_method, order_type, total_amount, items) in rows {
-        if is_cancelled_status(&status) {
-            continue;
-        }
-        let order_type = order_type.unwrap_or_default().to_ascii_lowercase();
-        let revenue = if total_amount > 0.0 {
-            total_amount
-        } else {
-            crate::parse_item_totals(&items).0
-        };
+        for (status, _created_at, _payment_method, order_type, total_amount, items) in rows {
+            if is_cancelled_status(&status) {
+                continue;
+            }
+            let order_type = order_type.unwrap_or_default().to_ascii_lowercase();
+            let revenue = if total_amount > 0.0 {
+                total_amount
+            } else {
+                crate::parse_item_totals(&items).0
+            };
 
-        if order_type == "delivery" {
-            delivery_count += 1;
-            delivery_total += revenue;
-        } else if matches!(
-            order_type.as_str(),
-            "dine-in" | "dinein" | "takeaway" | "pickup" | "instore" | "in-store"
-        ) {
-            instore_count += 1;
-            instore_total += revenue;
-        }
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "data": {
-            "delivery": {
-                "count": delivery_count,
-                "total": delivery_total,
-            },
-            "instore": {
-                "count": instore_count,
-                "total": instore_total,
+            if order_type == "delivery" {
+                delivery_count += 1;
+                delivery_total += revenue;
+            } else if matches!(
+                order_type.as_str(),
+                "dine-in" | "dinein" | "takeaway" | "pickup" | "instore" | "in-store"
+            ) {
+                instore_count += 1;
+                instore_total += revenue;
             }
         }
-    }))
+
+        Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "delivery": {
+                    "count": delivery_count,
+                    "total": delivery_total,
+                },
+                "instore": {
+                    "count": instore_count,
+                    "total": instore_total,
+                }
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn report_print_z_report(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.unwrap_or(serde_json::json!({}));
-    if let Some(z_report_id) = extract_z_report_id_from_payload(&payload) {
-        return zreport::print_z_report(
-            &db,
-            &serde_json::json!({ "zReportId": z_report_id }),
-            &app,
-        );
-    }
+    run_blocking_command("report_print_z_report", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.unwrap_or(serde_json::json!({}));
+        if let Some(z_report_id) = extract_z_report_id_from_payload(&payload) {
+            return zreport::print_z_report(
+                &db,
+                &serde_json::json!({ "zReportId": z_report_id }),
+                &app,
+            );
+        }
 
-    let Some(mut snapshot) = snapshot_or_payload(&payload) else {
-        return Ok(serde_json::json!({
-            "success": false,
-            "error": "Missing snapshot payload for queued z-report print",
-        }));
-    };
+        let Some(mut snapshot) = snapshot_or_payload(&payload) else {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "Missing snapshot payload for queued z-report print",
+            }));
+        };
 
-    if snapshot.get("terminalName").is_none() {
-        if let Some(terminal_name) = value_str(&payload, &["terminalName", "terminal_name"]) {
-            if let Some(obj) = snapshot.as_object_mut() {
-                obj.insert(
-                    "terminalName".to_string(),
-                    serde_json::Value::String(terminal_name),
-                );
+        if snapshot.get("terminalName").is_none() {
+            if let Some(terminal_name) = value_str(&payload, &["terminalName", "terminal_name"]) {
+                if let Some(obj) = snapshot.as_object_mut() {
+                    obj.insert(
+                        "terminalName".to_string(),
+                        serde_json::Value::String(terminal_name),
+                    );
+                }
             }
         }
-    }
 
-    let report_date = value_str(&snapshot, &["date", "reportDate", "report_date"])
-        .or_else(|| string_from_pointers(&snapshot, &["/date", "/reportDate", "/report_date"]))
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let synthetic_id = format!(
-        "snapshot-{}-{}",
-        report_date.replace(|ch: char| !ch.is_ascii_alphanumeric(), ""),
-        Utc::now().timestamp_millis()
-    );
+        let report_date = value_str(&snapshot, &["date", "reportDate", "report_date"])
+            .or_else(|| string_from_pointers(&snapshot, &["/date", "/reportDate", "/report_date"]))
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        let synthetic_id = format!(
+            "snapshot-{}-{}",
+            report_date.replace(|ch: char| !ch.is_ascii_alphanumeric(), ""),
+            Utc::now().timestamp_millis()
+        );
 
-    if !crate::print::is_print_action_enabled(&db, "z_report") {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
-    print::enqueue_print_job_with_payload(
-        &db,
-        "z_report",
-        &synthetic_id,
-        None,
-        Some(&snapshot),
-        &app,
-    )
+        if !crate::print::is_print_action_enabled(&db, "z_report") {
+            return Ok(serde_json::json!({ "success": true, "skipped": true }));
+        }
+        print::enqueue_print_job_with_payload(
+            &db,
+            "z_report",
+            &synthetic_id,
+            None,
+            Some(&snapshot),
+            &app,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1748,10 +1815,14 @@ pub async fn report_generate_z_report(
 #[tauri::command]
 pub async fn report_get_end_of_day_status(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = normalize_report_generate_payload(arg0);
-    zreport::get_end_of_day_status(&db, &payload)
+    run_blocking_command("report_get_end_of_day_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = normalize_report_generate_payload(arg0);
+        zreport::get_end_of_day_status(&db, &payload)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2191,10 +2262,14 @@ pub(crate) fn record_payment_blocker_guarded(
 #[tauri::command]
 pub async fn report_resolve_payment_blocker(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, crate::auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
-    record_payment_blocker_guarded(&db, &auth_state, arg0)
+    run_blocking_command("report_resolve_payment_blocker", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        record_payment_blocker_guarded(&db, &auth_state, arg0)
+    })
+    .await
 }
 
 #[tauri::command]

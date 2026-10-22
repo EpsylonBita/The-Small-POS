@@ -298,15 +298,33 @@ pub fn assign_order_to_driver_shift(
         true,
         now,
     )?;
+    // Tomikro 21/10/2026: the courier's money is read after the receipts moved
+    // to the driver's shift. Read before, a receipt the cashier recorded before
+    // assigning still counted as cashier custody and the earning was saved
+    // 0/0, while the live preview and checkout showed the cash. A custody read
+    // that cannot decide keeps the earlier figures and never fails assigning.
+    let (payment_method, cash_collected, card_amount) =
+        match load_order_attribution_snapshot(conn, order_id) {
+            Ok(moved) => (
+                moved.payment_method,
+                moved.cash_collected,
+                moved.card_amount,
+            ),
+            Err(_) => (
+                applied.payment_method,
+                applied.cash_collected,
+                applied.card_amount,
+            ),
+        };
 
     Ok(DriverOwnershipAssignment {
         driver_shift_id: driver_shift_id.to_string(),
         branch_id: applied.branch_id,
         delivery_fee: applied.delivery_fee,
         tip_amount: applied.tip_amount,
-        payment_method: applied.payment_method,
-        cash_collected: applied.cash_collected,
-        card_amount: applied.card_amount,
+        payment_method,
+        cash_collected,
+        card_amount,
     })
 }
 

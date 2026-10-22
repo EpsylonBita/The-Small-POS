@@ -1547,8 +1547,24 @@ export interface DiagnosticsSystemHealth {
   lastParitySync?: DiagnosticsLastParitySync | null;
   credentialState?: DiagnosticsCredentialState | null;
   checkoutPaymentBlockers?: DiagnosticsCheckoutPaymentBlockers | null;
+  /** Checkouts a manager parked in the last day (no customer data). */
+  parkedCheckouts?: DiagnosticsParkedCheckouts | null;
   isOnline: boolean;
   lastSyncTime: string | null;
+}
+
+export interface DiagnosticsParkedCheckout {
+  generation: number;
+  outcome: string;
+  method: string | null;
+  amount: number | null;
+  currency: string | null;
+  parkedAt: string;
+}
+
+export interface DiagnosticsParkedCheckouts {
+  count: number;
+  details: DiagnosticsParkedCheckout[];
 }
 
 export interface DiagnosticsExportOptions {

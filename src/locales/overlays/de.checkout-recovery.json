@@ -31,7 +31,16 @@
       "editServerUpdate": "Bestellkorrekturen sind vorübergehend nicht verfügbar. Prüfen Sie die Verbindung und versuchen Sie es nach dem Serverupdate erneut.",
       "editSyncRequired": "Die Zahlungs- oder Bestelländerung wurde noch nicht synchronisiert. Ihr Warenkorb ist gespeichert. Versuchen Sie es gleich erneut.",
       "emptyEditHint": "Um alle Artikel zu entfernen, schließen Sie den Editor und stornieren Sie die Bestellung.",
-      "editCanonicalChanged": "Die Bestelldaten müssen aktualisiert werden. Aktualisieren Sie die Bestellung, bevor Sie eine Zahlung oder Rückerstattung bestätigen."
+      "editCanonicalChanged": "Die Bestelldaten müssen aktualisiert werden. Aktualisieren Sie die Bestellung, bevor Sie eine Zahlung oder Rückerstattung bestätigen.",
+      "cardRecoveryQuestion": "Wurde die Karte belastet? Prüfen Sie diesen Betrag am Bank-Terminal, bevor Sie antworten. Hier wird nichts belastet.",
+      "cardRecoveryRegisterNote": "Diese Kasse erfasst Kartenbelastungen über ihre Registrierkasse oder ihr Terminal, und dort ist keine Belastung dieser Karte zu sehen. Zeigt das Bank-Terminal eine Belastung, rufen Sie eine Führungskraft.",
+      "cardRecoveryCharged": "Karte wurde belastet – erfassen",
+      "cardRecoveryNotCharged": "Karte wurde NICHT belastet – zurück zum Warenkorb",
+      "checkoutPark": "Beiseitelegen (Führungskraft)",
+      "checkoutParked": "Der Bezahlvorgang wurde beiseitegelegt; neue Bestellungen sind möglich. Prüfen Sie das Bank-Terminal: Wurde der Kunde belastet, nicht erneut belasten; eine Führungskraft klärt es. Der POS-Status zeigt diesen Vorgang.",
+      "checkoutParkFailed": "Der Bezahlvorgang konnte nicht beiseitegelegt werden. Er bleibt geschützt; nichts wurde geändert.",
+      "checkoutParkApprovalSubtitle": "Einen Bezahlvorgang beiseitezulegen erfordert die Berechtigung, Zahlungen zu stornieren. Eine Person, die sie hat, gibt ihre eigene PIN ein. Es wird nichts belastet.",
+      "freezeNotSaved": "Der Warenkorb konnte nicht für die Zahlung gespeichert werden, daher wurde keine Zahlung gestartet. Drücken Sie erneut auf Bezahlen."
     }
   },
   "checkoutRecovery": {
@@ -55,6 +64,15 @@
     "fixCodes": {
       "table_cancellation_not_saved": "Stellen Sie die ursprüngliche Tischstornierung wieder her. Übergeben oder erstatten Sie das Geld nicht erneut.",
       "edit_settlement_not_saved": "Öffnen Sie die gespeicherte Bearbeitung und speichern Sie dieselbe Korrektur. Kein Geld erneut kassieren oder zurückzahlen."
+    }
+  },
+  "recovery": {
+    "issues": {
+      "checkoutParked": {
+        "title": "Bezahlvorgang beiseitegelegt – Bank-Terminal prüfen",
+        "summary": "Um {{time}} hat eine Führungskraft einen Bezahlvorgang über {{amount}} {{currency}} beiseitegelegt, damit die Kasse wieder Bestellungen annimmt. Dafür wurde nichts erfasst.",
+        "guidance": "Prüfen Sie am Bank-Terminal (oder in der TWINT-App) diesen Betrag zu dieser Zeit. Wurde der Kunde belastet, nicht erneut belasten: Eine Führungskraft erfasst die Bestellung und diese Zahlung einmal. Wenn nicht, ist nichts weiter nötig."
+      }
     }
   }
 }

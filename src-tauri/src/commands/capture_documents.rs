@@ -34,6 +34,7 @@ use tauri::{Emitter, Manager};
 use crate::capture::watcher::EVENT_DOCUMENT_ARRIVED;
 use crate::capture::worker;
 use crate::capture::{files, store, CaptureSourceKind, CaptureStatus, MAX_CAPTURE_PAGES};
+use crate::database_lock::run_blocking_command;
 use crate::db;
 
 /// How many history entries the queue view asks for. Enough to answer "what
@@ -178,39 +179,47 @@ fn document_json(document: &store::CaptureDocument, pages: &[store::CapturePage]
 /// `capturing` documents are in it too, because a half-scanned invoice the user
 /// walked away from is exactly the kind of work that must not be forgettable.
 #[tauri::command]
-pub async fn capture_list_documents(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let conn = lock(&db)?;
-    let documents = store::list_open_documents(&conn)?;
+pub async fn capture_list_documents(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("capture_list_documents", move || {
+        let db = app.state::<db::DbState>();
+        let conn = lock(&db)?;
+        let documents = store::list_open_documents(&conn)?;
 
-    let mut out = Vec::with_capacity(documents.len());
-    for document in &documents {
-        let pages = store::list_pages(&conn, &document.id)?;
-        out.push(document_json(document, &pages));
-    }
+        let mut out = Vec::with_capacity(documents.len());
+        for document in &documents {
+            let pages = store::list_pages(&conn, &document.id)?;
+            out.push(document_json(document, &pages));
+        }
 
-    Ok(json!({ "success": true, "documents": out }))
+        Ok(json!({ "success": true, "documents": out }))
+    })
+    .await
 }
 
 /// One document with its pages and its own history.
 #[tauri::command]
 pub async fn capture_get_document(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let capture_id = required_string(&arg0, "captureId")?;
-    let conn = lock(&db)?;
+    run_blocking_command("capture_get_document", move || {
+        let db = app.state::<db::DbState>();
+        let capture_id = required_string(&arg0, "captureId")?;
+        let conn = lock(&db)?;
 
-    let Some(document) = store::get_document(&conn, &capture_id)? else {
-        return Ok(json!({ "success": false, "code": "not_found" }));
-    };
-    let pages = store::list_pages(&conn, &capture_id)?;
-    let events = store::list_events(&conn, &capture_id)?;
+        let Some(document) = store::get_document(&conn, &capture_id)? else {
+            return Ok(json!({ "success": false, "code": "not_found" }));
+        };
+        let pages = store::list_pages(&conn, &capture_id)?;
+        let events = store::list_events(&conn, &capture_id)?;
 
-    Ok(json!({
-        "success": true,
-        "document": document_json(&document, &pages),
-        "events": events.iter().map(event_json).collect::<Vec<_>>(),
-    }))
+        Ok(json!({
+            "success": true,
+            "document": document_json(&document, &pages),
+            "events": events.iter().map(event_json).collect::<Vec<_>>(),
+        }))
+    })
+    .await
 }
 
 /// The terminal's recent capture history (R13.4) plus the watched folder's
@@ -220,33 +229,34 @@ pub async fn capture_get_document(
 /// duplicate the watcher declined is a row here, and the history section says
 /// so in plain language instead of the file simply never appearing (R3.4).
 #[tauri::command]
-pub async fn capture_history(
-    arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
-    let limit = field(&arg0, "limit")
-        .and_then(Value::as_i64)
-        .unwrap_or(HISTORY_LIMIT)
-        .clamp(1, 500);
+pub async fn capture_history(arg0: Option<Value>, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("capture_history", move || {
+        let db = app.state::<db::DbState>();
+        let limit = field(&arg0, "limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(HISTORY_LIMIT)
+            .clamp(1, 500);
 
-    let conn = lock(&db)?;
-    let events = store::list_recent_events(&conn, limit)?;
-    let ingest = store::list_recent_ingest(&conn, limit)?;
+        let conn = lock(&db)?;
+        let events = store::list_recent_events(&conn, limit)?;
+        let ingest = store::list_recent_ingest(&conn, limit)?;
 
-    Ok(json!({
-        "success": true,
-        "events": events.iter().map(event_json).collect::<Vec<_>>(),
-        "ingest": ingest
-            .iter()
-            .map(|entry| json!({
-                "contentHash": entry.content_hash,
-                "sourcePath": entry.source_path,
-                "captureId": entry.capture_id,
-                "outcome": entry.outcome.as_str(),
-                "seenAt": entry.seen_at,
-            }))
-            .collect::<Vec<_>>(),
-    }))
+        Ok(json!({
+            "success": true,
+            "events": events.iter().map(event_json).collect::<Vec<_>>(),
+            "ingest": ingest
+                .iter()
+                .map(|entry| json!({
+                    "contentHash": entry.content_hash,
+                    "sourcePath": entry.source_path,
+                    "captureId": entry.capture_id,
+                    "outcome": entry.outcome.as_str(),
+                    "seenAt": entry.seen_at,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+    })
+    .await
 }
 
 /// A thumbnail of one stored page, as a `data:` URL.
@@ -405,30 +415,34 @@ fn thumbnail_data_url(path: &std::path::Path) -> Result<String, String> {
 #[tauri::command]
 pub async fn capture_start_document(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let source_kind_raw = required_string(&arg0, "sourceKind")?;
-    let source_kind = CaptureSourceKind::parse(&source_kind_raw)
-        .ok_or_else(|| format!("Unknown capture source kind: {source_kind_raw}"))?;
+    run_blocking_command("capture_start_document", move || {
+        let db = app.state::<db::DbState>();
+        let source_kind_raw = required_string(&arg0, "sourceKind")?;
+        let source_kind = CaptureSourceKind::parse(&source_kind_raw)
+            .ok_or_else(|| format!("Unknown capture source kind: {source_kind_raw}"))?;
 
-    let capture_id = uuid::Uuid::new_v4().to_string();
-    let document = store::NewCaptureDocument {
-        id: capture_id.clone(),
-        source_kind,
-        source_name: optional_string(&arg0, "sourceName"),
-        staff_id: optional_string(&arg0, "staffId"),
-        captured_at: chrono::Utc::now().to_rfc3339(),
-        content_hash: None,
-    };
+        let capture_id = uuid::Uuid::new_v4().to_string();
+        let document = store::NewCaptureDocument {
+            id: capture_id.clone(),
+            source_kind,
+            source_name: optional_string(&arg0, "sourceName"),
+            staff_id: optional_string(&arg0, "staffId"),
+            captured_at: chrono::Utc::now().to_rfc3339(),
+            content_hash: None,
+        };
 
-    let conn = lock(&db)?;
-    store::create_document(&conn, &document)?;
+        let conn = lock(&db)?;
+        store::create_document(&conn, &document)?;
 
-    Ok(json!({
-        "success": true,
-        "captureId": capture_id,
-        "status": CaptureStatus::Capturing.as_str(),
-    }))
+        Ok(json!({
+            "success": true,
+            "captureId": capture_id,
+            "status": CaptureStatus::Capturing.as_str(),
+        }))
+    })
+    .await
 }
 
 /// Move a document to `status`, enforcing the design's state machine.
@@ -517,17 +531,21 @@ pub async fn capture_advance(
 #[tauri::command]
 pub async fn capture_save_draft(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let capture_id = required_string(&arg0, "captureId")?;
-    let draft = field(&arg0, "draft")
-        .cloned()
-        .ok_or_else(|| "draft is required".to_string())?;
+    run_blocking_command("capture_save_draft", move || {
+        let db = app.state::<db::DbState>();
+        let capture_id = required_string(&arg0, "captureId")?;
+        let draft = field(&arg0, "draft")
+            .cloned()
+            .ok_or_else(|| "draft is required".to_string())?;
 
-    let conn = lock(&db)?;
-    store::set_draft_json(&conn, &capture_id, &draft.to_string())?;
+        let conn = lock(&db)?;
+        store::set_draft_json(&conn, &capture_id, &draft.to_string())?;
 
-    Ok(json!({ "success": true }))
+        Ok(json!({ "success": true }))
+    })
+    .await
 }
 
 /// Record the server's verbatim commit result and move to `committed`.
@@ -540,21 +558,25 @@ pub async fn capture_save_draft(
 #[tauri::command]
 pub async fn capture_confirm_commit(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let capture_id = required_string(&arg0, "captureId")?;
-    let result = field(&arg0, "result")
-        .cloned()
-        .ok_or_else(|| "result is required".to_string())?;
-    let staff_id = optional_string(&arg0, "staffId");
+    run_blocking_command("capture_confirm_commit", move || {
+        let db = app.state::<db::DbState>();
+        let capture_id = required_string(&arg0, "captureId")?;
+        let result = field(&arg0, "result")
+            .cloned()
+            .ok_or_else(|| "result is required".to_string())?;
+        let staff_id = optional_string(&arg0, "staffId");
 
-    let conn = lock(&db)?;
-    worker::confirm_commit(&conn, &capture_id, &result, staff_id.as_deref())?;
+        let conn = lock(&db)?;
+        worker::confirm_commit(&conn, &capture_id, &result, staff_id.as_deref())?;
 
-    Ok(json!({
-        "success": true,
-        "status": CaptureStatus::Committed.as_str(),
-    }))
+        Ok(json!({
+            "success": true,
+            "status": CaptureStatus::Committed.as_str(),
+        }))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -609,28 +631,32 @@ pub async fn capture_remove_page(
 #[tauri::command]
 pub async fn capture_reorder_pages(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let capture_id = required_string(&arg0, "captureId")?;
-    let order: Vec<i64> = field(&arg0, "order")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_i64).collect())
-        .ok_or_else(|| "order is required".to_string())?;
+    run_blocking_command("capture_reorder_pages", move || {
+        let db = app.state::<db::DbState>();
+        let capture_id = required_string(&arg0, "captureId")?;
+        let order: Vec<i64> = field(&arg0, "order")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_i64).collect())
+            .ok_or_else(|| "order is required".to_string())?;
 
-    if order.len() > MAX_CAPTURE_PAGES {
-        return Err(format!("A capture holds at most {MAX_CAPTURE_PAGES} pages"));
-    }
+        if order.len() > MAX_CAPTURE_PAGES {
+            return Err(format!("A capture holds at most {MAX_CAPTURE_PAGES} pages"));
+        }
 
-    let conn = lock(&db)?;
-    let document = store::get_document(&conn, &capture_id)?
-        .ok_or_else(|| format!("Capture {capture_id} not found"))?;
-    if document.status != CaptureStatus::Capturing {
-        return Ok(json!({ "success": false, "code": "not_editable" }));
-    }
+        let conn = lock(&db)?;
+        let document = store::get_document(&conn, &capture_id)?
+            .ok_or_else(|| format!("Capture {capture_id} not found"))?;
+        if document.status != CaptureStatus::Capturing {
+            return Ok(json!({ "success": false, "code": "not_editable" }));
+        }
 
-    store::reorder_pages(&conn, &capture_id, &order)?;
+        store::reorder_pages(&conn, &capture_id, &order)?;
 
-    Ok(json!({ "success": true }))
+        Ok(json!({ "success": true }))
+    })
+    .await
 }
 
 #[cfg(test)]

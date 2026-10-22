@@ -421,192 +421,201 @@ struct InventoryAdjustPayload {
 pub async fn offline_inventory_adjust(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload_value = object_payload(arg0, arg1)?;
-    let payload: InventoryAdjustPayload = serde_json::from_value(payload_value.clone())
-        .map_err(|e| format!("Invalid inventory adjustment payload: {e}"))?;
-    let product_id = payload.product_id.trim().to_string();
-    if product_id.is_empty() {
-        return Err("Missing product_id".to_string());
-    }
-
-    let _ = patch_inventory_cache(&db, &product_id, payload.adjustment)?;
-    // One idempotency key per queued adjustment (module audit 2026-09-16): a replay after a
-    // lost acknowledgement must not apply the delta twice.
-    let queue_payload = json!({
-        "product_id": product_id,
-        "adjustment": payload.adjustment,
-        "reason": payload.reason.unwrap_or_else(|| "count".to_string()),
-        "notes": payload.notes,
-        "idempotency_key": format!("tauri-inventory-{}", Uuid::new_v4()),
-        "organization_id": organization_id(&db, &payload_value),
-        "branch_id": branch_id(&db, &payload_value),
-    });
-
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "inventory_adjustments",
-            queue_payload
-                .get("product_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "inventory",
-            "manual",
-        )?
-    };
-
-    let _ = app.emit(
-        "inventory_adjusted",
-        json!({
-            "productId": queue_payload.get("product_id"),
-            "adjustment": queue_payload.get("adjustment"),
-            "queued": true,
-            "queueId": queue_id,
-        }),
-    );
-    emit_queue_hint(&app, "inventory");
-
-    Ok(json!({
-        "success": true,
-        "data": {
-            "queueId": queue_id,
-            "queued": true,
+    run_blocking_command("offline_inventory_adjust", move || {
+        let db = app.state::<db::DbState>();
+        let payload_value = object_payload(arg0, arg1)?;
+        let payload: InventoryAdjustPayload = serde_json::from_value(payload_value.clone())
+            .map_err(|e| format!("Invalid inventory adjustment payload: {e}"))?;
+        let product_id = payload.product_id.trim().to_string();
+        if product_id.is_empty() {
+            return Err("Missing product_id".to_string());
         }
-    }))
+
+        let _ = patch_inventory_cache(&db, &product_id, payload.adjustment)?;
+        // One idempotency key per queued adjustment (module audit 2026-09-16): a replay after a
+        // lost acknowledgement must not apply the delta twice.
+        let queue_payload = json!({
+            "product_id": product_id,
+            "adjustment": payload.adjustment,
+            "reason": payload.reason.unwrap_or_else(|| "count".to_string()),
+            "notes": payload.notes,
+            "idempotency_key": format!("tauri-inventory-{}", Uuid::new_v4()),
+            "organization_id": organization_id(&db, &payload_value),
+            "branch_id": branch_id(&db, &payload_value),
+        });
+
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "inventory_adjustments",
+                queue_payload
+                    .get("product_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "inventory",
+                "manual",
+            )?
+        };
+
+        let _ = app.emit(
+            "inventory_adjusted",
+            json!({
+                "productId": queue_payload.get("product_id"),
+                "adjustment": queue_payload.get("adjustment"),
+                "queued": true,
+                "queueId": queue_id,
+            }),
+        );
+        emit_queue_hint(&app, "inventory");
+
+        Ok(json!({
+            "success": true,
+            "data": {
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn offline_coupon_upsert(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let mut payload = object_payload(arg0, arg1)?;
-    let now = now_rfc3339();
-    let operation = if read_string(&payload, &["id"]).is_some() {
-        "UPDATE"
-    } else {
-        "INSERT"
-    };
-    let coupon_id = read_string(&payload, &["id"]).unwrap_or_else(|| temp_id("coupon"));
-    let resolved_branch_id = branch_id(&db, &payload);
-    let resolved_organization_id = organization_id(&db, &payload);
-    let Some(object) = payload.as_object_mut() else {
-        return Err("Coupon payload must be an object".to_string());
-    };
-    set_object_field(object, "id", Value::String(coupon_id.clone()));
-    set_object_field(object, "updated_at", Value::String(now.clone()));
-    if operation == "INSERT" {
-        set_object_field(object, "created_at", Value::String(now.clone()));
-        object
-            .entry("usage_count".to_string())
-            .or_insert(Value::from(0));
-    }
-    object
-        .entry("branch_id".to_string())
-        .or_insert(Value::String(resolved_branch_id));
-    object
-        .entry("organization_id".to_string())
-        .or_insert(Value::String(resolved_organization_id));
-
-    patch_coupon_caches(&db, &payload)?;
-
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "coupons",
-            &coupon_id,
-            operation,
-            &payload,
-            "promotions",
-            "manual",
-        )?
-    };
-
-    let _ = app.emit(
-        "coupon_updated",
-        json!({
-            "coupon": payload,
-            "queued": true,
-            "queueId": queue_id,
-        }),
-    );
-    emit_queue_hint(&app, "promotions");
-
-    Ok(json!({
-        "success": true,
-        "data": {
-            "coupon": payload,
-            "queueId": queue_id,
-            "queued": true,
+    run_blocking_command("offline_coupon_upsert", move || {
+        let db = app.state::<db::DbState>();
+        let mut payload = object_payload(arg0, arg1)?;
+        let now = now_rfc3339();
+        let operation = if read_string(&payload, &["id"]).is_some() {
+            "UPDATE"
+        } else {
+            "INSERT"
+        };
+        let coupon_id = read_string(&payload, &["id"]).unwrap_or_else(|| temp_id("coupon"));
+        let resolved_branch_id = branch_id(&db, &payload);
+        let resolved_organization_id = organization_id(&db, &payload);
+        let Some(object) = payload.as_object_mut() else {
+            return Err("Coupon payload must be an object".to_string());
+        };
+        set_object_field(object, "id", Value::String(coupon_id.clone()));
+        set_object_field(object, "updated_at", Value::String(now.clone()));
+        if operation == "INSERT" {
+            set_object_field(object, "created_at", Value::String(now.clone()));
+            object
+                .entry("usage_count".to_string())
+                .or_insert(Value::from(0));
         }
-    }))
+        object
+            .entry("branch_id".to_string())
+            .or_insert(Value::String(resolved_branch_id));
+        object
+            .entry("organization_id".to_string())
+            .or_insert(Value::String(resolved_organization_id));
+
+        patch_coupon_caches(&db, &payload)?;
+
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "coupons",
+                &coupon_id,
+                operation,
+                &payload,
+                "promotions",
+                "manual",
+            )?
+        };
+
+        let _ = app.emit(
+            "coupon_updated",
+            json!({
+                "coupon": payload,
+                "queued": true,
+                "queueId": queue_id,
+            }),
+        );
+        emit_queue_hint(&app, "promotions");
+
+        Ok(json!({
+            "success": true,
+            "data": {
+                "coupon": payload,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn offline_coupon_set_active(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let coupon_id = read_string(&payload, &["couponId", "coupon_id", "id"])
-        .ok_or_else(|| "Missing coupon id".to_string())?;
-    let is_active = read_bool(&payload, &["isActive", "is_active"])
-        .ok_or_else(|| "Missing coupon active state".to_string())?;
-    let updated_coupon = patch_coupon_active_state(&db, &coupon_id, is_active)?;
+    run_blocking_command("offline_coupon_set_active", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let coupon_id = read_string(&payload, &["couponId", "coupon_id", "id"])
+            .ok_or_else(|| "Missing coupon id".to_string())?;
+        let is_active = read_bool(&payload, &["isActive", "is_active"])
+            .ok_or_else(|| "Missing coupon active state".to_string())?;
+        let updated_coupon = patch_coupon_active_state(&db, &coupon_id, is_active)?;
 
-    let queue_payload = json!({
-        "id": coupon_id,
-        "is_active": is_active,
-        "organization_id": organization_id(&db, &payload),
-        "branch_id": branch_id(&db, &payload),
-    });
+        let queue_payload = json!({
+            "id": coupon_id,
+            "is_active": is_active,
+            "organization_id": organization_id(&db, &payload),
+            "branch_id": branch_id(&db, &payload),
+        });
 
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "coupons",
-            queue_payload
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "promotions",
-            "manual",
-        )?
-    };
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "coupons",
+                queue_payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "promotions",
+                "manual",
+            )?
+        };
 
-    let _ = app.emit(
-        "coupon_updated",
-        json!({
-            "couponId": queue_payload.get("id"),
-            "isActive": is_active,
-            "queued": true,
-            "queueId": queue_id,
-        }),
-    );
-    emit_queue_hint(&app, "promotions");
+        let _ = app.emit(
+            "coupon_updated",
+            json!({
+                "couponId": queue_payload.get("id"),
+                "isActive": is_active,
+                "queued": true,
+                "queueId": queue_id,
+            }),
+        );
+        emit_queue_hint(&app, "promotions");
 
-    Ok(json!({
-        "success": true,
-        "data": {
-            "coupon": updated_coupon,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+        Ok(json!({
+            "success": true,
+            "data": {
+                "coupon": updated_coupon,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 fn build_local_reservation(db: &db::DbState, payload: &Value) -> Value {
@@ -962,106 +971,112 @@ fn merge_cached_appointment_status(
 pub async fn offline_appointment_create(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let mut payload = object_payload(arg0, arg1)?;
-    let appointment = build_local_appointment(&db, &payload);
-    let appointment_id = read_string(&appointment, &["id"]).unwrap_or_default();
-    payload["client_request_id"] = Value::String(appointment_id.clone());
-    patch_appointment_caches(&db, &appointment)?;
+    run_blocking_command("offline_appointment_create", move || {
+        let db = app.state::<db::DbState>();
+        let mut payload = object_payload(arg0, arg1)?;
+        let appointment = build_local_appointment(&db, &payload);
+        let appointment_id = read_string(&appointment, &["id"]).unwrap_or_default();
+        payload["client_request_id"] = Value::String(appointment_id.clone());
+        patch_appointment_caches(&db, &appointment)?;
 
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "appointments",
-            &appointment_id,
-            "INSERT",
-            &payload,
-            "salon",
-            "manual",
-        )?
-    };
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "appointments",
+                &appointment_id,
+                "INSERT",
+                &payload,
+                "salon",
+                "manual",
+            )?
+        };
 
-    let _ = app.emit(
-        "appointment_updated",
-        json!({
-            "appointment": appointment,
-            "queued": true,
-            "queueId": queue_id,
-        }),
-    );
-    emit_queue_hint(&app, "salon");
+        let _ = app.emit(
+            "appointment_updated",
+            json!({
+                "appointment": appointment,
+                "queued": true,
+                "queueId": queue_id,
+            }),
+        );
+        emit_queue_hint(&app, "salon");
 
-    Ok(json!({
-        "success": true,
-        "data": {
-            "appointment": appointment,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+        Ok(json!({
+            "success": true,
+            "data": {
+                "appointment": appointment,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn offline_appointment_update_status(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let appointment_id = read_string(&payload, &["appointmentId", "appointment_id", "id"])
-        .ok_or_else(|| "Missing appointment id".to_string())?;
-    let status = read_string(&payload, &["status"])
-        .ok_or_else(|| "Missing appointment status".to_string())?;
-    let org = organization_id(&db, &payload);
-    let appointment_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        sync_queue::resolve_appointment_id(&conn, &org, &appointment_id)?
-    };
-    let appointment = merge_cached_appointment_status(&db, &appointment_id, &status, &payload)?;
+    run_blocking_command("offline_appointment_update_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let appointment_id = read_string(&payload, &["appointmentId", "appointment_id", "id"])
+            .ok_or_else(|| "Missing appointment id".to_string())?;
+        let status = read_string(&payload, &["status"])
+            .ok_or_else(|| "Missing appointment status".to_string())?;
+        let org = organization_id(&db, &payload);
+        let appointment_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            sync_queue::resolve_appointment_id(&conn, &org, &appointment_id)?
+        };
+        let appointment = merge_cached_appointment_status(&db, &appointment_id, &status, &payload)?;
 
-    let queue_payload = json!({
-        "id": appointment_id,
-        "status": status,
-        "cancellation_reason": read_string(&payload, &["cancellation_reason", "cancellationReason"]),
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "appointments",
-            queue_payload
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "salon",
-            "manual",
-        )?
-    };
+        let queue_payload = json!({
+            "id": appointment_id,
+            "status": status,
+            "cancellation_reason": read_string(&payload, &["cancellation_reason", "cancellationReason"]),
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "appointments",
+                queue_payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "salon",
+                "manual",
+            )?
+        };
 
-    let _ = app.emit(
-        "appointment_updated",
-        json!({
-            "appointment": appointment,
-            "queued": true,
-            "queueId": queue_id,
-        }),
-    );
-    emit_queue_hint(&app, "salon");
+        let _ = app.emit(
+            "appointment_updated",
+            json!({
+                "appointment": appointment,
+                "queued": true,
+                "queueId": queue_id,
+            }),
+        );
+        emit_queue_hint(&app, "salon");
 
-    Ok(json!({
-        "success": true,
-        "data": {
-            "appointment": appointment,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+        Ok(json!({
+            "success": true,
+            "data": {
+                "appointment": appointment,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 fn mutate_staff_schedule_locally(
@@ -1310,40 +1325,49 @@ fn emit_staff_schedule_mutation(app: &tauri::AppHandle, result: &Value) {
 pub async fn offline_staff_shift_create(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let result = mutate_staff_schedule_locally(&db, &object_payload(arg0, arg1)?, "INSERT")?;
-    emit_staff_schedule_mutation(&app, &result);
-    Ok(result)
+    run_blocking_command("offline_staff_shift_create", move || {
+        let db = app.state::<db::DbState>();
+        let result = mutate_staff_schedule_locally(&db, &object_payload(arg0, arg1)?, "INSERT")?;
+        emit_staff_schedule_mutation(&app, &result);
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn offline_staff_shift_update(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    read_string(&payload, &["shift_id", "id"]).ok_or("Missing shift id")?;
-    let result = mutate_staff_schedule_locally(&db, &payload, "UPDATE")?;
-    emit_staff_schedule_mutation(&app, &result);
-    Ok(result)
+    run_blocking_command("offline_staff_shift_update", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        read_string(&payload, &["shift_id", "id"]).ok_or("Missing shift id")?;
+        let result = mutate_staff_schedule_locally(&db, &payload, "UPDATE")?;
+        emit_staff_schedule_mutation(&app, &result);
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn offline_staff_shift_delete(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    read_string(&payload, &["shift_id", "id"]).ok_or("Missing shift id")?;
-    let result = mutate_staff_schedule_locally(&db, &payload, "DELETE")?;
-    emit_staff_schedule_mutation(&app, &result);
-    Ok(result)
+    run_blocking_command("offline_staff_shift_delete", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        read_string(&payload, &["shift_id", "id"]).ok_or("Missing shift id")?;
+        let result = mutate_staff_schedule_locally(&db, &payload, "DELETE")?;
+        emit_staff_schedule_mutation(&app, &result);
+        Ok(result)
+    })
+    .await
 }
 
 fn patch_drive_thru_cache(
@@ -1377,54 +1401,57 @@ fn patch_drive_thru_cache(
 pub async fn offline_drive_thru_update_status(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let order_id = read_string(
-        &payload,
-        &[
-            "drive_through_order_id",
-            "driveThruOrderId",
-            "orderId",
-            "id",
-        ],
-    )
-    .ok_or_else(|| "Missing drive-through order id".to_string())?;
-    let status = read_string(&payload, &["status"])
-        .ok_or_else(|| "Missing drive-through status".to_string())?;
-    let updated_order = patch_drive_thru_cache(&db, &order_id, &status)?;
-    let queue_payload = json!({
-        "drive_through_order_id": order_id,
-        "status": status,
-        "organization_id": organization_id(&db, &payload),
-        "branch_id": branch_id(&db, &payload),
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "drive_thru_orders",
-            queue_payload
-                .get("drive_through_order_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "fast_food",
-            "server-wins",
-        )?
-    };
+    run_blocking_command("offline_drive_thru_update_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let order_id = read_string(
+            &payload,
+            &[
+                "drive_through_order_id",
+                "driveThruOrderId",
+                "orderId",
+                "id",
+            ],
+        )
+        .ok_or_else(|| "Missing drive-through order id".to_string())?;
+        let status = read_string(&payload, &["status"])
+            .ok_or_else(|| "Missing drive-through status".to_string())?;
+        let updated_order = patch_drive_thru_cache(&db, &order_id, &status)?;
+        let queue_payload = json!({
+            "drive_through_order_id": order_id,
+            "status": status,
+            "organization_id": organization_id(&db, &payload),
+            "branch_id": branch_id(&db, &payload),
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "drive_thru_orders",
+                queue_payload
+                    .get("drive_through_order_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "fast_food",
+                "server-wins",
+            )?
+        };
 
-    emit_queue_hint(&app, "fast_food");
-    Ok(json!({
-        "success": true,
-        "data": {
-            "order": updated_order,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+        emit_queue_hint(&app, "fast_food");
+        Ok(json!({
+            "success": true,
+            "data": {
+                "order": updated_order,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 fn room_status_requires_checkout(room: &Value, next: &str) -> bool {
@@ -1463,58 +1490,61 @@ fn patch_rooms_cache(
 pub async fn offline_room_update_status(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let room_id = read_string(&payload, &["roomId", "room_id", "id"])
-        .ok_or_else(|| "Missing room id".to_string())?;
-    let status =
-        read_string(&payload, &["status"]).ok_or_else(|| "Missing room status".to_string())?;
-    for path in list_cached_admin_get_paths(&db, &["/api/pos/rooms".into()])? {
-        if let Some((cached, _)) = read_cached_admin_get_response(&db, &path) {
-            if let Some(rooms) = cached.get("rooms").and_then(Value::as_array) {
-                if rooms.iter().any(|room| {
-                    room.get("id").and_then(Value::as_str) == Some(&room_id)
-                        && room_status_requires_checkout(room, &status)
-                }) {
-                    return Err("ROOM_CHECKOUT_REQUIRED".into());
+    run_blocking_command("offline_room_update_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let room_id = read_string(&payload, &["roomId", "room_id", "id"])
+            .ok_or_else(|| "Missing room id".to_string())?;
+        let status =
+            read_string(&payload, &["status"]).ok_or_else(|| "Missing room status".to_string())?;
+        for path in list_cached_admin_get_paths(&db, &["/api/pos/rooms".into()])? {
+            if let Some((cached, _)) = read_cached_admin_get_response(&db, &path) {
+                if let Some(rooms) = cached.get("rooms").and_then(Value::as_array) {
+                    if rooms.iter().any(|room| {
+                        room.get("id").and_then(Value::as_str) == Some(&room_id)
+                            && room_status_requires_checkout(room, &status)
+                    }) {
+                        return Err("ROOM_CHECKOUT_REQUIRED".into());
+                    }
                 }
             }
         }
-    }
-    let updated_room = patch_rooms_cache(&db, &room_id, &status)?;
-    let queue_payload = json!({
-        "room_id": room_id,
-        "status": status,
-        "organization_id": organization_id(&db, &payload),
-        "branch_id": branch_id(&db, &payload),
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "rooms",
-            queue_payload
-                .get("room_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "hospitality",
-            "manual",
-        )?
-    };
+        let updated_room = patch_rooms_cache(&db, &room_id, &status)?;
+        let queue_payload = json!({
+            "room_id": room_id,
+            "status": status,
+            "organization_id": organization_id(&db, &payload),
+            "branch_id": branch_id(&db, &payload),
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "rooms",
+                queue_payload
+                    .get("room_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "hospitality",
+                "manual",
+            )?
+        };
 
-    emit_queue_hint(&app, "hospitality");
-    Ok(json!({
-        "success": true,
-        "data": {
-            "room": updated_room,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+        emit_queue_hint(&app, "hospitality");
+        Ok(json!({
+            "success": true,
+            "data": {
+                "room": updated_room,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 /// Capture an offline room check-in: patch the cached `/api/pos/rooms`
@@ -1596,13 +1626,16 @@ fn capture_room_checkin(db: &db::DbState, payload: &Value) -> Result<Value, Stri
 pub async fn offline_room_checkin(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let response = capture_room_checkin(&db, &payload)?;
-    emit_queue_hint(&app, "hospitality");
-    Ok(response)
+    run_blocking_command("offline_room_checkin", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let response = capture_room_checkin(&db, &payload)?;
+        emit_queue_hint(&app, "hospitality");
+        Ok(response)
+    })
+    .await
 }
 
 /// Capture an offline goods receipt against a purchase order
@@ -1698,24 +1731,27 @@ fn capture_po_receipt(db: &db::DbState, payload: &Value) -> Result<Value, String
 pub async fn offline_po_receipt(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let response = capture_po_receipt(&db, &payload)?;
-    let _ = app.emit(
-        "po_receipt_queued",
-        json!({
-            "purchaseOrderId": read_string(&payload, &["purchaseOrderId", "purchase_order_id"]),
-            "queueId": response
-                .get("data")
-                .and_then(|data| data.get("queueId"))
-                .cloned(),
-            "queued": true,
-        }),
-    );
-    emit_queue_hint(&app, "suppliers");
-    Ok(response)
+    run_blocking_command("offline_po_receipt", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let response = capture_po_receipt(&db, &payload)?;
+        let _ = app.emit(
+            "po_receipt_queued",
+            json!({
+                "purchaseOrderId": read_string(&payload, &["purchaseOrderId", "purchase_order_id"]),
+                "queueId": response
+                    .get("data")
+                    .and_then(|data| data.get("queueId"))
+                    .cloned(),
+                "queued": true,
+            }),
+        );
+        emit_queue_hint(&app, "suppliers");
+        Ok(response)
+    })
+    .await
 }
 
 /// Queue a reviewed scanned invoice for replay when the connection drops at the
@@ -1845,13 +1881,16 @@ fn capture_supplier_import_commit(db: &db::DbState, payload: &Value) -> Result<V
 pub async fn offline_supplier_import_commit(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let response = capture_supplier_import_commit(&db, &payload)?;
-    emit_queue_hint(&app, "suppliers");
-    Ok(response)
+    run_blocking_command("offline_supplier_import_commit", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let response = capture_supplier_import_commit(&db, &payload)?;
+        emit_queue_hint(&app, "suppliers");
+        Ok(response)
+    })
+    .await
 }
 
 /// Patch one field of a cached housekeeping task. The second value is the
@@ -1899,103 +1938,109 @@ fn patch_housekeeping_cache(
 pub async fn offline_housekeeping_update_status(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let task_id = read_string(&payload, &["taskId", "task_id", "id"])
-        .ok_or_else(|| "Missing housekeeping task id".to_string())?;
-    let status = read_string(&payload, &["status"])
-        .ok_or_else(|| "Missing housekeeping status".to_string())?;
-    let (updated_task, expected_updated_at) =
-        patch_housekeeping_cache(&db, &task_id, "status", Value::String(status.clone()))?;
-    let mut queue_payload = json!({
-        "task_id": task_id,
-        "status": status,
-        "organization_id": organization_id(&db, &payload),
-        "branch_id": branch_id(&db, &payload),
-    });
-    if let (Some(object), Some(stamp)) = (queue_payload.as_object_mut(), expected_updated_at) {
-        object.insert("expected_updated_at".to_string(), Value::String(stamp));
-    }
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "housekeeping_tasks",
-            queue_payload
-                .get("task_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "hospitality",
-            "manual",
-        )?
-    };
-
-    emit_queue_hint(&app, "hospitality");
-    Ok(json!({
-        "success": true,
-        "data": {
-            "task": updated_task,
-            "queueId": queue_id,
-            "queued": true,
+    run_blocking_command("offline_housekeeping_update_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let task_id = read_string(&payload, &["taskId", "task_id", "id"])
+            .ok_or_else(|| "Missing housekeeping task id".to_string())?;
+        let status = read_string(&payload, &["status"])
+            .ok_or_else(|| "Missing housekeeping status".to_string())?;
+        let (updated_task, expected_updated_at) =
+            patch_housekeeping_cache(&db, &task_id, "status", Value::String(status.clone()))?;
+        let mut queue_payload = json!({
+            "task_id": task_id,
+            "status": status,
+            "organization_id": organization_id(&db, &payload),
+            "branch_id": branch_id(&db, &payload),
+        });
+        if let (Some(object), Some(stamp)) = (queue_payload.as_object_mut(), expected_updated_at) {
+            object.insert("expected_updated_at".to_string(), Value::String(stamp));
         }
-    }))
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "housekeeping_tasks",
+                queue_payload
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "hospitality",
+                "manual",
+            )?
+        };
+
+        emit_queue_hint(&app, "hospitality");
+        Ok(json!({
+            "success": true,
+            "data": {
+                "task": updated_task,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn offline_housekeeping_assign_staff(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let task_id = read_string(&payload, &["taskId", "task_id", "id"])
-        .ok_or_else(|| "Missing housekeeping task id".to_string())?;
-    let staff_id = payload
-        .get("assigned_staff_id")
-        .or_else(|| payload.get("assignedStaffId"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let (updated_task, expected_updated_at) =
-        patch_housekeeping_cache(&db, &task_id, "assigned_staff_id", staff_id.clone())?;
-    let mut queue_payload = json!({
-        "id": task_id,
-        "assigned_staff_id": staff_id,
-        "organization_id": organization_id(&db, &payload),
-        "branch_id": branch_id(&db, &payload),
-    });
-    if let (Some(object), Some(stamp)) = (queue_payload.as_object_mut(), expected_updated_at) {
-        object.insert("expected_updated_at".to_string(), Value::String(stamp));
-    }
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "housekeeping_tasks",
-            queue_payload
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            "hospitality",
-            "manual",
-        )?
-    };
-
-    emit_queue_hint(&app, "hospitality");
-    Ok(json!({
-        "success": true,
-        "data": {
-            "task": updated_task,
-            "queueId": queue_id,
-            "queued": true,
+    run_blocking_command("offline_housekeeping_assign_staff", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let task_id = read_string(&payload, &["taskId", "task_id", "id"])
+            .ok_or_else(|| "Missing housekeeping task id".to_string())?;
+        let staff_id = payload
+            .get("assigned_staff_id")
+            .or_else(|| payload.get("assignedStaffId"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let (updated_task, expected_updated_at) =
+            patch_housekeeping_cache(&db, &task_id, "assigned_staff_id", staff_id.clone())?;
+        let mut queue_payload = json!({
+            "id": task_id,
+            "assigned_staff_id": staff_id,
+            "organization_id": organization_id(&db, &payload),
+            "branch_id": branch_id(&db, &payload),
+        });
+        if let (Some(object), Some(stamp)) = (queue_payload.as_object_mut(), expected_updated_at) {
+            object.insert("expected_updated_at".to_string(), Value::String(stamp));
         }
-    }))
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "housekeeping_tasks",
+                queue_payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                "hospitality",
+                "manual",
+            )?
+        };
+
+        emit_queue_hint(&app, "hospitality");
+        Ok(json!({
+            "success": true,
+            "data": {
+                "task": updated_task,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 fn patch_products_cache(
@@ -2027,42 +2072,45 @@ fn patch_products_cache(
 pub async fn offline_product_update_quantity(
     arg0: Option<Value>,
     arg1: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let payload = object_payload(arg0, arg1)?;
-    let product_id = read_string(&payload, &["productId", "product_id", "id"])
-        .ok_or_else(|| "Missing product id".to_string())?;
-    let quantity =
-        read_i64(&payload, &["quantity"]).ok_or_else(|| "Missing quantity".to_string())?;
-    let updated_product = patch_products_cache(&db, &product_id, quantity)?;
-    let queue_payload = json!({
-        "quantity": quantity,
-        "organization_id": organization_id(&db, &payload),
-        "branch_id": branch_id(&db, &payload),
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        enqueue_parity_item(
-            &conn,
-            "products",
-            &product_id,
-            "UPDATE",
-            &queue_payload,
-            "inventory",
-            "manual",
-        )?
-    };
+    run_blocking_command("offline_product_update_quantity", move || {
+        let db = app.state::<db::DbState>();
+        let payload = object_payload(arg0, arg1)?;
+        let product_id = read_string(&payload, &["productId", "product_id", "id"])
+            .ok_or_else(|| "Missing product id".to_string())?;
+        let quantity =
+            read_i64(&payload, &["quantity"]).ok_or_else(|| "Missing quantity".to_string())?;
+        let updated_product = patch_products_cache(&db, &product_id, quantity)?;
+        let queue_payload = json!({
+            "quantity": quantity,
+            "organization_id": organization_id(&db, &payload),
+            "branch_id": branch_id(&db, &payload),
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            enqueue_parity_item(
+                &conn,
+                "products",
+                &product_id,
+                "UPDATE",
+                &queue_payload,
+                "inventory",
+                "manual",
+            )?
+        };
 
-    emit_queue_hint(&app, "inventory");
-    Ok(json!({
-        "success": true,
-        "data": {
-            "product": updated_product,
-            "queueId": queue_id,
-            "queued": true,
-        }
-    }))
+        emit_queue_hint(&app, "inventory");
+        Ok(json!({
+            "success": true,
+            "data": {
+                "product": updated_product,
+                "queueId": queue_id,
+                "queued": true,
+            }
+        }))
+    })
+    .await
 }
 
 #[cfg(test)]

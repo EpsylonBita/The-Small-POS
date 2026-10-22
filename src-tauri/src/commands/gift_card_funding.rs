@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
+use tauri::Manager;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -33,6 +34,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::{self, AdminFetchError};
+use crate::database_lock::run_blocking_command;
 use crate::db;
 use crate::gift_financial_opening::{
     self as opening, DispatchOutcome, HostedAccessError, HostedCashierScope, OpeningScope,
@@ -2784,15 +2786,19 @@ pub async fn gift_funding_grant(
 #[tauri::command]
 pub async fn gift_funding_status(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let conn = lock(&db)?;
-    let key = arg0
-        .as_ref()
-        .and_then(|payload| payload.get("attemptKey"))
-        .and_then(Value::as_str)
-        .map(|key| key.trim().to_ascii_lowercase());
-    status_in(&conn, key.as_deref())
+    run_blocking_command("gift_funding_status", move || {
+        let db = app.state::<db::DbState>();
+        let conn = lock(&db)?;
+        let key = arg0
+            .as_ref()
+            .and_then(|payload| payload.get("attemptKey"))
+            .and_then(Value::as_str)
+            .map(|key| key.trim().to_ascii_lowercase());
+        status_in(&conn, key.as_deref())
+    })
+    .await
 }
 
 /// Current strict drawer of the selected cashier's usable original.
@@ -2808,10 +2814,14 @@ pub async fn gift_funding_refresh_drawer(
 #[tauri::command]
 pub async fn gift_funding_close_blocker(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let conn = lock(&db)?;
-    Ok(close_blocker_value(&conn, arg0.as_ref()))
+    run_blocking_command("gift_funding_close_blocker", move || {
+        let db = app.state::<db::DbState>();
+        let conn = lock(&db)?;
+        Ok(close_blocker_value(&conn, arg0.as_ref()))
+    })
+    .await
 }
 
 // Advisory hosted availability (`GET /api/pos/gift-cards/status`) with the

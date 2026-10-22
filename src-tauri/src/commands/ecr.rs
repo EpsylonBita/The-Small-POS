@@ -5,9 +5,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, device_admission, ecr, payload_arg0_as_string, value_str};
 
 /// A direct EFT sale whose exact card payment is not in the ledger.
@@ -1597,15 +1598,17 @@ pub async fn ecr_discover_devices(
 }
 
 #[tauri::command]
-pub async fn ecr_get_devices(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let devices = with_admission(&conn, db::ecr_list_devices(&conn));
-    Ok(serde_json::json!({
-        "success": true,
-        "devices": devices
-    }))
+pub async fn ecr_get_devices(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("ecr_get_devices", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let devices = with_admission(&conn, db::ecr_list_devices(&conn));
+        Ok(serde_json::json!({
+            "success": true,
+            "devices": devices
+        }))
+    })
+    .await
 }
 
 /// Each device carries `admitted`: whether its plugin is active, configured
@@ -1946,128 +1949,146 @@ mod device_admission_gate_tests {
 #[tauri::command]
 pub async fn ecr_get_device(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let device_id = parse_required_device_id(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let device = db::ecr_get_device(&conn, &device_id);
-    Ok(serde_json::json!({
-        "success": device.is_some(),
-        "device": device,
-        "error": if device.is_none() { serde_json::json!("Device not found") } else { serde_json::Value::Null }
-    }))
+    run_blocking_command("ecr_get_device", move || {
+        let db = app.state::<db::DbState>();
+        let device_id = parse_required_device_id(arg0)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let device = db::ecr_get_device(&conn, &device_id);
+        Ok(serde_json::json!({
+            "success": device.is_some(),
+            "device": device,
+            "error": if device.is_none() { serde_json::json!("Device not found") } else { serde_json::Value::Null }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_add_device(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let mut config = arg0.unwrap_or(serde_json::json!({}));
-    let device_id = config
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("ecr-{}", &uuid::Uuid::new_v4().to_string()[..8]));
-    if let Some(obj) = config.as_object_mut() {
-        obj.insert("id".to_string(), serde_json::json!(device_id));
-        obj.entry("status".to_string())
-            .or_insert(serde_json::json!("disconnected"));
-        obj.entry("enabled".to_string())
-            .or_insert(serde_json::json!(true));
-    } else {
-        config = serde_json::json!({
-            "id": device_id,
-            "status": "disconnected",
-            "enabled": true
-        });
-    }
+    run_blocking_command("ecr_add_device", move || {
+        let db = app.state::<db::DbState>();
+        let mut config = arg0.unwrap_or(serde_json::json!({}));
+        let device_id = config
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("ecr-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        if let Some(obj) = config.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(device_id));
+            obj.entry("status".to_string())
+                .or_insert(serde_json::json!("disconnected"));
+            obj.entry("enabled".to_string())
+                .or_insert(serde_json::json!(true));
+        } else {
+            config = serde_json::json!({
+                "id": device_id,
+                "status": "disconnected",
+                "enabled": true
+            });
+        }
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let device_type = match admitted_new_device_type(&conn, &config) {
-        Ok(device_type) => device_type,
-        Err(refusal) => return Ok(refusal),
-    };
-    if let Some(object) = config.as_object_mut() {
-        object.insert("deviceType".into(), serde_json::json!(device_type));
-    }
-    db::ecr_insert_device(&conn, &config)?;
-    let device = db::ecr_get_device(&conn, &device_id);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let device_type = match admitted_new_device_type(&conn, &config) {
+            Ok(device_type) => device_type,
+            Err(refusal) => return Ok(refusal),
+        };
+        if let Some(object) = config.as_object_mut() {
+            object.insert("deviceType".into(), serde_json::json!(device_type));
+        }
+        db::ecr_insert_device(&conn, &config)?;
+        let device = db::ecr_get_device(&conn, &device_id);
 
-    Ok(serde_json::json!({
-        "success": true,
-        "device": device.unwrap_or(config)
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "device": device.unwrap_or(config)
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_update_device(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_update_device_payload(arg0, arg1)?;
-    let device_id = parsed.device_id;
-    let updates = parsed.updates;
+    run_blocking_command("ecr_update_device", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_update_device_payload(arg0, arg1)?;
+        let device_id = parsed.device_id;
+        let updates = parsed.updates;
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let Some(existing) = db::ecr_get_device(&conn, &device_id) else {
-        return Ok(serde_json::json!({
-            "success": false,
-            "error": "Device not found"
-        }));
-    };
-    if let Some(refusal) = refuse_unadmitted_update(&conn, &existing, &updates) {
-        return Ok(refusal);
-    }
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let Some(existing) = db::ecr_get_device(&conn, &device_id) else {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "Device not found"
+            }));
+        };
+        if let Some(refusal) = refuse_unadmitted_update(&conn, &existing, &updates) {
+            return Ok(refusal);
+        }
 
-    db::ecr_update_device(&conn, &device_id, &updates)?;
-    let updated_device = db::ecr_get_device(&conn, &device_id);
+        db::ecr_update_device(&conn, &device_id, &updates)?;
+        let updated_device = db::ecr_get_device(&conn, &device_id);
 
-    let _ = app.emit(
-        "ecr_event_device_status_changed",
-        serde_json::json!({
-            "deviceId": device_id,
+        let _ = app.emit(
+            "ecr_event_device_status_changed",
+            serde_json::json!({
+                "deviceId": device_id,
+                "device": updated_device
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "success": true,
             "device": updated_device
-        }),
-    );
-
-    Ok(serde_json::json!({
-        "success": true,
-        "device": updated_device
-    }))
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_remove_device(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    mgr: tauri::State<'_, ecr::DeviceManager>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let device_id = parse_required_device_id(arg0)?;
-    // Disconnect from DeviceManager if connected
-    let _ = mgr.disconnect_device(&device_id);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let removed = db::ecr_delete_device(&conn, &device_id)?;
-    Ok(serde_json::json!({
-        "success": removed,
-        "removed": if removed { 1 } else { 0 }
-    }))
+    run_blocking_command("ecr_remove_device", move || {
+        let db = app.state::<db::DbState>();
+        let mgr = app.state::<ecr::DeviceManager>();
+        let device_id = parse_required_device_id(arg0)?;
+        // Disconnect from DeviceManager if connected
+        let _ = mgr.disconnect_device(&device_id);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let removed = db::ecr_delete_device(&conn, &device_id)?;
+        Ok(serde_json::json!({
+            "success": removed,
+            "removed": if removed { 1 } else { 0 }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn ecr_get_default_terminal(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    // The default *card* terminal only: a cash register admitted by MyData is
-    // never a bank terminal (manual card admission, `ecr_process_payment`).
-    let default_device = db::ecr_get_default_device(&conn, Some(device_admission::CARD_TERMINAL));
-    Ok(serde_json::json!({
-        "success": default_device.is_some(),
-        "device": default_device
-    }))
+pub async fn ecr_get_default_terminal(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("ecr_get_default_terminal", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // The default *card* terminal only: a cash register admitted by MyData is
+        // never a bank terminal (manual card admission, `ecr_process_payment`).
+        let default_device =
+            db::ecr_get_default_device(&conn, Some(device_admission::CARD_TERMINAL));
+        Ok(serde_json::json!({
+            "success": default_device.is_some(),
+            "device": default_device
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2166,132 +2187,141 @@ pub async fn ecr_connect_device(
 #[tauri::command]
 pub async fn ecr_disconnect_device(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    mgr: tauri::State<'_, ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let device_id = parse_required_device_id(arg0)?;
-    let _ = mgr.disconnect_device(&device_id);
+    run_blocking_command("ecr_disconnect_device", move || {
+        let db = app.state::<db::DbState>();
+        let mgr = app.state::<ecr::DeviceManager>();
+        let device_id = parse_required_device_id(arg0)?;
+        let _ = mgr.disconnect_device(&device_id);
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::ecr_update_device(
-        &conn,
-        &device_id,
-        &serde_json::json!({"status": "disconnected"}),
-    )?;
-    let _ = app.emit(
-        "ecr_event_device_disconnected",
-        serde_json::json!({ "deviceId": device_id }),
-    );
-    let _ = app.emit(
-        "ecr_event_device_status_changed",
-        serde_json::json!({
-            "deviceId": device_id,
-            "status": "disconnected"
-        }),
-    );
-    Ok(serde_json::json!({ "success": true }))
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::ecr_update_device(
+            &conn,
+            &device_id,
+            &serde_json::json!({"status": "disconnected"}),
+        )?;
+        let _ = app.emit(
+            "ecr_event_device_disconnected",
+            serde_json::json!({ "deviceId": device_id }),
+        );
+        let _ = app.emit(
+            "ecr_event_device_status_changed",
+            serde_json::json!({
+                "deviceId": device_id,
+                "status": "disconnected"
+            }),
+        );
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_get_device_status(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    mgr: tauri::State<'_, ecr::DeviceManager>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let device_id = parse_required_device_id(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let device = db::ecr_get_device(&conn, &device_id);
-    let connected = mgr.is_connected(&device_id);
-    let db_status = device
-        .as_ref()
-        .and_then(|d| d.get("status"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("disconnected");
-    let live_status = if connected {
-        Some(mgr.get_device_status(&device_id))
-    } else {
-        None
-    };
-    let (
-        status,
-        ready,
-        busy,
-        error,
-        firmware_version,
-        serial_number,
-        fiscal_receipt_counter,
-        fiscal_z_counter,
-    ) = match live_status {
-        Some(Ok(status)) => {
-            let status_label = if status.error.is_some() {
-                "error"
-            } else if status.busy {
-                "busy"
-            } else {
-                "connected"
-            };
-            (
-                status_label,
-                status.ready,
-                status.busy,
-                status.error,
-                status.firmware_version,
-                status.serial_number,
-                status.fiscal_receipt_counter,
-                status.fiscal_z_counter,
-            )
-        }
-        Some(Err(error)) => ("error", false, false, Some(error), None, None, None, None),
-        None => (db_status, false, false, None, None, None, None, None),
-    };
+    run_blocking_command("ecr_get_device_status", move || {
+        let db = app.state::<db::DbState>();
+        let mgr = app.state::<ecr::DeviceManager>();
+        let device_id = parse_required_device_id(arg0)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let device = db::ecr_get_device(&conn, &device_id);
+        let connected = mgr.is_connected(&device_id);
+        let db_status = device
+            .as_ref()
+            .and_then(|d| d.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("disconnected");
+        let live_status = if connected {
+            Some(mgr.get_device_status(&device_id))
+        } else {
+            None
+        };
+        let (
+            status,
+            ready,
+            busy,
+            error,
+            firmware_version,
+            serial_number,
+            fiscal_receipt_counter,
+            fiscal_z_counter,
+        ) = match live_status {
+            Some(Ok(status)) => {
+                let status_label = if status.error.is_some() {
+                    "error"
+                } else if status.busy {
+                    "busy"
+                } else {
+                    "connected"
+                };
+                (
+                    status_label,
+                    status.ready,
+                    status.busy,
+                    status.error,
+                    status.firmware_version,
+                    status.serial_number,
+                    status.fiscal_receipt_counter,
+                    status.fiscal_z_counter,
+                )
+            }
+            Some(Err(error)) => ("error", false, false, Some(error), None, None, None, None),
+            None => (db_status, false, false, None, None, None, None, None),
+        };
 
-    Ok(serde_json::json!({
-        "success": device.is_some(),
-        "deviceId": device_id,
-        "connected": connected,
-        "status": status,
-        "ready": ready,
-        "busy": busy,
-        "error": error,
-        "firmwareVersion": firmware_version,
-        "serialNumber": serial_number,
-        "fiscalReceiptCounter": fiscal_receipt_counter,
-        "fiscalZCounter": fiscal_z_counter,
-    }))
+        Ok(serde_json::json!({
+            "success": device.is_some(),
+            "deviceId": device_id,
+            "connected": connected,
+            "status": status,
+            "ready": ready,
+            "busy": busy,
+            "error": error,
+            "firmwareVersion": firmware_version,
+            "serialNumber": serial_number,
+            "fiscalReceiptCounter": fiscal_receipt_counter,
+            "fiscalZCounter": fiscal_z_counter,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn ecr_get_all_statuses(
-    db: tauri::State<'_, db::DbState>,
-    mgr: tauri::State<'_, ecr::DeviceManager>,
-) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let devices = db::ecr_list_devices(&conn);
-    let statuses: Vec<serde_json::Value> = devices
-        .iter()
-        .map(|d| {
-            let device_id = d
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let connected = mgr.is_connected(&device_id);
-            let db_status = d
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("disconnected");
-            serde_json::json!({
-                "deviceId": device_id,
-                "connected": connected,
-                "status": if connected { "connected" } else { db_status }
+pub async fn ecr_get_all_statuses(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("ecr_get_all_statuses", move || {
+        let db = app.state::<db::DbState>();
+        let mgr = app.state::<ecr::DeviceManager>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let devices = db::ecr_list_devices(&conn);
+        let statuses: Vec<serde_json::Value> = devices
+            .iter()
+            .map(|d| {
+                let device_id = d
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let connected = mgr.is_connected(&device_id);
+                let db_status = d
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("disconnected");
+                serde_json::json!({
+                    "deviceId": device_id,
+                    "connected": connected,
+                    "status": if connected { "connected" } else { db_status }
+                })
             })
-        })
-        .collect();
-    Ok(serde_json::json!({
-        "success": true,
-        "statuses": statuses
-    }))
+            .collect();
+        Ok(serde_json::json!({
+            "success": true,
+            "statuses": statuses
+        }))
+    })
+    .await
 }
 
 fn original_ecr_currency(
@@ -2775,80 +2805,96 @@ pub async fn ecr_settlement(
 #[tauri::command]
 pub async fn ecr_get_recent_transactions(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let limit = parse_recent_transactions_limit(arg0);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let transactions = db::ecr_list_transactions(&conn, None, Some(limit as u32));
-    Ok(serde_json::json!({
-        "success": true,
-        "transactions": transactions
-    }))
+    run_blocking_command("ecr_get_recent_transactions", move || {
+        let db = app.state::<db::DbState>();
+        let limit = parse_recent_transactions_limit(arg0);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let transactions = db::ecr_list_transactions(&conn, None, Some(limit as u32));
+        Ok(serde_json::json!({
+            "success": true,
+            "transactions": transactions
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_query_transactions(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let filters = parse_query_filters_payload(arg0);
-    let device_id = filters
-        .get("deviceId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let limit = filters.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let transactions = db::ecr_list_transactions(&conn, device_id.as_deref(), Some(limit));
-    Ok(serde_json::json!({
-        "success": true,
-        "transactions": transactions
-    }))
+    run_blocking_command("ecr_query_transactions", move || {
+        let db = app.state::<db::DbState>();
+        let filters = parse_query_filters_payload(arg0);
+        let device_id = filters
+            .get("deviceId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let limit = filters.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let transactions = db::ecr_list_transactions(&conn, device_id.as_deref(), Some(limit));
+        Ok(serde_json::json!({
+            "success": true,
+            "transactions": transactions
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_get_transaction_stats(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let filters = parse_query_filters_payload(arg0);
-    let device_filter = value_str(&filters, &["deviceId", "device_id"]);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let transactions = db::ecr_list_transactions(&conn, device_filter.as_deref(), None);
-    let count = transactions.len();
-    let total: i64 = transactions
-        .iter()
-        .filter_map(|t| t.get("amount").and_then(|v| v.as_i64()))
-        .sum();
-    Ok(serde_json::json!({
-        "success": true,
-        "count": count,
-        "totalAmount": total
-    }))
+    run_blocking_command("ecr_get_transaction_stats", move || {
+        let db = app.state::<db::DbState>();
+        let filters = parse_query_filters_payload(arg0);
+        let device_filter = value_str(&filters, &["deviceId", "device_id"]);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let transactions = db::ecr_list_transactions(&conn, device_filter.as_deref(), None);
+        let count = transactions.len();
+        let total: i64 = transactions
+            .iter()
+            .filter_map(|t| t.get("amount").and_then(|v| v.as_i64()))
+            .sum();
+        Ok(serde_json::json!({
+            "success": true,
+            "count": count,
+            "totalAmount": total
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn ecr_get_transaction_for_order(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    if let Some(order_id) = parse_optional_order_id(arg0) {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let all = db::ecr_list_transactions(&conn, None, None);
-        let matched = all.into_iter().find(|t| {
-            t.get("orderId")
-                .and_then(|v| v.as_str())
-                .map(|oid| oid == order_id)
-                .unwrap_or(false)
-        });
-        return Ok(serde_json::json!({
+    run_blocking_command("ecr_get_transaction_for_order", move || {
+        let db = app.state::<db::DbState>();
+        if let Some(order_id) = parse_optional_order_id(arg0) {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let all = db::ecr_list_transactions(&conn, None, None);
+            let matched = all.into_iter().find(|t| {
+                t.get("orderId")
+                    .and_then(|v| v.as_str())
+                    .map(|oid| oid == order_id)
+                    .unwrap_or(false)
+            });
+            return Ok(serde_json::json!({
+                "success": true,
+                "transaction": matched
+            }));
+        }
+        Ok(serde_json::json!({
             "success": true,
-            "transaction": matched
-        }));
-    }
-    Ok(serde_json::json!({
-        "success": true,
-        "transaction": serde_json::Value::Null
-    }))
+            "transaction": serde_json::Value::Null
+        }))
+    })
+    .await
 }
 
 // -- ECR new commands --------------------------------------------------------

@@ -1,6 +1,7 @@
 use serde_json::Value;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
+use crate::database_lock::run_blocking_command;
 use crate::{api, auth, core_helpers, db, storage};
 
 fn parse_permission_payload(arg0: Option<Value>) -> Option<String> {
@@ -70,18 +71,19 @@ fn parse_permissions_payload(arg0: Option<Value>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub async fn auth_login(
-    arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
-) -> Result<Value, String> {
-    let result = auth::login(arg0, &db, &auth_state);
-    if result.is_ok() {
-        // Refresh the fiscal-active verdict on the next sync pass after a
-        // login, like Android's post-login fiscal status check.
-        crate::fiscal::status::mark_due();
-    }
-    result
+pub async fn auth_login(arg0: Option<Value>, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("auth_login", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        let result = auth::login(arg0, &db, &auth_state);
+        if result.is_ok() {
+            // Refresh the fiscal-active verdict on the next sync pass after a
+            // login, like Android's post-login fiscal status check.
+            crate::fiscal::status::mark_due();
+        }
+        result
+    })
+    .await
 }
 
 #[tauri::command]
@@ -196,81 +198,88 @@ pub async fn auth_confirm_privileged_action(
 }
 
 #[tauri::command]
-pub async fn auth_setup_pin(
-    arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
-) -> Result<Value, String> {
-    // Security hardening: once an admin PIN is set, require an active admin
-    // session before allowing PIN reset/overwrite — UNLESS the admin has
-    // remotely triggered a PIN reset (pin_reset_required flag). In that case
-    // the user is on the login screen with no session and must be allowed to
-    // set a new PIN to break the deadlock.
-    let (has_admin_pin, pin_reset_required) = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let has_pin = db::get_setting(&conn, "staff", "admin_pin_hash").is_some();
-        let reset_flag = db::get_setting(&conn, "terminal", "pin_reset_required")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-        (has_pin, reset_flag)
-    };
-    if has_admin_pin && !pin_reset_required {
-        let session = auth::get_session_json(&auth_state);
-        let role_name = session
-            .get("role")
-            .and_then(|r| r.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if role_name != "admin" {
-            return Err("Unauthorized: active admin session required to change PIN".into());
+pub async fn auth_setup_pin(arg0: Option<Value>, app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("auth_setup_pin", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        // Security hardening: once an admin PIN is set, require an active admin
+        // session before allowing PIN reset/overwrite — UNLESS the admin has
+        // remotely triggered a PIN reset (pin_reset_required flag). In that case
+        // the user is on the login screen with no session and must be allowed to
+        // set a new PIN to break the deadlock.
+        let (has_admin_pin, pin_reset_required) = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let has_pin = db::get_setting(&conn, "staff", "admin_pin_hash").is_some();
+            let reset_flag = db::get_setting(&conn, "terminal", "pin_reset_required")
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            (has_pin, reset_flag)
+        };
+        if has_admin_pin && !pin_reset_required {
+            let session = auth::get_session_json(&auth_state);
+            let role_name = session
+                .get("role")
+                .and_then(|r| r.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if role_name != "admin" {
+                return Err("Unauthorized: active admin session required to change PIN".into());
+            }
         }
-    }
-    let result = auth::setup_pin(arg0, &db)?;
+        let result = auth::setup_pin(arg0, &db)?;
 
-    // Fire-and-forget: acknowledge PIN reset to admin server so the remote
-    // pos_configurations flag doesn't re-sync as true on next settings fetch.
-    tokio::spawn(async move {
-        let Some(api_key) = storage::get_credential("pos_api_key") else {
-            return;
-        };
-        let Some(admin_url) = storage::get_credential("admin_dashboard_url") else {
-            return;
-        };
-        let Some(terminal_id) = storage::get_credential("terminal_id") else {
-            return;
-        };
+        // Fire-and-forget: acknowledge PIN reset to admin server so the remote
+        // pos_configurations flag doesn't re-sync as true on next settings fetch.
+        tokio::spawn(async move {
+            let Some(api_key) = storage::get_credential("pos_api_key") else {
+                return;
+            };
+            let Some(admin_url) = storage::get_credential("admin_dashboard_url") else {
+                return;
+            };
+            let Some(terminal_id) = storage::get_credential("terminal_id") else {
+                return;
+            };
 
-        // Wave 1 C3: validate terminal_id shape before path interpolation.
-        // Same rationale as commands/api_bridge.rs (C2). Because this runs
-        // in a detached fire-and-forget tokio::spawn, a validation failure
-        // is logged at warn! and the ack is skipped — the server will
-        // re-send the pin_reset_required flag on the next settings fetch,
-        // giving us another chance if the keyring is later repaired.
-        let Ok(terminal_id) = core_helpers::validate_terminal_id_path_safe(&terminal_id) else {
-            tracing::warn!("Skipping PIN-reset ack: terminal_id in keyring failed UUID validation");
-            return;
-        };
-        let path = format!("/api/pos/settings/{terminal_id}");
-        let body = serde_json::json!({
-            "settings": { "terminal": { "pin_reset_required": false } }
+            // Wave 1 C3: validate terminal_id shape before path interpolation.
+            // Same rationale as commands/api_bridge.rs (C2). Because this runs
+            // in a detached fire-and-forget tokio::spawn, a validation failure
+            // is logged at warn! and the ack is skipped — the server will
+            // re-send the pin_reset_required flag on the next settings fetch,
+            // giving us another chance if the keyring is later repaired.
+            let Ok(terminal_id) = core_helpers::validate_terminal_id_path_safe(&terminal_id) else {
+                tracing::warn!(
+                    "Skipping PIN-reset ack: terminal_id in keyring failed UUID validation"
+                );
+                return;
+            };
+            let path = format!("/api/pos/settings/{terminal_id}");
+            let body = serde_json::json!({
+                "settings": { "terminal": { "pin_reset_required": false } }
+            });
+            match api::fetch_from_admin(&admin_url, &api_key, &path, "POST", Some(body)).await {
+                Ok(_) => tracing::info!("PIN reset acknowledged to admin server"),
+                Err(e) => tracing::warn!("Failed to ack PIN reset to admin (non-fatal): {e}"),
+            }
         });
-        match api::fetch_from_admin(&admin_url, &api_key, &path, "POST", Some(body)).await {
-            Ok(_) => tracing::info!("PIN reset acknowledged to admin server"),
-            Err(e) => tracing::warn!("Failed to ack PIN reset to admin (non-fatal): {e}"),
-        }
-    });
 
-    Ok(result)
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn staff_auth_authenticate_pin(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    // staff_auth:authenticate-pin uses the same login logic
-    auth::login(arg0, &db, &auth_state)
+    run_blocking_command("staff_auth_authenticate_pin", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        // staff_auth:authenticate-pin uses the same login logic
+        auth::login(arg0, &db, &auth_state)
+    })
+    .await
 }
 
 #[tauri::command]

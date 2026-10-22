@@ -25,12 +25,14 @@
 
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use tauri::Manager;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
+use crate::database_lock::run_blocking_command;
 use crate::gift_financial_opening::{self as opening, OpeningScope};
 use crate::{api, db};
 
@@ -2046,9 +2048,13 @@ pub async fn gift_return_recover(
 #[tauri::command]
 pub async fn gift_return_status(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    status(db.inner(), &arg0.unwrap_or(Value::Null))
+    run_blocking_command("gift_return_status", move || {
+        let db = app.state::<db::DbState>();
+        status(db.inner(), &arg0.unwrap_or(Value::Null))
+    })
+    .await
 }
 
 // -- Validators --------------------------------------------------------------

@@ -5,6 +5,7 @@ use serde_json::Value;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing::info;
 
+use crate::database_lock::run_blocking_command;
 use crate::db;
 
 const MAX_CLIPBOARD_TEXT_LEN: usize = 1_000_000;
@@ -912,32 +913,43 @@ mod display_request_tests {
 }
 
 #[tauri::command]
-pub async fn clipboard_read_text(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    match crate::read_system_clipboard_text() {
-        Ok(text) => {
-            let _ =
-                crate::write_local_json(&db, "clipboard_fallback_text", &serde_json::json!(text));
-            Ok(serde_json::json!(text))
+pub async fn clipboard_read_text(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("clipboard_read_text", move || {
+        let db = app.state::<db::DbState>();
+        match crate::read_system_clipboard_text() {
+            Ok(text) => {
+                let _ = crate::write_local_json(
+                    &db,
+                    "clipboard_fallback_text",
+                    &serde_json::json!(text),
+                );
+                Ok(serde_json::json!(text))
+            }
+            Err(_) => {
+                let fallback = crate::read_local_json(&db, "clipboard_fallback_text")?;
+                Ok(serde_json::json!(fallback
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()))
+            }
         }
-        Err(_) => {
-            let fallback = crate::read_local_json(&db, "clipboard_fallback_text")?;
-            Ok(serde_json::json!(fallback
-                .as_str()
-                .unwrap_or_default()
-                .to_string()))
-        }
-    }
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn clipboard_write_text(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let text = parse_clipboard_text_payload(arg0)?;
-    let _ = crate::write_local_json(&db, "clipboard_fallback_text", &serde_json::json!(text));
-    let _ = crate::write_system_clipboard_text(&text);
-    Ok(serde_json::json!({ "success": true }))
+    run_blocking_command("clipboard_write_text", move || {
+        let db = app.state::<db::DbState>();
+        let text = parse_clipboard_text_payload(arg0)?;
+        let _ = crate::write_local_json(&db, "clipboard_fallback_text", &serde_json::json!(text));
+        let _ = crate::write_system_clipboard_text(&text);
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[tauri::command]

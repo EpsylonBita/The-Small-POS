@@ -31,7 +31,16 @@
       "editServerUpdate": "Korrigjimet nuk janë përkohësisht të disponueshme. Kontrolloni lidhjen dhe riprovoni pas përditësimit të serverit.",
       "editSyncRequired": "Ndryshimi i pagesës ose i porosisë nuk është sinkronizuar ende. Shporta është ruajtur. Provoni përsëri pas pak.",
       "emptyEditHint": "Për të hequr të gjithë artikujt, mbyllni redaktuesin dhe anuloni porosinë.",
-      "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash."
+      "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash.",
+      "cardRecoveryQuestion": "A u tërhoq pagesa nga karta? Kontrolloni këtë shumë në POS-in e bankës para se të përgjigjeni. Këtu nuk tërhiqet asgjë.",
+      "cardRecoveryRegisterNote": "Kjo arkë i regjistron tërheqjet me kartë përmes arkës fiskale ose terminalit, dhe aty nuk duket asnjë tërheqje e kësaj karte. Nëse POS-i i bankës tregon një tërheqje, thërrisni menaxherin.",
+      "cardRecoveryCharged": "Karta u tërhoq – regjistroje",
+      "cardRecoveryNotCharged": "Karta NUK u tërhoq – kthehu te shporta",
+      "checkoutPark": "Lëre mënjanë (menaxher)",
+      "checkoutParked": "Pagesa u la mënjanë dhe mund të merren porosi të reja. Kontrolloni POS-in e bankës: nëse klientit iu tërhoq pagesa, mos e tërhiqni përsëri; e rregullon menaxheri. Statusi i POS-it e tregon këtë përpjekje.",
+      "checkoutParkFailed": "Pagesa nuk mund të lihej mënjanë. Mbetet e mbrojtur; nuk ndryshoi asgjë.",
+      "checkoutParkApprovalSubtitle": "Lënia mënjanë e një pagese kërkon të drejtën për të anuluar pagesa. Një person që e ka fut PIN-in e vet. Nuk tarifohet asgjë.",
+      "freezeNotSaved": "Shporta nuk u ruajt dot për pagesë, ndaj nuk nisi asnjë pagesë. Shtypni Paguaj për ta provuar përsëri."
     }
   },
   "checkoutRecovery": {
@@ -55,6 +64,15 @@
     "fixCodes": {
       "table_cancellation_not_saved": "Rikuperoni anulimin fillestar të tavolinës. Mos i dorëzoni ose rimbursoni paratë përsëri.",
       "edit_settlement_not_saved": "Rihapni redaktimin e ruajtur dhe ruani të njëjtin korrigjim. Mos arkëtoni ose ktheni para përsëri."
+    }
+  },
+  "recovery": {
+    "issues": {
+      "checkoutParked": {
+        "title": "Pagesë e lënë mënjanë – kontrolloni POS-in e bankës",
+        "summary": "Në {{time}} menaxheri la mënjanë një pagesë prej {{amount}} {{currency}} që arka të merrte përsëri porosi. Nuk u regjistrua asgjë për të.",
+        "guidance": "Kontrolloni këtë shumë në atë orë në POS-in e bankës (ose aplikacionin TWINT). Nëse klientit iu tërhoq pagesa, mos e tërhiqni përsëri: menaxheri fut porosinë dhe e regjistron këtë pagesë një herë. Nëse jo, nuk duhet gjë tjetër."
+      }
     }
   }
 }

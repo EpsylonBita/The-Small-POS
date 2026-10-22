@@ -371,12 +371,119 @@ fn driver_preview_reads_receipts_after_assignment_changes_local_attribution() {
             1300,
             CASHIER_SHIFT,
         );
-        // Assignment returns the pre-assignment tender snapshot, then moves
-        // the receipt columns. No explicit cashier collection metadata exists.
+        // Assignment moves the receipt to the courier's shift and only then
+        // reads the courier's money (Tomikro 21/10/2026: it used to read the
+        // pre-assignment snapshot and save 0/0 while the preview showed 13.00).
         assign(&conn, "assigned-after-payment");
-        assert_eq!(earning(&conn, "assigned-after-payment"), (0, 0, 0));
+        assert_eq!(earning(&conn, "assigned-after-payment"), (1300, 0, 1300));
     }
     assert_eq!(amount_to_return(&td), OPENING + 13.0 - 1.0);
+}
+
+/// Tomikro 21/10/2026: the cashier recorded the cash of two delivery orders
+/// (8.10 and 15.70), then assigned the courier. Each earning was saved 0/0, so
+/// Health reported cash missing from the courier record while the preview and
+/// the courier's checkout counted it.
+#[test]
+fn cash_the_cashier_recorded_before_assigning_is_the_couriers_in_the_saved_earning() {
+    let _keyring = fake_keyring::install_seeded([("terminal_id", TERMINAL), ("branch_id", BRANCH)]);
+    let td = TestDb::open();
+    let conn = td.state.conn.lock().unwrap();
+    seed_shifts(&conn);
+    for (order, cents) in [("tomikro-00003", 810), ("tomikro-00053", 1570)] {
+        seed_delivery(&conn, order);
+        add_payment(
+            &conn,
+            &format!("{order}-cash"),
+            order,
+            "cash",
+            cents,
+            CASHIER_SHIFT,
+        );
+        assign(&conn, order);
+        assert_eq!(earning(&conn, order), (cents, 0, cents), "{order}");
+    }
+    conn.execute(
+        "UPDATE staff_shifts SET status='closed',check_out_time=datetime('now') WHERE id=?1",
+        [DRIVER_SHIFT],
+    )
+    .unwrap();
+    conn.execute("UPDATE driver_earnings SET created_at=datetime('now')", [])
+        .unwrap();
+    assert!(crate::courier_integrity::collect(&conn).unwrap()["issues"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+/// The courier prints the checkout slip without checking out to see the
+/// amounts (get_shift_summary). Active, its cash is read live; in the window
+/// after the cashier closed and before the next one took over (transferred),
+/// it is the saved earning, which now holds the same cash.
+#[test]
+fn the_couriers_summary_shows_cashier_recorded_cash_active_and_in_the_transferred_window() {
+    let _keyring = fake_keyring::install_seeded([("terminal_id", TERMINAL), ("branch_id", BRANCH)]);
+    let td = TestDb::open();
+    {
+        let conn = td.state.conn.lock().unwrap();
+        seed_shifts(&conn);
+        for (order, cents) in [("slip-00003", 810), ("slip-00053", 1570)] {
+            seed_delivery(&conn, order);
+            add_payment(
+                &conn,
+                &format!("{order}-cash"),
+                order,
+                "cash",
+                cents,
+                CASHIER_SHIFT,
+            );
+            assign(&conn, order);
+        }
+    }
+    // Each order keeps its 1.00 tip with the courier.
+    let active = amount_to_return(&td);
+    assert!(
+        (active - (OPENING + 8.10 + 15.70 - 2.0)).abs() < 0.001,
+        "{active}"
+    );
+    td.state
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE driver_earnings SET is_transferred = 1", [])
+        .unwrap();
+    let transferred = amount_to_return(&td);
+    assert!(
+        (transferred - active).abs() < 0.001,
+        "{transferred} vs {active}"
+    );
+}
+
+/// A receipt whose saved custody contradicts its new shift (the cashier's
+/// drawer named on a courier's shift) cannot be read after the move; the
+/// assignment keeps the earlier figures and still succeeds.
+#[test]
+fn an_ambiguous_custody_receipt_never_fails_the_assignment() {
+    let _keyring = fake_keyring::install_seeded([("terminal_id", TERMINAL), ("branch_id", BRANCH)]);
+    let td = TestDb::open();
+    let conn = td.state.conn.lock().unwrap();
+    seed_shifts(&conn);
+    seed_delivery(&conn, "ambiguous-custody");
+    add_payment(
+        &conn,
+        "ambiguous-cash",
+        "ambiguous-custody",
+        "cash",
+        1300,
+        CASHIER_SHIFT,
+    );
+    conn.execute(
+        "UPDATE order_payments SET metadata=json_object('collected_by','cashier_drawer') WHERE id='ambiguous-cash'",
+        [],
+    )
+    .unwrap();
+    assign(&conn, "ambiguous-custody");
+    assert_eq!(earning(&conn, "ambiguous-custody"), (0, 0, 0));
 }
 
 /// No payment row: the courier owes nothing for the order and keeps no tip

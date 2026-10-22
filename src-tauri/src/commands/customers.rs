@@ -1,7 +1,8 @@
 use chrono::Utc;
 use serde::Deserialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
+use crate::database_lock::run_blocking_command;
 use crate::{
     db, fetch_supabase_rows, normalize_phone, payload_arg0_as_string, read_local_json_array,
     read_local_setting, storage, sync_queue, value_i64, value_str, write_local_json,
@@ -1648,55 +1649,61 @@ fn address_already_gone(error: &crate::api::AdminFetchError) -> bool {
 }
 
 #[tauri::command]
-pub async fn customer_get_cache_stats(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let cache = read_local_json_array(&db, "customer_cache_v1")?;
-    Ok(serde_json::json!({
-        "total": cache.len(),
-        "valid": cache.len(),
-        "expired": 0
-    }))
+pub async fn customer_get_cache_stats(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("customer_get_cache_stats", move || {
+        let db = app.state::<db::DbState>();
+        let cache = read_local_json_array(&db, "customer_cache_v1")?;
+        Ok(serde_json::json!({
+            "total": cache.len(),
+            "valid": cache.len(),
+            "expired": 0
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn customer_clear_cache(
-    db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    let existing = read_local_json_array(&db, "customer_cache_v1")?;
-    let count = existing.len();
-    write_local_json(&db, "customer_cache_v1", &serde_json::json!([]))?;
-    let _ = app.emit("customer_deleted", serde_json::json!({ "count": count }));
-    Ok(serde_json::json!({ "success": true, "cleared": count }))
+pub async fn customer_clear_cache(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("customer_clear_cache", move || {
+        let db = app.state::<db::DbState>();
+        let existing = read_local_json_array(&db, "customer_cache_v1")?;
+        let count = existing.len();
+        write_local_json(&db, "customer_cache_v1", &serde_json::json!([]))?;
+        let _ = app.emit("customer_deleted", serde_json::json!({ "count": count }));
+        Ok(serde_json::json!({ "success": true, "cleared": count }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn customer_invalidate_cache(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_phone_payload(arg0)?;
-    let phone = payload.phone;
-    let phone_norm = normalize_phone(&phone);
-    let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-    let before = cache.len();
-    cache.retain(|entry| {
-        let p = value_str(entry, &["phone", "customerPhone", "mobile", "telephone"])
-            .map(|s| normalize_phone(&s))
-            .unwrap_or_default();
-        p != phone_norm
-    });
-    let removed = before.saturating_sub(cache.len());
-    write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-    if removed > 0 {
-        let _ = app.emit(
-            "customer_deleted",
-            serde_json::json!({ "removed": removed }),
-        );
-    }
-    Ok(serde_json::json!({ "success": true, "removed": removed }))
+    run_blocking_command("customer_invalidate_cache", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_phone_payload(arg0)?;
+        let phone = payload.phone;
+        let phone_norm = normalize_phone(&phone);
+        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+        let before = cache.len();
+        cache.retain(|entry| {
+            let p = value_str(entry, &["phone", "customerPhone", "mobile", "telephone"])
+                .map(|s| normalize_phone(&s))
+                .unwrap_or_default();
+            p != phone_norm
+        });
+        let removed = before.saturating_sub(cache.len());
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        if removed > 0 {
+            let _ = app.emit(
+                "customer_deleted",
+                serde_json::json!({ "removed": removed }),
+            );
+        }
+        Ok(serde_json::json!({ "success": true, "removed": removed }))
+    })
+    .await
 }
 
 /// Cache-only sibling of `customer_lookup_by_phone` — sync, takes an
@@ -3493,10 +3500,14 @@ pub async fn customer_delete_address(
 #[tauri::command]
 pub async fn customer_get_conflicts(
     _arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let conflicts = read_local_json_array(&db, "customer_conflicts_v1")?;
-    Ok(serde_json::json!(conflicts))
+    run_blocking_command("customer_get_conflicts", move || {
+        let db = app.state::<db::DbState>();
+        let conflicts = read_local_json_array(&db, "customer_conflicts_v1")?;
+        Ok(serde_json::json!(conflicts))
+    })
+    .await
 }
 
 #[tauri::command]

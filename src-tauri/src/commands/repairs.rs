@@ -3,8 +3,9 @@
 //! Tenant scope, credentials, queue envelopes, ciphertext, native paths and
 //! signed URLs are intentionally absent from every serializable type here.
 
+use crate::database_lock::run_blocking_command;
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2546,21 +2547,25 @@ pub(crate) async fn repairs_open_attachment(
 
 #[tauri::command]
 pub(crate) async fn repairs_list_conflicts(
-    db: tauri::State<'_, crate::db::DbState>,
+    app: tauri::AppHandle,
     input: RepairListConflictsInput,
 ) -> Result<RepairConflictsSnapshot, String> {
-    let access = acquire_access(&db, &input.staff_session_id, "repairs.read")?;
-    let conflicts = {
-        let connection = db
-            .conn
-            .lock()
-            .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
-        crate::repairs::list_open_conflicts(&connection, &access)?
-    };
-    Ok(RepairConflictsSnapshot {
-        scope_token: access.scope_token().to_string(),
-        conflicts: conflicts.into_iter().map(project_conflict_record).collect(),
+    run_blocking_command("repairs_list_conflicts", move || {
+        let db = app.state::<crate::db::DbState>();
+        let access = acquire_access(&db, &input.staff_session_id, "repairs.read")?;
+        let conflicts = {
+            let connection = db
+                .conn
+                .lock()
+                .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
+            crate::repairs::list_open_conflicts(&connection, &access)?
+        };
+        Ok(RepairConflictsSnapshot {
+            scope_token: access.scope_token().to_string(),
+            conflicts: conflicts.into_iter().map(project_conflict_record).collect(),
+        })
     })
+    .await
 }
 
 #[tauri::command]

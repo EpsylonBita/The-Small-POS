@@ -1538,6 +1538,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           draftContext={{ tableId, tableNumber }}
           onDraftRestore={restoreCheckoutContext}
           onRecoveredOrder={async () => { resetCheckoutRequestId(); await silentRefresh(); navigate('/'); }}
+          onCheckoutParked={resetCheckoutRequestId}
         />
       )}
 

@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   confirmationError: false,
   draftFreezeError: false,
   confirmationFreezeError: false,
+  readError: false,
+  freezeAckLost: false,
   editOrder: null as any,
   inspect: null as any,
   applyEditSettlement: vi.fn(),
@@ -128,10 +130,11 @@ vi.mock('../../../utils/catalog-offers', async (importOriginal) => ({
 }));
 
 const draftStorage = vi.hoisted(() => ({ draft: null as any, generation: 0, invalidated: false, deletes: 0, deleteError: false,
-  loadGate: null as Promise<void> | null }));
+  loadGate: null as Promise<void> | null, parked: null as any, parkError: null as string | null }));
 beforeEach(() => {
   draftStorage.draft = null; draftStorage.generation = 0; draftStorage.invalidated = false;
   draftStorage.deletes = 0; draftStorage.deleteError = false; draftStorage.loadGate = null;
+  draftStorage.parked = null; draftStorage.parkError = null;
 });
 vi.mock('../../../../lib', async (importOriginal) => {
   const bridge = {
@@ -147,15 +150,25 @@ vi.mock('../../../../lib', async (importOriginal) => {
         return { success: true };
       }
       if (command === 'checkout_draft_get' && draftStorage.loadGate) await draftStorage.loadGate;
+      if (command === 'checkout_draft_get' && mocks.readError) throw new Error('DISK_UNAVAILABLE');
+      if (command === 'checkout_draft_report_failure') return { success: true };
       if (command === 'checkout_draft_inspect') return mocks.inspect ?? { success: true, outcome: 'not_found', canCollect: false };
       if (command === 'checkout_draft_put') {
         if ((mocks.draftFreezeError && input.draft.phase === 'checkout_pending') ||
           (mocks.confirmationFreezeError && input.draft.state.paymentAdmission === 'confirmed')) throw new Error('DISK_UNAVAILABLE');
         draftStorage.draft = input.draft; draftStorage.generation++;
+        if (mocks.freezeAckLost && input.draft.phase === 'checkout_pending') { mocks.freezeAckLost = false; throw new Error('IPC_LOST'); }
       }
       if (command === 'checkout_draft_delete') {
         if (draftStorage.deleteError) throw new Error('DISK_UNAVAILABLE');
         draftStorage.deletes++; draftStorage.draft = null; draftStorage.generation++;
+      }
+      if (command === 'checkout_draft_park') {
+        if (draftStorage.parkError) throw new Error(draftStorage.parkError);
+        if (input.expectedGeneration !== draftStorage.generation || input.clientRequestId !== draftStorage.draft?.checkoutRequestId) throw new Error('CHECKOUT_DRAFT_VERSION_CHANGED');
+        draftStorage.parked = draftStorage.draft; draftStorage.draft = null; draftStorage.generation++;
+        return { success: true, scope: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' }, generation: draftStorage.generation, draft: null,
+          parked: { outcome: 'uncertain', generation: draftStorage.generation - 1 } };
       }
       return { success: true, scope: { organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1' }, generation: draftStorage.generation, draft: draftStorage.draft,
         ...(draftStorage.invalidated ? { invalidation: { reason: 'edit_target_cancelled', orderId: 'cancelled-order' } } : {}) };
@@ -251,6 +264,8 @@ beforeEach(() => {
   mocks.editOrder = null;
   mocks.draftFreezeError = false;
   mocks.confirmationFreezeError = false;
+  mocks.readError = false;
+  mocks.freezeAckLost = false;
   mocks.inspect = null;
   mocks.applyEditSettlement.mockReset();
   mocks.recoverySnapshot.mockReset().mockResolvedValue({ id: 'pre-action-snapshot' });
@@ -272,73 +287,80 @@ it('closes a cancelled order editor archived by native recovery without showing 
 });
 
 describe('MenuModal recovery after a failed durable freeze', () => {
-  async function openFrozenCreate(method: 'cash' | 'card', onOrderComplete: any, onClose = vi.fn()) {
+  // Tomikro 21/10/2026: a freeze whose write failed comes before any
+  // collection. With native proof that it never committed, the cart is
+  // editable again and Pay retries it. While storage stays unreadable the
+  // original is kept, nothing is collected and nothing is dispatched.
+  const freezeNotSaved = 'The cart could not be saved for payment, so no payment was started. Press Pay to try again.';
+
+  async function openFrozenCreate(method: 'cash' | 'card', onOrderComplete: any, unreadable = false, onClose = vi.fn()) {
     mocks.settings.unavailable = false;
-    mocks.draftFreezeError = true;
     render(<MenuModal isOpen onClose={onClose} orderType="pickup" onOrderComplete={onOrderComplete} />);
     await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
     fireEvent.click(screen.getByText('Add espresso'));
     await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
     const originalId = draftStorage.draft.checkoutRequestId;
+    mocks.draftFreezeError = true;
+    mocks.readError = unreadable;
     fireEvent.click(screen.getByText('Checkout'));
     fireEvent.click(await screen.findByText(`Confirm ${method}`));
-    await screen.findByText('modals.menu.draftSaveFailed');
-    expect(onOrderComplete).not.toHaveBeenCalled();
-    expect((screen.getByText('Return to orders') as HTMLButtonElement).disabled).toBe(true);
     return { originalId, onClose };
   }
 
-  it('the visible recovery action persists the original cash request before completing once without restarting', async () => {
-    let release!: () => void;
-    const completion = new Promise<void>(resolve => { release = resolve; });
-    const accepted = vi.fn(async submission => {
-      expect(draftStorage.draft).toMatchObject({ phase: 'checkout_pending', checkoutRequestId: submission.clientRequestId });
-      expect(draftStorage.draft.submission).toEqual(JSON.parse(JSON.stringify(submission)));
-      await completion;
-      return true;
-    });
-    const { originalId, onClose } = await openFrozenCreate('cash', accepted);
+  it.each(['cash', 'card'] as const)('a %s freeze that never committed returns the editable cart, and Pay then saves it once', async method => {
+    const accepted = vi.fn(async () => true);
+    const { originalId } = await openFrozenCreate(method, accepted);
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(freezeNotSaved));
+    expect(screen.queryByText('modals.menu.draftSaveFailed')).toBeNull();
+    expect(screen.queryByText('Check original checkout')).toBeNull();
+    // The editable cart is durable at once, not only when it next changes.
+    expect(draftStorage.draft).toMatchObject({ checkoutRequestId: originalId, phase: 'editing', state: { paymentAdmissionCancelled: true } });
+    expect(draftStorage.draft.cartItems).toHaveLength(1);
+    expect(accepted).not.toHaveBeenCalled();
     mocks.draftFreezeError = false;
-    fireEvent.click(screen.getByText('Check original checkout'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText(`Confirm ${method}`));
     await waitFor(() => expect(accepted).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByText('Check original checkout'));
-    expect(accepted).toHaveBeenCalledOnce();
-    expect(accepted.mock.calls[0][0]).toMatchObject({ clientRequestId: originalId, paymentData: { method: 'cash', amount: 8 } });
-    await act(async () => release());
-    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-    expect(draftStorage.draft).toBeNull();
-    expect(draftStorage.deletes).toBe(1);
+    expect(accepted.mock.calls[0][0]).toMatchObject({ clientRequestId: originalId, paymentData: { method } });
   });
 
-  it('continued storage failure never inspects, dispatches, clears or enables dismissal', async () => {
-    const accepted = vi.fn();
-    const { originalId, onClose } = await openFrozenCreate('cash', accepted);
+  it('while storage stays unreadable the original is kept and nothing is collected; once it reads, the cart returns', async () => {
+    const accepted = vi.fn(async () => true);
+    const { originalId, onClose } = await openFrozenCreate('cash', accepted, true);
+    await screen.findByText('modals.menu.draftSaveFailed');
+    expect((screen.getByText('Return to orders') as HTMLButtonElement).disabled).toBe(true);
     vi.mocked(getBridge().invoke).mockClear();
     fireEvent.click(screen.getByText('Check original checkout'));
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The original checkout could not be verified. Its saved cart remains protected.'));
-    expect(vi.mocked(getBridge().invoke).mock.calls.map(call => call[0])).toEqual(['checkout_draft_get', 'checkout_draft_put']);
+    const commands = vi.mocked(getBridge().invoke).mock.calls.map(call => call[0]);
+    expect(commands).not.toContain('checkout_draft_inspect');
+    expect(commands).not.toContain('checkout_draft_delete');
     expect(accepted).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
-    expect(draftStorage.draft).toMatchObject({ checkoutRequestId: originalId, phase: 'editing' });
-    expect(draftStorage.deletes).toBe(0);
     expect((screen.getByText('Return to orders') as HTMLButtonElement).disabled).toBe(true);
+    mocks.readError = false;
+    fireEvent.click(screen.getByText('Check original checkout'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(freezeNotSaved));
+    expect(draftStorage.draft).toMatchObject({ checkoutRequestId: originalId, phase: 'editing' });
+    expect(accepted).not.toHaveBeenCalled();
+    expect(draftStorage.deletes).toBe(0);
   });
 
-  it('saving an ambiguous card original enables safe return while retaining the cart and forbidding new collection', async () => {
-    const accepted = vi.fn();
-    const { originalId, onClose } = await openFrozenCreate('card', accepted);
-    mocks.draftFreezeError = false;
-    fireEvent.click(screen.getByText('Check original checkout'));
-    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The original checkout still needs reconciliation. No new payment was started. Use payment recovery or ask a manager.'));
-    expect(screen.queryByText('modals.menu.draftSaveFailed')).toBeNull();
-    expect((screen.getByText('Return to orders') as HTMLButtonElement).disabled).toBe(false);
+  it('a freeze that did commit after all stays with recovery and is never returned to the cart', async () => {
+    const accepted = vi.fn(async () => true);
+    mocks.settings.unavailable = false;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={accepted} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    // The write commits, but its answer is lost.
+    mocks.freezeAckLost = true;
     fireEvent.click(screen.getByText('Checkout'));
-    expect(screen.queryByTestId('payment-modal')).toBeNull();
-    expect(accepted).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText('Return to orders'));
-    expect(onClose).toHaveBeenCalledOnce();
-    expect(draftStorage.draft).toMatchObject({ checkoutRequestId: originalId, phase: 'checkout_pending', submission: { paymentData: { method: 'card' } } });
-    expect(draftStorage.deletes).toBe(0);
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('checkout_pending'));
+    await screen.findByText('Check original checkout');
+    expect(mocks.toastError).not.toHaveBeenCalledWith(freezeNotSaved);
+    expect(draftStorage.draft.state.paymentAdmission).toBe('admitted');
   });
 });
 
@@ -1010,6 +1032,231 @@ it('recovers the confirmed original TWINT receipt after confirmation persistence
     paymentData: expect.objectContaining({ method: 'twint', amount: 7.2, idempotencyKey: 'admitted-twint' }) }));
 });
 
+
+// Tomikro 21/10/2026: the till closed during a card payment. The draft stayed
+// `checkout_pending` with the admission `admitted`, and the till had no order,
+// no terminal row and no held payment for it. "Check original checkout" only
+// said "needs reconciliation", and the single draft slot reopened that frozen
+// checkout for every new order. The cashier now answers what the bank POS
+// shows; whatever recovery still cannot settle, a manager parks.
+describe('a card admission frozen across a restart (Tomikro 21/10/2026)', () => {
+  const cardChargeConfirmable = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: true };
+
+  async function freezeAdmittedCard(complete: any) {
+    mocks.settings.unavailable = false;
+    const first = render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Admit card'));
+    await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('admitted'));
+    const original = JSON.parse(JSON.stringify(draftStorage.draft.submission));
+    first.unmount();
+    return original;
+  }
+
+  const reopen = (complete: any, onClose = vi.fn(), extra: Record<string, any> = {}) =>
+    render(<MenuModal isOpen onClose={onClose} orderType="pickup" onOrderComplete={complete} {...extra} />);
+
+  it('asks whether the card was charged instead of a dead end: not charged returns the editable cart', async () => {
+    mocks.inspect = cardChargeConfirmable;
+    const complete = vi.fn(async () => true);
+    const original = await freezeAdmittedCard(complete);
+    reopen(complete);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('card-recover-not-charged'));
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(draftStorage.draft.submission).toBeUndefined();
+    expect(draftStorage.draft.checkoutRequestId).toBe(original.clientRequestId);
+    expect(complete).not.toHaveBeenCalled();
+    expect(mocks.toastError).not.toHaveBeenCalledWith('The original checkout still needs reconciliation. No new payment was started. Use payment recovery or ask a manager.');
+    // The till takes the order again.
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ clientRequestId: original.clientRequestId, paymentData: expect.objectContaining({ method: 'cash' }) }));
+  });
+
+  it('charged records the original card request once as collected, with no terminal step, and the next order starts fresh', async () => {
+    mocks.inspect = cardChargeConfirmable;
+    const complete = vi.fn(async () => true);
+    const onClose = vi.fn();
+    const original = await freezeAdmittedCard(complete);
+    const second = reopen(complete, onClose);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('card-recover-charged'));
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(complete).toHaveBeenCalledWith({ ...original, paymentData: { ...original.paymentData,
+      metadata: { confirmation: 'cashier', confirmation_action: 'card_charged_outside_till' } } });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(draftStorage.draft).toBeNull();
+    expect(vi.mocked(getBridge().invoke).mock.calls.map(call => call[0])).not.toContain('ecr_process_payment');
+    second.unmount();
+    reopen(complete);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(screen.queryByText('Check original checkout')).toBeNull();
+    expect(draftStorage.draft.checkoutRequestId).not.toBe(original.clientRequestId);
+  });
+
+  it('never offers "charged" when this till charges cards through its cash register, or when evidence exists', async () => {
+    const complete = vi.fn(async () => true);
+    await freezeAdmittedCard(complete);
+    mocks.inspect = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: false };
+    const second = reopen(complete);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await screen.findByTestId('card-recover-not-charged');
+    expect(screen.queryByTestId('card-recover-charged')).toBeNull();
+    second.unmount();
+    mocks.inspect = { success: true, outcome: 'uncertain', canCollect: false, cashierCanConfirmCard: true, ecr: [{ id: 'sale', status: 'processing' }] };
+    reopen(complete);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The original checkout still needs reconciliation. No new payment was started. Use payment recovery or ask a manager.'));
+    expect(screen.queryByTestId('card-recover-charged')).toBeNull();
+    expect(screen.queryByTestId('card-recover-not-charged')).toBeNull();
+    await screen.findByTestId('checkout-park');
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('a manager parks an attempt recovery cannot settle, and the till takes new orders under a new identity', async () => {
+    const complete = vi.fn(async () => true);
+    const onClose = vi.fn();
+    const onCheckoutParked = vi.fn();
+    const original = await freezeAdmittedCard(complete);
+    mocks.inspect = { success: true, outcome: 'uncertain', canCollect: false, ecr: [{ id: 'sale', status: 'processing' }] };
+    const second = reopen(complete, onClose, { onCheckoutParked });
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('checkout-park'));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    const park = vi.mocked(getBridge().invoke).mock.calls.find(call => call[0] === 'checkout_draft_park');
+    expect(park?.[1]).toMatchObject({ organizationId: 'org-1', branchId: 'branch-1', terminalId: 'terminal-1',
+      draftId: expect.any(String), clientRequestId: original.clientRequestId, expectedGeneration: expect.any(Number) });
+    expect(draftStorage.parked).toMatchObject({ checkoutRequestId: original.clientRequestId, phase: 'checkout_pending' });
+    expect(draftStorage.draft).toBeNull();
+    expect(onCheckoutParked).toHaveBeenCalledOnce();
+    expect(complete).not.toHaveBeenCalled();
+    second.unmount();
+    mocks.inspect = null;
+    reopen(complete);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(screen.queryByText('Check original checkout')).toBeNull();
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect((complete.mock.calls[0] as any[])[0].clientRequestId).not.toBe(original.clientRequestId);
+  });
+
+  it('a refused park keeps the frozen checkout and parks nothing', async () => {
+    const complete = vi.fn(async () => true);
+    const onClose = vi.fn();
+    const original = await freezeAdmittedCard(complete);
+    mocks.inspect = { success: true, outcome: 'held', canCollect: false, payments: [] };
+    draftStorage.parkError = 'CHECKOUT_DRAFT_PARK_NOT_NEEDED';
+    reopen(complete, onClose);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('checkout-park'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('The checkout could not be set aside. It stays protected; nothing was changed.'));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(draftStorage.parked).toBeNull();
+    expect(draftStorage.draft).toMatchObject({ checkoutRequestId: original.clientRequestId, phase: 'checkout_pending' });
+  });
+});
+
+// Tomikro 21/10/2026, the first half: the order write failed before anything
+// existed and the admitted checkout stayed frozen. Money no provider collects
+// returns to the editable cart under the same identity; a provider's attempt
+// stays protected for recovery.
+describe('an order write that fails before anything exists (Tomikro 21/10/2026)', () => {
+  const notSaved = 'The order was not saved and no payment was recorded. The cart is kept: press Pay again. If you already took the money, do not take it again.';
+
+  async function payAndFail(button: string, complete: any) {
+    mocks.settings.unavailable = false;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    const identity = draftStorage.draft.checkoutRequestId;
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText(button));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    return identity;
+  }
+
+  it.each([
+    ['refused', 'Confirm cash', async () => false],
+    ['threw', 'Confirm cash', async () => { throw new Error('ORDER_WRITE_FAILED'); }],
+    ['refused', 'Confirm card', async () => false],
+  ])('a %s write (%s) returns the editable cart and the retry reuses the same identity', async (_kind, button, failure) => {
+    mocks.inspect = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: true, checkoutInProgress: false };
+    const complete = vi.fn(failure as any);
+    const identity = await payAndFail(button, complete);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(draftStorage.draft.submission).toBeUndefined();
+    expect(draftStorage.draft.checkoutRequestId).toBe(identity);
+    expect(mocks.toastError).toHaveBeenCalledWith(notSaved, expect.anything());
+    expect(screen.queryByText('Check original checkout')).toBeNull();
+    complete.mockImplementation(async () => true);
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText(button));
+    await waitFor(() => expect(complete).toHaveBeenCalledTimes(2));
+    expect((complete.mock.calls[1] as any[])[0].clientRequestId).toBe(identity);
+  });
+
+  it('keeps a card protected where the cash register charges cards, and while a press still runs', async () => {
+    mocks.inspect = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: false, checkoutInProgress: false };
+    const complete = vi.fn(async () => false);
+    const first = await payAndFail('Confirm card', complete);
+    await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('confirmed'));
+    expect(draftStorage.draft).toMatchObject({ phase: 'checkout_pending', checkoutRequestId: first });
+    expect(mocks.toastError).not.toHaveBeenCalledWith(notSaved, expect.anything());
+    cleanup();
+    draftStorage.draft = null; draftStorage.generation = 0;
+    mocks.inspect = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: true, checkoutInProgress: true };
+    const running = vi.fn(async () => false);
+    await payAndFail('Confirm cash', running);
+    await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('confirmed'));
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    expect(mocks.toastError).not.toHaveBeenCalledWith(notSaved, expect.anything());
+  });
+
+  it('never releases a TWINT receipt the customer already paid', async () => {
+    mocks.settings.unavailable = false;
+    mocks.inspect = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: true, checkoutInProgress: false };
+    const complete = vi.fn(async () => false);
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Admit QR'));
+    await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('admitted'));
+    fireEvent.click(screen.getByText('Confirm TWINT receipt'));
+    await waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('confirmed'));
+    expect(draftStorage.draft.phase).toBe('checkout_pending');
+    expect(mocks.toastError).not.toHaveBeenCalledWith(notSaved, expect.anything());
+  });
+
+  it('after a restart, a card the app had confirmed but never wrote still gets the cashier question', async () => {
+    mocks.settings.unavailable = false;
+    mocks.inspect = { success: true, outcome: 'not_found', canCollect: false, cashierCanConfirmCard: false, checkoutInProgress: false };
+    const complete = vi.fn(async () => false);
+    const first = render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm card'));
+    await waitFor(() => expect(draftStorage.draft?.state.paymentAdmission).toBe('confirmed'));
+    first.unmount();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={complete} />);
+    fireEvent.click(await screen.findByText('Check original checkout'));
+    fireEvent.click(await screen.findByTestId('card-recover-not-charged'));
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    expect(draftStorage.draft.submission).toBeUndefined();
+    expect(complete).toHaveBeenCalledOnce();
+  });
+});
 
 it.each(['paid', 'not-paid'])('recovers an unconfirmed TWINT admission after restart: %s', async decision => {
   mocks.settings.unavailable = false;

@@ -1350,6 +1350,8 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 checkout_drafts::checkout_draft_put,
                 checkout_drafts::checkout_draft_delete,
                 checkout_drafts::checkout_draft_inspect,
+                checkout_drafts::checkout_draft_park,
+                checkout_drafts::checkout_draft_report_failure,
                 checkout_drafts::checkout_draft_resume_declined,
                 table_attempt_recovery::table_attempt_recovery_status,
                 table_attempt_recovery::table_attempt_recovery_confirm_original,

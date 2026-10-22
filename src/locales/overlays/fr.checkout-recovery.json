@@ -31,7 +31,16 @@
       "editServerUpdate": "Les corrections sont temporairement indisponibles. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
       "editSyncRequired": "La modification du paiement ou de la commande n’est pas encore synchronisée. Votre panier est conservé. Réessayez dans un instant.",
       "emptyEditHint": "Pour retirer tous les articles, fermez l’éditeur et annulez la commande.",
-      "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement."
+      "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement.",
+      "cardRecoveryQuestion": "La carte a-t-elle été débitée ? Vérifiez ce montant sur le terminal bancaire avant de répondre. Rien n’est débité ici.",
+      "cardRecoveryRegisterNote": "Cette caisse enregistre les débits par carte via sa caisse enregistreuse ou son terminal, et rien n’y montre un débit de cette carte. Si le terminal bancaire affiche un débit, appelez un responsable.",
+      "cardRecoveryCharged": "La carte a été débitée – l’enregistrer",
+      "cardRecoveryNotCharged": "La carte n’a PAS été débitée – retour au panier",
+      "checkoutPark": "Mettre de côté (responsable)",
+      "checkoutParked": "L’encaissement a été mis de côté et de nouvelles commandes sont possibles. Vérifiez le terminal bancaire : si le client a été débité, ne le débitez pas à nouveau ; un responsable régularise. L’état du POS affiche cette tentative.",
+      "checkoutParkFailed": "L’encaissement n’a pas pu être mis de côté. Il reste protégé ; rien n’a été modifié.",
+      "checkoutParkApprovalSubtitle": "Mettre de côté un encaissement exige le droit d’annuler des paiements. Une personne qui l’a saisit son propre PIN. Rien n’est débité.",
+      "freezeNotSaved": "Le panier n’a pas pu être enregistré pour le paiement : aucun paiement n’a été lancé. Appuyez sur Payer pour réessayer."
     }
   },
   "checkoutRecovery": {
@@ -55,6 +64,15 @@
     "fixCodes": {
       "table_cancellation_not_saved": "Récupérez l’annulation initiale de la table. Ne remettez et ne remboursez pas l’argent une seconde fois.",
       "edit_settlement_not_saved": "Rouvrez la modification conservée et enregistrez la même correction. Ne pas encaisser ni rembourser à nouveau."
+    }
+  },
+  "recovery": {
+    "issues": {
+      "checkoutParked": {
+        "title": "Encaissement mis de côté – vérifiez le terminal bancaire",
+        "summary": "À {{time}}, un responsable a mis de côté un encaissement de {{amount}} {{currency}} pour que la caisse reprenne les commandes. Rien n’a été enregistré pour lui.",
+        "guidance": "Vérifiez ce montant à cette heure sur le terminal bancaire (ou l’app TWINT). Si le client a été débité, ne le débitez pas à nouveau : un responsable saisit la commande et enregistre ce paiement une seule fois. Sinon, rien d’autre n’est nécessaire."
+      }
     }
   }
 }

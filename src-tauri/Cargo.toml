@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.4.134"
+version = "1.4.135"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -165,8 +165,9 @@ serial_test = "3"
 # `sync_queue` table (those fixtures pin the dual-queue transitional-reader
 # contract during the bake window before migration v56 drops the table).
 # `proc-macro2` with `span-locations` makes `Span::start().line` return real
-# source positions so failure messages are actionable.
-syn = { version = "2", features = ["full", "extra-traits"] }
+# source positions so failure messages are actionable. `visit` walks command
+# bodies for `commands::diagnostics::main_thread_command_audit`.
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [profile.dev]

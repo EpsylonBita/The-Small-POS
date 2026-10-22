@@ -31,7 +31,16 @@
       "editServerUpdate": "Le correzioni non sono temporaneamente disponibili. Verifica la connessione e riprova dopo l’aggiornamento del server.",
       "editSyncRequired": "La modifica del pagamento o dell’ordine non è ancora sincronizzata. Il carrello è salvato. Riprova tra poco.",
       "emptyEditHint": "Per rimuovere tutti gli articoli, chiudi l’editor e annulla l’ordine.",
-      "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso."
+      "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso.",
+      "cardRecoveryQuestion": "La carta è stata addebitata? Controlla questo importo sul POS della banca prima di rispondere. Qui non viene addebitato nulla.",
+      "cardRecoveryRegisterNote": "Questa cassa registra gli addebiti con carta tramite il registratore di cassa o il terminale, e lì non risulta alcun addebito di questa carta. Se il POS della banca mostra un addebito, chiama un responsabile.",
+      "cardRecoveryCharged": "La carta è stata addebitata – registrala",
+      "cardRecoveryNotCharged": "La carta NON è stata addebitata – torna al carrello",
+      "checkoutPark": "Metti da parte (responsabile)",
+      "checkoutParked": "Il pagamento è stato messo da parte e si possono prendere nuovi ordini. Controlla il POS della banca: se il cliente è stato addebitato, non addebitarlo di nuovo; lo sistema un responsabile. Lo stato del POS mostra questo tentativo.",
+      "checkoutParkFailed": "Non è stato possibile mettere da parte il pagamento. Resta protetto; non è stato modificato nulla.",
+      "checkoutParkApprovalSubtitle": "Mettere da parte un pagamento richiede il permesso di annullare i pagamenti. Chi ce l’ha inserisce il proprio PIN. Non viene addebitato nulla.",
+      "freezeNotSaved": "Non è stato possibile salvare il carrello per il pagamento, quindi nessun pagamento è stato avviato. Premi Paga per riprovare."
     }
   },
   "checkoutRecovery": {
@@ -55,6 +64,15 @@
     "fixCodes": {
       "table_cancellation_not_saved": "Recupera l’annullamento originale del tavolo. Non consegnare o rimborsare nuovamente il denaro.",
       "edit_settlement_not_saved": "Riapri la modifica salvata e salva la stessa correzione. Non incassare o rimborsare di nuovo."
+    }
+  },
+  "recovery": {
+    "issues": {
+      "checkoutParked": {
+        "title": "Pagamento messo da parte – controlla il POS della banca",
+        "summary": "Alle {{time}} un responsabile ha messo da parte un pagamento di {{amount}} {{currency}} perché la cassa riprendesse gli ordini. Non è stato registrato nulla.",
+        "guidance": "Controlla questo importo a quell’ora sul POS della banca (o nell’app TWINT). Se il cliente è stato addebitato, non addebitarlo di nuovo: un responsabile inserisce l’ordine e registra quel pagamento una sola volta. Altrimenti non serve altro."
+      }
     }
   }
 }

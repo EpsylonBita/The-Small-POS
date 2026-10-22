@@ -3801,6 +3801,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       restoreCheckoutContext({ ...saved.context, checkoutRequestId: saved.checkoutRequestId, checkoutPhase: saved.phase });
       return true;
     }, [restoreCheckoutContext]);
+    // A manager parked the frozen checkout: its id must not carry over to the
+    // next new order.
+    const releaseParkedCheckout = useCallback(() => {
+      resetCheckoutRequestId();
+      setRestoredCheckoutContext(null);
+    }, [resetCheckoutRequestId]);
     const acceptRecoveredCheckout = async () => {
       resetCheckoutRequestId();
       setRestoredCheckoutContext(null);
@@ -8535,6 +8541,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           draftContext={{ selectedTable, tableNumber, tableGuestCount, deliveryZoneInfo }}
           onDraftRestore={restoreCheckoutContext}
           onRecoveredOrder={acceptRecoveredCheckout}
+          onCheckoutParked={releaseParkedCheckout}
         />
 
         {/* Split Payment Modal — rendered at OrderDashboard level so it
@@ -8944,6 +8951,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           draftContext={{ editOrderNumber: currentEditOrderNumber, editHeaders }}
           onDraftRestore={restoreCheckoutContext}
           onRecoveredOrder={acceptRecoveredCheckout}
+          onCheckoutParked={releaseParkedCheckout}
         />
 
         {/* Receipt Preview Modal */}

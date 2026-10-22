@@ -138,13 +138,46 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
       // snapshot/CAS while the brief binding transition drains.
       await retryPrewriteScopeRefusal(() => owner.save(draft), isCurrent);
     }
-    catch (cause) { if (isCurrent()) setError('draftSaveFailed'); throw cause; }
+    catch (cause) {
+      // A stale owner after reopening is an expected cancellation, not a failure.
+      if (isCurrent()) { setError('draftSaveFailed'); owner.reportFailure('save', cause, draft.phase); }
+      throw cause;
+    }
     finally { if (freezeInFlight.current === draft) freezeInFlight.current = null; }
     if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
     pendingSave.current = false;
     lastSaved.current = JSON.stringify(draft);
     setError(null);
     return draft.checkoutRequestId;
+  }, []);
+
+  // Tomikro 21/10/2026: a failed freeze is before any collection. When native
+  // proves it never committed, the cart is editable again; Pay retries it.
+  const abandonFailedFreeze = useCallback(async () => {
+    const draft = current.current;
+    if (!active.current || !store.current || freezeInFlight.current || !pendingSave.current ||
+      draft.phase !== 'checkout_pending' || draft.state.paymentAdmission !== 'admitted') throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    const owner = store.current;
+    const generation = epoch.current;
+    let editing: CheckoutDraft;
+    try { editing = await owner.abandonUncommittedFreeze(draft); }
+    catch (cause) {
+      if (String(cause).includes('CHECKOUT_DRAFT_FREEZE_COMMITTED') && generation === epoch.current && current.current === draft) {
+        // It committed after all: the frozen request is durable and recovery owns it.
+        pendingSave.current = false;
+        lastSaved.current = JSON.stringify(draft);
+        setError(null);
+      } else owner.reportFailure('read', cause, draft.phase);
+      throw cause;
+    }
+    if (generation !== epoch.current || owner !== store.current || current.current !== draft) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    // The store wrote this editable cart before answering.
+    current.current = editing;
+    lastSaved.current = JSON.stringify(editing);
+    pendingSave.current = false;
+    setError(null);
+    setRestored(editing);
+    return editing;
   }, []);
 
   const confirmPaymentAdmission = useCallback(async (paymentData: Record<string, any>) => {
@@ -158,7 +191,11 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     freezeInFlight.current = draft;
     setRestored(draft);
     try { await retryPrewriteScopeRefusal(() => owner.save(draft), isCurrent); }
-    catch (cause) { if (isCurrent()) setError('draftSaveFailed'); throw cause; }
+    catch (cause) {
+      // A stale owner after reopening is an expected cancellation, not a failure.
+      if (isCurrent()) { setError('draftSaveFailed'); owner.reportFailure('save', cause, draft.phase); }
+      throw cause;
+    }
     finally { if (freezeInFlight.current === draft) freezeInFlight.current = null; }
     if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
     pendingSave.current = false;
@@ -167,11 +204,11 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     return draft.submission!;
   }, []);
 
-  const cancelPaymentAdmission = useCallback(async () => {
+  const cancelPaymentAdmission = useCallback(async (options: { confirmed?: boolean; automatic?: boolean } = {}) => {
     if (!active.current || !store.current || freezeInFlight.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
     const owner = store.current;
     const draft = current.current;
-    const editing = await owner.cancelPaymentAdmission();
+    const editing = await owner.cancelPaymentAdmission(options);
     if (owner !== store.current || current.current !== draft || !active.current) throw new Error('CHECKOUT_DRAFT_CHANGED');
     current.current = editing;
     lastSaved.current = JSON.stringify(editing);
@@ -187,6 +224,25 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     current.current = createCheckoutDraft();
     lastSaved.current = '';
     active.current = false;
+    setRestored(null);
+  }, []);
+
+  // A manager parked the frozen checkout: the slot is free and the next
+  // checkout gets a new identity, exactly as after an accepted one.
+  const park = useCallback(async () => {
+    if (!active.current || !store.current || freezeInFlight.current || current.current.phase !== 'checkout_pending') {
+      throw new Error('CHECKOUT_DRAFT_NOT_READY');
+    }
+    const owner = store.current;
+    const generation = epoch.current;
+    const draft = current.current;
+    await owner.park(draft.checkoutRequestId);
+    if (generation !== epoch.current || owner !== store.current || current.current !== draft) throw new Error('CHECKOUT_DRAFT_CHANGED');
+    current.current = createCheckoutDraft();
+    lastSaved.current = '';
+    pendingSave.current = false;
+    active.current = false;
+    setError(null);
     setRestored(null);
   }, []);
 
@@ -248,7 +304,11 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
     return renewed;
   }, []);
 
-  return { status, restored, error, markHydrated, persist, freeze, clear, failedSave, resumeDeclined, renewRefusedEdit,
+  return { status, restored, error, markHydrated, persist, freeze, clear, park, failedSave, resumeDeclined, renewRefusedEdit,
+    abandonFailedFreeze,
+    /** A freeze whose write did not confirm, before any collection. */
+    hasUncommittedFreeze: () => pendingSave.current && current.current.phase === 'checkout_pending' &&
+      current.current.state.paymentAdmission === 'admitted',
     checkAdmission: async (context: { orderId?: string } = {}) => {
       if (!active.current || !store.current || current.current.phase === 'checkout_pending') throw new Error('CHECKOUT_DRAFT_NOT_READY');
       return store.current.checkAdmission(context);
@@ -273,7 +333,10 @@ export function useCheckoutDraftPersistence(enabled: boolean) {
       if (pendingSave.current) {
         if (!active.current) throw new Error('CHECKOUT_DRAFT_NOT_READY');
         try { await owner.retryFrozenSave(draft, () => isCurrent() && active.current); }
-        catch (cause) { if (isCurrent()) setError('draftSaveFailed'); throw cause; }
+        catch (cause) {
+          if (isCurrent()) { setError('draftSaveFailed'); owner.reportFailure('save', cause, draft.phase); }
+          throw cause;
+        }
         if (!isCurrent()) throw new Error('CHECKOUT_DRAFT_CHANGED');
         pendingSave.current = false;
         lastSaved.current = JSON.stringify(draft);

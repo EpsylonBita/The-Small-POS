@@ -1,10 +1,12 @@
 //! Tauri IPC command handlers for the Caller ID / VoIP module.
 
 use std::sync::Arc;
+use tauri::Manager;
 
 use serde_json::Value;
 use tracing::info;
 
+use crate::database_lock::run_blocking_command;
 use crate::{
     callerid::{
         self,
@@ -186,54 +188,66 @@ pub async fn callerid_get_status(
 /// Legacy SIP configuration is read-only in the Phase 1 runtime.
 #[tauri::command]
 pub async fn callerid_save_config(
-    db: tauri::State<'_, db::DbState>,
-    _mgr: tauri::State<'_, Arc<callerid::CallerIdManager>>,
+    app: tauri::AppHandle,
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) -> Result<Value, String> {
-    let payload = crate::parse_channel_payload(arg0, arg1);
-    resolve_runtime_config(&db, Some(&payload))?;
-    Err(LEGACY_CALLER_ID_DISABLED.to_string())
+    run_blocking_command("callerid_save_config", move || {
+        let db = app.state::<db::DbState>();
+        let _mgr = app.state::<Arc<callerid::CallerIdManager>>();
+        let payload = crate::parse_channel_payload(arg0, arg1);
+        resolve_runtime_config(&db, Some(&payload))?;
+        Err(LEGACY_CALLER_ID_DISABLED.to_string())
+    })
+    .await
 }
 
 /// Get caller ID configuration.
 #[tauri::command]
-pub async fn callerid_get_config(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
-    let config = load_config(&db);
+pub async fn callerid_get_config(app: tauri::AppHandle) -> Result<Value, String> {
+    run_blocking_command("callerid_get_config", move || {
+        let db = app.state::<db::DbState>();
+        let config = load_config(&db);
 
-    Ok(serde_json::json!({
-        "mode": config.mode,
-        "transport": config.transport,
-        "sipServer": config.sip_server,
-        "sipPort": config.sip_port,
-        "sipUsername": config.sip_username,
-        "authUsername": config.auth_username,
-        "outboundProxy": config.outbound_proxy,
-        "providerPresetId": config.provider_preset_id,
-        "listenPort": config.listen_port,
-        "enabled": config.enabled,
-        "hasPassword": config.has_password,
-    }))
+        Ok(serde_json::json!({
+            "mode": config.mode,
+            "transport": config.transport,
+            "sipServer": config.sip_server,
+            "sipPort": config.sip_port,
+            "sipUsername": config.sip_username,
+            "authUsername": config.auth_username,
+            "outboundProxy": config.outbound_proxy,
+            "providerPresetId": config.provider_preset_id,
+            "listenPort": config.listen_port,
+            "enabled": config.enabled,
+            "hasPassword": config.has_password,
+        }))
+    })
+    .await
 }
 
 /// Legacy SIP connection tests are unavailable in the Phase 1 runtime.
 #[tauri::command]
 pub async fn callerid_test_connection(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
     arg0: Option<Value>,
     arg1: Option<Value>,
 ) -> Result<Value, String> {
-    let payload = crate::parse_channel_payload(arg0, arg1);
-    resolve_runtime_config(
-        &db,
-        if payload == serde_json::json!({}) {
-            None
-        } else {
-            Some(&payload)
-        },
-    )?;
+    run_blocking_command("callerid_test_connection", move || {
+        let db = app.state::<db::DbState>();
+        let payload = crate::parse_channel_payload(arg0, arg1);
+        resolve_runtime_config(
+            &db,
+            if payload == serde_json::json!({}) {
+                None
+            } else {
+                Some(&payload)
+            },
+        )?;
 
-    Err(LEGACY_CALLER_ID_DISABLED.to_string())
+        Err(LEGACY_CALLER_ID_DISABLED.to_string())
+    })
+    .await
 }
 
 #[cfg(test)]

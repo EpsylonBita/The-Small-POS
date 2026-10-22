@@ -1,6 +1,7 @@
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::info;
 
+use crate::database_lock::run_blocking_command;
 use crate::{
     auth, db, ecr, payload_arg0_as_string, storage, validate_external_url, APP_START_EPOCH,
 };
@@ -11,55 +12,57 @@ fn parse_external_url_payload(arg0: Option<serde_json::Value>) -> Result<String,
 }
 
 #[tauri::command]
-pub async fn app_shutdown(
-    app: tauri::AppHandle,
-    mgr: tauri::State<'_, ecr::DeviceManager>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
-) -> Result<(), auth::GuardedCommandError> {
-    auth::authorize_privileged_action(
-        auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    info!("app:shutdown requested");
-    let _ = app.emit(
-        "control_command_received",
-        serde_json::json!({ "command": "shutdown" }),
-    );
-    let _ = app.emit(
-        "app_shutdown_initiated",
-        serde_json::json!({ "source": "ipc" }),
-    );
-    let _ = app.emit("app_close", serde_json::json!({ "reason": "shutdown" }));
-    mgr.shutdown();
-    app.exit(0);
-    Ok(())
+pub async fn app_shutdown(app: tauri::AppHandle) -> Result<(), auth::GuardedCommandError> {
+    run_blocking_command("app_shutdown", move || {
+        let mgr = app.state::<ecr::DeviceManager>();
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        auth::authorize_privileged_action(
+            auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        info!("app:shutdown requested");
+        let _ = app.emit(
+            "control_command_received",
+            serde_json::json!({ "command": "shutdown" }),
+        );
+        let _ = app.emit(
+            "app_shutdown_initiated",
+            serde_json::json!({ "source": "ipc" }),
+        );
+        let _ = app.emit("app_close", serde_json::json!({ "reason": "shutdown" }));
+        mgr.shutdown();
+        app.exit(0);
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn app_restart(
-    app: tauri::AppHandle,
-    mgr: tauri::State<'_, ecr::DeviceManager>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
-) -> Result<(), auth::GuardedCommandError> {
-    auth::authorize_privileged_action(
-        auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    info!("app:restart requested");
-    let _ = app.emit(
-        "control_command_received",
-        serde_json::json!({ "command": "restart" }),
-    );
-    let _ = app.emit(
-        "app_restart_initiated",
-        serde_json::json!({ "source": "ipc" }),
-    );
-    mgr.shutdown();
-    app.restart();
+pub async fn app_restart(app: tauri::AppHandle) -> Result<(), auth::GuardedCommandError> {
+    run_blocking_command("app_restart", move || {
+        let mgr = app.state::<ecr::DeviceManager>();
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        auth::authorize_privileged_action(
+            auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        info!("app:restart requested");
+        let _ = app.emit(
+            "control_command_received",
+            serde_json::json!({ "command": "restart" }),
+        );
+        let _ = app.emit(
+            "app_restart_initiated",
+            serde_json::json!({ "source": "ipc" }),
+        );
+        mgr.shutdown();
+        app.restart();
+    })
+    .await
 }
 
 #[tauri::command]
@@ -73,53 +76,60 @@ pub async fn app_get_shutdown_status() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn system_get_info(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let db_size = std::fs::metadata(&db.db_path).map(|m| m.len()).unwrap_or(0);
-    let is_configured = storage::is_configured();
-    let start = APP_START_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
-    let uptime = if start > 0 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        now.saturating_sub(start)
-    } else {
-        0
-    };
+pub async fn system_get_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("system_get_info", move || {
+        let db = app.state::<db::DbState>();
+        let db_size = std::fs::metadata(&db.db_path).map(|m| m.len()).unwrap_or(0);
+        let is_configured = storage::is_configured();
+        let start = APP_START_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+        let uptime = if start > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            now.saturating_sub(start)
+        } else {
+            0
+        };
 
-    Ok(serde_json::json!({
-        "platform": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "version": env!("CARGO_PKG_VERSION"),
-        "db_path": db.db_path.to_string_lossy(),
-        "db_size_bytes": db_size,
-        "is_configured": is_configured,
-        "uptime_seconds": uptime,
-    }))
+        Ok(serde_json::json!({
+            "platform": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "version": env!("CARGO_PKG_VERSION"),
+            "db_path": db.db_path.to_string_lossy(),
+            "db_size_bytes": db_size,
+            "is_configured": is_configured,
+            "uptime_seconds": uptime,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn system_open_external_url(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let url_raw = parse_external_url_payload(arg0)?;
-    let parsed = validate_external_url(&url_raw, Some(&db))?;
-    let host = parsed.host_str().unwrap_or("unknown").to_string();
-    let scheme = parsed.scheme().to_string();
-    webbrowser::open(parsed.as_str()).map_err(|e| format!("Failed to open external URL: {e}"))?;
-    info!(
-        scheme = %scheme,
-        host = %host,
-        "Opened external URL via secure gateway"
-    );
-    Ok(serde_json::json!({
-        "success": true,
-        "host": host,
-        "scheme": scheme
-    }))
+    run_blocking_command("system_open_external_url", move || {
+        let db = app.state::<db::DbState>();
+        let url_raw = parse_external_url_payload(arg0)?;
+        let parsed = validate_external_url(&url_raw, Some(&db))?;
+        let host = parsed.host_str().unwrap_or("unknown").to_string();
+        let scheme = parsed.scheme().to_string();
+        webbrowser::open(parsed.as_str())
+            .map_err(|e| format!("Failed to open external URL: {e}"))?;
+        info!(
+            scheme = %scheme,
+            host = %host,
+            "Opened external URL via secure gateway"
+        );
+        Ok(serde_json::json!({
+            "success": true,
+            "host": host,
+            "scheme": scheme
+        }))
+    })
+    .await
 }
 
 #[tauri::command]

@@ -206,6 +206,27 @@ describe('CheckoutDraftStore durable identity', () => {
 });
 
 
+// Review 22/10/2026: a freeze that never committed returned the editable
+// cart in memory only. When the freeze was the cart's first write, closing the
+// app before the next change lost the cart.
+it('writes a freeze that never committed back as the editable cart, so a restart still has it', async () => {
+  const file = fixture();
+  const { transport } = database(file);
+  const native = vi.fn(async (command: string, input: any) => {
+    if (command === 'checkout_draft_put' && input.draft.phase === 'checkout_pending') throw new Error('database is locked');
+    return transport(command, input);
+  });
+  const owner = new CheckoutDraftStore(scope, native);
+  const frozen = { ...cart(), phase: 'checkout_pending' as const, state: { ...cart().state, paymentAdmission: 'admitted' },
+    submission: { paymentData: { method: 'cash', amount: 8 } } };
+  await expect(owner.save(frozen)).rejects.toThrow('database is locked');
+  const editing = await owner.abandonUncommittedFreeze(frozen);
+  expect(editing).toMatchObject({ phase: 'editing', cartItems: frozen.cartItems, checkoutRequestId: frozen.checkoutRequestId,
+    state: { paymentAdmissionCancelled: true } });
+  expect(editing.submission).toBeUndefined();
+  expect(await new CheckoutDraftStore(scope, database(file).transport).load()).toEqual(editing);
+});
+
 it('only adds confirmation evidence to the durably admitted payment', async () => {
   let saved: any = null; let generation = 0;
   const owner = new CheckoutDraftStore(scope, async (command, input) => {
@@ -293,4 +314,114 @@ it.each(['write-fails', 'release-fails', 'ok'])('invalidates a cancelled admissi
     expect(native.mock.calls.some(([command]) => command === 'loyalty_release_redemption')).toBe(false);
     expect(saved.phase).toBe('checkout_pending');
   } else expect(saved.submission).toBeUndefined();
+});
+
+// Tomikro 21/10/2026: a manager parks a frozen checkout recovery cannot
+// settle. Only the native park command may free the slot, only for the exact
+// frozen attempt, and a later save of that cart or identity stays fenced.
+describe('CheckoutDraftStore park', () => {
+  const frozen = () => ({ ...cart(), phase: 'checkout_pending' as const, state: { paymentAdmission: 'admitted' },
+    submission: { paymentData: { method: 'card', amount: 8 } } });
+
+  function nativePark(reply?: (input: any) => any) {
+    let stored: any = null; let generation = 0;
+    const native = vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_put') { stored = input.draft; generation++; }
+      if (command === 'checkout_draft_park') {
+        if (reply) return reply(input);
+        if (input.expectedGeneration !== generation || input.clientRequestId !== stored?.checkoutRequestId ||
+          input.draftId !== stored?.draftId) throw new Error('CHECKOUT_DRAFT_VERSION_CHANGED');
+        stored = null; generation++;
+      }
+      return { success: true, scope, generation, draft: stored };
+    });
+    return native;
+  }
+
+  it('sends the exact frozen identity with its generation, then fences the parked cart and identity', async () => {
+    const native = nativePark();
+    const owner = new CheckoutDraftStore(scope, native);
+    const draft = frozen();
+    await owner.save(draft);
+    await owner.park(draft.checkoutRequestId);
+    expect(native).toHaveBeenCalledWith('checkout_draft_park', { ...scope, expectedGeneration: 1,
+      draftId: draft.draftId, clientRequestId: draft.checkoutRequestId });
+    expect(await owner.load()).toBeNull();
+    await expect(owner.save(draft)).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+    await expect(owner.save({ ...createCheckoutDraft(), checkoutRequestId: draft.checkoutRequestId })).rejects.toThrow('CHECKOUT_REQUEST_ID_CHANGED');
+    const fresh = createCheckoutDraft();
+    expect((await owner.save({ ...fresh, cartItems: [{ id: 'next', quantity: 1 }] }))?.checkoutRequestId).toBe(fresh.checkoutRequestId);
+  });
+
+  it('never parks an editable cart or another attempt, and refuses a reply that still holds a draft', async () => {
+    const editable = nativePark();
+    const owner = new CheckoutDraftStore(scope, editable);
+    const draft = cart();
+    await owner.save(draft);
+    await expect(owner.park(draft.checkoutRequestId)).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+    expect(editable.mock.calls.some(call => call[0] === 'checkout_draft_park')).toBe(false);
+
+    const pending = frozen();
+    const other = new CheckoutDraftStore(scope, nativePark());
+    await other.save(pending);
+    await expect(other.park('another-attempt')).rejects.toThrow('CHECKOUT_DRAFT_CHANGED');
+
+    const stale = new CheckoutDraftStore(scope, nativePark(() => ({ success: true, scope, generation: 2, draft: pending })));
+    await stale.save(pending);
+    await expect(stale.park(pending.checkoutRequestId)).rejects.toThrow('CHECKOUT_DRAFT_RECOVERY_UNAVAILABLE');
+    expect(await stale.load()).toEqual(pending);
+  });
+});
+
+// Tomikro 21/10/2026: a failed freeze left no trace in the support log. A
+// refusal raised in the renderer reaches the native log as one fixed class;
+// native errors (strings) are already logged natively and are not repeated.
+describe('CheckoutDraftStore failure reporting', () => {
+  it('classifies only the renderer\'s own refusals, never native strings or arbitrary errors', async () => {
+    const { draftFailureClass } = await import('../CheckoutDraftStore');
+    expect(draftFailureClass(new Error('CHECKOUT_DRAFT_CHANGED'))).toBe('version_changed');
+    expect(draftFailureClass(new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION'))).toBe('invalid');
+    expect(draftFailureClass(new Error('CHECKOUT_DRAFT_STORAGE_UNAVAILABLE'))).toBe('storage_unavailable');
+    expect(draftFailureClass(new TypeError('x is undefined'))).toBe('unclassified');
+    expect(draftFailureClass('database is locked')).toBeNull();
+    expect(draftFailureClass(new Error('disk unavailable'))).toBeNull();
+  });
+
+  it('reports a refused freeze once with its class and phase, and never the cart', async () => {
+    const native = vi.fn(async (command: string) => command === 'checkout_draft_get'
+      ? { success: true, scope, generation: 0, draft: null } : { success: true });
+    const owner = new CheckoutDraftStore(scope, native);
+    owner.reportFailure('save', new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION'), 'checkout_pending');
+    owner.reportFailure('save', 'database is locked', 'checkout_pending');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const reports = native.mock.calls.filter(call => call[0] === 'checkout_draft_report_failure');
+    expect(reports).toEqual([['checkout_draft_report_failure', { operation: 'save', failureClass: 'invalid', draftPhase: 'checkout_pending' }]]);
+  });
+});
+
+// Tomikro 21/10/2026: each cart change queued its own write, and the checkout
+// waited behind the whole queue. Only the newest editable snapshot is written.
+describe('CheckoutDraftStore editable save coalescing', () => {
+  it('writes only the newest of queued editable snapshots and never skips a freeze', async () => {
+    let stored: any = null; let generation = 0;
+    const native = vi.fn(async (command: string, input: any) => {
+      if (command === 'checkout_draft_put') { await new Promise(resolve => setTimeout(resolve, 5)); stored = input.draft; generation++; }
+      return { success: true, scope, generation, draft: stored };
+    });
+    const owner = new CheckoutDraftStore(scope, native);
+    const base = cart();
+    const saves = [1, 2, 3].map(quantity => owner.save({ ...base, cartItems: [{ id: 'item', quantity }] }));
+    await Promise.all(saves);
+    const puts = native.mock.calls.filter(call => call[0] === 'checkout_draft_put');
+    expect(puts).toHaveLength(1);
+    expect(puts[0][1].draft.cartItems).toEqual([{ id: 'item', quantity: 3 }]);
+    expect((await owner.load())?.cartItems).toEqual([{ id: 'item', quantity: 3 }]);
+    // Negative control: a freeze queued behind an editable save is written.
+    const edit = owner.save({ ...base, cartItems: [{ id: 'item', quantity: 4 }] });
+    const frozen = owner.save({ ...base, cartItems: [{ id: 'item', quantity: 4 }], phase: 'checkout_pending',
+      state: { paymentAdmission: 'admitted' }, submission: { paymentData: { method: 'cash', amount: 8 } } });
+    await Promise.all([edit, frozen]);
+    expect(native.mock.calls.filter(call => call[0] === 'checkout_draft_put')).toHaveLength(3);
+    expect((await owner.load())?.phase).toBe('checkout_pending');
+  });
 });

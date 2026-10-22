@@ -4,10 +4,11 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{debug, info, warn};
 
 use super::offline_mutations::patch_menu_flag;
+use crate::database_lock::run_blocking_command;
 use crate::{
     db, handle_invalid_terminal_credentials, hydrate_terminal_credentials_from_local_settings,
     is_terminal_auth_failure, mask_terminal_id, maybe_lazy_warm_menu_cache, menu,
@@ -780,224 +781,236 @@ pub async fn menu_sync(
 pub async fn menu_update_category(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_menu_category_update_payload(arg0, arg1)?;
-    let id = payload.id;
-    let is_active = payload.is_active;
-    let updated = patch_menu_flag(&db, "categories", &id, "is_active", is_active)?;
-    let queue_payload = serde_json::json!({
-        "id": id,
-        "is_active": is_active,
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        sync_queue::enqueue_payload_item(
-            &conn,
-            "menu_categories",
-            queue_payload
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            Some(0),
-            Some("catalog"),
-            Some("manual"),
-            Some(1),
-        )?
-    };
-    let _ = app.emit(
-        "menu_sync",
-        serde_json::json!({
-            "table": "menu_categories",
-            "action": "update",
-            "id": queue_payload.get("id"),
+    run_blocking_command("menu_update_category", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_menu_category_update_payload(arg0, arg1)?;
+        let id = payload.id;
+        let is_active = payload.is_active;
+        let updated = patch_menu_flag(&db, "categories", &id, "is_active", is_active)?;
+        let queue_payload = serde_json::json!({
+            "id": id,
+            "is_active": is_active,
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            sync_queue::enqueue_payload_item(
+                &conn,
+                "menu_categories",
+                queue_payload
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                Some(0),
+                Some("catalog"),
+                Some("manual"),
+                Some(1),
+            )?
+        };
+        let _ = app.emit(
+            "menu_sync",
+            serde_json::json!({
+                "table": "menu_categories",
+                "action": "update",
+                "id": queue_payload.get("id"),
+                "queued": true,
+                "queueId": queue_id,
+                "item": updated,
+            }),
+        );
+        let _ = app.emit(
+            "sync:status",
+            serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+        );
+
+        Ok(serde_json::json!({
+            "success": true,
             "queued": true,
             "queueId": queue_id,
-            "item": updated,
-        }),
-    );
-    let _ = app.emit(
-        "sync:status",
-        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
-    );
-
-    Ok(serde_json::json!({
-        "success": true,
-        "queued": true,
-        "queueId": queue_id,
-        "data": updated,
-    }))
+            "data": updated,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn menu_update_subcategory(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_menu_subcategory_update_payload(arg0, arg1)?;
-    let id = payload.id;
-    let is_available = payload.is_available;
-    let updated = patch_menu_flag(&db, "subcategories", &id, "is_available", is_available)?;
-    let queue_payload = serde_json::json!({
-        "id": id,
-        "is_available": is_available,
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        sync_queue::enqueue_payload_item(
-            &conn,
-            "menu_subcategories",
-            queue_payload
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            Some(0),
-            Some("catalog"),
-            Some("manual"),
-            Some(1),
-        )?
-    };
-    let _ = app.emit(
-        "menu_sync",
-        serde_json::json!({
-            "table": "subcategories",
-            "action": "update",
-            "id": queue_payload.get("id"),
+    run_blocking_command("menu_update_subcategory", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_menu_subcategory_update_payload(arg0, arg1)?;
+        let id = payload.id;
+        let is_available = payload.is_available;
+        let updated = patch_menu_flag(&db, "subcategories", &id, "is_available", is_available)?;
+        let queue_payload = serde_json::json!({
+            "id": id,
+            "is_available": is_available,
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            sync_queue::enqueue_payload_item(
+                &conn,
+                "menu_subcategories",
+                queue_payload
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                Some(0),
+                Some("catalog"),
+                Some("manual"),
+                Some(1),
+            )?
+        };
+        let _ = app.emit(
+            "menu_sync",
+            serde_json::json!({
+                "table": "subcategories",
+                "action": "update",
+                "id": queue_payload.get("id"),
+                "queued": true,
+                "queueId": queue_id,
+                "item": updated,
+            }),
+        );
+        let _ = app.emit(
+            "sync:status",
+            serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+        );
+
+        Ok(serde_json::json!({
+            "success": true,
             "queued": true,
             "queueId": queue_id,
-            "item": updated,
-        }),
-    );
-    let _ = app.emit(
-        "sync:status",
-        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
-    );
-
-    Ok(serde_json::json!({
-        "success": true,
-        "queued": true,
-        "queueId": queue_id,
-        "data": updated,
-    }))
+            "data": updated,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn menu_update_ingredient(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_menu_ingredient_update_payload(arg0, arg1)?;
-    let id = payload.id;
-    let is_available = payload.is_available;
-    let updated = patch_menu_flag(&db, "ingredients", &id, "is_available", is_available)?;
-    let queue_payload = serde_json::json!({
-        "id": id,
-        "is_available": is_available,
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        sync_queue::enqueue_payload_item(
-            &conn,
-            "menu_ingredients",
-            queue_payload
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            Some(0),
-            Some("catalog"),
-            Some("manual"),
-            Some(1),
-        )?
-    };
-    let _ = app.emit(
-        "menu_sync",
-        serde_json::json!({
-            "table": "ingredients",
-            "action": "update",
-            "id": queue_payload.get("id"),
+    run_blocking_command("menu_update_ingredient", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_menu_ingredient_update_payload(arg0, arg1)?;
+        let id = payload.id;
+        let is_available = payload.is_available;
+        let updated = patch_menu_flag(&db, "ingredients", &id, "is_available", is_available)?;
+        let queue_payload = serde_json::json!({
+            "id": id,
+            "is_available": is_available,
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            sync_queue::enqueue_payload_item(
+                &conn,
+                "menu_ingredients",
+                queue_payload
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                Some(0),
+                Some("catalog"),
+                Some("manual"),
+                Some(1),
+            )?
+        };
+        let _ = app.emit(
+            "menu_sync",
+            serde_json::json!({
+                "table": "ingredients",
+                "action": "update",
+                "id": queue_payload.get("id"),
+                "queued": true,
+                "queueId": queue_id,
+                "item": updated,
+            }),
+        );
+        let _ = app.emit(
+            "sync:status",
+            serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+        );
+
+        Ok(serde_json::json!({
+            "success": true,
             "queued": true,
             "queueId": queue_id,
-            "item": updated,
-        }),
-    );
-    let _ = app.emit(
-        "sync:status",
-        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
-    );
-
-    Ok(serde_json::json!({
-        "success": true,
-        "queued": true,
-        "queueId": queue_id,
-        "data": updated,
-    }))
+            "data": updated,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn menu_update_combo(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_menu_combo_update_payload(arg0, arg1)?;
-    let id = payload.id;
-    let is_active = payload.is_active;
-    let updated = patch_menu_flag(&db, "combos", &id, "is_active", is_active)?;
-    let queue_payload = serde_json::json!({
-        "id": id,
-        "is_active": is_active,
-    });
-    let queue_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        sync_queue::enqueue_payload_item(
-            &conn,
-            "menu_combos",
-            queue_payload
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
-            "UPDATE",
-            &queue_payload,
-            Some(0),
-            Some("catalog"),
-            Some("manual"),
-            Some(1),
-        )?
-    };
-    let _ = app.emit(
-        "menu_sync",
-        serde_json::json!({
-            "table": "menu_combos",
-            "action": "update",
-            "id": queue_payload.get("id"),
+    run_blocking_command("menu_update_combo", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_menu_combo_update_payload(arg0, arg1)?;
+        let id = payload.id;
+        let is_active = payload.is_active;
+        let updated = patch_menu_flag(&db, "combos", &id, "is_active", is_active)?;
+        let queue_payload = serde_json::json!({
+            "id": id,
+            "is_active": is_active,
+        });
+        let queue_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            sync_queue::enqueue_payload_item(
+                &conn,
+                "menu_combos",
+                queue_payload
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "UPDATE",
+                &queue_payload,
+                Some(0),
+                Some("catalog"),
+                Some("manual"),
+                Some(1),
+            )?
+        };
+        let _ = app.emit(
+            "menu_sync",
+            serde_json::json!({
+                "table": "menu_combos",
+                "action": "update",
+                "id": queue_payload.get("id"),
+                "queued": true,
+                "queueId": queue_id,
+                "item": updated,
+            }),
+        );
+        let _ = app.emit(
+            "sync:status",
+            serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
+        );
+
+        Ok(serde_json::json!({
+            "success": true,
             "queued": true,
             "queueId": queue_id,
-            "item": updated,
-        }),
-    );
-    let _ = app.emit(
-        "sync:status",
-        serde_json::json!({ "queuedRemote": 1, "moduleType": "catalog" }),
-    );
-
-    Ok(serde_json::json!({
-        "success": true,
-        "queued": true,
-        "queueId": queue_id,
-        "data": updated,
-    }))
+            "data": updated,
+        }))
+    })
+    .await
 }
 
 #[tauri::command]

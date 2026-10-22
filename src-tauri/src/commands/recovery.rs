@@ -1,9 +1,11 @@
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use tauri::Manager;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::commands::customers;
+use crate::database_lock::run_blocking_command;
 use crate::terminal_helpers::TerminalEventSink;
 use crate::{auth, db, payments, recovery, sync, sync_queue};
 
@@ -399,56 +401,70 @@ fn prepare_invalid_driver_order_repair(
 
 #[tauri::command]
 pub async fn recovery_list_points(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<recovery::RecoveryListResponse, String> {
-    let points = recovery::list_recovery_points(&db)?;
-    Ok(recovery::RecoveryListResponse {
-        success: true,
-        points,
+    run_blocking_command("recovery_list_points", move || {
+        let db = app.state::<db::DbState>();
+        let points = recovery::list_recovery_points(&db)?;
+        Ok(recovery::RecoveryListResponse {
+            success: true,
+            points,
+        })
     })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_create_snapshot(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<recovery::RecoveryPointMetadata, String> {
-    recovery::create_manual_snapshot(&db)
+    run_blocking_command("recovery_create_snapshot", move || {
+        let db = app.state::<db::DbState>();
+        recovery::create_manual_snapshot(&db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_create_pre_action_snapshot(
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<recovery::RecoveryPointMetadata, String> {
-    recovery::create_pre_recovery_action_snapshot(&db)
+    run_blocking_command("recovery_create_pre_action_snapshot", move || {
+        let db = app.state::<db::DbState>();
+        recovery::create_pre_recovery_action_snapshot(&db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_record_action_log(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
-    let entry = recovery_log_entry_from_payload(&raw_entry);
-    let target_refs = entry
-        .get("targetRefs")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let actor = entry.get("actor").cloned().unwrap_or_else(|| json!({}));
-    let id = value_field_str(&entry, "id").unwrap_or_else(|| Uuid::new_v4().to_string());
-    let action_id = value_field_str(&entry, "actionId").unwrap_or_default();
-    let issue_code = value_field_str(&entry, "issueCode").unwrap_or_default();
-    let timestamp =
-        value_field_str(&entry, "timestamp").unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    let success = entry
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let payload_json =
-        serde_json::to_string(&raw_entry).map_err(|e| format!("serialize recovery log: {e}"))?;
+    run_blocking_command("recovery_record_action_log", move || {
+        let db = app.state::<db::DbState>();
+        let raw_entry = arg0.ok_or_else(|| "Missing recovery action log entry".to_string())?;
+        let entry = recovery_log_entry_from_payload(&raw_entry);
+        let target_refs = entry
+            .get("targetRefs")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let actor = entry.get("actor").cloned().unwrap_or_else(|| json!({}));
+        let id = value_field_str(&entry, "id").unwrap_or_else(|| Uuid::new_v4().to_string());
+        let action_id = value_field_str(&entry, "actionId").unwrap_or_default();
+        let issue_code = value_field_str(&entry, "issueCode").unwrap_or_default();
+        let timestamp =
+            value_field_str(&entry, "timestamp").unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let success = entry
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let payload_json = serde_json::to_string(&raw_entry)
+            .map_err(|e| format!("serialize recovery log: {e}"))?;
 
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    conn.execute(
-        "INSERT OR REPLACE INTO recovery_action_log (
+        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO recovery_action_log (
             id, action_id, issue_code, issue_id, recipe_id, recipe_version,
             entity_type, entity_id, order_id, order_number, shift_id, queue_id,
             snapshot_point_id, export_path, success, message, error_message,
@@ -459,33 +475,35 @@ pub async fn recovery_record_action_log(
             ?13, ?14, ?15, ?16, ?17,
             ?18, ?19, ?20, ?21
          )",
-        rusqlite::params![
-            id,
-            action_id,
-            issue_code,
-            value_field_str(&raw_entry, "issueId"),
-            value_field_str(&entry, "recipeId"),
-            value_field_i64(&entry, "recipeVersion"),
-            value_field_str(&raw_entry, "entityType"),
-            value_field_str(&target_refs, "entityId"),
-            value_field_str(&target_refs, "orderId"),
-            value_field_str(&target_refs, "orderNumber"),
-            value_field_str(&target_refs, "shiftId"),
-            value_field_i64(&raw_entry, "queueId"),
-            value_field_str(&entry, "snapshotPointId"),
-            value_field_str(&entry, "exportPath"),
-            if success { 1 } else { 0 },
-            value_field_str(&entry, "message"),
-            value_field_str(&entry, "errorMessage"),
-            value_field_str(&actor, "staffId"),
-            value_field_str(&actor, "staffName"),
-            payload_json,
-            timestamp,
-        ],
-    )
-    .map_err(|e| format!("record recovery action log: {e}"))?;
+            rusqlite::params![
+                id,
+                action_id,
+                issue_code,
+                value_field_str(&raw_entry, "issueId"),
+                value_field_str(&entry, "recipeId"),
+                value_field_i64(&entry, "recipeVersion"),
+                value_field_str(&raw_entry, "entityType"),
+                value_field_str(&target_refs, "entityId"),
+                value_field_str(&target_refs, "orderId"),
+                value_field_str(&target_refs, "orderNumber"),
+                value_field_str(&target_refs, "shiftId"),
+                value_field_i64(&raw_entry, "queueId"),
+                value_field_str(&entry, "snapshotPointId"),
+                value_field_str(&entry, "exportPath"),
+                if success { 1 } else { 0 },
+                value_field_str(&entry, "message"),
+                value_field_str(&entry, "errorMessage"),
+                value_field_str(&actor, "staffId"),
+                value_field_str(&actor, "staffName"),
+                payload_json,
+                timestamp,
+            ],
+        )
+        .map_err(|e| format!("record recovery action log: {e}"))?;
 
-    Ok(entry)
+        Ok(entry)
+    })
+    .await
 }
 
 /// Recovery scheduling is not healing. Expose only the shipped outcome enum;
@@ -499,17 +517,19 @@ fn recovery_action_log_outcome(payload_json: Option<&str>) -> Option<String> {
 #[tauri::command]
 pub async fn recovery_list_action_log(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let limit = arg0
-        .as_ref()
-        .and_then(|value| value_field_i64(value, "limit"))
-        .unwrap_or(25)
-        .clamp(1, 100);
-    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT
+    run_blocking_command("recovery_list_action_log", move || {
+        let db = app.state::<db::DbState>();
+        let limit = arg0
+            .as_ref()
+            .and_then(|value| value_field_i64(value, "limit"))
+            .unwrap_or(25)
+            .clamp(1, 100);
+        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT
                 id, action_id, issue_code, success, created_at, recipe_id,
                 recipe_version, snapshot_point_id, export_path, message,
                 error_message, actor_staff_id, actor_staff_name, entity_id,
@@ -517,134 +537,152 @@ pub async fn recovery_list_action_log(
              FROM recovery_action_log
              ORDER BY created_at DESC
              LIMIT ?1",
-        )
-        .map_err(|e| format!("prepare recovery action log list: {e}"))?;
-    let rows = stmt
-        .query_map(rusqlite::params![limit], |row| {
-            let success: i64 = row.get(3)?;
-            let mut entry = json!({
-                "id": row.get::<_, String>(0)?,
-                "actionId": row.get::<_, String>(1)?,
-                "issueCode": row.get::<_, String>(2)?,
-                "success": success != 0,
-                "timestamp": row.get::<_, String>(4)?,
-                "recipeId": row.get::<_, Option<String>>(5)?,
-                "recipeVersion": row.get::<_, Option<i64>>(6)?,
-                "snapshotPointId": row.get::<_, Option<String>>(7)?,
-                "exportPath": row.get::<_, Option<String>>(8)?,
-                "message": row.get::<_, Option<String>>(9)?,
-                "errorMessage": row.get::<_, Option<String>>(10)?,
-                "actor": {
-                    "staffId": row.get::<_, Option<String>>(11)?,
-                    "staffName": row.get::<_, Option<String>>(12)?,
-                },
-                "targetRefs": {
-                    "entityId": row.get::<_, Option<String>>(13)?,
-                    "orderId": row.get::<_, Option<String>>(14)?,
-                    "orderNumber": row.get::<_, Option<String>>(15)?,
-                    "shiftId": row.get::<_, Option<String>>(16)?,
-                },
-            });
-            let payload_json: Option<String> = row.get(17)?;
-            if let Some(outcome) = recovery_action_log_outcome(payload_json.as_deref()) {
-                entry["outcome"] = Value::String(outcome);
-            }
-            Ok(entry)
-        })
-        .map_err(|e| format!("query recovery action log: {e}"))?;
+            )
+            .map_err(|e| format!("prepare recovery action log list: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit], |row| {
+                let success: i64 = row.get(3)?;
+                let mut entry = json!({
+                    "id": row.get::<_, String>(0)?,
+                    "actionId": row.get::<_, String>(1)?,
+                    "issueCode": row.get::<_, String>(2)?,
+                    "success": success != 0,
+                    "timestamp": row.get::<_, String>(4)?,
+                    "recipeId": row.get::<_, Option<String>>(5)?,
+                    "recipeVersion": row.get::<_, Option<i64>>(6)?,
+                    "snapshotPointId": row.get::<_, Option<String>>(7)?,
+                    "exportPath": row.get::<_, Option<String>>(8)?,
+                    "message": row.get::<_, Option<String>>(9)?,
+                    "errorMessage": row.get::<_, Option<String>>(10)?,
+                    "actor": {
+                        "staffId": row.get::<_, Option<String>>(11)?,
+                        "staffName": row.get::<_, Option<String>>(12)?,
+                    },
+                    "targetRefs": {
+                        "entityId": row.get::<_, Option<String>>(13)?,
+                        "orderId": row.get::<_, Option<String>>(14)?,
+                        "orderNumber": row.get::<_, Option<String>>(15)?,
+                        "shiftId": row.get::<_, Option<String>>(16)?,
+                    },
+                });
+                let payload_json: Option<String> = row.get(17)?;
+                if let Some(outcome) = recovery_action_log_outcome(payload_json.as_deref()) {
+                    entry["outcome"] = Value::String(outcome);
+                }
+                Ok(entry)
+            })
+            .map_err(|e| format!("query recovery action log: {e}"))?;
 
-    let mut entries = Vec::new();
-    for row in rows {
-        entries.push(row.map_err(|e| format!("read recovery action log row: {e}"))?);
-    }
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(|e| format!("read recovery action log row: {e}"))?);
+        }
 
-    Ok(Value::Array(entries))
+        Ok(Value::Array(entries))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_export_current(
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<recovery::RecoveryExportResponse, auth::GuardedCommandError> {
-    auth::authorize_privileged_action(
-        auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    recovery::export_current_bundle(&db).map_err(Into::into)
+    run_blocking_command("recovery_export_current", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        auth::authorize_privileged_action(
+            auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        recovery::export_current_bundle(&db).map_err(Into::into)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_export_point(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<recovery::RecoveryExportResponse, auth::GuardedCommandError> {
-    auth::authorize_privileged_action(
-        auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    let point_id = parse_point_id(arg0)?;
-    recovery::export_recovery_point(&db, &point_id).map_err(Into::into)
+    run_blocking_command("recovery_export_point", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        auth::authorize_privileged_action(
+            auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        let point_id = parse_point_id(arg0)?;
+        recovery::export_recovery_point(&db, &point_id).map_err(Into::into)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_restore_point(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<recovery::RecoveryRestoreResponse, auth::GuardedCommandError> {
-    auth::authorize_privileged_action(
-        auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    let point_id = parse_point_id(arg0)?;
-    recovery::stage_restore_from_point(&db, &point_id).map_err(Into::into)
+    run_blocking_command("recovery_restore_point", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        auth::authorize_privileged_action(
+            auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        let point_id = parse_point_id(arg0)?;
+        recovery::stage_restore_from_point(&db, &point_id).map_err(Into::into)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn recovery_open_dir(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let app_data_dir = db
-        .db_path
-        .parent()
-        .ok_or_else(|| "database path does not have a parent directory".to_string())?;
-    let recovery_root = recovery::recovery_root_for_app_data(app_data_dir);
-    let requested_path = parse_open_dir_payload(arg0);
-    let target = if let Some(requested_path) = requested_path {
-        let candidate = std::path::PathBuf::from(&requested_path);
-        let normalized = if candidate.is_file() {
-            candidate
-                .parent()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| recovery_root.clone())
+    run_blocking_command("recovery_open_dir", move || {
+        let db = app.state::<db::DbState>();
+        let app_data_dir = db
+            .db_path
+            .parent()
+            .ok_or_else(|| "database path does not have a parent directory".to_string())?;
+        let recovery_root = recovery::recovery_root_for_app_data(app_data_dir);
+        let requested_path = parse_open_dir_payload(arg0);
+        let target = if let Some(requested_path) = requested_path {
+            let candidate = std::path::PathBuf::from(&requested_path);
+            let normalized = if candidate.is_file() {
+                candidate
+                    .parent()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| recovery_root.clone())
+            } else {
+                candidate
+            };
+            if !normalized.starts_with(&recovery_root) {
+                return Err("Recovery path must stay inside the recovery directory".into());
+            }
+            normalized
         } else {
-            candidate
+            recovery_root.clone()
         };
-        if !normalized.starts_with(&recovery_root) {
-            return Err("Recovery path must stay inside the recovery directory".into());
+
+        if !target.exists() {
+            return Err(format!(
+                "Recovery directory does not exist: {}",
+                target.display()
+            ));
         }
-        normalized
-    } else {
-        recovery_root.clone()
-    };
 
-    if !target.exists() {
-        return Err(format!(
-            "Recovery directory does not exist: {}",
-            target.display()
-        ));
-    }
-
-    open_directory(&target)?;
-    Ok(serde_json::json!({
-        "success": true,
-        "path": target.to_string_lossy().to_string(),
-    }))
+        open_directory(&target)?;
+        Ok(serde_json::json!({
+            "success": true,
+            "path": target.to_string_lossy().to_string(),
+        }))
+    })
+    .await
 }
 
 #[tauri::command]

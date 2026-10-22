@@ -681,6 +681,33 @@ const preferredCheckoutBlockerMethod = (
   return null;
 };
 
+/// Tomikro 21/10/2026: a manager parked a frozen checkout so the till could
+/// take orders again. Nothing was recorded for it: each one is checked against
+/// the bank POS (or TWINT app) for its amount and time, and money already
+/// taken is settled by a manager, never charged again.
+const buildParkedCheckoutIssues = (systemHealth: DiagnosticsSystemHealth): RecoveryIssue[] =>
+  (systemHealth.parkedCheckouts?.details ?? []).map((parked) => ({
+    id: `checkout-parked-${parked.generation}`,
+    code: 'checkout_parked',
+    severity: 'warning',
+    status: 'blocking',
+    entityType: 'checkout',
+    entityId: String(parked.generation),
+    titleKey: 'recovery.issues.checkoutParked.title',
+    summaryKey: 'recovery.issues.checkoutParked.summary',
+    guidanceKey: 'recovery.issues.checkoutParked.guidance',
+    actions: [],
+    params: {
+      amount: parked.amount === null ? '' : Number(parked.amount).toFixed(2),
+      currency: parked.currency ?? '',
+      method: parked.method ?? '',
+      time: Number.isNaN(Date.parse(parked.parkedAt)) ? parked.parkedAt
+        : new Date(parked.parkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      parkedAt: parked.parkedAt,
+      outcome: parked.outcome,
+    },
+  }));
+
 const buildCheckoutPaymentBlockerIssues = (
   systemHealth: DiagnosticsSystemHealth,
   localize?: PaymentBlockerLocalizer,
@@ -2229,6 +2256,9 @@ export function buildSyncRecoveryIssues({
     customerDirectoryFailureResult.issues.length > 0;
   pushIssue(issues, buildMissingCredentialIssue(systemHealth, lastParitySync));
   for (const issue of buildCheckoutPaymentBlockerIssues(systemHealth, localizePaymentBlocker)) {
+    pushIssue(issues, issue);
+  }
+  for (const issue of buildParkedCheckoutIssues(systemHealth)) {
     pushIssue(issues, issue);
   }
   pushIssue(issues, buildInvalidOrdersIssue(systemHealth));

@@ -1,7 +1,8 @@
 use chrono::Utc;
 use serde::Deserialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, storage};
 
 #[derive(Debug)]
@@ -692,127 +693,132 @@ pub async fn modules_fetch_from_admin(
 }
 
 #[tauri::command]
-pub async fn modules_get_cached(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let cache = match crate::read_module_cache(&db) {
-        Ok(c) => c,
-        Err(_) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": "No cached modules found",
-                "modules": serde_json::Value::Null,
-                "isValid": false
-            }))
-        }
-    };
+pub async fn modules_get_cached(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("modules_get_cached", move || {
+        let db = app.state::<db::DbState>();
+        let cache = match crate::read_module_cache(&db) {
+            Ok(c) => c,
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "error": "No cached modules found",
+                    "modules": serde_json::Value::Null,
+                    "isValid": false
+                }))
+            }
+        };
 
-    let repair_access_retained = native_repair_cache_access_available(&db);
-    let api_modules = cached_modules_for_native_access(&cache, repair_access_retained);
-    let organization_id = cache
-        .get("organizationId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let terminal_id = cache
-        .get("terminalId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let (current_org, current_branch, current_terminal, current_admin_url) =
-        current_module_identity(&db);
-    let identity_match = cache_identity_matches(
-        &cache,
-        &current_org,
-        &current_branch,
-        &current_terminal,
-        &current_admin_url,
-    );
-    let api_timestamp = cache
-        .get("apiTimestamp")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let cache_age = cache_age_ms(&cache);
-    let is_valid = cache_age < crate::MODULE_CACHE_TTL_MS && identity_match;
+        let repair_access_retained = native_repair_cache_access_available(&db);
+        let api_modules = cached_modules_for_native_access(&cache, repair_access_retained);
+        let organization_id = cache
+            .get("organizationId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let terminal_id = cache
+            .get("terminalId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let (current_org, current_branch, current_terminal, current_admin_url) =
+            current_module_identity(&db);
+        let identity_match = cache_identity_matches(
+            &cache,
+            &current_org,
+            &current_branch,
+            &current_terminal,
+            &current_admin_url,
+        );
+        let api_timestamp = cache
+            .get("apiTimestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cache_age = cache_age_ms(&cache);
+        let is_valid = cache_age < crate::MODULE_CACHE_TTL_MS && identity_match;
 
-    Ok(serde_json::json!({
-        "success": true,
-        "modules": {
+        Ok(serde_json::json!({
             "success": true,
-            "modules": api_modules,
-            "organization_id": organization_id,
-            "terminal_id": terminal_id,
-            "timestamp": api_timestamp,
-            "stats": crate::stats_for_modules(&api_modules),
-            "processing_time_ms": 0,
-        },
-        "isValid": is_valid,
-        "cacheAge": cache_age,
-        "cacheAgeMs": cache_age,
-        "stale": cache_age >= crate::MODULE_CACHE_TTL_MS,
-        "identityMatch": identity_match,
-        "repairAccessRetained": repair_access_retained
-    }))
+            "modules": {
+                "success": true,
+                "modules": api_modules,
+                "organization_id": organization_id,
+                "terminal_id": terminal_id,
+                "timestamp": api_timestamp,
+                "stats": crate::stats_for_modules(&api_modules),
+                "processing_time_ms": 0,
+            },
+            "isValid": is_valid,
+            "cacheAge": cache_age,
+            "cacheAgeMs": cache_age,
+            "stale": cache_age >= crate::MODULE_CACHE_TTL_MS,
+            "identityMatch": identity_match,
+            "repairAccessRetained": repair_access_retained
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn modules_save_cache(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_modules_save_cache_payload(arg0);
+    run_blocking_command("modules_save_cache", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_modules_save_cache_payload(arg0);
 
-    let organization_id = parsed
-        .organization_id
-        .or_else(|| storage::get_credential("organization_id"))
-        .unwrap_or_default();
-    let branch_id = storage::get_credential("branch_id")
-        .or_else(|| crate::read_local_setting(&db, "terminal", "branch_id"))
-        .unwrap_or_default();
-    let terminal_id = parsed
-        .terminal_id
-        .or_else(|| storage::get_credential("terminal_id"))
-        .unwrap_or_default();
-    let admin_dashboard_url = parsed
-        .admin_dashboard_url
-        .or_else(|| storage::get_credential("admin_dashboard_url"))
-        .unwrap_or_default();
-    let api_timestamp = parsed
-        .api_timestamp
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let organization_id = parsed
+            .organization_id
+            .or_else(|| storage::get_credential("organization_id"))
+            .unwrap_or_default();
+        let branch_id = storage::get_credential("branch_id")
+            .or_else(|| crate::read_local_setting(&db, "terminal", "branch_id"))
+            .unwrap_or_default();
+        let terminal_id = parsed
+            .terminal_id
+            .or_else(|| storage::get_credential("terminal_id"))
+            .unwrap_or_default();
+        let admin_dashboard_url = parsed
+            .admin_dashboard_url
+            .or_else(|| storage::get_credential("admin_dashboard_url"))
+            .unwrap_or_default();
+        let api_timestamp = parsed
+            .api_timestamp
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-    let repair_access_retained = native_repair_cache_access_available(&db);
-    let mut modules = parsed.modules;
-    if !repair_access_retained {
-        modules.retain(|module| {
-            module.get("module_id").and_then(serde_json::Value::as_str) != Some("repairs")
+        let repair_access_retained = native_repair_cache_access_available(&db);
+        let mut modules = parsed.modules;
+        if !repair_access_retained {
+            modules.retain(|module| {
+                module.get("module_id").and_then(serde_json::Value::as_str) != Some("repairs")
+            });
+        }
+
+        let cache_payload = serde_json::json!({
+            "apiModules": modules,
+            "organizationId": organization_id,
+            "branchId": branch_id,
+            "terminalId": terminal_id,
+            "adminDashboardUrl": admin_dashboard_url,
+            "timestamp": Utc::now().timestamp_millis(),
+            "apiTimestamp": api_timestamp,
         });
-    }
+        crate::write_module_cache(&db, &cache_payload)?;
+        let _ = app.emit(
+            "modules_refresh_needed",
+            serde_json::json!({
+                "count": cache_payload
+                    .get("apiModules")
+                    .and_then(|v| v.as_array())
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            }),
+        );
 
-    let cache_payload = serde_json::json!({
-        "apiModules": modules,
-        "organizationId": organization_id,
-        "branchId": branch_id,
-        "terminalId": terminal_id,
-        "adminDashboardUrl": admin_dashboard_url,
-        "timestamp": Utc::now().timestamp_millis(),
-        "apiTimestamp": api_timestamp,
-    });
-    crate::write_module_cache(&db, &cache_payload)?;
-    let _ = app.emit(
-        "modules_refresh_needed",
-        serde_json::json!({
-            "count": cache_payload
-                .get("apiModules")
-                .and_then(|v| v.as_array())
-                .map(|v| v.len())
-                .unwrap_or(0)
-        }),
-    );
-
-    Ok(serde_json::json!({ "success": true }))
+        Ok(serde_json::json!({ "success": true }))
+    })
+    .await
 }
 
 #[cfg(test)]

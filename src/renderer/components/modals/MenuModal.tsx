@@ -423,6 +423,8 @@ interface MenuModalProps {
   draftContext?: Record<string, any>;
   onDraftRestore?: (context: Record<string, any>, renewal?: { previousCheckoutRequestId: string }) => void;
   onRecoveredOrder?: (order: any) => Promise<void>;
+  /** A manager parked the frozen checkout: the host's checkout id ends with it. */
+  onCheckoutParked?: () => void;
   selectedCustomer?: any;
   selectedAddress?: any;
   orderType?: 'pickup' | 'delivery' | 'dine-in';
@@ -491,6 +493,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   draftContext,
   onDraftRestore,
   onRecoveredOrder,
+  onCheckoutParked,
   selectedCustomer,
   selectedAddress,
   orderType = 'delivery',
@@ -566,6 +569,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // prepared again under a new event that replaces it, or closed by a manager
   // without recording money. Neither collects or returns anything again.
   const [refusedEdit, setRefusedEdit] = useState<{ event: string; orderId: string } | null>(null);
+  // Tomikro 21/10/2026: a card admitted before the till closed, with no order,
+  // terminal row or held payment anywhere, used to end in "needs
+  // reconciliation" for good. The cashier now answers what the bank POS shows
+  // (`chargeConfirmable` is false where the till's own cash register charges
+  // cards and has no record of it). Whatever a check still cannot settle, a
+  // manager can park, so one frozen checkout never blocks the till.
+  const [cardRecovery, setCardRecovery] = useState<{ chargeConfirmable: boolean; confirmed: boolean } | null>(null);
+  const [parkOffered, setParkOffered] = useState(false);
   const supersedesEditEventRef = useRef<string | undefined>(undefined);
   const [legacyCurrency, setLegacyCurrency] = useState<{ shiftId: string; currency: string; orderId?: string } | null>(null);
   const [legacyCurrencyPin, setLegacyCurrencyPin] = useState('');
@@ -2518,11 +2529,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     void draftPersistence.persist(draftSnapshot).catch(draftPersistence.failedSave);
   }, [isOpen, draftPersistence.status, draftSnapshotSignature]);
 
-  const recoverSavedCheckout = async (twintDecision?: 'paid') => {
+  const draftPendingNow = draftPersistence.isPending();
+  useEffect(() => {
+    if (!draftPendingNow) { setCardRecovery(null); setParkOffered(false); }
+  }, [draftPendingNow]);
+
+  const recoverSavedCheckout = async (decision?: 'paid' | 'card_charged') => {
     if (draftRecoveryInFlight.current || isLocalProcessing) return;
     draftRecoveryInFlight.current = true;
     setDraftRecoveryBusy(true);
+    setCardRecovery(null);
     try {
+      // A freeze that never confirmed came before any collection: back to the
+      // editable cart when native proves it never committed.
+      if (draftPersistence.hasUncommittedFreeze() && await returnFailedFreezeToCart()) return;
       let proof = await draftPersistence.inspect();
       let original = draftPersistence.restored?.submission;
       if (['declined', 'not_sent', 'not_charged'].includes(proof.outcome) && original?.paymentData?.method === 'card') {
@@ -2603,21 +2623,39 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       }
       if (proof.outcome === 'not_found' || proof.outcome === 'declined') {
         const method = original?.paymentData?.method;
+        const admitted = draftPersistence.restored?.state.paymentAdmission === 'admitted';
         let confirmedOnRecovery = false;
-        if (proof.outcome === 'not_found' && twintDecision === 'paid' && method === 'twint' &&
-          draftPersistence.restored?.state.paymentAdmission === 'admitted') {
+        if (proof.outcome === 'not_found' && decision === 'paid' && method === 'twint' && admitted) {
           original = await draftPersistence.confirmPaymentAdmission({ ...original!.paymentData, metadata: {
             ...original!.paymentData.metadata, provider: 'twint', confirmation: 'cashier', confirmation_action: 'confirm',
           } });
           confirmedOnRecovery = true;
         }
+        // A card the cashier already confirmed in the app, whose order was
+        // never written, gets the same question.
+        const confirmedPlainCard = method === 'card' && draftPersistence.restored?.state.paymentAdmission === 'confirmed' &&
+          !original?.paymentData?.metadata?.confirmation;
+        // The cashier saw this amount on the bank POS. Only the receipt
+        // evidence is added; the frozen request, amount and identity stay, and
+        // native refuses it wherever its cash register would charge the card.
+        if (proof.outcome === 'not_found' && decision === 'card_charged' && method === 'card' &&
+          (admitted || confirmedPlainCard) && proof.cashierCanConfirmCard === true) {
+          const metadata = { ...original!.paymentData.metadata, confirmation: 'cashier', confirmation_action: 'card_charged_outside_till' };
+          original = admitted ? await draftPersistence.confirmPaymentAdmission({ ...original!.paymentData, metadata })
+            : { ...original!, paymentData: { ...original!.paymentData, metadata } };
+          confirmedOnRecovery = true;
+        }
+        const confirmedCardReceipt = method === 'card' &&
+          (confirmedOnRecovery || draftPersistence.restored?.state.paymentAdmission === 'confirmed') &&
+          original?.paymentData?.metadata?.confirmation === 'cashier' &&
+          original?.paymentData?.metadata?.confirmation_action === 'card_charged_outside_till';
         const confirmedTwintReceipt = method === 'twint' &&
           (confirmedOnRecovery || draftPersistence.restored?.state.paymentAdmission === 'confirmed') &&
           original?.paymentData?.currency === 'CHF' && Boolean(original?.paymentData?.idempotencyKey) &&
           original?.paymentData?.metadata?.provider === 'twint' &&
           original?.paymentData?.metadata?.confirmation === 'cashier' &&
           ['confirm', 'skip'].includes(original?.paymentData?.metadata?.confirmation_action);
-        const noProviderCollection = ['cash', 'table', 'pending'].includes(method) || confirmedTwintReceipt ||
+        const noProviderCollection = ['cash', 'table', 'pending'].includes(method) || confirmedTwintReceipt || confirmedCardReceipt ||
           (original?.is_ghost === true && !method);
         if (original && noProviderCollection && onOrderComplete) {
           // Replay the exact confirmed request. A not_found read never permits
@@ -2629,9 +2667,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             return;
           }
         }
+        if (proof.outcome === 'not_found' && method === 'card' && (admitted || confirmedPlainCard) && !confirmedOnRecovery &&
+          proof.checkoutInProgress !== true) {
+          setCardRecovery({ chargeConfirmable: proof.cashierCanConfirmCard === true, confirmed: confirmedPlainCard });
+          setParkOffered(true);
+          return;
+        }
       }
       const orderId = proof.order?.id || proof.orderId;
       if (proof.outcome !== 'saved' || !orderId) {
+        setParkOffered(true);
         toast.error(t('modals.menu.draftNeedsReconciliation', { defaultValue: 'The original checkout still needs reconciliation. No new payment was started. Use payment recovery or ask a manager.' }));
         return;
       }
@@ -2641,8 +2686,31 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       await onRecoveredOrder?.(order);
       await draftPersistence.clear(true);
       onClose();
-    } catch { toast.error(t('modals.menu.draftRecoveryUnavailable', { defaultValue: 'The original checkout could not be verified. Its saved cart remains protected.' })); }
+    } catch {
+      setParkOffered(true);
+      toast.error(t('modals.menu.draftRecoveryUnavailable', { defaultValue: 'The original checkout could not be verified. Its saved cart remains protected.' }));
+    }
     finally { draftRecoveryInFlight.current = false; setDraftRecoveryBusy(false); }
+  };
+
+  // A manager sets aside what recovery cannot settle (an unknown terminal
+  // result, held money, a replay the till keeps refusing). Native re-proves
+  // the attempt, archives it and records the approver; nothing is collected,
+  // voided or deleted, and Health lists the parked attempt.
+  const parkFrozenCheckout = async () => {
+    if (draftRecoveryInFlight.current || isLocalProcessing || !draftPersistence.isPending()) return;
+    draftRecoveryInFlight.current = true;
+    setDraftRecoveryBusy(true);
+    try {
+      await runWithPrivilegedConfirmation({ scope: 'cash_drawer_control', action: () => draftPersistence.park(),
+        approvalSubtitle: t('modals.menu.checkoutParkApprovalSubtitle', { defaultValue: 'Setting aside a checkout needs the right to void payments. A staff member who has it enters their own PIN. Nothing is charged.' }) });
+      admittedCheckoutRef.current = null;
+      onCheckoutParked?.();
+      toast.success(t('modals.menu.checkoutParked', { defaultValue: 'The checkout was set aside and new orders can be taken. Check the bank POS: if the customer was charged, do not charge again; a manager settles it. Health lists this attempt.' }), { duration: 10000 });
+      onClose();
+    } catch {
+      toast.error(t('modals.menu.checkoutParkFailed', { defaultValue: 'The checkout could not be set aside. It stays protected; nothing was changed.' }));
+    } finally { draftRecoveryInFlight.current = false; setDraftRecoveryBusy(false); }
   };
 
   // Re-quote: keep the cart, renew the draft identity and let the next save
@@ -3017,22 +3085,37 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       await draftPersistence.freeze({ ...draftSnapshot, state: { ...draftSnapshot.state, paymentAdmission: 'admitted' } }, submission);
       return true;
     } catch {
-      // No QR or terminal operation was started. The retained draft owns recovery.
+      // No QR or terminal operation was started. Tomikro 21/10/2026: when
+      // native proves the frozen write never committed, the cart is editable
+      // again and Pay retries it; otherwise the retained draft owns recovery.
       setShowPaymentModal(false);
       setCheckoutPhase('editing');
+      await returnFailedFreezeToCart();
       return false;
     }
   };
 
-  const cancelCheckoutPaymentAdmission = async () => {
+  // `confirmed`: the cashier says a card the app had confirmed, whose order
+  // was never written, was not charged (Tomikro 21/10/2026).
+  const returnFailedFreezeToCart = async (): Promise<boolean> => {
+    try {
+      await draftPersistence.abandonFailedFreeze();
+      admittedCheckoutRef.current = null;
+      toast.error(t('modals.menu.freezeNotSaved', { defaultValue: 'The cart could not be saved for payment, so no payment was started. Press Pay to try again.' }));
+      return true;
+    } catch { return false; }
+  };
+
+  const cancelCheckoutPaymentAdmission = async (options: { confirmed?: boolean } = {}) => {
     if (draftRecoveryInFlight.current) return false;
     const admission = admittedCheckoutRef.current;
-    if (!admission && !(draftPersistence.isPending() && draftPersistence.restored?.state.paymentAdmission === 'admitted')) return true;
-    if (admission?.confirmed) return false;
+    const pendingState = draftPersistence.isPending() ? draftPersistence.restored?.state.paymentAdmission : undefined;
+    if (!admission && !(pendingState === 'admitted' || (options.confirmed === true && pendingState === 'confirmed'))) return true;
+    if (admission?.confirmed && options.confirmed !== true) return false;
     draftRecoveryInFlight.current = true;
     setDraftRecoveryBusy(true);
     try {
-      await draftPersistence.cancelPaymentAdmission();
+      await draftPersistence.cancelPaymentAdmission(options.confirmed === true ? { confirmed: true } : {});
       admittedCheckoutRef.current = null;
       setShowPaymentModal(false);
       setCheckoutPhase('editing');
@@ -3041,6 +3124,23 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       toast.error(t('modals.menu.draftRecoveryUnavailable'));
       return false;
     } finally { draftRecoveryInFlight.current = false; setDraftRecoveryBusy(false); }
+  };
+
+  // Tomikro 21/10/2026: an order write that failed before anything existed
+  // left the admitted checkout frozen, and a card had no way back. When native
+  // proves nothing names the attempt and no provider collected the money (cash,
+  // split, a card this till records by hand), the admission ends and the cart
+  // is editable again under the same identity, as before 20/10. A provider's
+  // attempt (TWINT, a register that charges cards) stays for recovery.
+  const releaseUnwrittenAdmission = async (): Promise<boolean> => {
+    const admission = admittedCheckoutRef.current;
+    if (!draftPersistence.isPending() || admission?.fallbackOrderId) return false;
+    try {
+      await draftPersistence.cancelPaymentAdmission({ confirmed: true, automatic: true });
+      admittedCheckoutRef.current = null;
+      toast.error(t('modals.menu.orderNotSavedCartKept', { defaultValue: 'The order was not saved and no payment was recorded. The cart is kept: press Pay again. If you already took the money, do not take it again.' }), { duration: 10000 });
+      return true;
+    } catch { return false; }
   };
 
   const handlePaymentComplete = async (paymentData?: any): Promise<boolean> => {
@@ -3069,6 +3169,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         }
         if (completionResult === false) {
           setIsLocalProcessing(false);
+          if (!(paymentData?.roomChargeFallback === true) && await releaseUnwrittenAdmission()) {
+            setShowPaymentModal(false);
+            setCheckoutPhase('editing');
+            return false;
+          }
           setCheckoutPhase('payment');
           return false;
         }
@@ -3091,7 +3196,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return true;
     } catch (error) {
       console.error('Error completing order:', error);
-      toast.error(t('modals.menu.orderFailed'));
+      if (!await releaseUnwrittenAdmission()) toast.error(t('modals.menu.orderFailed'));
       setShowPaymentModal(false);
       setIsLocalProcessing(false);
       setCheckoutPhase('editing');
@@ -3277,6 +3382,25 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 {t('modals.menu.twintRecoveryNotPaid')}
               </button>
             </>}
+            {draftPersistence.isPending() && cardRecovery && <div data-testid="card-recovery" className="mt-2 space-y-2">
+              <p>{t('modals.menu.cardRecoveryQuestion', { defaultValue: 'Was the card charged? Check the bank POS for this amount before you answer. Nothing is charged here.' })}</p>
+              {!cardRecovery.chargeConfirmable && <p>{t('modals.menu.cardRecoveryRegisterNote', { defaultValue: 'This till records card charges through its cash register or terminal, and nothing there shows this card was charged. If the bank POS shows a charge, ask a manager.' })}</p>}
+              <div className="flex flex-wrap gap-3">
+                {cardRecovery.chargeConfirmable && <button type="button" data-testid="card-recover-charged" disabled={draftRecoveryBusy || isLocalProcessing}
+                  onClick={() => void recoverSavedCheckout('card_charged')} className="rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                  {t('modals.menu.cardRecoveryCharged', { defaultValue: 'The card was charged – record it' })}
+                </button>}
+                <button type="button" data-testid="card-recover-not-charged" disabled={draftRecoveryBusy || isLocalProcessing}
+                  onClick={() => void cancelCheckoutPaymentAdmission({ confirmed: cardRecovery.confirmed })} className="rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+                  {t('modals.menu.cardRecoveryNotCharged', { defaultValue: 'The card was NOT charged – back to the cart' })}
+                </button>
+              </div>
+            </div>}
+            {draftPersistence.isPending() && parkOffered && !refusedEdit && <button type="button" data-testid="checkout-park"
+              disabled={draftRecoveryBusy || isLocalProcessing} onClick={() => void parkFrozenCheckout()}
+              className="ml-3 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50">
+              {t('modals.menu.checkoutPark', { defaultValue: 'Set aside (manager)' })}
+            </button>}
             {draftPersistence.isPending() && <button
               type="button"
               disabled={draftRecoveryBusy || isSavingEdit || checkoutPhase !== 'editing' || draftPersistence.error === 'draftSaveFailed'}

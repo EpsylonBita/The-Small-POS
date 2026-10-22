@@ -4041,60 +4041,70 @@ fn resolve_driver_display_name(conn: &rusqlite::Connection, driver_id: &str) -> 
 }
 
 #[tauri::command]
-pub async fn order_get_all(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<Vec<serde_json::Value>, String> {
-    sync::get_all_orders(&db)
+pub async fn order_get_all(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    run_blocking_command("order_get_all", move || {
+        let db = app.state::<db::DbState>();
+        sync::get_all_orders(&db)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn order_get_by_id(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let id = payload_arg0_as_string(
-        arg0,
-        &["orderId", "order_id", "id", "supabaseId", "supabase_id"],
-    )
-    .or(arg1)
-    .ok_or("Missing order ID")?;
-    let resolved_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_renderer_order_id(&conn, &id)?
-    };
-    sync::get_order_by_id(&db, &resolved_id)
+    run_blocking_command("order_get_by_id", move || {
+        let db = app.state::<db::DbState>();
+        let id = payload_arg0_as_string(
+            arg0,
+            &["orderId", "order_id", "id", "supabaseId", "supabase_id"],
+        )
+        .or(arg1)
+        .ok_or("Missing order ID")?;
+        let resolved_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            resolve_renderer_order_id(&conn, &id)?
+        };
+        sync::get_order_by_id(&db, &resolved_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn order_get_by_customer_phone(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let customer_phone =
-        payload_arg0_as_string(arg0, &["customerPhone", "customer_phone", "phone"])
-            .or(arg1)
-            .ok_or("Missing customer phone")?;
-    let all_orders = sync::get_all_orders_since_utc(&db, None)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let organization_id = db::get_setting(&conn, "terminal", "organization_id")
-        .filter(|id| !id.trim().is_empty())
-        .or_else(|| storage::get_credential("organization_id"))
-        .unwrap_or_default();
-    let branch_id = db::get_setting(&conn, "terminal", "branch_id")
-        .filter(|id| !id.trim().is_empty())
-        .or_else(|| storage::get_credential("branch_id"))
-        .unwrap_or_default();
-    let filtered = customer_history_for_scope(
-        &conn,
-        all_orders,
-        &customer_phone,
-        &organization_id,
-        &branch_id,
-    )?;
+    run_blocking_command("order_get_by_customer_phone", move || {
+        let db = app.state::<db::DbState>();
+        let customer_phone =
+            payload_arg0_as_string(arg0, &["customerPhone", "customer_phone", "phone"])
+                .or(arg1)
+                .ok_or("Missing customer phone")?;
+        let all_orders = sync::get_all_orders_since_utc(&db, None)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let organization_id = db::get_setting(&conn, "terminal", "organization_id")
+            .filter(|id| !id.trim().is_empty())
+            .or_else(|| storage::get_credential("organization_id"))
+            .unwrap_or_default();
+        let branch_id = db::get_setting(&conn, "terminal", "branch_id")
+            .filter(|id| !id.trim().is_empty())
+            .or_else(|| storage::get_credential("branch_id"))
+            .unwrap_or_default();
+        let filtered = customer_history_for_scope(
+            &conn,
+            all_orders,
+            &customer_phone,
+            &organization_id,
+            &branch_id,
+        )?;
 
-    Ok(serde_json::json!({ "success": true, "orders": filtered }))
+        Ok(serde_json::json!({ "success": true, "orders": filtered }))
+    })
+    .await
 }
 
 fn customer_history_for_scope(
@@ -4347,84 +4357,87 @@ pub(crate) fn apply_order_status_in_connection(
 pub async fn order_update_status(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_order_update_status_payload(arg0, arg1)?;
-    let order_id_raw = payload.order_id;
-    let status = normalize_status_for_storage(&payload.status);
-    let estimated_time = payload.estimated_time;
-    // Only honor cancellation_reason when the transition is actually to
-    // cancelled. For other transitions (e.g. complete -> delivered) we never
-    // overwrite the existing reason column.
-    let cancellation_reason: Option<String> = if status == "cancelled" {
-        payload
-            .cancellation_reason
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
-    let now = Utc::now().to_rfc3339();
+    run_blocking_command("order_update_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_order_update_status_payload(arg0, arg1)?;
+        let order_id_raw = payload.order_id;
+        let status = normalize_status_for_storage(&payload.status);
+        let estimated_time = payload.estimated_time;
+        // Only honor cancellation_reason when the transition is actually to
+        // cancelled. For other transitions (e.g. complete -> delivered) we never
+        // overwrite the existing reason column.
+        let cancellation_reason: Option<String> = if status == "cancelled" {
+            payload
+                .cancellation_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        let now = Utc::now().to_rfc3339();
 
-    let (actual_order_id, remote_order_id) = match apply_order_status_locally(
-        &db,
-        &order_id_raw,
-        &status,
-        estimated_time,
-        cancellation_reason.as_deref(),
-        &now,
-    )? {
-        LocalStatusChange::Blocked(answer) => return Ok(answer),
-        LocalStatusChange::Applied {
-            order_id,
-            remote_order_id,
-        } => (order_id, remote_order_id),
-    };
+        let (actual_order_id, remote_order_id) = match apply_order_status_locally(
+            &db,
+            &order_id_raw,
+            &status,
+            estimated_time,
+            cancellation_reason.as_deref(),
+            &now,
+        )? {
+            LocalStatusChange::Blocked(answer) => return Ok(answer),
+            LocalStatusChange::Applied {
+                order_id,
+                remote_order_id,
+            } => (order_id, remote_order_id),
+        };
 
-    let mut event_payload = serde_json::json!({
-        "orderId": actual_order_id,
-        "status": status,
-        "estimatedTime": estimated_time
-    });
-    if let Some(reason) = cancellation_reason.as_ref() {
-        if let Some(obj) = event_payload.as_object_mut() {
-            obj.insert(
-                "cancellationReason".to_string(),
-                serde_json::Value::String(reason.clone()),
+        let mut event_payload = serde_json::json!({
+            "orderId": actual_order_id,
+            "status": status,
+            "estimatedTime": estimated_time
+        });
+        if let Some(reason) = cancellation_reason.as_ref() {
+            if let Some(obj) = event_payload.as_object_mut() {
+                obj.insert(
+                    "cancellationReason".to_string(),
+                    serde_json::Value::String(reason.clone()),
+                );
+            }
+        } else if status == "pending" {
+            if let Some(obj) = event_payload.as_object_mut() {
+                obj.insert("cancellationReason".to_string(), serde_json::Value::Null);
+            }
+        }
+        let _ = app.emit("order_status_updated", event_payload.clone());
+        let _ = app.emit("order_realtime_update", event_payload);
+
+        if let Some(remote_order_id) = remote_order_id.as_deref() {
+            spawn_immediate_order_status_patch(
+                &db,
+                build_order_status_patch_body(
+                    remote_order_id,
+                    &status,
+                    estimated_time,
+                    cancellation_reason.as_deref(),
+                    if status == "cancelled" {
+                        Some(now.as_str())
+                    } else {
+                        None
+                    },
+                ),
             );
         }
-    } else if status == "pending" {
-        if let Some(obj) = event_payload.as_object_mut() {
-            obj.insert("cancellationReason".to_string(), serde_json::Value::Null);
-        }
-    }
-    let _ = app.emit("order_status_updated", event_payload.clone());
-    let _ = app.emit("order_realtime_update", event_payload);
 
-    if let Some(remote_order_id) = remote_order_id.as_deref() {
-        spawn_immediate_order_status_patch(
-            &db,
-            build_order_status_patch_body(
-                remote_order_id,
-                &status,
-                estimated_time,
-                cancellation_reason.as_deref(),
-                if status == "cancelled" {
-                    Some(now.as_str())
-                } else {
-                    None
-                },
-            ),
-        );
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": actual_order_id
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id
+        }))
+    })
+    .await
 }
 
 fn convert_pickup_order_to_delivery_inner(
@@ -4787,19 +4800,22 @@ pub async fn order_update_customer_info(
 #[tauri::command]
 pub async fn order_convert_pickup_to_delivery(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_pickup_to_delivery_conversion_payload(arg0)?;
-    let (actual_order_id, order_json) = convert_pickup_order_to_delivery_inner(&db, payload)?;
+    run_blocking_command("order_convert_pickup_to_delivery", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_pickup_to_delivery_conversion_payload(arg0)?;
+        let (actual_order_id, order_json) = convert_pickup_order_to_delivery_inner(&db, payload)?;
 
-    let _ = app.emit("order_realtime_update", order_json.clone());
+        let _ = app.emit("order_realtime_update", order_json.clone());
 
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": actual_order_id,
-        "data": order_json
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id,
+            "data": order_json
+        }))
+    })
+    .await
 }
 
 fn ensure_full_order_item_replacement_safe(
@@ -7471,41 +7487,42 @@ pub(crate) fn apply_server_order_deletion(
 pub async fn order_delete(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_order_delete_payload(arg0, arg1)?;
-    let order_id_raw = payload.order_id;
+    run_blocking_command("order_delete", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_order_delete_payload(arg0, arg1)?;
+        let order_id_raw = payload.order_id;
 
-    let mut kept_hidden = false;
-    let actual_order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let actual_order_id = resolve_renderer_deletable_order_id(&conn, &order_id_raw)?;
-        if let Some(id) = actual_order_id.as_ref() {
-            payments::ensure_ecommerce_order_mutation_allowed(&conn, id, None)?;
-        }
-        // R7 (round 3, 01/10/2026): the admin's delete broadcast is a server
-        // deletion. An order with payment rows or inside a closed Z is kept,
-        // hidden as deleted; any other order is deleted here too.
-        if let Some(actual_id) = actual_order_id.as_ref() {
-            if server_deletion_keeps_order(&conn, actual_id)? {
-                hide_server_deleted_order(&conn, actual_id, &Utc::now().to_rfc3339())?;
-                kept_hidden = true;
+        let mut kept_hidden = false;
+        let actual_order_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let actual_order_id = resolve_renderer_deletable_order_id(&conn, &order_id_raw)?;
+            if let Some(id) = actual_order_id.as_ref() {
+                payments::ensure_ecommerce_order_mutation_allowed(&conn, id, None)?;
             }
-        }
-        if let Some(actual_id) = actual_order_id.as_ref().filter(|_| !kept_hidden) {
-            conn.execute(
-                "DELETE FROM orders WHERE id = ?1",
-                rusqlite::params![actual_id],
-            )
-            .map_err(|e| format!("delete order: {e}"))?;
-            // Electron parity: order delete remains local-only.
-            // Also purge stale queued order delete operations so they cannot poison
-            // /api/pos/orders/sync (which only accepts insert/update).
-            delete_renderer_order_delete_queue_rows(&conn, actual_id)?;
-            // Compatibility cleanup for historical pre-parity order delete rows.
-            conn.execute(
-                "DELETE FROM sync_queue
+            // R7 (round 3, 01/10/2026): the admin's delete broadcast is a server
+            // deletion. An order with payment rows or inside a closed Z is kept,
+            // hidden as deleted; any other order is deleted here too.
+            if let Some(actual_id) = actual_order_id.as_ref() {
+                if server_deletion_keeps_order(&conn, actual_id)? {
+                    hide_server_deleted_order(&conn, actual_id, &Utc::now().to_rfc3339())?;
+                    kept_hidden = true;
+                }
+            }
+            if let Some(actual_id) = actual_order_id.as_ref().filter(|_| !kept_hidden) {
+                conn.execute(
+                    "DELETE FROM orders WHERE id = ?1",
+                    rusqlite::params![actual_id],
+                )
+                .map_err(|e| format!("delete order: {e}"))?;
+                // Electron parity: order delete remains local-only.
+                // Also purge stale queued order delete operations so they cannot poison
+                // /api/pos/orders/sync (which only accepts insert/update).
+                delete_renderer_order_delete_queue_rows(&conn, actual_id)?;
+                // Compatibility cleanup for historical pre-parity order delete rows.
+                conn.execute(
+                    "DELETE FROM sync_queue
                  WHERE entity_type = 'order'
                    AND operation = 'delete'
                    AND (entity_id = ?1 OR status IN ('pending', 'in_progress', 'failed', 'deferred'))
@@ -7515,22 +7532,24 @@ pub async fn order_delete(
                               OR orders.supabase_id = sync_queue.entity_id)
                          AND lower(trim(COALESCE(orders.order_context, ''))) = 'repair_settlement'
                    )",
-                rusqlite::params![actual_id],
-            )
-            .map_err(|e| format!("delete legacy renderer order queue rows: {e}"))?;
+                    rusqlite::params![actual_id],
+                )
+                .map_err(|e| format!("delete legacy renderer order queue rows: {e}"))?;
+            }
+            actual_order_id
+        };
+
+        if let Some(actual_id) = actual_order_id.as_ref() {
+            let _ = app.emit("order_deleted", serde_json::json!({ "orderId": actual_id }));
         }
-        actual_order_id
-    };
 
-    if let Some(actual_id) = actual_order_id.as_ref() {
-        let _ = app.emit("order_deleted", serde_json::json!({ "orderId": actual_id }));
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": actual_order_id,
-        "keptHidden": kept_hidden
-    }))
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id,
+            "keptHidden": kept_hidden
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -8321,75 +8340,87 @@ fn enqueue_order_creation_fiscal(
 #[tauri::command]
 pub async fn order_create(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing order payload")?;
-    let normalized = payload.get("orderData").cloned().unwrap_or(payload);
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, &normalized)?;
-    }
-    let mut resp = sync::create_order(&db, &normalized, &app)?;
-    let order_id = resp
-        .get("orderId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            resp.get("order")
-                .and_then(|v| v.get("id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-
-    if let Some(order_id) = order_id.clone() {
-        if let Some(obj) = resp.as_object_mut() {
-            obj.entry("orderId".to_string())
-                .or_insert_with(|| serde_json::Value::String(order_id.clone()));
-            obj.entry("data".to_string())
-                .or_insert_with(|| serde_json::json!({ "orderId": order_id.clone() }));
+    run_blocking_command("order_create", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing order payload")?;
+        let normalized = payload.get("orderData").cloned().unwrap_or(payload);
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, &normalized)?;
         }
+        let mut resp = sync::create_order(&db, &normalized, &app)?;
+        let order_id = resp
+            .get("orderId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                resp.get("order")
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
 
-        // T22 (fiscalization-core / Req 4.2 + Req 12): best-effort fire-and-forget
-        // handoff to the fiscal dispatcher. The order itself is already persisted;
-        // a fiscal enqueue failure here MUST NOT fail the order_create command —
-        // the cashier always gets a successful response.
-        if let Ok(conn_guard) = db.conn.lock() {
-            if let Err(fiscal_err) =
-                enqueue_order_creation_fiscal(&conn_guard, &order_id, &normalized)
-            {
+        if let Some(order_id) = order_id.clone() {
+            if let Some(obj) = resp.as_object_mut() {
+                obj.entry("orderId".to_string())
+                    .or_insert_with(|| serde_json::Value::String(order_id.clone()));
+                obj.entry("data".to_string())
+                    .or_insert_with(|| serde_json::json!({ "orderId": order_id.clone() }));
+            }
+
+            // T22 (fiscalization-core / Req 4.2 + Req 12): best-effort fire-and-forget
+            // handoff to the fiscal dispatcher. The order itself is already persisted;
+            // a fiscal enqueue failure here MUST NOT fail the order_create command —
+            // the cashier always gets a successful response.
+            if let Ok(conn_guard) = db.conn.lock() {
+                if let Err(fiscal_err) =
+                    enqueue_order_creation_fiscal(&conn_guard, &order_id, &normalized)
+                {
+                    tracing::warn!(
+                        "[order_create] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
+                    );
+                }
+            } else {
                 tracing::warn!(
-                    "[order_create] fiscal enqueue best-effort failed for order {order_id}: {fiscal_err}"
+                    "[order_create] could not lock db for fiscal enqueue (order {order_id}); skipping handoff"
                 );
             }
-        } else {
-            tracing::warn!(
-                "[order_create] could not lock db for fiscal enqueue (order {order_id}); skipping handoff"
-            );
         }
-    }
 
-    // NOTE: We intentionally do NOT emit order_created/order_realtime_update here.
-    // Self-created orders are added to state directly in the frontend store.
-    // Only order_save_from_remote() emits these events (for orders from other terminals).
-    Ok(resp)
+        // NOTE: We intentionally do NOT emit order_created/order_realtime_update here.
+        // Self-created orders are added to state directly in the frontend store.
+        // Only order_save_from_remote() emits these events (for orders from other terminals).
+        Ok(resp)
+    })
+    .await
 }
 
+/// The new-order checkout (cash, card, TWINT, room charge). Tomikro
+/// 21/10/2026: it waited for `DbState.conn` on a Tokio runtime worker, so a
+/// busy database parked the runtime and the till froze at "Complete order".
+/// It now runs on the blocking pool; its awaits (fiscal device, moved-money
+/// save retries) are driven on that same blocking thread.
 #[tauri::command]
 pub async fn order_create_with_initial_payment(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    mgr: tauri::State<'_, crate::ecr::DeviceManager>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing order payload")?;
-    create_order_with_initial_payment(
-        &db,
-        &mgr,
-        &app,
-        payload,
-        &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
-    )
+    run_blocking_command("order_create_with_initial_payment", move || {
+        let db = app.state::<db::DbState>();
+        let mgr = app.state::<crate::ecr::DeviceManager>();
+        let payload = arg0.ok_or("Missing order payload")?;
+        let answer = tauri::async_runtime::block_on(create_order_with_initial_payment(
+            &db,
+            &mgr,
+            &app,
+            payload,
+            &crate::unsaved_payments::MOVED_MONEY_SAVE_DELAYS_MS,
+        ));
+        crate::checkout_drafts::log_create_failure(&answer);
+        answer
+    })
     .await
 }
 
@@ -8426,6 +8457,16 @@ pub(crate) fn claim_checkout(
         return Ok(None);
     }
     Ok(Some(CheckoutInProgress(key)))
+}
+
+/// Whether a press of this checkout is still running on this till. An
+/// unreadable registry counts as running: recovery then waits.
+pub(crate) fn checkout_in_progress(db: &db::DbState, client_request_id: &str) -> bool {
+    let key = format!("{}|{client_request_id}", db.db_path.display());
+    active_checkouts()
+        .lock()
+        .map(|active| active.contains(&key))
+        .unwrap_or(true)
 }
 
 /// The answer to a press of Pay while the same checkout is still in progress.
@@ -8473,7 +8514,9 @@ pub(crate) async fn create_order_with_initial_payment(
 ) -> Result<serde_json::Value, String> {
     let mut normalized = payload.get("orderData").cloned().unwrap_or(payload);
     {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("order_create_with_initial_payment")
+            .map_err(|e| e.to_string())?;
         ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, &normalized)?;
     }
     let initial_payment = normalized
@@ -8531,7 +8574,9 @@ pub(crate) async fn create_order_with_initial_payment(
     };
 
     let existing_order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("order_create_with_initial_payment")
+            .map_err(|e| e.to_string())?;
         let existing = conn
             .query_row(
                 "SELECT id, lower(trim(COALESCE(order_context, '')))
@@ -8555,7 +8600,9 @@ pub(crate) async fn create_order_with_initial_payment(
     // A durable cashier-confirmed TWINT receipt is saved only as its original
     // checkout. A changed cart, method or new checkout must use recovery.
     let manual_pending = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db
+            .lock_traced("order_create_with_initial_payment")
+            .map_err(|e| e.to_string())?;
         crate::unsaved_payments::list(&conn, None)?
             .into_iter()
             .find(|entry| entry.is_manual_twint() && entry.is_new_order_checkout())
@@ -8580,7 +8627,9 @@ pub(crate) async fn create_order_with_initial_payment(
         // This checkout's charge is held as not saved (item E): replay the
         // held order and payment, the payload the card was charged for.
         let held = {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let conn = db
+                .lock_traced("order_create_with_initial_payment")
+                .map_err(|e| e.to_string())?;
             crate::unsaved_payments::list(&conn, Some(&client_request_id))?
                 .into_iter()
                 .find(crate::unsaved_payments::UnsavedChargedPayment::is_new_order_checkout)
@@ -8597,7 +8646,32 @@ pub(crate) async fn create_order_with_initial_payment(
         }
     }
 
-    if existing_order_id.is_none() && !manual_twint {
+    // Tomikro 21/10/2026: the cashier saw this card charged on a separate
+    // bank POS after the till closed mid-checkout. It is recorded as collected
+    // and never reaches a terminal, so it is refused wherever this till's cash
+    // register would charge the card or a terminal row already names it.
+    let cashier_confirmed_card =
+        crate::checkout_drafts::is_cashier_confirmed_card(&initial_payment);
+    if cashier_confirmed_card && existing_order_id.is_none() {
+        let outside_till_only = {
+            let conn = db
+                .lock_traced("order_create_with_initial_payment")
+                .map_err(|e| e.to_string())?;
+            crate::checkout_drafts::card_charge_outside_till_only(&conn, &client_request_id)
+                .unwrap_or(false)
+        };
+        if !outside_till_only {
+            return Ok(serde_json::json!({
+                "success": false,
+                "errorCode": "CARD_CONFIRMATION_REFUSED",
+                "paymentApproved": false,
+                "orderPersisted": false,
+                "error": "This till's cash register charges cards and has no record of this one. Nothing was charged or saved.",
+            }));
+        }
+    }
+
+    if existing_order_id.is_none() && !manual_twint && !cashier_confirmed_card {
         let checkout = match crate::commands::ecr::fiscal_checkout_for_order_payload(
             db,
             mgr,
@@ -8785,7 +8859,7 @@ pub(crate) async fn create_order_with_initial_payment(
         }
 
         if !fiscal_enqueued {
-            if let Ok(conn) = db.conn.lock() {
+            if let Ok(conn) = db.lock_traced("order_create_with_initial_payment") {
                 if let Err(fiscal_err) =
                     crate::fiscal::dispatcher::enqueue_for_order(&conn, &order_id)
                 {
@@ -8802,31 +8876,34 @@ pub(crate) async fn create_order_with_initial_payment(
 
 #[tauri::command]
 pub async fn orders_clear_all(
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
-    // Gap review 2026-07-10 P0: `DELETE FROM orders` from the webview with no
-    // authorization. Gate it like the sibling reset commands and snapshot first.
-    crate::auth::authorize_privileged_action(
-        crate::auth::PrivilegedActionScope::SystemControl,
-        &db,
-        &auth_state,
-    )?;
-    crate::recovery::snapshot_before_destructive_action(
-        &db,
-        crate::recovery::RecoveryPointKind::PreClearOperationalData,
-    )?;
-    let count = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM orders", [])
-            .map_err(|e| e.to_string())?
-    };
-    let _ = app.emit("orders_cleared", serde_json::json!({ "count": count }));
-    Ok(serde_json::json!({
-        "success": true,
-        "cleared": count
-    }))
+    run_blocking_command("orders_clear_all", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        // Gap review 2026-07-10 P0: `DELETE FROM orders` from the webview with no
+        // authorization. Gate it like the sibling reset commands and snapshot first.
+        crate::auth::authorize_privileged_action(
+            crate::auth::PrivilegedActionScope::SystemControl,
+            &db,
+            &auth_state,
+        )?;
+        crate::recovery::snapshot_before_destructive_action(
+            &db,
+            crate::recovery::RecoveryPointKind::PreClearOperationalData,
+        )?;
+        let count = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM orders", [])
+                .map_err(|e| e.to_string())?
+        };
+        let _ = app.emit("orders_cleared", serde_json::json!({ "count": count }));
+        Ok(serde_json::json!({
+            "success": true,
+            "cleared": count
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -9804,7 +9881,6 @@ pub async fn order_cancel_with_approval(
                 "cancellationReason": reason,
             })),
             None,
-            db.clone(),
             app,
         )
         .await
@@ -9834,62 +9910,65 @@ pub async fn order_assign_driver(
     arg0: Option<String>,
     arg1: Option<String>,
     arg2: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let driver_id = arg1.ok_or("Missing driverId")?;
-    let notes = arg2;
-    let now = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let (order_id, driver_name, assigned_status) =
-        assign_driver_locally(&conn, &order_id_raw, &driver_id, notes.as_deref(), &now)?;
-    let earning_created = true;
-    drop(conn);
-    // Use is_print_action_enabled (not setting_bool) so the default-true behaviour
-    // is preserved on fresh installs where the key is absent from local_settings.
-    let driver_assigned_print_enabled =
-        crate::print::is_print_action_enabled(&db, "driver_assigned");
+    run_blocking_command("order_assign_driver", move || {
+        let db = app.state::<db::DbState>();
+        let order_id_raw = arg0.ok_or("Missing orderId")?;
+        let driver_id = arg1.ok_or("Missing driverId")?;
+        let notes = arg2;
+        let now = Utc::now().to_rfc3339();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (order_id, driver_name, assigned_status) =
+            assign_driver_locally(&conn, &order_id_raw, &driver_id, notes.as_deref(), &now)?;
+        let earning_created = true;
+        drop(conn);
+        // Use is_print_action_enabled (not setting_bool) so the default-true behaviour
+        // is preserved on fresh installs where the key is absent from local_settings.
+        let driver_assigned_print_enabled =
+            crate::print::is_print_action_enabled(&db, "driver_assigned");
 
-    let assign_slip_payload = serde_json::json!({
-        "slip_mode": "assign_driver",
-        "driverId": driver_id,
-        "driverName": driver_name,
-    });
-    if driver_assigned_print_enabled {
-        if let Err(error) = print::enqueue_print_job_with_payload(
-            &db,
-            "delivery_slip",
-            &order_id,
-            None,
-            Some(&assign_slip_payload),
-            &app,
-        ) {
-            tracing::warn!(
-                order_id = %order_id,
-                error = %error,
-                "Failed to enqueue delivery slip print job"
-            );
+        let assign_slip_payload = serde_json::json!({
+            "slip_mode": "assign_driver",
+            "driverId": driver_id,
+            "driverName": driver_name,
+        });
+        if driver_assigned_print_enabled {
+            if let Err(error) = print::enqueue_print_job_with_payload(
+                &db,
+                "delivery_slip",
+                &order_id,
+                None,
+                Some(&assign_slip_payload),
+                &app,
+            ) {
+                tracing::warn!(
+                    order_id = %order_id,
+                    error = %error,
+                    "Failed to enqueue delivery slip print job"
+                );
+            }
         }
-    }
 
-    let payload = serde_json::json!({
-        "orderId": order_id_raw,
-        "driverId": driver_id,
-        "driverName": driver_name,
-        "status": assigned_status,
-        "notes": notes,
-        "earningCreated": earning_created
-    });
-    let _ = app.emit(
-        "order_status_updated",
-        serde_json::json!({
+        let payload = serde_json::json!({
             "orderId": order_id_raw,
+            "driverId": driver_id,
+            "driverName": driver_name,
             "status": assigned_status,
-        }),
-    );
-    let _ = app.emit("order_realtime_update", payload.clone());
-    Ok(serde_json::json!({ "success": true, "data": payload }))
+            "notes": notes,
+            "earningCreated": earning_created
+        });
+        let _ = app.emit(
+            "order_status_updated",
+            serde_json::json!({
+                "orderId": order_id_raw,
+                "status": assigned_status,
+            }),
+        );
+        let _ = app.emit("order_realtime_update", payload.clone());
+        Ok(serde_json::json!({ "success": true, "data": payload }))
+    })
+    .await
 }
 
 /// The local half of `order_assign_driver`, in one connection: the order
@@ -10104,37 +10183,40 @@ fn reset_order_row_to_active(
 #[tauri::command]
 pub async fn order_reset_to_active(
     arg0: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let now = Utc::now().to_rfc3339();
-    let (order_id, order_type, driver_was_unassigned, removed_driver_earning) = {
-        let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
-        reset_order_to_active_locally(&mut conn, &order_id_raw, &now)?
-    };
+    run_blocking_command("order_reset_to_active", move || {
+        let db = app.state::<db::DbState>();
+        let order_id_raw = arg0.ok_or("Missing orderId")?;
+        let now = Utc::now().to_rfc3339();
+        let (order_id, order_type, driver_was_unassigned, removed_driver_earning) = {
+            let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+            reset_order_to_active_locally(&mut conn, &order_id_raw, &now)?
+        };
 
-    let event_payload = serde_json::json!({
-        "orderId": order_id,
-        "status": "pending",
-        "orderType": order_type,
-        "driverId": serde_json::Value::Null,
-        "driverName": serde_json::Value::Null,
-        "resetToActive": true,
-    });
-    let _ = app.emit("order_status_updated", event_payload.clone());
-    let _ = app.emit("order_realtime_update", event_payload.clone());
-
-    Ok(serde_json::json!({
-        "success": true,
-        "data": {
-            "orderId": order_id_raw,
+        let event_payload = serde_json::json!({
+            "orderId": order_id,
             "status": "pending",
             "orderType": order_type,
-            "driverUnassigned": driver_was_unassigned,
-            "driverEarningRemoved": removed_driver_earning,
-        }
-    }))
+            "driverId": serde_json::Value::Null,
+            "driverName": serde_json::Value::Null,
+            "resetToActive": true,
+        });
+        let _ = app.emit("order_status_updated", event_payload.clone());
+        let _ = app.emit("order_realtime_update", event_payload.clone());
+
+        Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "orderId": order_id_raw,
+                "status": "pending",
+                "orderType": order_type,
+                "driverUnassigned": driver_was_unassigned,
+                "driverEarningRemoved": removed_driver_earning,
+            }
+        }))
+    })
+    .await
 }
 
 /// The local half of `order_reset_to_active` (RESET of a delivered or
@@ -10377,13 +10459,17 @@ pub(crate) fn notify_platform_ready_locally(
 #[tauri::command]
 pub async fn order_notify_platform_ready(
     arg0: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let now = Utc::now().to_rfc3339();
-    let (remote_order_id, local_status) =
-        match notify_platform_ready_locally(&db, &order_id_raw, &now)? {
+    run_blocking_command("order_notify_platform_ready", move || {
+        let db = app.state::<db::DbState>();
+        let order_id_raw = arg0.ok_or("Missing orderId")?;
+        let now = Utc::now().to_rfc3339();
+        let (remote_order_id, local_status) = match notify_platform_ready_locally(
+            &db,
+            &order_id_raw,
+            &now,
+        )? {
             // Nothing written, queued or sent; the renderer refreshes quietly.
             PlatformReadyLocal::AlreadyClosed { status } => {
                 return Ok(
@@ -10402,24 +10488,26 @@ pub async fn order_notify_platform_ready(
                 local_status,
             } => (remote_order_id, local_status),
         };
-    let payload = serde_json::json!({ "orderId": order_id_raw, "status": local_status });
-    let _ = app.emit("order_status_updated", payload.clone());
-    let _ = app.emit("order_realtime_update", payload);
-    // Immediate server PATCH so the platform "ready" relay fires in seconds
-    // instead of waiting for the 15s sync loop (the queue entry above stays as
-    // the offline-replay fallback, matching order_approve/order_decline).
-    // Deliberately ONLY "ready": an immediate "delivered" would close the
-    // server order before the queued 'ready' fallback replays, turning that
-    // replay into a permanent invalid-transition failure on every online
-    // press. The queued 'delivered' row closes the server order on the next
-    // sync tick, after the queued 'ready' replays in order.
-    if let Some(remote_order_id) = remote_order_id.as_deref() {
-        spawn_immediate_order_status_patch(
-            &db,
-            build_order_status_patch_body(remote_order_id, "ready", None, None, None),
-        );
-    }
-    Ok(serde_json::json!({ "success": true, "status": local_status }))
+        let payload = serde_json::json!({ "orderId": order_id_raw, "status": local_status });
+        let _ = app.emit("order_status_updated", payload.clone());
+        let _ = app.emit("order_realtime_update", payload);
+        // Immediate server PATCH so the platform "ready" relay fires in seconds
+        // instead of waiting for the 15s sync loop (the queue entry above stays as
+        // the offline-replay fallback, matching order_approve/order_decline).
+        // Deliberately ONLY "ready": an immediate "delivered" would close the
+        // server order before the queued 'ready' fallback replays, turning that
+        // replay into a permanent invalid-transition failure on every online
+        // press. The queued 'delivered' row closes the server order on the next
+        // sync tick, after the queued 'ready' replays in order.
+        if let Some(remote_order_id) = remote_order_id.as_deref() {
+            spawn_immediate_order_status_patch(
+                &db,
+                build_order_status_patch_body(remote_order_id, "ready", None, None, None),
+            );
+        }
+        Ok(serde_json::json!({ "success": true, "status": local_status }))
+    })
+    .await
 }
 
 /// True for platform orders carried by the platform's own fleet
@@ -10455,172 +10543,178 @@ pub async fn order_update_preparation(
     arg1: Option<String>,
     arg2: Option<f64>,
     arg3: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id = arg0.ok_or("Missing orderId")?;
-    let stage = arg1.unwrap_or_else(|| "preparing".to_string());
-    let progress = arg2.unwrap_or(0.0).clamp(0.0, 100.0);
-    let message = arg3;
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        ensure_renderer_order_is_not_repair_settlement(&conn, &order_id)?;
-        let canonical_order_id = resolve_renderer_order_id(&conn, &order_id)?;
-        ensure_box_order_mutation_allowed(
-            &conn,
-            &canonical_order_id,
-            "preparing",
-            BoxOrderMutation::Generic,
+    run_blocking_command("order_update_preparation", move || {
+        let db = app.state::<db::DbState>();
+        let order_id = arg0.ok_or("Missing orderId")?;
+        let stage = arg1.unwrap_or_else(|| "preparing".to_string());
+        let progress = arg2.unwrap_or(0.0).clamp(0.0, 100.0);
+        let message = arg3;
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            ensure_renderer_order_is_not_repair_settlement(&conn, &order_id)?;
+            let canonical_order_id = resolve_renderer_order_id(&conn, &order_id)?;
+            ensure_box_order_mutation_allowed(
+                &conn,
+                &canonical_order_id,
+                "preparing",
+                BoxOrderMutation::Generic,
+            )?;
+        }
+        let mut all = read_local_json_array(&db, "order_preparation_states")?;
+        all.retain(|item| {
+            item.get("orderId")
+                .and_then(|v| v.as_str())
+                .map(|v| v != order_id)
+                .unwrap_or(true)
+        });
+        all.push(serde_json::json!({
+            "orderId": order_id,
+            "stage": stage,
+            "progress": progress,
+            "message": message,
+            "updatedAt": Utc::now().to_rfc3339()
+        }));
+        write_local_json(
+            &db,
+            "order_preparation_states",
+            &serde_json::Value::Array(all),
         )?;
-    }
-    let mut all = read_local_json_array(&db, "order_preparation_states")?;
-    all.retain(|item| {
-        item.get("orderId")
-            .and_then(|v| v.as_str())
-            .map(|v| v != order_id)
-            .unwrap_or(true)
-    });
-    all.push(serde_json::json!({
-        "orderId": order_id,
-        "stage": stage,
-        "progress": progress,
-        "message": message,
-        "updatedAt": Utc::now().to_rfc3339()
-    }));
-    write_local_json(
-        &db,
-        "order_preparation_states",
-        &serde_json::Value::Array(all),
-    )?;
 
-    let payload = serde_json::json!({
-        "orderId": order_id,
-        "preparationStage": stage,
-        "preparationProgress": progress,
-        "message": message
-    });
-    let _ = app.emit("order_realtime_update", payload.clone());
-    Ok(serde_json::json!({ "success": true, "data": payload }))
+        let payload = serde_json::json!({
+            "orderId": order_id,
+            "preparationStage": stage,
+            "preparationProgress": progress,
+            "message": message
+        });
+        let _ = app.emit("order_realtime_update", payload.clone());
+        Ok(serde_json::json!({ "success": true, "data": payload }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn order_update_type(
     arg0: Option<String>,
     arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let order_type = arg1.ok_or("Missing orderType")?.trim().to_ascii_lowercase();
-    let now = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
-    payments::ensure_ecommerce_order_mutation_allowed(&conn, &order_id, None)?;
-    // The order update, and for a delivery turned pickup its earning's
-    // removal: a full queue refuses the change before anything changes here
-    // (offline-week audit #3: both rows used to be dropped silently).
-    crate::sync_queue::ensure_enqueue_capacity(&conn, 2)?;
-    let mut emitted_status: Option<String> = None;
-    if order_type == "pickup" {
-        // Keyring-first; plaintext `local_settings` is backward-compat fallback.
-        let acting_terminal_id = storage::get_credential("terminal_id")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                db::get_setting(&conn, "terminal", "terminal_id")
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            });
-        let current_status: String = conn
-            .query_row(
-                "SELECT COALESCE(status, 'pending')
+    run_blocking_command("order_update_type", move || {
+        let db = app.state::<db::DbState>();
+        let order_id_raw = arg0.ok_or("Missing orderId")?;
+        let order_type = arg1.ok_or("Missing orderType")?.trim().to_ascii_lowercase();
+        let now = Utc::now().to_rfc3339();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
+        payments::ensure_ecommerce_order_mutation_allowed(&conn, &order_id, None)?;
+        // The order update, and for a delivery turned pickup its earning's
+        // removal: a full queue refuses the change before anything changes here
+        // (offline-week audit #3: both rows used to be dropped silently).
+        crate::sync_queue::ensure_enqueue_capacity(&conn, 2)?;
+        let mut emitted_status: Option<String> = None;
+        if order_type == "pickup" {
+            // Keyring-first; plaintext `local_settings` is backward-compat fallback.
+            let acting_terminal_id = storage::get_credential("terminal_id")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    db::get_setting(&conn, "terminal", "terminal_id")
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                });
+            let current_status: String = conn
+                .query_row(
+                    "SELECT COALESCE(status, 'pending')
                  FROM orders
                  WHERE id = ?1",
-                rusqlite::params![order_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("load pickup conversion context: {e}"))?;
-        order_ownership::assign_order_to_cashier_pickup(
-            &conn,
-            &order_id,
-            acting_terminal_id.as_deref(),
-            &now,
-        )?;
-
-        if let Some(removed_earning) =
-            order_ownership::remove_driver_earning_for_order(&conn, &order_id)?
-        {
-            let _ = sync::clear_non_repair_unsynced_parity_items(
+                    rusqlite::params![order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("load pickup conversion context: {e}"))?;
+            order_ownership::assign_order_to_cashier_pickup(
                 &conn,
-                "driver_earnings",
-                removed_earning.id.as_str(),
-            );
+                &order_id,
+                acting_terminal_id.as_deref(),
+                &now,
+            )?;
 
-            if removed_earning.supabase_id.is_some() {
-                let driver_sync_payload = serde_json::json!({
-                    "id": removed_earning.id,
-                    "supabase_id": removed_earning.supabase_id,
-                    "order_id": order_id,
-                    "deleted_at": now,
-                });
-                crate::sync_queue::enqueue_payload_item(
+            if let Some(removed_earning) =
+                order_ownership::remove_driver_earning_for_order(&conn, &order_id)?
+            {
+                let _ = sync::clear_non_repair_unsynced_parity_items(
                     &conn,
                     "driver_earnings",
-                    &removed_earning.id,
-                    "DELETE",
-                    &driver_sync_payload,
-                    Some(1),
-                    Some("financial"),
-                    Some("manual"),
-                    Some(1),
-                )?;
-            }
-        }
+                    removed_earning.id.as_str(),
+                );
 
-        emitted_status = Some(if order_ownership::is_final_order_status(&current_status) {
-            current_status
-        } else if current_status.eq_ignore_ascii_case("out_for_delivery") {
-            "ready".to_string()
+                if removed_earning.supabase_id.is_some() {
+                    let driver_sync_payload = serde_json::json!({
+                        "id": removed_earning.id,
+                        "supabase_id": removed_earning.supabase_id,
+                        "order_id": order_id,
+                        "deleted_at": now,
+                    });
+                    crate::sync_queue::enqueue_payload_item(
+                        &conn,
+                        "driver_earnings",
+                        &removed_earning.id,
+                        "DELETE",
+                        &driver_sync_payload,
+                        Some(1),
+                        Some("financial"),
+                        Some("manual"),
+                        Some(1),
+                    )?;
+                }
+            }
+
+            emitted_status = Some(if order_ownership::is_final_order_status(&current_status) {
+                current_status
+            } else if current_status.eq_ignore_ascii_case("out_for_delivery") {
+                "ready".to_string()
+            } else {
+                current_status
+            });
         } else {
-            current_status
-        });
-    } else {
-        conn.execute(
-            "UPDATE orders SET order_type = ?1, sync_status = 'pending', updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![order_type, now, order_id],
-        )
-        .map_err(|e| format!("update order type: {e}"))?;
-    }
-    let payload = serde_json::json!({
-        "orderId": order_id,
-        "orderType": order_type,
-        "status": emitted_status,
-        "driverId": serde_json::Value::Null,
-        "driverName": serde_json::Value::Null
-    });
-    enqueue_order_sync_payload(&conn, &order_id, &payload)?;
-    drop(conn);
-    if let Some(ref status) = emitted_status {
-        let _ = app.emit(
-            "order_status_updated",
-            serde_json::json!({
-                "orderId": order_id_raw,
-                "status": status,
-            }),
-        );
-    }
-    let _ = app.emit("order_realtime_update", payload);
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": order_id_raw,
-        "data": {
-            "orderId": order_id_raw,
+            conn.execute(
+                "UPDATE orders SET order_type = ?1, sync_status = 'pending', updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![order_type, now, order_id],
+            )
+            .map_err(|e| format!("update order type: {e}"))?;
+        }
+        let payload = serde_json::json!({
+            "orderId": order_id,
             "orderType": order_type,
             "status": emitted_status,
             "driverId": serde_json::Value::Null,
             "driverName": serde_json::Value::Null
+        });
+        enqueue_order_sync_payload(&conn, &order_id, &payload)?;
+        drop(conn);
+        if let Some(ref status) = emitted_status {
+            let _ = app.emit(
+                "order_status_updated",
+                serde_json::json!({
+                    "orderId": order_id_raw,
+                    "status": status,
+                }),
+            );
         }
-    }))
+        let _ = app.emit("order_realtime_update", payload);
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": order_id_raw,
+            "data": {
+                "orderId": order_id_raw,
+                "orderType": order_type,
+                "status": emitted_status,
+                "driverId": serde_json::Value::Null,
+                "driverName": serde_json::Value::Null
+            }
+        }))
+    })
+    .await
 }
 
 fn resolve_delivery_tip_recipients_for_assignment(
@@ -10699,68 +10793,75 @@ fn resolve_delivery_tip_recipients_for_assignment(
 #[tauri::command]
 pub async fn order_save_for_retry(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing order payload")?;
-    ensure_renderer_order_payload_is_not_repair_settlement(&payload)?;
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let order_data = payload.get("orderData").unwrap_or(&payload);
-        ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, order_data)?;
-    }
-    let mut resp = sync::create_order(&db, &payload, &app)?;
-    let order_id = resp
-        .get("orderId")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-        .or_else(|| {
-            resp.get("order")
-                .and_then(|value| value.get("id"))
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string())
-        })
-        .ok_or("Retry save did not return an orderId")?;
-
-    let queue_length = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        crate::sync_queue::renderer_get_length(&conn)?
-    };
-    if let Some(obj) = resp.as_object_mut() {
-        obj.insert("queueLength".to_string(), serde_json::json!(queue_length));
-    }
-    let _ = app.emit(
-        "order_sync_conflict",
-        serde_json::json!({ "queueLength": queue_length }),
-    );
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": order_id,
-        "queueLength": queue_length,
-        "data": {
-            "orderId": order_id
+    run_blocking_command("order_save_for_retry", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing order payload")?;
+        ensure_renderer_order_payload_is_not_repair_settlement(&payload)?;
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let order_data = payload.get("orderData").unwrap_or(&payload);
+            ensure_renderer_payload_does_not_target_existing_repair_settlement(&conn, order_data)?;
         }
-    }))
+        let mut resp = sync::create_order(&db, &payload, &app)?;
+        let order_id = resp
+            .get("orderId")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+            .or_else(|| {
+                resp.get("order")
+                    .and_then(|value| value.get("id"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string())
+            })
+            .ok_or("Retry save did not return an orderId")?;
+
+        let queue_length = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            crate::sync_queue::renderer_get_length(&conn)?
+        };
+        if let Some(obj) = resp.as_object_mut() {
+            obj.insert("queueLength".to_string(), serde_json::json!(queue_length));
+        }
+        let _ = app.emit(
+            "order_sync_conflict",
+            serde_json::json!({ "queueLength": queue_length }),
+        );
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": order_id,
+            "queueLength": queue_length,
+            "data": {
+                "orderId": order_id
+            }
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn order_get_retry_queue(
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let queue = crate::sync_queue::renderer_list_actionable_items(
-        &conn,
-        &crate::sync_queue::QueueListQuery {
-            limit: Some(200),
-            module_type: Some("orders".to_string()),
-        },
-    )?
-    .into_iter()
-    .filter(|item| item.table_name == "orders" && item.operation == "INSERT")
-    .filter(|item| ensure_renderer_order_is_not_repair_settlement(&conn, &item.record_id).is_ok())
-    .filter_map(|item| serde_json::from_str::<Value>(&item.data).ok())
-    .collect::<Vec<_>>();
-    Ok(serde_json::json!(queue))
+pub async fn order_get_retry_queue(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    run_blocking_command("order_get_retry_queue", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let queue = crate::sync_queue::renderer_list_actionable_items(
+            &conn,
+            &crate::sync_queue::QueueListQuery {
+                limit: Some(200),
+                module_type: Some("orders".to_string()),
+            },
+        )?
+        .into_iter()
+        .filter(|item| item.table_name == "orders" && item.operation == "INSERT")
+        .filter(|item| {
+            ensure_renderer_order_is_not_repair_settlement(&conn, &item.record_id).is_ok()
+        })
+        .filter_map(|item| serde_json::from_str::<Value>(&item.data).ok())
+        .collect::<Vec<_>>();
+        Ok(serde_json::json!(queue))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -10804,33 +10905,39 @@ pub async fn order_process_retry_queue(
 #[tauri::command]
 pub async fn orders_force_sync_retry(
     arg0: Option<String>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_renderer_order_id(&conn, &order_id_raw)?
-    };
-    let retry_result = force_order_sync_retry_inner(&db, &order_id)?;
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": order_id_raw,
-        "updated": retry_result.updated
-    }))
+    run_blocking_command("orders_force_sync_retry", move || {
+        let db = app.state::<db::DbState>();
+        let order_id_raw = arg0.ok_or("Missing orderId")?;
+        let order_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            resolve_renderer_order_id(&conn, &order_id_raw)?
+        };
+        let retry_result = force_order_sync_retry_inner(&db, &order_id)?;
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": order_id_raw,
+            "updated": retry_result.updated
+        }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn orders_get_retry_info(
     arg0: Option<String>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    ensure_renderer_order_is_not_repair_settlement(&conn, &order_id_raw)?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).unwrap_or(order_id_raw.clone());
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, status, attempts, error_message, created_at, last_attempt, next_retry_at
+    run_blocking_command("orders_get_retry_info", move || {
+        let db = app.state::<db::DbState>();
+        let order_id_raw = arg0.ok_or("Missing orderId")?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_renderer_order_is_not_repair_settlement(&conn, &order_id_raw)?;
+        let order_id = resolve_order_id(&conn, &order_id_raw).unwrap_or(order_id_raw.clone());
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status, attempts, error_message, created_at, last_attempt, next_retry_at
              FROM parity_sync_queue
              WHERE table_name = 'orders'
                AND record_id = ?1
@@ -10839,29 +10946,31 @@ pub async fn orders_get_retry_info(
                AND table_name NOT IN ('repairs', 'repair_attachments')
              ORDER BY created_at DESC
              LIMIT 5",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params![order_id], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "status": row.get::<_, String>(1)?,
-                "retryCount": row.get::<_, i64>(2)?,
-                "maxRetries": crate::sync_queue::MAX_RETRY_ATTEMPTS,
-                "lastError": row.get::<_, Option<String>>(3)?,
-                "createdAt": row.get::<_, String>(4)?,
-                "updatedAt": row.get::<_, Option<String>>(5)?.unwrap_or_else(|| row.get::<_, String>(4).unwrap_or_default()),
-                "nextRetryAt": row.get::<_, Option<String>>(6)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let entries: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": order_id_raw,
-        "entries": entries,
-        "hasRetries": !entries.is_empty()
-    }))
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![order_id], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "status": row.get::<_, String>(1)?,
+                    "retryCount": row.get::<_, i64>(2)?,
+                    "maxRetries": crate::sync_queue::MAX_RETRY_ATTEMPTS,
+                    "lastError": row.get::<_, Option<String>>(3)?,
+                    "createdAt": row.get::<_, String>(4)?,
+                    "updatedAt": row.get::<_, Option<String>>(5)?.unwrap_or_else(|| row.get::<_, String>(4).unwrap_or_default()),
+                    "nextRetryAt": row.get::<_, Option<String>>(6)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?;
+        let entries: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": order_id_raw,
+            "entries": entries,
+            "hasRetries": !entries.is_empty()
+        }))
+    })
+    .await
 }
 
 #[cfg(test)]

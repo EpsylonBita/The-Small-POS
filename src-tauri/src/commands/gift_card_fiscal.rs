@@ -16,12 +16,14 @@
 
 use std::future::Future;
 use std::sync::MutexGuard;
+use tauri::Manager;
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::commands::ecr as ecr_commands;
+use crate::database_lock::run_blocking_command;
 use crate::ecr::protocol::{
     FiscalReceiptData, GiftTenderCodes, SettledDispatch, TaxRateConfig, TransactionRequest,
     TransactionResponse, TransactionStatus, TransactionType,
@@ -1618,26 +1620,31 @@ pub async fn gift_card_fiscal_finalize(
 #[tauri::command]
 pub async fn gift_card_fiscal_reconcile(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let local_order_id = match resolve_order(&db, &arg0)? {
-        Ok(local_order_id) => local_order_id,
-        Err(refusal) => return Ok(refusal),
-    };
-    let _reservation = match crate::commands::payments::reserve_payment_record(&local_order_id) {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            return Ok(command_result(refusal_disposition(
-                ("unavailable", "GIFT_CARD_ORDER_BUSY", error),
-                &local_order_id,
-            )))
-        }
-    };
-    Ok(command_result(reconcile_with(
-        &db,
-        &local_order_id,
-        cap_driver::probe_settled_receipt,
-    )))
+    run_blocking_command("gift_card_fiscal_reconcile", move || {
+        let db = app.state::<db::DbState>();
+        let local_order_id = match resolve_order(&db, &arg0)? {
+            Ok(local_order_id) => local_order_id,
+            Err(refusal) => return Ok(refusal),
+        };
+        let _reservation = match crate::commands::payments::reserve_payment_record(&local_order_id)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                return Ok(command_result(refusal_disposition(
+                    ("unavailable", "GIFT_CARD_ORDER_BUSY", error),
+                    &local_order_id,
+                )))
+            }
+        };
+        Ok(command_result(reconcile_with(
+            &db,
+            &local_order_id,
+            cap_driver::probe_settled_receipt,
+        )))
+    })
+    .await
 }
 
 #[cfg(test)]

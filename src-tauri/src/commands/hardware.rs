@@ -1,5 +1,7 @@
 use serde_json::Value;
+use tauri::Manager;
 
+use crate::database_lock::run_blocking_command;
 use crate::{
     auth, customer_display, db, drawer, hardware_manager, loyalty, scale, scanner, serial,
 };
@@ -577,83 +579,90 @@ pub async fn hardware_get_status() -> Result<Value, String> {
 #[tauri::command]
 pub async fn hardware_reconnect(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let device_type = parse_device_type_payload(arg0)?;
-    // Build settings from local_settings
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut settings = serde_json::json!({});
-    for (category, key, output_key) in [
-        ("scale", "enabled", "scale.enabled"),
-        ("scale", "port", "scale.port"),
-        ("scale", "baud_rate", "scale.baud_rate"),
-        ("scale", "protocol", "scale.protocol"),
-        ("display", "enabled", "display.enabled"),
-        ("display", "connection_type", "display.connection_type"),
-        ("display", "port", "display.port"),
-        ("display", "baud_rate", "display.baud_rate"),
-        ("display", "tcp_port", "display.tcp_port"),
-        ("scanner", "enabled", "scanner.enabled"),
-        ("scanner", "port", "scanner.port"),
-        ("scanner", "baud_rate", "scanner.baud_rate"),
-        (
-            "peripherals",
-            "loyalty_card_reader",
-            "peripherals.loyalty_card_reader",
-        ),
-        ("hardware", "scale_port", "hardware.scale_port"),
-        ("hardware", "scale_baud_rate", "hardware.scale_baud_rate"),
-        ("hardware", "scale_protocol", "hardware.scale_protocol"),
-        (
-            "hardware",
-            "barcode_scanner_port",
-            "hardware.barcode_scanner_port",
-        ),
-        (
-            "hardware",
-            "scanner_baud_rate",
-            "hardware.scanner_baud_rate",
-        ),
-        (
-            "hardware",
-            "display_connection_type",
-            "hardware.display_connection_type",
-        ),
-        ("hardware", "display_port", "hardware.display_port"),
-        (
-            "hardware",
-            "display_baud_rate",
-            "hardware.display_baud_rate",
-        ),
-        ("hardware", "display_tcp_port", "hardware.display_tcp_port"),
-        (
-            "hardware",
-            "loyalty_card_reader",
-            "hardware.loyalty_card_reader",
-        ),
-    ] {
-        if let Some(val) = db::get_setting(&conn, category, key) {
-            settings[output_key] = serde_json::Value::String(val);
+    run_blocking_command("hardware_reconnect", move || {
+        let db = app.state::<db::DbState>();
+        let device_type = parse_device_type_payload(arg0)?;
+        // Build settings from local_settings
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut settings = serde_json::json!({});
+        for (category, key, output_key) in [
+            ("scale", "enabled", "scale.enabled"),
+            ("scale", "port", "scale.port"),
+            ("scale", "baud_rate", "scale.baud_rate"),
+            ("scale", "protocol", "scale.protocol"),
+            ("display", "enabled", "display.enabled"),
+            ("display", "connection_type", "display.connection_type"),
+            ("display", "port", "display.port"),
+            ("display", "baud_rate", "display.baud_rate"),
+            ("display", "tcp_port", "display.tcp_port"),
+            ("scanner", "enabled", "scanner.enabled"),
+            ("scanner", "port", "scanner.port"),
+            ("scanner", "baud_rate", "scanner.baud_rate"),
+            (
+                "peripherals",
+                "loyalty_card_reader",
+                "peripherals.loyalty_card_reader",
+            ),
+            ("hardware", "scale_port", "hardware.scale_port"),
+            ("hardware", "scale_baud_rate", "hardware.scale_baud_rate"),
+            ("hardware", "scale_protocol", "hardware.scale_protocol"),
+            (
+                "hardware",
+                "barcode_scanner_port",
+                "hardware.barcode_scanner_port",
+            ),
+            (
+                "hardware",
+                "scanner_baud_rate",
+                "hardware.scanner_baud_rate",
+            ),
+            (
+                "hardware",
+                "display_connection_type",
+                "hardware.display_connection_type",
+            ),
+            ("hardware", "display_port", "hardware.display_port"),
+            (
+                "hardware",
+                "display_baud_rate",
+                "hardware.display_baud_rate",
+            ),
+            ("hardware", "display_tcp_port", "hardware.display_tcp_port"),
+            (
+                "hardware",
+                "loyalty_card_reader",
+                "hardware.loyalty_card_reader",
+            ),
+        ] {
+            if let Some(val) = db::get_setting(&conn, category, key) {
+                settings[output_key] = serde_json::Value::String(val);
+            }
         }
-    }
-    drop(conn);
-    hardware_manager::reconnect(&device_type, &settings, &app)
+        drop(conn);
+        hardware_manager::reconnect(&device_type, &settings, &app)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn drawer_open(
     arg0: Option<Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<Value, auth::GuardedCommandError> {
-    auth::authorize_privileged_action(
-        auth::PrivilegedActionScope::CashDrawerControl,
-        &db,
-        &auth_state,
-    )?;
-    let printer_id = parse_optional_printer_id(arg0);
-    Ok(drawer::open_cash_drawer(&db, printer_id.as_deref())?)
+    run_blocking_command("drawer_open", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<auth::AuthState>();
+        auth::authorize_privileged_action(
+            auth::PrivilegedActionScope::CashDrawerControl,
+            &db,
+            &auth_state,
+        )?;
+        let printer_id = parse_optional_printer_id(arg0);
+        Ok(drawer::open_cash_drawer(&db, printer_id.as_deref())?)
+    })
+    .await
 }
 
 #[cfg(test)]

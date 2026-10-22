@@ -1623,7 +1623,7 @@ pub fn create_order(
         }
     }
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db.lock_traced("orders_create").map_err(|e| e.to_string())?;
     let identity_payload = payload.get("orderData").unwrap_or(payload);
     if crate::hotel_folio::is_settlement(payload)
         || crate::hotel_folio::is_settlement(identity_payload)
@@ -14463,16 +14463,16 @@ fn retry_unresolved_remote_payments(conn: &Connection) -> Result<usize, String> 
     Ok(changed)
 }
 
+/// Tomikro 21/10/2026: a page and its cursor commit in one write transaction
+/// on the sync connection; 50 rows bound how long it holds the file's write
+/// lock while the checkout may be waiting (200 took seconds on a catch-up).
 fn payment_pull_path(cursor: Option<&str>, since: &str) -> String {
     match cursor {
         Some(cursor) => format!(
-            "/api/pos/payments?limit=200&cursor={}",
+            "/api/pos/payments?limit=50&cursor={}",
             percent_encode(cursor)
         ),
-        None => format!(
-            "/api/pos/payments?limit=200&since={}",
-            percent_encode(since)
-        ),
+        None => format!("/api/pos/payments?limit=50&since={}", percent_encode(since)),
     }
 }
 
@@ -25492,7 +25492,7 @@ mod tests {
         assert!(payment_pull_path(None, "2026-10-20T10:00:00Z").contains("&since="));
         assert_eq!(
             payment_pull_path(Some("opaque+/="), "ignored"),
-            "/api/pos/payments?limit=200&cursor=opaque%2B%2F%3D"
+            "/api/pos/payments?limit=50&cursor=opaque%2B%2F%3D"
         );
         crate::db::set_setting(&conn, "sync", "payments_cursor", "original").unwrap();
         apply_remote_payment_page(&conn,&serde_json::json!({"payments":[],"next_cursor":"must-not-advance","sync_timestamp":"2099-01-01T00:00:00Z"})).unwrap();

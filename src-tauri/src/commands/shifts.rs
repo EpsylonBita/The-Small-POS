@@ -4,6 +4,7 @@ use serde::Deserialize;
 use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
+use crate::database_lock::run_blocking_command;
 use crate::shifts as shift_service;
 use crate::{db, fetch_supabase_rows, print, value_f64, value_str};
 
@@ -689,9 +690,13 @@ pub async fn shift_financial_opening_authorize(
 #[tauri::command]
 pub async fn shift_financial_opening_status(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    crate::gift_financial_opening::opening_status(&db, arg0.as_ref())
+    run_blocking_command("shift_financial_opening_status", move || {
+        let db = app.state::<db::DbState>();
+        crate::gift_financial_opening::opening_status(&db, arg0.as_ref())
+    })
+    .await
 }
 
 /// Native-only clear of every dedicated hosted cashier authorization (e.g. on
@@ -719,10 +724,14 @@ pub async fn shift_financial_closing_authorize(
 #[tauri::command]
 pub async fn shift_financial_closing_list_pending(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing financial closing payload")?;
-    crate::gift_financial_closing::list_pending_closings(&db, &payload)
+    run_blocking_command("shift_financial_closing_list_pending", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing financial closing payload")?;
+        crate::gift_financial_closing::list_pending_closings(&db, &payload)
+    })
+    .await
 }
 
 /// Nonsecret status of one retained financial closing; confirmed only from
@@ -730,10 +739,14 @@ pub async fn shift_financial_closing_list_pending(
 #[tauri::command]
 pub async fn shift_financial_closing_status(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing financial closing payload")?;
-    crate::gift_financial_closing::closing_status(&db, &payload)
+    run_blocking_command("shift_financial_closing_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing financial closing payload")?;
+        crate::gift_financial_closing::closing_status(&db, &payload)
+    })
+    .await
 }
 
 /// Explicit retry of one retained original: natively makes only its exact
@@ -742,36 +755,39 @@ pub async fn shift_financial_closing_status(
 #[tauri::command]
 pub async fn shift_financial_closing_retry(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing financial closing payload")?;
-    let (reply, wake) = crate::gift_financial_closing::request_closing_retry(&db, &payload)?;
-    if wake {
-        tauri::async_runtime::spawn(async move {
-            let sync_state = app
-                .state::<std::sync::Arc<crate::sync::SyncState>>()
-                .inner()
-                .clone();
-            let db = app.state::<db::DbState>();
-            match crate::sync::force_sync(&db, &sync_state, &app).await {
-                Ok(()) => {
-                    let _ = app.emit(
-                        "sync_complete",
-                        serde_json::json!({ "trigger": "gift_closing_retry" }),
-                    );
+    run_blocking_command("shift_financial_closing_retry", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing financial closing payload")?;
+        let (reply, wake) = crate::gift_financial_closing::request_closing_retry(&db, &payload)?;
+        if wake {
+            tauri::async_runtime::spawn(async move {
+                let sync_state = app
+                    .state::<std::sync::Arc<crate::sync::SyncState>>()
+                    .inner()
+                    .clone();
+                let db = app.state::<db::DbState>();
+                match crate::sync::force_sync(&db, &sync_state, &app).await {
+                    Ok(()) => {
+                        let _ = app.emit(
+                            "sync_complete",
+                            serde_json::json!({ "trigger": "gift_closing_retry" }),
+                        );
+                    }
+                    // The raw sync error stays native; the renderer re-reads status.
+                    Err(_) => {
+                        let _ = app.emit(
+                            "sync_error",
+                            serde_json::json!({ "error": "GIFT_CLOSING_RETRY_WAKE_FAILED", "trigger": "gift_closing_retry" }),
+                        );
+                    }
                 }
-                // The raw sync error stays native; the renderer re-reads status.
-                Err(_) => {
-                    let _ = app.emit(
-                        "sync_error",
-                        serde_json::json!({ "error": "GIFT_CLOSING_RETRY_WAKE_FAILED", "trigger": "gift_closing_retry" }),
-                    );
-                }
-            }
-        });
-    }
-    Ok(reply)
+            });
+        }
+        Ok(reply)
+    })
+    .await
 }
 
 fn schedule_financial_opening_sync(app: &tauri::AppHandle, result: &serde_json::Value) {
@@ -783,50 +799,91 @@ fn schedule_financial_opening_sync(app: &tauri::AppHandle, result: &serde_json::
 #[tauri::command]
 pub async fn shift_open(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing shift payload")?;
-    // Whether this person's PIN was checked on this till (the server could
-    // not be reached) is native state, never the renderer's claim.
-    let staff_id = value_str(&payload, &["staffId", "staff_id"]).unwrap_or_default();
-    let admission = crate::offline_check_in::admission_for(&staff_id, chrono::Utc::now());
-    let result = shift_service::open_shift_with_admission(&db, &payload, &admission)?;
-    if admission != crate::offline_check_in::CheckInAdmission::Ordinary {
-        crate::offline_check_in::complete(&staff_id);
-    }
-    if let Some(shift_id) = result.get("shiftId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_sync(app.clone(), "shift", shift_id.to_string());
-    }
-    let _ = app.emit(
-        "shift_updated",
-        serde_json::json!({
-            "action": "open",
-            "shift": result
-        }),
-    );
-    Ok(result)
+    run_blocking_command("shift_open", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing shift payload")?;
+        // Whether this person's PIN was checked on this till (the server could
+        // not be reached) is native state, never the renderer's claim.
+        let staff_id = value_str(&payload, &["staffId", "staff_id"]).unwrap_or_default();
+        let admission = crate::offline_check_in::admission_for(&staff_id, chrono::Utc::now());
+        let result = shift_service::open_shift_with_admission(&db, &payload, &admission)?;
+        if admission != crate::offline_check_in::CheckInAdmission::Ordinary {
+            crate::offline_check_in::complete(&staff_id);
+        }
+        if let Some(shift_id) = result.get("shiftId").and_then(serde_json::Value::as_str) {
+            schedule_immediate_sync(app.clone(), "shift", shift_id.to_string());
+        }
+        let _ = app.emit(
+            "shift_updated",
+            serde_json::json!({
+                "action": "open",
+                "shift": result
+            }),
+        );
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_close(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing shift close payload")?;
-    let requested_shift_id = value_str(&payload, &["shiftId", "shift_id"]);
-    let mut result = shift_service::close_shift(&db, &payload)?;
-    let success = result
-        .get("success")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    if !success {
-        return Ok(result);
-    }
-    // A gift-bound close is only captured locally, pending financial
-    // confirmation: no generic auto-print and no ordinary sync handling.
-    if is_gift_financial_close(&result) {
+    run_blocking_command("shift_close", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing shift close payload")?;
+        let requested_shift_id = value_str(&payload, &["shiftId", "shift_id"]);
+        let mut result = shift_service::close_shift(&db, &payload)?;
+        let success = result
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if !success {
+            return Ok(result);
+        }
+        // A gift-bound close is only captured locally, pending financial
+        // confirmation: no generic auto-print and no ordinary sync handling.
+        if is_gift_financial_close(&result) {
+            let _ = app.emit(
+                "shift_updated",
+                serde_json::json!({
+                    "action": "close",
+                    "shift": result.clone()
+                }),
+            );
+            return Ok(result);
+        }
+
+        let shift_id = value_str(&result, &["id", "shiftId", "shift_id"])
+            .or_else(|| {
+                result
+                    .get("shift")
+                    .and_then(|shift| value_str(shift, &["id", "shiftId", "shift_id"]))
+            })
+            .or(requested_shift_id);
+        if let Some(shift_id) = shift_id {
+            if crate::print::is_print_action_enabled(&db, "shift_close") {
+                match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None, &app) {
+                    Ok(job) => {
+                        if let Some(obj) = result.as_object_mut() {
+                            obj.insert("autoPrintJob".to_string(), job);
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            shift_id = %shift_id,
+                            error = %error,
+                            "Failed to enqueue automatic shift checkout print job"
+                        );
+                    }
+                }
+            }
+            schedule_immediate_sync(app.clone(), "shift", shift_id);
+        }
+
         let _ = app.emit(
             "shift_updated",
             serde_json::json!({
@@ -834,44 +891,9 @@ pub async fn shift_close(
                 "shift": result.clone()
             }),
         );
-        return Ok(result);
-    }
-
-    let shift_id = value_str(&result, &["id", "shiftId", "shift_id"])
-        .or_else(|| {
-            result
-                .get("shift")
-                .and_then(|shift| value_str(shift, &["id", "shiftId", "shift_id"]))
-        })
-        .or(requested_shift_id);
-    if let Some(shift_id) = shift_id {
-        if crate::print::is_print_action_enabled(&db, "shift_close") {
-            match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None, &app) {
-                Ok(job) => {
-                    if let Some(obj) = result.as_object_mut() {
-                        obj.insert("autoPrintJob".to_string(), job);
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        shift_id = %shift_id,
-                        error = %error,
-                        "Failed to enqueue automatic shift checkout print job"
-                    );
-                }
-            }
-        }
-        schedule_immediate_sync(app.clone(), "shift", shift_id);
-    }
-
-    let _ = app.emit(
-        "shift_updated",
-        serde_json::json!({
-            "action": "close",
-            "shift": result.clone()
-        }),
-    );
-    Ok(result)
+        Ok(result)
+    })
+    .await
 }
 
 /// A native gift-bound close result, pending financial confirmation.
@@ -893,216 +915,259 @@ pub async fn shift_record_satellite_handover(
 #[tauri::command]
 pub async fn shift_get_active(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_staff_payload(arg0)?;
-    shift_service::get_active(&db, &payload.staff_id)
+    run_blocking_command("shift_get_active", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_staff_payload(arg0)?;
+        shift_service::get_active(&db, &payload.staff_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_active_for_branch(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_branch_payload(arg0)?;
-    shift_service::get_active_for_branch(&db, &payload.branch_id)
+    run_blocking_command("shift_get_active_for_branch", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_branch_payload(arg0)?;
+        shift_service::get_active_for_branch(&db, &payload.branch_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_by_id(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_cashier_shift_payload(arg0)?;
-    shift_service::get_shift_by_id(&db, &payload.cashier_shift_id)
+    run_blocking_command("shift_get_by_id", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_cashier_shift_payload(arg0)?;
+        shift_service::get_shift_by_id(&db, &payload.cashier_shift_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_sync_state(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_cashier_shift_payload(arg0)?;
-    shift_service::get_shift_sync_state(&db, &payload.cashier_shift_id)
+    run_blocking_command("shift_get_sync_state", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_cashier_shift_payload(arg0)?;
+        shift_service::get_shift_sync_state(&db, &payload.cashier_shift_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_active_by_terminal(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
-    shift_service::get_active_by_terminal(&db, &payload.branch_id, &payload.terminal_id)
+    run_blocking_command("shift_get_active_by_terminal", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
+        shift_service::get_active_by_terminal(&db, &payload.branch_id, &payload.terminal_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_active_by_terminal_loose(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_terminal_payload(arg0)?;
-    shift_service::get_active_by_terminal_loose(&db, &payload.terminal_id)
+    run_blocking_command("shift_get_active_by_terminal_loose", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_terminal_payload(arg0)?;
+        shift_service::get_active_by_terminal_loose(&db, &payload.terminal_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_active_cashier_by_terminal(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
-    shift_service::get_active_cashier_by_terminal(&db, &payload.branch_id, &payload.terminal_id)
+    run_blocking_command("shift_get_active_cashier_by_terminal", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
+        shift_service::get_active_cashier_by_terminal(&db, &payload.branch_id, &payload.terminal_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_check_in_eligibility(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
-    shift_service::get_check_in_eligibility(&db, &payload.branch_id, &payload.terminal_id)
+    run_blocking_command("shift_get_check_in_eligibility", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
+        shift_service::get_check_in_eligibility(&db, &payload.branch_id, &payload.terminal_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_active_cashier_by_terminal_loose(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_terminal_payload(arg0)?;
-    shift_service::get_active_cashier_by_terminal_loose(&db, &payload.terminal_id)
+    run_blocking_command("shift_get_active_cashier_by_terminal_loose", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_terminal_payload(arg0)?;
+        shift_service::get_active_cashier_by_terminal_loose(&db, &payload.terminal_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_summary(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_summary_payload(arg0, arg1)?;
-    let _skip_backfill = payload.skip_backfill;
-    shift_service::get_shift_summary(&db, &payload.shift_id)
+    run_blocking_command("shift_get_summary", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_summary_payload(arg0, arg1)?;
+        let _skip_backfill = payload.skip_backfill;
+        shift_service::get_shift_summary(&db, &payload.shift_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_print_checkout(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_print_checkout_payload(arg0)?;
-    let summary = match shift_service::get_shift_summary(&db, &payload.shift_id) {
-        Ok(summary) => summary,
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": error,
-                "shiftId": payload.shift_id,
-                "roleType": payload.role_type,
-                "terminalName": payload.terminal_name,
-            }));
+    run_blocking_command("shift_print_checkout", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_print_checkout_payload(arg0)?;
+        let summary = match shift_service::get_shift_summary(&db, &payload.shift_id) {
+            Ok(summary) => summary,
+            Err(error) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "error": error,
+                    "shiftId": payload.shift_id,
+                    "roleType": payload.role_type,
+                    "terminalName": payload.terminal_name,
+                }));
+            }
+        };
+
+        let shift = summary
+            .get("shift")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let role_type = payload.role_type.unwrap_or_else(|| {
+            value_str(&shift, &["role_type", "roleType"]).unwrap_or_else(|| "staff".to_string())
+        });
+        let terminal_name = payload.terminal_name.or_else(|| {
+            db.conn.lock().ok().and_then(|conn| {
+                ["name", "display_name", "displayName"]
+                    .iter()
+                    .find_map(|key| db::get_setting(&conn, "terminal", key))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| {
+                        !value.is_empty()
+                            && !value.to_ascii_lowercase().starts_with("terminal-")
+                            && !value.to_ascii_lowercase().starts_with("term-")
+                    })
+            })
+        });
+        let shift_id = payload.shift_id.clone();
+        let role_type_for_job = role_type.clone();
+        let terminal_name_for_job = terminal_name.clone();
+
+        if !crate::print::is_print_action_enabled(&db, "shift_close") {
+            return Ok(serde_json::json!({ "success": true, "skipped": true }));
         }
-    };
 
-    let shift = summary
-        .get("shift")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    let role_type = payload.role_type.unwrap_or_else(|| {
-        value_str(&shift, &["role_type", "roleType"]).unwrap_or_else(|| "staff".to_string())
-    });
-    let terminal_name = payload.terminal_name.or_else(|| {
-        db.conn.lock().ok().and_then(|conn| {
-            ["name", "display_name", "displayName"]
-                .iter()
-                .find_map(|key| db::get_setting(&conn, "terminal", key))
-                .map(|value| value.trim().to_string())
-                .filter(|value| {
-                    !value.is_empty()
-                        && !value.to_ascii_lowercase().starts_with("terminal-")
-                        && !value.to_ascii_lowercase().starts_with("term-")
-                })
-        })
-    });
-    let shift_id = payload.shift_id.clone();
-    let role_type_for_job = role_type.clone();
-    let terminal_name_for_job = terminal_name.clone();
+        // A gift-bound original prints only after its strict adopted close proof,
+        // and only its frozen canonical amounts; the caller's snapshot is dropped.
+        let gift_close = db
+            .conn
+            .lock()
+            .map_err(|e| e.to_string())
+            .and_then(|conn| print::gift_close_checkout_binding(&conn, &payload.shift_id));
+        let gift_bound = match gift_close {
+            Ok(binding) => binding.is_some(),
+            Err(error) => {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "pending": true,
+                    "code": print::GIFT_CLOSE_PRINT_NOT_FINAL,
+                    "error": error,
+                    "shiftId": payload.shift_id,
+                    "roleType": role_type,
+                    "terminalName": terminal_name,
+                }));
+            }
+        };
+        let caller_snapshot = |value: serde_json::Value| {
+            if gift_bound {
+                serde_json::Value::Null
+            } else {
+                value
+            }
+        };
 
-    if !crate::print::is_print_action_enabled(&db, "shift_close") {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
+        let (expected_amount, variance_amount) = current_checkout_print_amounts(
+            &summary,
+            payload.expected_amount,
+            payload.closing_amount,
+            payload.variance_amount,
+        );
+        let print_payload = serde_json::json!({
+            "shiftId": shift_id,
+            "roleType": role_type_for_job,
+            "terminalName": terminal_name_for_job,
+            "snapshotCheckOutTime": caller_snapshot(serde_json::json!(payload.snapshot_check_out_time)),
+            "expectedAmount": caller_snapshot(serde_json::json!(expected_amount)),
+            "closingAmount": caller_snapshot(serde_json::json!(payload.closing_amount)),
+            "varianceAmount": caller_snapshot(serde_json::json!(variance_amount)),
+        });
 
-    // A gift-bound original prints only after its strict adopted close proof,
-    // and only its frozen canonical amounts; the caller's snapshot is dropped.
-    let gift_close = db
-        .conn
-        .lock()
-        .map_err(|e| e.to_string())
-        .and_then(|conn| print::gift_close_checkout_binding(&conn, &payload.shift_id));
-    let gift_bound = match gift_close {
-        Ok(binding) => binding.is_some(),
-        Err(error) => {
-            return Ok(serde_json::json!({
+        match print::enqueue_print_job_with_payload(
+            &db,
+            "shift_checkout",
+            &payload.shift_id,
+            None,
+            Some(&print_payload),
+            &app,
+        ) {
+            Ok(job) => Ok(serde_json::json!({
+                "success": true,
+                "queued": true,
+                "shiftId": payload.shift_id,
+                "roleType": role_type,
+                "terminalName": terminal_name,
+                "job": job,
+                "jobId": job.get("jobId").cloned().unwrap_or(serde_json::Value::Null),
+            })),
+            Err(error) => Ok(serde_json::json!({
                 "success": false,
-                "pending": true,
-                "code": print::GIFT_CLOSE_PRINT_NOT_FINAL,
                 "error": error,
                 "shiftId": payload.shift_id,
                 "roleType": role_type,
                 "terminalName": terminal_name,
-            }));
+            })),
         }
-    };
-    let caller_snapshot = |value: serde_json::Value| {
-        if gift_bound {
-            serde_json::Value::Null
-        } else {
-            value
-        }
-    };
-
-    let (expected_amount, variance_amount) = current_checkout_print_amounts(
-        &summary,
-        payload.expected_amount,
-        payload.closing_amount,
-        payload.variance_amount,
-    );
-    let print_payload = serde_json::json!({
-        "shiftId": shift_id,
-        "roleType": role_type_for_job,
-        "terminalName": terminal_name_for_job,
-        "snapshotCheckOutTime": caller_snapshot(serde_json::json!(payload.snapshot_check_out_time)),
-        "expectedAmount": caller_snapshot(serde_json::json!(expected_amount)),
-        "closingAmount": caller_snapshot(serde_json::json!(payload.closing_amount)),
-        "varianceAmount": caller_snapshot(serde_json::json!(variance_amount)),
-    });
-
-    match print::enqueue_print_job_with_payload(
-        &db,
-        "shift_checkout",
-        &payload.shift_id,
-        None,
-        Some(&print_payload),
-        &app,
-    ) {
-        Ok(job) => Ok(serde_json::json!({
-            "success": true,
-            "queued": true,
-            "shiftId": payload.shift_id,
-            "roleType": role_type,
-            "terminalName": terminal_name,
-            "job": job,
-            "jobId": job.get("jobId").cloned().unwrap_or(serde_json::Value::Null),
-        })),
-        Err(error) => Ok(serde_json::json!({
-            "success": false,
-            "error": error,
-            "shiftId": payload.shift_id,
-            "roleType": role_type,
-            "terminalName": terminal_name,
-        })),
-    }
+    })
+    .await
 }
 
 fn current_checkout_print_amounts(
@@ -1141,120 +1206,141 @@ fn current_checkout_print_amounts(
 #[tauri::command]
 pub async fn shift_record_expense(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing expense payload")?;
-    let result = shift_service::record_expense(&db, &payload)?;
-    if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_sync(app, "shift_expense", expense_id.to_string());
-    }
-    Ok(result)
+    run_blocking_command("shift_record_expense", move || {
+        let db = app.state::<db::DbState>();
+        let payload = arg0.ok_or("Missing expense payload")?;
+        let result = shift_service::record_expense(&db, &payload)?;
+        if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
+            schedule_immediate_sync(app, "shift_expense", expense_id.to_string());
+        }
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_delete_expense(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_shift_expense_delete_payload(arg0, arg1)?;
-    let payload = serde_json::json!({
-        "expenseId": parsed.expense_id,
-        "shiftId": parsed.shift_id,
-    });
-    let result = shift_service::delete_expense(&db, &payload)?;
-    if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_sync(app, "shift_expense", expense_id.to_string());
-    }
-    Ok(result)
+    run_blocking_command("shift_delete_expense", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_shift_expense_delete_payload(arg0, arg1)?;
+        let payload = serde_json::json!({
+            "expenseId": parsed.expense_id,
+            "shiftId": parsed.shift_id,
+        });
+        let result = shift_service::delete_expense(&db, &payload)?;
+        if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
+            schedule_immediate_sync(app, "shift_expense", expense_id.to_string());
+        }
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_expenses(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_shift_summary_payload(arg0, None)?;
-    shift_service::get_expenses(&db, &payload.shift_id)
+    run_blocking_command("shift_get_expenses", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_shift_summary_payload(arg0, None)?;
+        shift_service::get_expenses(&db, &payload.shift_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_record_staff_payment(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_staff_payment_mutation_payload(arg0)?;
-    let payload = serde_json::json!({
-        "cashierShiftId": parsed.cashier_shift_id,
-        "paidToStaffId": parsed.paid_to_staff_id,
-        "amount": parsed.amount,
-        "paymentType": parsed.payment_type.unwrap_or_else(|| "wage".to_string()),
-        "notes": parsed.notes,
-    });
-    let result = shift_service::record_staff_payment(&db, &payload)?;
-    if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
-    }
-    Ok(result)
+    run_blocking_command("shift_record_staff_payment", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_staff_payment_mutation_payload(arg0)?;
+        let payload = serde_json::json!({
+            "cashierShiftId": parsed.cashier_shift_id,
+            "paidToStaffId": parsed.paid_to_staff_id,
+            "amount": parsed.amount,
+            "paymentType": parsed.payment_type.unwrap_or_else(|| "wage".to_string()),
+            "notes": parsed.notes,
+        });
+        let result = shift_service::record_staff_payment(&db, &payload)?;
+        if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
+            schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
+        }
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_update_staff_payment(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_staff_payment_mutation_payload(arg0)?;
-    let payment_id = parsed.payment_id.ok_or("Missing paymentId")?;
-    let payload = serde_json::json!({
-        "paymentId": payment_id,
-        "cashierShiftId": parsed.cashier_shift_id,
-        "paidToStaffId": parsed.paid_to_staff_id,
-        "amount": parsed.amount,
-        "paymentType": parsed.payment_type.unwrap_or_else(|| "wage".to_string()),
-        "notes": parsed.notes,
-    });
-    let result = shift_service::update_staff_payment(&db, &payload)?;
-    if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
-    }
-    Ok(result)
+    run_blocking_command("shift_update_staff_payment", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_staff_payment_mutation_payload(arg0)?;
+        let payment_id = parsed.payment_id.ok_or("Missing paymentId")?;
+        let payload = serde_json::json!({
+            "paymentId": payment_id,
+            "cashierShiftId": parsed.cashier_shift_id,
+            "paidToStaffId": parsed.paid_to_staff_id,
+            "amount": parsed.amount,
+            "paymentType": parsed.payment_type.unwrap_or_else(|| "wage".to_string()),
+            "notes": parsed.notes,
+        });
+        let result = shift_service::update_staff_payment(&db, &payload)?;
+        if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
+            schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
+        }
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_delete_staff_payment(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let parsed = parse_staff_payment_delete_payload(arg0)?;
-    let payload = serde_json::json!({
-        "paymentId": parsed.payment_id,
-        "cashierShiftId": parsed.cashier_shift_id,
-    });
-    let result = shift_service::delete_staff_payment(&db, &payload)?;
-    if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
-    }
-    Ok(result)
+    run_blocking_command("shift_delete_staff_payment", move || {
+        let db = app.state::<db::DbState>();
+        let parsed = parse_staff_payment_delete_payload(arg0)?;
+        let payload = serde_json::json!({
+            "paymentId": parsed.payment_id,
+            "cashierShiftId": parsed.cashier_shift_id,
+        });
+        let result = shift_service::delete_staff_payment(&db, &payload)?;
+        if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
+            schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
+        }
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_staff_payments(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_cashier_shift_payload(arg0)?;
-    let cashier_shift_id = payload.cashier_shift_id;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    ensure_staff_payments_table(&conn)?;
+    run_blocking_command("shift_get_staff_payments", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_cashier_shift_payload(arg0)?;
+        let cashier_shift_id = payload.cashier_shift_id;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_staff_payments_table(&conn)?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at, sp.updated_at,
+        let mut stmt = conn
+            .prepare(
+                "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at, sp.updated_at,
                     (SELECT ss.staff_name
                      FROM staff_shifts ss
                      WHERE ss.staff_id = sp.paid_to_staff_id
@@ -1268,43 +1354,47 @@ pub async fn shift_get_staff_payments(
              FROM staff_payments sp
              WHERE sp.cashier_shift_id = ?1
              ORDER BY sp.created_at DESC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params![cashier_shift_id], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "cashier_shift_id": row.get::<_, String>(1)?,
-                "paid_to_staff_id": row.get::<_, String>(2)?,
-                "amount": row.get::<_, f64>(3)?,
-                "payment_type": row.get::<_, String>(4)?,
-                "notes": row.get::<_, Option<String>>(5)?,
-                "created_at": row.get::<_, String>(6)?,
-                "updated_at": row.get::<_, String>(7)?,
-                "staff_name": row.get::<_, Option<String>>(8)?,
-                "role_type": row.get::<_, Option<String>>(9)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
-    Ok(serde_json::json!(items))
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![cashier_shift_id], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "cashier_shift_id": row.get::<_, String>(1)?,
+                    "paid_to_staff_id": row.get::<_, String>(2)?,
+                    "amount": row.get::<_, f64>(3)?,
+                    "payment_type": row.get::<_, String>(4)?,
+                    "notes": row.get::<_, Option<String>>(5)?,
+                    "created_at": row.get::<_, String>(6)?,
+                    "updated_at": row.get::<_, String>(7)?,
+                    "staff_name": row.get::<_, Option<String>>(8)?,
+                    "role_type": row.get::<_, Option<String>>(9)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?;
+        let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!(items))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_staff_payments_by_staff(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_staff_payments_by_staff_payload(arg0)?;
-    let staff_id = payload.staff_id;
-    let date_from = payload.date_from;
-    let date_to = payload.date_to;
+    run_blocking_command("shift_get_staff_payments_by_staff", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_staff_payments_by_staff_payload(arg0)?;
+        let staff_id = payload.staff_id;
+        let date_from = payload.date_from;
+        let date_to = payload.date_to;
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    ensure_staff_payments_table(&conn)?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_staff_payments_table(&conn)?;
 
-    let query =
-        "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes,
+        let query =
+            "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes,
                 sp.created_at, sp.updated_at,
                 (SELECT ss.staff_name
                  FROM staff_shifts ss
@@ -1315,149 +1405,159 @@ pub async fn shift_get_staff_payments_by_staff(
                    AND (?2 IS NULL OR substr(sp.created_at, 1, 10) >= ?2)
                    AND (?3 IS NULL OR substr(sp.created_at, 1, 10) <= ?3)
                  ORDER BY sp.created_at DESC";
-    let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params![staff_id, date_from, date_to], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "cashier_shift_id": row.get::<_, String>(1)?,
-                "paid_to_staff_id": row.get::<_, String>(2)?,
-                "amount": row.get::<_, f64>(3)?,
-                "payment_type": row.get::<_, String>(4)?,
-                "notes": row.get::<_, Option<String>>(5)?,
-                "created_at": row.get::<_, String>(6)?,
-                "updated_at": row.get::<_, String>(7)?,
-                "cashier_name": row.get::<_, Option<String>>(8)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
-    Ok(serde_json::json!(items))
+        let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![staff_id, date_from, date_to], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "cashier_shift_id": row.get::<_, String>(1)?,
+                    "paid_to_staff_id": row.get::<_, String>(2)?,
+                    "amount": row.get::<_, f64>(3)?,
+                    "payment_type": row.get::<_, String>(4)?,
+                    "notes": row.get::<_, Option<String>>(5)?,
+                    "created_at": row.get::<_, String>(6)?,
+                    "updated_at": row.get::<_, String>(7)?,
+                    "cashier_name": row.get::<_, Option<String>>(8)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?;
+        let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+        Ok(serde_json::json!(items))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_get_staff_payment_total_for_date(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<f64, String> {
-    let payload = parse_staff_date_payload(arg0, arg1)?;
-    let staff_id = payload.staff_id;
-    let date = payload.date;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    ensure_staff_payments_table(&conn)?;
-    let total: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
+    run_blocking_command("shift_get_staff_payment_total_for_date", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_staff_date_payload(arg0, arg1)?;
+        let staff_id = payload.staff_id;
+        let date = payload.date;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        ensure_staff_payments_table(&conn)?;
+        let total: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
              WHERE paid_to_staff_id = ?1 AND substr(created_at, 1, 10) = ?2",
-            rusqlite::params![staff_id, date],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
-    Ok(total)
+                rusqlite::params![staff_id, date],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        Ok(total)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn shift_backfill_driver_earnings(
     _arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    run_blocking_command("shift_backfill_driver_earnings", move || {
+        let db = app.state::<db::DbState>();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    // Read legacy JSON array from local_settings
-    let json_str = db::get_setting(&conn, "local", "driver_earnings_v1");
-    let entries: Vec<serde_json::Value> = match json_str {
-        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-        None => {
-            return Ok(
-                serde_json::json!({ "message": "No legacy data found", "processed": 0, "total": 0 }),
-            )
-        }
-    };
-
-    let total = entries.len();
-    let mut processed = 0i64;
-
-    for entry in &entries {
-        let id =
-            value_str(entry, &["id"]).unwrap_or_else(|| format!("de-bf-{}", uuid::Uuid::new_v4()));
-        let driver_id = match value_str(entry, &["driverId", "driver_id"]) {
-            Some(v) => v,
-            None => continue,
+        // Read legacy JSON array from local_settings
+        let json_str = db::get_setting(&conn, "local", "driver_earnings_v1");
+        let entries: Vec<serde_json::Value> = match json_str {
+            Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+            None => {
+                return Ok(
+                    serde_json::json!({ "message": "No legacy data found", "processed": 0, "total": 0 }),
+                )
+            }
         };
-        let shift_id = value_str(
-            entry,
-            &["shiftId", "shift_id", "staffShiftId", "staff_shift_id"],
-        );
-        let order_id = match value_str(entry, &["orderId", "order_id"]) {
-            Some(v) => v,
-            None => continue,
-        };
-        let branch_id = value_str(entry, &["branchId", "branch_id"]).unwrap_or_default();
-        let delivery_fee = value_f64(entry, &["deliveryFee", "delivery_fee"]).unwrap_or(0.0);
-        let tip_amount = value_f64(entry, &["tipAmount", "tip_amount"]).unwrap_or(0.0);
-        let total_earning = delivery_fee + tip_amount;
-        let payment_method = value_str(entry, &["paymentMethod", "payment_method"])
-            .unwrap_or_else(|| "cash".to_string());
-        let cash_collected = value_f64(entry, &["cashCollected", "cash_collected"]).unwrap_or(0.0);
-        let card_amount = value_f64(entry, &["cardAmount", "card_amount"]).unwrap_or(0.0);
-        let cash_to_return = cash_collected - card_amount;
-        let order_details = entry
-            .get("orderDetails")
-            .or_else(|| entry.get("order_details"))
-            .map(|v| v.to_string());
-        let created_at = value_str(entry, &["createdAt", "created_at"])
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-        let updated_at = value_str(entry, &["updatedAt", "updated_at"])
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO driver_earnings (
+        let total = entries.len();
+        let mut processed = 0i64;
+
+        for entry in &entries {
+            let id =
+                value_str(entry, &["id"]).unwrap_or_else(|| format!("de-bf-{}", uuid::Uuid::new_v4()));
+            let driver_id = match value_str(entry, &["driverId", "driver_id"]) {
+                Some(v) => v,
+                None => continue,
+            };
+            let shift_id = value_str(
+                entry,
+                &["shiftId", "shift_id", "staffShiftId", "staff_shift_id"],
+            );
+            let order_id = match value_str(entry, &["orderId", "order_id"]) {
+                Some(v) => v,
+                None => continue,
+            };
+            let branch_id = value_str(entry, &["branchId", "branch_id"]).unwrap_or_default();
+            let delivery_fee = value_f64(entry, &["deliveryFee", "delivery_fee"]).unwrap_or(0.0);
+            let tip_amount = value_f64(entry, &["tipAmount", "tip_amount"]).unwrap_or(0.0);
+            let total_earning = delivery_fee + tip_amount;
+            let payment_method = value_str(entry, &["paymentMethod", "payment_method"])
+                .unwrap_or_else(|| "cash".to_string());
+            let cash_collected = value_f64(entry, &["cashCollected", "cash_collected"]).unwrap_or(0.0);
+            let card_amount = value_f64(entry, &["cardAmount", "card_amount"]).unwrap_or(0.0);
+            let cash_to_return = cash_collected - card_amount;
+            let order_details = entry
+                .get("orderDetails")
+                .or_else(|| entry.get("order_details"))
+                .map(|v| v.to_string());
+            let created_at = value_str(entry, &["createdAt", "created_at"])
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let updated_at = value_str(entry, &["updatedAt", "updated_at"])
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+            let result = conn.execute(
+                "INSERT OR IGNORE INTO driver_earnings (
                 id, driver_id, staff_shift_id, order_id, branch_id,
                 delivery_fee, tip_amount, total_earning,
                 payment_method, cash_collected, card_amount, cash_to_return,
                 order_details, settled, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15)",
-            params![
-                id,
-                driver_id,
-                shift_id,
-                order_id,
-                branch_id,
-                delivery_fee,
-                tip_amount,
-                total_earning,
-                payment_method,
-                cash_collected,
-                card_amount,
-                cash_to_return,
-                order_details,
-                created_at,
-                updated_at
-            ],
-        );
+                params![
+                    id,
+                    driver_id,
+                    shift_id,
+                    order_id,
+                    branch_id,
+                    delivery_fee,
+                    tip_amount,
+                    total_earning,
+                    payment_method,
+                    cash_collected,
+                    card_amount,
+                    cash_to_return,
+                    order_details,
+                    created_at,
+                    updated_at
+                ],
+            );
 
-        match result {
-            Ok(rows) if rows > 0 => processed += 1,
-            Ok(_) => {} // INSERT OR IGNORE skipped duplicate
-            Err(e) => warn!("Backfill skip for order {order_id}: {e}"),
+            match result {
+                Ok(rows) if rows > 0 => processed += 1,
+                Ok(_) => {} // INSERT OR IGNORE skipped duplicate
+                Err(e) => warn!("Backfill skip for order {order_id}: {e}"),
+            }
         }
-    }
 
-    // Delete the legacy JSON key after successful backfill
-    if processed > 0 || total > 0 {
-        let _ = conn.execute(
-            "DELETE FROM local_settings WHERE setting_category = 'local' AND setting_key = 'driver_earnings_v1'",
-            [],
-        );
-        info!("Driver earnings backfill complete: {processed}/{total} migrated from JSON to SQL");
-    }
+        // Delete the legacy JSON key after successful backfill
+        if processed > 0 || total > 0 {
+            let _ = conn.execute(
+                "DELETE FROM local_settings WHERE setting_category = 'local' AND setting_key = 'driver_earnings_v1'",
+                [],
+            );
+            info!("Driver earnings backfill complete: {processed}/{total} migrated from JSON to SQL");
+        }
 
-    Ok(serde_json::json!({
-        "message": "Backfill completed",
-        "processed": processed,
-        "total": total
-    }))
+        Ok(serde_json::json!({
+            "message": "Backfill completed",
+            "processed": processed,
+            "total": total
+        }))
+    })
+    .await
 }
 
 #[tauri::command]

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
+use crate::database_lock::run_blocking_command;
 use crate::{db, payload_arg0_as_string, payments, refunds, resolve_order_id};
 
 static ACTIVE_PAYMENT_RECORDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -526,60 +527,66 @@ pub async fn payment_update_payment_status(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
     arg2: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_payment_update_status_payload(arg0, arg1, arg2)?;
-    let order_id_raw = payload.order_id;
-    let payment_status = payload.payment_status;
-    let payment_method = payload.payment_method;
-    let now = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    run_blocking_command("payment_update_payment_status", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_payment_update_status_payload(arg0, arg1, arg2)?;
+        let order_id_raw = payload.order_id;
+        let payment_status = payload.payment_status;
+        let payment_method = payload.payment_method;
+        let now = Utc::now().to_rfc3339();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
 
-    set_order_payment_status_in_connection(&conn, &order_id, &payment_status, &now)?;
+        set_order_payment_status_in_connection(&conn, &order_id, &payment_status, &now)?;
 
-    let event_payload = serde_json::json!({
-        "orderId": order_id,
-        "paymentStatus": payment_status,
-        "paymentMethod": payment_method
-    });
-    // Wave 6 M3: the sync-queue idempotency key is anchored on
-    // `(order_id, payment_status)`, so a double submission of the same
-    // status change produces the same key.
-    let idem = format!("order:status:{}:{}", order_id, payment_status);
-    let _ = conn.execute(
-        "INSERT OR IGNORE INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+        let event_payload = serde_json::json!({
+            "orderId": order_id,
+            "paymentStatus": payment_status,
+            "paymentMethod": payment_method
+        });
+        // Wave 6 M3: the sync-queue idempotency key is anchored on
+        // `(order_id, payment_status)`, so a double submission of the same
+        // status change produces the same key.
+        let idem = format!("order:status:{}:{}", order_id, payment_status);
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('order', ?1, 'update', ?2, ?3)",
-        rusqlite::params![order_id, event_payload.to_string(), idem],
-    );
-    drop(conn);
-    let _ = app.emit("order_payment_updated", event_payload.clone());
-    Ok(serde_json::json!({ "success": true, "data": event_payload }))
+            rusqlite::params![order_id, event_payload.to_string(), idem],
+        );
+        drop(conn);
+        let _ = app.emit("order_payment_updated", event_payload.clone());
+        Ok(serde_json::json!({ "success": true, "data": event_payload }))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_update_payment_method(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
-    auth_state: tauri::State<'_, crate::auth::AuthState>,
 ) -> Result<serde_json::Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let session = crate::auth::get_session_json(&auth_state);
-    let payload = parse_payment_method_update_payload(arg0, arg1)?;
-    let result = payments::update_payment_method_for_payment_with_actor(
-        &db,
-        &payload.order_id,
-        payload.payment_id.as_deref(),
-        &payload.payment_method,
-        session["staffId"].as_str(),
-    )?;
-    if let Some(event_payload) = result.get("data").cloned() {
-        let _ = app.emit("order_payment_updated", event_payload);
-    }
-    Ok(result)
+    run_blocking_command("payment_update_payment_method", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let session = crate::auth::get_session_json(&auth_state);
+        let payload = parse_payment_method_update_payload(arg0, arg1)?;
+        let result = payments::update_payment_method_for_payment_with_actor(
+            &db,
+            &payload.order_id,
+            payload.payment_id.as_deref(),
+            &payload.payment_method,
+            session["staffId"].as_str(),
+        )?;
+        if let Some(event_payload) = result.get("data").cloned() {
+            let _ = app.emit("order_payment_updated", event_payload);
+        }
+        Ok(result)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1109,10 +1116,14 @@ pub(crate) fn resolve_set_aside_payment_guarded(
 #[tauri::command]
 pub async fn payment_resolve_set_aside(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, crate::auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
-    resolve_set_aside_payment_guarded(&db, &auth_state, arg0)
+    run_blocking_command("payment_resolve_set_aside", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        resolve_set_aside_payment_guarded(&db, &auth_state, arg0)
+    })
+    .await
 }
 
 /// A charged payment of this order is not saved yet (fix review 30/09/2026):
@@ -1197,9 +1208,13 @@ pub(crate) fn list_unsaved_payments(
 #[tauri::command]
 pub async fn payment_list_unsaved(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    list_unsaved_payments(&db, arg0)
+    run_blocking_command("payment_list_unsaved", move || {
+        let db = app.state::<db::DbState>();
+        list_unsaved_payments(&db, arg0)
+    })
+    .await
 }
 
 /// "Save payment again": replays the same writes with the same keys (no new
@@ -1456,131 +1471,158 @@ pub(crate) fn resolve_unsaved_payment_guarded(
 #[tauri::command]
 pub async fn payment_resolve_unsaved(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-    auth_state: tauri::State<'_, crate::auth::AuthState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
-    resolve_unsaved_payment_guarded(&db, &auth_state, arg0)
+    run_blocking_command("payment_resolve_unsaved", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        resolve_unsaved_payment_guarded(&db, &auth_state, arg0)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_void(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = parse_payment_void_payload(arg0)?;
-    payments::void_payment(
-        &db,
-        &payload.payment_id,
-        &payload.reason,
-        payload.voided_by.as_deref(),
-        payload.staff_shift_id.as_deref(),
-    )
+    run_blocking_command("payment_void", move || {
+        let db = app.state::<db::DbState>();
+        let payload = parse_payment_void_payload(arg0)?;
+        payments::void_payment(
+            &db,
+            &payload.payment_id,
+            &payload.reason,
+            payload.voided_by.as_deref(),
+            payload.staff_shift_id.as_deref(),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_get_order_payments(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id = parse_order_id_payload(arg0)?;
-    payments::get_order_payments(&db, &order_id)
+    run_blocking_command("payment_get_order_payments", move || {
+        let db = app.state::<db::DbState>();
+        let order_id = parse_order_id_payload(arg0)?;
+        payments::get_order_payments(&db, &order_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_get_settlement_snapshot(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    // Asked before a TWINT QR is shown for this order (fix review 06/10/2026).
-    let wants_twint_admission = arg0
-        .as_ref()
-        .and_then(|payload| payload.get("twintAdmission"))
-        .and_then(serde_json::Value::as_bool)
-        == Some(true);
-    let order_id = parse_order_id_payload(arg0)?;
-    let mut snapshot = payments::get_order_settlement_snapshot(&db, &order_id)?;
-    let actual_order_id = snapshot
-        .get("orderId")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("Settlement snapshot has no order identity")?
-        .to_string();
-    let actual_order_id = actual_order_id.as_str();
-    let conn = db.conn.lock().map_err(|error| error.to_string())?;
-    let sale = crate::commands::ecr::direct_sale_projection(&conn, actual_order_id)?;
-    snapshot["unresolvedDirectSale"] = sale;
-    // Why a cancel of this order would be refused (founder rule 30/09 and
-    // 01/10/2026), so the cashier is told before any reason or PIN; the
-    // cancel itself refuses again. Null when it may be cancelled (a
-    // platform order's settlement row included, which `netPaid` still
-    // counts); absent when the ledger could not be read (the cancel then
-    // decides, and the renderer falls back to `netPaid`).
-    match crate::commands::orders::cancel_refusal_code(&conn, actual_order_id) {
-        Ok(code) => {
-            snapshot["cancelRefusal"] = code
-                .map(|code| serde_json::Value::String(code.to_string()))
-                .unwrap_or(serde_json::Value::Null);
+    run_blocking_command("payment_get_settlement_snapshot", move || {
+        let db = app.state::<db::DbState>();
+        // Asked before a TWINT QR is shown for this order (fix review 06/10/2026).
+        let wants_twint_admission = arg0
+            .as_ref()
+            .and_then(|payload| payload.get("twintAdmission"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        let order_id = parse_order_id_payload(arg0)?;
+        let mut snapshot = payments::get_order_settlement_snapshot(&db, &order_id)?;
+        let actual_order_id = snapshot
+            .get("orderId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Settlement snapshot has no order identity")?
+            .to_string();
+        let actual_order_id = actual_order_id.as_str();
+        let conn = db.conn.lock().map_err(|error| error.to_string())?;
+        let sale = crate::commands::ecr::direct_sale_projection(&conn, actual_order_id)?;
+        snapshot["unresolvedDirectSale"] = sale;
+        // Why a cancel of this order would be refused (founder rule 30/09 and
+        // 01/10/2026), so the cashier is told before any reason or PIN; the
+        // cancel itself refuses again. Null when it may be cancelled (a
+        // platform order's settlement row included, which `netPaid` still
+        // counts); absent when the ledger could not be read (the cancel then
+        // decides, and the renderer falls back to `netPaid`).
+        match crate::commands::orders::cancel_refusal_code(&conn, actual_order_id) {
+            Ok(code) => {
+                snapshot["cancelRefusal"] = code
+                    .map(|code| serde_json::Value::String(code.to_string()))
+                    .unwrap_or(serde_json::Value::Null);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    order_id = %actual_order_id,
+                    error = %error,
+                    "Cancel refusal could not be read for the settlement snapshot"
+                );
+            }
         }
-        Err(error) => {
-            tracing::warn!(
-                order_id = %actual_order_id,
-                error = %error,
-                "Cancel refusal could not be read for the settlement snapshot"
-            );
+        // Whether a cashier-confirmed TWINT receipt for the whole outstanding
+        // balance could be saved now: the QR is shown only when it could, so a
+        // refusal comes before the customer pays, never after.
+        if wants_twint_admission {
+            snapshot["twintAdmission"] =
+                crate::unsaved_payments::manual_twint_existing_admission(&conn, actual_order_id);
         }
-    }
-    // Whether a cashier-confirmed TWINT receipt for the whole outstanding
-    // balance could be saved now: the QR is shown only when it could, so a
-    // refusal comes before the customer pays, never after.
-    if wants_twint_admission {
-        snapshot["twintAdmission"] =
-            crate::unsaved_payments::manual_twint_existing_admission(&conn, actual_order_id);
-    }
-    Ok(snapshot)
+        Ok(snapshot)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_get_receipt_preview(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id = parse_order_id_payload(arg0)?;
-    payments::get_receipt_preview(&db, &order_id)
+    run_blocking_command("payment_get_receipt_preview", move || {
+        let db = app.state::<db::DbState>();
+        let order_id = parse_order_id_payload(arg0)?;
+        payments::get_receipt_preview(&db, &order_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_get_paid_items(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id = parse_order_id_payload(arg0)?;
-    payments::get_paid_items(&db, &order_id)
+    run_blocking_command("payment_get_paid_items", move || {
+        let db = app.state::<db::DbState>();
+        let order_id = parse_order_id_payload(arg0)?;
+        payments::get_paid_items(&db, &order_id)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn payment_print_split_receipt(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payment_id = parse_payment_id_payload(arg0)?;
-    if !crate::print::is_print_action_enabled(&db, "split_receipt") {
-        return Ok(serde_json::json!({ "success": true, "skipped": true }));
-    }
-    // Use split_receipt entity type for the print pipeline
-    let enqueue_result =
-        crate::print::enqueue_print_job(&db, "split_receipt", &payment_id, None, &app)?;
+    run_blocking_command("payment_print_split_receipt", move || {
+        let db = app.state::<db::DbState>();
+        let payment_id = parse_payment_id_payload(arg0)?;
+        if !crate::print::is_print_action_enabled(&db, "split_receipt") {
+            return Ok(serde_json::json!({ "success": true, "skipped": true }));
+        }
+        // Use split_receipt entity type for the print pipeline
+        let enqueue_result =
+            crate::print::enqueue_print_job(&db, "split_receipt", &payment_id, None, &app)?;
 
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    crate::print::spawn_pending_job_processing(
-        app.clone(),
-        data_dir,
-        format!("split receipt for payment {payment_id}"),
-    );
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        crate::print::spawn_pending_job_processing(
+            app.clone(),
+            data_dir,
+            format!("split receipt for payment {payment_id}"),
+        );
 
-    Ok(enqueue_result)
+        Ok(enqueue_result)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1613,10 +1655,14 @@ pub async fn refund_void_payment(
 #[tauri::command]
 pub async fn refund_list_order_adjustments(
     arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id = parse_order_id_payload(arg0)?;
-    refunds::list_order_adjustments(&db, &order_id)
+    run_blocking_command("refund_list_order_adjustments", move || {
+        let db = app.state::<db::DbState>();
+        let order_id = parse_order_id_payload(arg0)?;
+        refunds::list_order_adjustments(&db, &order_id)
+    })
+    .await
 }
 
 #[tauri::command]

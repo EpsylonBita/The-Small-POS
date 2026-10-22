@@ -31,7 +31,16 @@
       "editServerUpdate": "Order corrections are temporarily unavailable. Check your connection and retry after the server update.",
       "editSyncRequired": "The payment or order change has not synced yet. Your cart is saved. Try again shortly.",
       "emptyEditHint": "To remove every item, close the editor and cancel the order.",
-      "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund."
+      "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund.",
+      "cardRecoveryQuestion": "Was the card charged? Check the bank POS for this amount before you answer. Nothing is charged here.",
+      "cardRecoveryRegisterNote": "This till records card charges through its cash register or terminal, and nothing there shows this card was charged. If the bank POS shows a charge, ask a manager.",
+      "cardRecoveryCharged": "The card was charged – record it",
+      "cardRecoveryNotCharged": "The card was NOT charged – back to the cart",
+      "checkoutPark": "Set aside (manager)",
+      "checkoutParked": "The checkout was set aside and new orders can be taken. Check the bank POS: if the customer was charged, do not charge again; a manager settles it. POS status lists this attempt.",
+      "checkoutParkFailed": "The checkout could not be set aside. It stays protected; nothing was changed.",
+      "checkoutParkApprovalSubtitle": "Setting aside a checkout needs the right to void payments. A staff member who has it enters their own PIN. Nothing is charged.",
+      "freezeNotSaved": "The cart could not be saved for payment, so no payment was started. Press Pay to try again."
     }
   },
   "checkoutRecovery": {
@@ -55,6 +64,15 @@
     "fixCodes": {
       "table_cancellation_not_saved": "Recover the original table cancellation. Do not hand back or refund the money again.",
       "edit_settlement_not_saved": "Reopen the saved order edit and save the same correction. Do not collect or return money again."
+    }
+  },
+  "recovery": {
+    "issues": {
+      "checkoutParked": {
+        "title": "Checkout set aside – check the bank POS",
+        "summary": "At {{time}} a manager set aside a checkout of {{amount}} {{currency}} so the till could take orders again. Nothing was recorded for it.",
+        "guidance": "Check the bank POS (or TWINT app) for this amount at that time. If the customer was charged, do not charge again: a manager enters the order and records that payment once. If not, nothing more is needed."
+      }
     }
   }
 }

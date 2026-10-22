@@ -743,7 +743,7 @@ fn contains_any(text: &str, patterns: &[&str]) -> bool {
 
 // A checkout code is `checkout_<operation>_<class>` from these fixed lists.
 // Keep both aligned with shared/pos/health/runtime-log-events.
-const CHECKOUT_OPERATIONS: &[&str] = &["save", "read", "delete"];
+const CHECKOUT_OPERATIONS: &[&str] = &["save", "read", "delete", "create"];
 const CHECKOUT_FAILURE_CLASSES: &[&str] = &[
     "scope_transition",
     "reset_pending",
@@ -758,6 +758,12 @@ const CHECKOUT_FAILURE_CLASSES: &[&str] = &[
     "storage_io",
     "unclassified",
     "storage_unavailable",
+    "in_progress",
+    "fiscal_not_approved",
+    "card_confirmation_refused",
+    "payment_not_saved",
+    "shift_required",
+    "currency_unavailable",
 ];
 
 fn is_checkout_event_code(value: &str) -> bool {

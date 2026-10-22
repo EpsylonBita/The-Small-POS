@@ -2312,6 +2312,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             draftContext={{ selectedTable, tableNumber, deliveryZoneInfo, salonMode: isSalonSale, ...restoredEditContext }}
             onDraftRestore={restoreDraftContext}
             onRecoveredOrder={acceptRecoveredDraftOrder}
+            onCheckoutParked={resetCheckoutRequestId}
             editMode={!!restoredEditContext}
             editOrderId={restoredEditContext?.editOrderId}
             editSupabaseId={restoredEditContext?.editSupabaseId}

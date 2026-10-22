@@ -203,6 +203,17 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
             "sourceWindow": "active_shift",
         })
     });
+    // Checkouts a manager parked in the last day (Tomikro 21/10/2026): each is
+    // checked against the bank POS. A failed read is reported, never "none".
+    let parked_checkouts = db
+        .conn
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|conn| crate::checkout_drafts::recent_parks(&conn))
+        .unwrap_or_else(|_| {
+            read_failures.push("parkedCheckouts");
+            Value::Null
+        });
 
     Ok(json!({
         "schemaVersion": schema_version,
@@ -223,6 +234,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         "lastParitySync": last_parity_sync,
         "credentialState": credential_state,
         "checkoutPaymentBlockers": checkout_payment_blockers,
+        "parkedCheckouts": parked_checkouts,
         "invalidOrders": {
             "count": invalid_orders_count,
             "details": invalid_orders

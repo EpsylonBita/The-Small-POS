@@ -267,3 +267,115 @@ async fn a_held_checkout_booked_under_another_key_is_saved_not_booked_again() {
     );
     assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 1, "one order");
 }
+
+/// Tomikro 21/10/2026: the till closed during a card checkout and the
+/// cashier saw the card charged on a separate bank POS. The answer carries
+/// the original request with the cashier's confirmation.
+fn cashier_confirmed_card(mut payload: Value) -> Value {
+    payload["initialPayment"]["metadata"] =
+        json!({ "confirmation": "cashier", "confirmation_action": "card_charged_outside_till" });
+    payload
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn a_cashier_confirmed_card_never_reaches_a_cash_register_that_charges_cards() {
+    let _keyring =
+        fake_keyring::install_seeded([("terminal_id", TERMINAL_ID), ("branch_id", BRANCH_ID)]);
+    let td = TestDb::open();
+    {
+        let conn = td.state.conn.lock().unwrap();
+        seed_terminal(&conn);
+        open_cashier_shift(&conn);
+    }
+
+    let answer = press_pay(&td, cashier_confirmed_card(checkout(1))).await;
+    assert_eq!(answer["errorCode"], "CARD_CONFIRMATION_REFUSED", "{answer}");
+    assert_eq!(answer["orderPersisted"], false);
+    {
+        let conn = td.state.conn.lock().unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 0);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM ecr_transactions"),
+            0,
+            "the register was never asked"
+        );
+    }
+
+    // Negative control: the same checkout without the cashier's answer goes
+    // to the register (not connected here, so its attempt is recorded).
+    let ordinary = press_pay(&td, checkout(1)).await;
+    assert_eq!(
+        ordinary["errorCode"], "FISCAL_CHECKOUT_NOT_APPROVED",
+        "{ordinary}"
+    );
+    let conn = td.state.conn.lock().unwrap();
+    assert!(count(&conn, "SELECT COUNT(*) FROM ecr_transactions") > 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn a_cashier_confirmed_card_without_a_register_is_recorded_once_with_no_terminal() {
+    let _keyring =
+        fake_keyring::install_seeded([("terminal_id", TERMINAL_ID), ("branch_id", BRANCH_ID)]);
+    let td = TestDb::open();
+    {
+        let conn = td.state.conn.lock().unwrap();
+        seed_terminal(&conn);
+        conn.execute("DELETE FROM ecr_devices", []).unwrap();
+        // Without a register the card is recorded in the store's own currency.
+        for (key, value) in [
+            ("currency", "EUR"),
+            ("store_currency_branch_id", BRANCH_ID),
+            ("store_currency_available", "true"),
+            ("store_currency_source", "branch_country"),
+        ] {
+            crate::db::set_setting(&conn, "restaurant", key, value).unwrap();
+        }
+        open_cashier_shift(&conn);
+        conn.execute("UPDATE staff_shifts SET currency='EUR'", [])
+            .unwrap();
+    }
+
+    let answer = press_pay(&td, cashier_confirmed_card(checkout(1))).await;
+    assert_eq!(answer["success"], true, "{answer}");
+    let again = press_pay(&td, cashier_confirmed_card(checkout(1))).await;
+    assert_ne!(again["errorCode"], "CARD_CONFIRMATION_REFUSED", "{again}");
+    let conn = td.state.conn.lock().unwrap();
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 1);
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM order_payments WHERE method='card' AND status='completed'"
+        ),
+        1
+    );
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM ecr_transactions"), 0);
+
+    // A terminal row that names the checkout refuses the answer.
+    drop(conn);
+    let other = json!({ "clientRequestId": "checkout-request-with-row" });
+    {
+        let conn = td.state.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO ecr_devices (id, name, device_type, connection_type, is_default, enabled)
+             VALUES ('reader', 'Reader', 'payment_terminal', 'network', 1, 1)",
+            [],
+        )
+        .unwrap();
+        crate::db::ecr_insert_transaction(
+            &conn,
+            &json!({"id":"declined-row","deviceId":"reader","transactionType":"sale",
+            "amount":1300,"currency":"EUR","orderId":other["clientRequestId"],"status":"declined"}),
+        )
+        .unwrap();
+    }
+    let mut payload = cashier_confirmed_card(checkout(1));
+    payload["clientRequestId"] = other["clientRequestId"].clone();
+    let refused = press_pay(&td, payload).await;
+    assert_eq!(
+        refused["errorCode"], "CARD_CONFIRMATION_REFUSED",
+        "{refused}"
+    );
+}
