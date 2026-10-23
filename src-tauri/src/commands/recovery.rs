@@ -312,20 +312,24 @@ fn promote_waiting_settlement_refunds_for_payment(
         promoted += 1;
 
         let _ = conn.execute(
-            "UPDATE parity_sync_queue
-             SET status = 'pending',
-                 attempts = 0,
-                 last_attempt = NULL,
-                 error_message = NULL,
-                 next_retry_at = NULL,
-                 retry_delay_ms = 1000,
-                 priority = CASE WHEN priority > 1 THEN priority ELSE 1 END,
-                 claim_generation = claim_generation + 1
-             WHERE table_name = 'payment_adjustments'
-               AND record_id = ?1
-               AND COALESCE(module_type, '') <> 'repairs'
-               AND table_name NOT IN ('repairs', 'repair_attachments')
-               AND status IN ('pending', 'processing', 'failed', 'conflict')",
+            &format!(
+                "UPDATE parity_sync_queue
+                 SET status = 'pending',
+                     attempts = 0,
+                     last_attempt = NULL,
+                     error_message = NULL,
+                     next_retry_at = NULL,
+                     retry_delay_ms = 1000,
+                     priority = CASE WHEN priority > 1 THEN priority ELSE 1 END,
+                     claim_generation = claim_generation + 1
+                 WHERE table_name = 'payment_adjustments'
+                   AND record_id = ?1
+                   AND COALESCE(module_type, '') <> 'repairs'
+                   AND table_name NOT IN ('repairs', 'repair_attachments')
+                   AND status IN ('pending', 'processing', 'failed', 'conflict')
+                   AND {}",
+                crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
+            ),
             rusqlite::params![adjustment_id.as_str()],
         );
     }
@@ -377,21 +381,25 @@ fn prepare_invalid_driver_order_repair(
 
     let sanitized = sanitize_invalid_driver_order_payload(&data)?;
     conn.execute(
-        "UPDATE parity_sync_queue
-         SET data = ?1,
-             status = 'pending',
-             attempts = 0,
-             last_attempt = NULL,
-             error_message = NULL,
-             next_retry_at = NULL,
-             retry_delay_ms = 1000,
-             priority = CASE WHEN priority > 2 THEN priority ELSE 2 END,
-             claim_generation = claim_generation + 1
-         WHERE id = ?2
-           AND table_name = 'orders'
-           AND operation = 'UPDATE'
-           AND COALESCE(module_type, '') <> 'repairs'
-           AND table_name NOT IN ('repairs', 'repair_attachments')",
+        &format!(
+            "UPDATE parity_sync_queue
+             SET data = ?1,
+                 status = 'pending',
+                 attempts = 0,
+                 last_attempt = NULL,
+                 error_message = NULL,
+                 next_retry_at = NULL,
+                 retry_delay_ms = 1000,
+                 priority = CASE WHEN priority > 2 THEN priority ELSE 2 END,
+                 claim_generation = claim_generation + 1
+             WHERE id = ?2
+               AND table_name = 'orders'
+               AND operation = 'UPDATE'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND table_name NOT IN ('repairs', 'repair_attachments')
+               AND {}",
+            crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
+        ),
         rusqlite::params![sanitized, item_id],
     )
     .map_err(|e| format!("requeue invalid-driver order parity row: {e}"))?;

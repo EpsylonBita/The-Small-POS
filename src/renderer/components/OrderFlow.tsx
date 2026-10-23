@@ -1,4 +1,4 @@
-import { saveOrderWithLoyalty, LoyaltyCheckoutRefused } from '../services/LoyaltyCheckout';
+import { saveOrderWithLoyalty, LoyaltyCheckoutRefused, LoyaltyRedemptionUnconfirmed, loyaltyCheckoutMessageKey } from '../services/LoyaltyCheckout';
 import type { SalonSale } from '../pages/verticals/salon/salon-sale';
 import { resolveAdjustmentAttribution } from '../utils/staffAttribution';
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
@@ -18,6 +18,7 @@ import {
   type OutstandingPaymentSelection,
 } from './modals/OutstandingPaymentMethodModal';
 import type { PaymentModalExistingOrder, RoomChargeContext } from './modals/PaymentModal';
+import { resolveOrderTipRecipient, type TipRecipientRole } from '../utils/tip-recipient';
 import { SalonRoomChargeModal } from '../pages/verticals/hotel/SalonRoomChargeModal';
 import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
@@ -67,7 +68,7 @@ import { usePaymentPrintPrompt, type PaymentPrintPromptContext } from '../hooks/
 import { AlertTriangle } from 'lucide-react';
 import TableOrderIcon from './icons/TableOrderIcon';
 import PickupOrderIcon from './icons/PickupOrderIcon';
-import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { deliveryZoneSelectionMetadata, resolveDeliveryFee } from '../utils/delivery-fee';
 import { toValidLatLng } from '../utils/coordinates';
 import {
   getCachedTerminalCredentials,
@@ -209,7 +210,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     orderType: 'pickup' | 'delivery';
     existingPayments?: any[];
     tipAmount?: number;
-    tipRecipientRole?: 'waiter' | 'cashier' | 'driver';
+    tipRecipientRole?: TipRecipientRole;
     tipRecipientStaffId?: string;
     tipRecipientStaffShiftId?: string;
     recoverySession?: number;
@@ -225,7 +226,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     orderType: 'pickup' | 'delivery';
     existingPayments: any[];
     tipAmount?: number;
-    tipRecipientRole?: 'waiter' | 'cashier' | 'driver';
+    tipRecipientRole?: TipRecipientRole;
     tipRecipientStaffId?: string;
     tipRecipientStaffShiftId?: string;
     recoverySession?: number;
@@ -1558,7 +1559,13 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     const ghostSource = isGhostOrder
       ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_code_x_1')
       : null;
-    const ghostMetadata = isGhostOrder ? (orderData.ghost_metadata ?? null) : null;
+    // Offline week Ω6β: a zone the cashier chose offline travels in the
+    // order's metadata as the "zone chosen manually" marker.
+    const ghostMetadata = deliveryZoneSelectionMetadata(
+      isGhostOrder ? (orderData.ghost_metadata ?? null) : null,
+      selectedOrderType,
+      orderData.deliveryZoneInfo,
+    );
 
     try {
       // Calculate delivery details
@@ -1629,24 +1636,26 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         0,
         Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
       );
-      const requestedTipRecipientRole = String(
-        orderData.paymentData?.tipRecipientRole || '',
-      );
-      const tipRecipientRole: 'waiter' | 'cashier' | 'driver' | undefined =
-        tipAmount > 0 &&
-        ['waiter', 'cashier', 'driver'].includes(requestedTipRecipientRole)
-          ? (requestedTipRecipientRole as 'waiter' | 'cashier' | 'driver')
-          : undefined;
       const actualWaiterId =
         selectedTable?.currentWaiterId || staff?.staffId || undefined;
       const actualWaiterShiftId =
         actualWaiterId && actualWaiterId === staff?.staffId
           ? activeShift?.id
           : undefined;
-      const tipRecipientStaffId =
-        tipRecipientRole === 'waiter' ? actualWaiterId : undefined;
-      const tipRecipientStaffShiftId =
-        tipRecipientRole === 'waiter' ? actualWaiterShiftId : undefined;
+      // A `staff` tip goes to one stylist of the order's lines; native resolves
+      // that stylist's active shift, if any (salon, 21/10/2026).
+      const {
+        tipRecipientRole,
+        tipRecipientStaffId,
+        tipRecipientStaffShiftId,
+      } = resolveOrderTipRecipient({
+        tipAmount,
+        requestedRole: orderData.paymentData?.tipRecipientRole,
+        requestedStaffId: orderData.paymentData?.tipRecipientStaffId,
+        items: orderData.items,
+        waiterId: actualWaiterId,
+        waiterShiftId: actualWaiterShiftId,
+      });
       const total_amount = subtotalAfterDiscount + deliveryFee + tipAmount;
       const paymentMethod = typeof orderData.paymentData?.method === 'string'
         ? orderData.paymentData.method
@@ -1815,7 +1824,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         // Use total_amount instead of total (matching shared types)
         total_amount: total_amount,
         subtotal: subtotalAfterDiscount,
-        country_code: 'GR',
+        // No country here: the native create body names the branch's VAT country (tax.vat_country).
         pricing_mode: 'tax_inclusive',
         delivery_fee: deliveryFee,
 
@@ -2040,8 +2049,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         return false;
       }
     } catch (error) {
-      if (error instanceof LoyaltyCheckoutRefused) {
-        toast.error(t('loyalty.checkoutRefused'));
+      // Ω11 (22/10/2026): offline, refused or unconfirmed points each say what
+      // happened; the sale itself is never blocked by them.
+      if (error instanceof LoyaltyCheckoutRefused || error instanceof LoyaltyRedemptionUnconfirmed) {
+        toast.error(t(loyaltyCheckoutMessageKey(error) ?? 'loyalty.checkoutRefused'));
         return false;
       }
       console.error('Error creating order:', error);

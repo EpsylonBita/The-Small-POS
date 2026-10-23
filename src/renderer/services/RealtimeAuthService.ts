@@ -1,4 +1,5 @@
 import { posApiFetch } from '../utils/api-helpers'
+import { subscribeConnectivityRestored as subscribeTillConnectivityRestored } from './server-reachability'
 
 const REFRESH_FRACTION = 0.8
 const REFRESH_SAFETY_MS = 30_000
@@ -46,6 +47,12 @@ export interface RealtimeAuthHealth {
 export interface RealtimeAuthServiceOptions {
   requestToken?: () => Promise<RealtimeTokenRequestResult>
   now?: () => number
+  /**
+   * Subscribes to "connectivity is back": the browser `online` event, or the
+   * till's own connectivity check turning reachable again. Defaults to
+   * `subscribeConnectivityRestored` (server-reachability.ts); `null` disables.
+   */
+  subscribeConnectivityRestored?: ((onRestored: () => void) => () => void) | null
 }
 
 type ValidToken = {
@@ -83,6 +90,10 @@ function resolveHttpStatus(result: RealtimeTokenRequestResult): number | undefin
 export class RealtimeAuthService {
   private readonly requestToken: () => Promise<RealtimeTokenRequestResult>
   private readonly now: () => number
+  private readonly subscribeConnectivityRestored:
+    | ((onRestored: () => void) => () => void)
+    | null
+  private unsubscribeConnectivityRestored: (() => void) | null = null
   private readonly listeners = new Set<(health: RealtimeAuthHealth) => void>()
 
   private generation = 0
@@ -100,6 +111,10 @@ export class RealtimeAuthService {
   ) {
     this.requestToken = options.requestToken ?? requestRealtimeToken
     this.now = options.now ?? Date.now
+    this.subscribeConnectivityRestored =
+      options.subscribeConnectivityRestored === undefined
+        ? subscribeTillConnectivityRestored
+        : options.subscribeConnectivityRestored
     this.health = {
       status: 'disconnected',
       reason: 'stopped',
@@ -141,6 +156,8 @@ export class RealtimeAuthService {
     this.retryAttempt = 0
     this.inFlight = null
     this.clearRefreshTimer()
+    this.unsubscribeConnectivityRestored?.()
+    this.unsubscribeConnectivityRestored = null
     if (shouldQueueClear) {
       this.stopClearQueued = true
       this.queueClientAuthClear()
@@ -175,11 +192,42 @@ export class RealtimeAuthService {
     this.inFlight = null
     this.stopClearQueued = false
     this.clearRefreshTimer()
+    if (!this.unsubscribeConnectivityRestored && this.subscribeConnectivityRestored) {
+      try {
+        this.unsubscribeConnectivityRestored = this.subscribeConnectivityRestored(
+          this.handleConnectivityRestored,
+        )
+      } catch {
+        this.unsubscribeConnectivityRestored = null
+      }
+    }
     this.setHealth({
       status: 'authenticating',
       reason: null,
       retryAttempt: 0,
     })
+  }
+
+  /**
+   * Offline week Ω6 (22/10/2026): after its scheduled retries the service
+   * used to wait for a re-login or a restart, so realtime stayed down long
+   * after the outage. When connectivity comes back, a service that is still
+   * active but lost its token on a retryable failure starts over at once,
+   * with a fresh retry budget. An authenticated or authenticating service is
+   * left alone, and a permanent denial needs new credentials, not a network.
+   */
+  private readonly handleConnectivityRestored = (): void => {
+    if (!this.active || this.health.status !== 'disconnected') {
+      return
+    }
+    if (
+      this.health.reason !== 'transient-error' &&
+      this.health.reason !== 'malformed-response'
+    ) {
+      return
+    }
+    this.retryAttempt = 0
+    void this.refreshNow()
   }
 
   private fetchForGeneration(generation: number): Promise<void> {

@@ -22,6 +22,29 @@ vi.mock('../../../config/environment', () => ({
 
 import { posApiGet, posApiPatch, posApiPost } from '../api-helpers';
 
+describe('appointment claim conflict details', () => {
+  const body = { success: false, code: 'APPOINTMENT_CHECKOUT_CLAIMED', error: 'Busy',
+    claim: { terminal_id: 'till-2', terminal_name: 'Front desk', lease_expires_at: '2026-10-21T07:15:00Z' } };
+  afterEach(() => {
+    delete (window as any).__TAURI_INTERNALS__;
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps terminal and lease details from the browser response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 409, json: async () => body })));
+    expect(await posApiPost('/pos/appointments/a/checkout-claim', { claim_id: 'c' }))
+      .toMatchObject({ success: false, code: body.code, status: 409, errorBody: body });
+  });
+
+  it('keeps terminal and lease details from the native response', async () => {
+    (window as any).__TAURI_INTERNALS__ = {};
+    bridge.fetchFromAdmin.mockResolvedValue({ success: false, code: body.code, status: 409,
+      error: `Busy (HTTP 409): ${JSON.stringify(body)}` });
+    expect(await posApiPost('/pos/appointments/a/checkout-claim', { claim_id: 'c' }))
+      .toMatchObject({ success: false, code: body.code, status: 409, errorBody: body });
+  });
+});
+
 const SAVED_AT = '2026-10-05T09:30:00.000Z';
 const list = { branch_id: 'branch-1', integrations: [{ provider: 'wolt', is_purchased: true, status: 'connected' }] };
 

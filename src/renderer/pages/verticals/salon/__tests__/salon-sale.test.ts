@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appointmentSale, appointmentWallTimes, branchWallClock, serviceSaleLine, serviceVatDefaults, appointmentCanCheckIn, hasAppointmentTicket } from '../salon-sale';
+import { appointmentSale, appointmentWallTimes, branchWallClock, serviceSaleLine, serviceVatDefaults, appointmentCanCheckIn, hasAppointmentTicket, withWalkInStylist } from '../salon-sale';
 import { normalizePosOrderItem, hasValidSyncedPosMenuItemId } from '../../../../../shared/utils/pos-order-items';
 import type { Service } from '../../../../services/ServicesService';
 import type { Appointment } from '../../../../services/AppointmentsService';
@@ -35,6 +35,23 @@ describe('salon ordinary order contract', () => {
     expect(serviceSaleLine({ ...service, vatCategoryCode: 'not_a_category', priceIncludesVat: false }, undefined, undefined, islands))
       .toMatchObject({ price: 29.25 });
     expect(serviceSaleLine({ ...service, priceIncludesVat: false }, undefined, undefined, islands)).toMatchObject({ price: 31 });
+  });
+  it('reads the branch VAT country and registration the feed stores as text (founder, 21/10/2026)', () => {
+    const read = (settings: Record<string, unknown>) =>
+      serviceVatDefaults(<T,>(category: string, key: string) => settings[`${category}.${key}`] as T | undefined);
+    const swiss = read({ 'tax.vat_country': 'CH', 'tax.vat_default_category_code': 'ch_reduced_26', 'tax.vat_registered': 'true' });
+    expect(swiss).toMatchObject({ defaultVatCategoryCode: 'ch_reduced_26', vatRegionProfile: null, country: 'CH', vatRegistered: true });
+    const net = { ...service, vatCategoryCode: null, priceIncludesVat: false } as unknown as Service;
+    // 2.6 % in tenths of a percent: 25.00 * 1.026 = 25.65.
+    expect(serviceSaleLine(net, undefined, undefined, swiss)).toMatchObject({ price: 25.65 });
+    // A Greek code in a Swiss branch takes the branch default.
+    expect(serviceSaleLine({ ...service, priceIncludesVat: false }, undefined, undefined, swiss)).toMatchObject({ price: 25.65 });
+    const unregistered = read({ 'tax.vat_registered': false });
+    expect(unregistered.vatRegistered).toBe(false);
+    expect(serviceSaleLine({ ...service, priceIncludesVat: false }, undefined, undefined, unregistered)).toMatchObject({ price: 25 });
+    expect(read({}).vatRegistered).toBeNull();
+    expect(read({ 'tax.vat_registered': 'FALSE' }).vatRegistered).toBe(false);
+    expect(read({ 'tax.vat_registered': 'maybe' }).vatRegistered).toBeNull();
   });
   it('sells a service at its recorded price and VAT without a menu identity or duration multiplier', () => {
     const line = normalizePosOrderItem(serviceSaleLine(service));
@@ -91,5 +108,32 @@ describe('branch wall time contract', () => {
     expect(branchWallClock('2026-10-25T01:30:00Z', 'Europe/Athens')).toBe('2026-10-25T03:30');
     expect(branchWallClock('2026-10-20T22:30:00Z', 'Europe/Athens')).toBe('2026-10-21T01:30');
     expect(branchWallClock('2026-10-21T10:00:00', 'Europe/Athens')).toBe('2026-10-21T10:00');
+  });
+});
+
+describe('walk-in stylist on a service line (salon follow-ups, 21/10/2026)', () => {
+  const maria = { id: '5a1f0000-0000-4000-8000-000000000001', name: 'Maria' };
+  it('gives a walk-in line the picked stylist exactly like an appointment line', () => {
+    const line = serviceSaleLine(service, undefined, undefined, undefined, maria);
+    expect(line).toMatchObject({ appointment_id: null, staff_id: maria.id,
+      metadata: { staff_id: maria.id, staff_name: 'Maria' } });
+    expect(normalizePosOrderItem(line)).toMatchObject({ service_id: service.id, staff_id: maria.id });
+    expect(withWalkInStylist(serviceSaleLine(service), maria)).toMatchObject({ staff_id: maria.id,
+      metadata: { staff_id: maria.id, staff_name: 'Maria' } });
+  });
+  it('keeps "No stylist" as a line without staff', () => {
+    const plain = serviceSaleLine(service);
+    for (const line of [serviceSaleLine(service, undefined, undefined, undefined, null), withWalkInStylist(plain, null),
+      serviceSaleLine(service, undefined, undefined, undefined, { id: '  ', name: 'Blank' })]) {
+      expect(line).toMatchObject({ staff_id: null, metadata: { staff_id: null, staff_name: null } });
+    }
+  });
+  it('lets the booked staff of an appointment or segment win over a walk-in pick', () => {
+    expect(serviceSaleLine(service, appointment, undefined, undefined, maria)).toMatchObject({
+      staff_id: 'stylist', metadata: { staff_id: 'stylist', staff_name: 'Ana' } });
+    expect(serviceSaleLine(service, appointment, { staffId: 'segment-staff', staffName: 'Lia' } as any, undefined, maria))
+      .toMatchObject({ staff_id: 'segment-staff', metadata: { staff_name: 'Lia' } });
+    const booked = appointmentSale(appointment, [service]).items[0];
+    expect(withWalkInStylist(booked, maria)).toBe(booked);
   });
 });

@@ -4,7 +4,7 @@
       "offlineCheckIn": {
         "checkedInTitle": "Check-in senza connessione",
         "checkedInMessage": "Il server controllerà questo check-in appena torna la connessione.",
-        "giftCardsNeedServer": "Con le carte regalo, l'apertura del cassetto ha bisogno del server. Fai il check-in appena torna la connessione.",
+        "giftCardOrdinaryOpening": "È stato aperto un cassetto ordinario. Le carte regalo aspettano la connessione e il server controllerà questa apertura.",
         "noPinOnTill": "Questa cassa non conserva il PIN di questa persona, quindi non può fare il check-in senza connessione.",
         "locked": "Troppi PIN sbagliati. Riprova tra 15 minuti o appena torna la connessione.",
         "waiterPhone": "Sul telefono del cameriere il check-in passa dal server. Riprova appena torna la connessione."

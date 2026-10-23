@@ -15,6 +15,9 @@ use crate::tests::harness::TestDb;
 
 const TERMINAL_ID: &str = "terminal-checkout";
 const BRANCH_ID: &str = "11111111-2222-4333-8444-777777777777";
+// Every test here replays the same checkout id, and payment record
+// reservations are process-wide (commands/payments.rs), so the tests run
+// one at a time: in parallel one test saw "already in progress" (22/10/2026).
 const CLIENT_REQUEST_ID: &str = "checkout-request-0001";
 const FISCAL_TXN: &str = "fiscal-txn-checkout-1";
 const PAYMENT_KEY: &str = "terminal-card:fiscal-txn-checkout-1";
@@ -103,6 +106,7 @@ fn not_saved_blockers(td: &TestDb) -> Vec<Value> {
 /// hold the Z. "Save payment again" then writes the order and its payment
 /// with the same keys: one order, paid by its row, no second charge.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(unsaved_checkout)]
 async fn a_charged_checkout_the_till_cannot_save_is_held_across_a_restart_and_saved_with_its_keys()
 {
     let _keyring =
@@ -204,6 +208,7 @@ async fn a_charged_checkout_the_till_cannot_save_is_held_across_a_restart_and_sa
 /// The manager's way out: the money given back to the customer. The audit
 /// entry holds the decision, the Z is released, and no order is written.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(unsaved_checkout)]
 async fn a_checkout_charge_given_back_releases_the_z_and_writes_no_order() {
     let _keyring =
         fake_keyring::install_seeded([("terminal_id", TERMINAL_ID), ("branch_id", BRANCH_ID)]);
@@ -250,6 +255,7 @@ async fn a_checkout_charge_given_back_releases_the_z_and_writes_no_order() {
 /// a payment terminal (no fiscal device here) is money that moved as well,
 /// held and saved with its keys the same way.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(unsaved_checkout)]
 async fn a_terminal_approved_checkout_card_the_till_cannot_save_is_held_and_saved_with_its_keys() {
     let _keyring =
         fake_keyring::install_seeded([("terminal_id", TERMINAL_ID), ("branch_id", BRANCH_ID)]);
@@ -321,6 +327,7 @@ async fn a_terminal_approved_checkout_card_the_till_cannot_save_is_held_and_save
 /// The usual checkout: the write succeeds at once. The answer is the order's,
 /// the payment carries its key, and no record is left to hold the Z.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(unsaved_checkout)]
 async fn a_charged_checkout_that_saves_answers_with_the_order_and_leaves_no_record() {
     let _keyring =
         fake_keyring::install_seeded([("terminal_id", TERMINAL_ID), ("branch_id", BRANCH_ID)]);

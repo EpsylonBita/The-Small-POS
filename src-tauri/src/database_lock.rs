@@ -74,6 +74,7 @@ pub(crate) const LOCK_LABELS: &[&str] = &[
     "orders_apply_table_session_snapshot",
     "orders_create",
     "orders_get_table_session_snapshot",
+    "orders_get_unsynced_retail_quantities",
     "parity_queue_process",
     "print_dispatch",
     "repairs_access_reconciliation",
@@ -94,10 +95,12 @@ pub(crate) const LOCK_LABELS: &[&str] = &[
     "sync_queue_status",
     "table_attempt_recovery_status",
     UNTRACED,
+    "z_gate_set_aside",
     "z_report_generate",
     "z_report_generate_for_date",
     "z_report_readiness",
     "z_report_submit",
+    "z_report_sweep",
 ];
 
 /// The traced holder of one mutex.

@@ -861,6 +861,29 @@ fn read_admin_get_fallback_after_error(
     read_cached_admin_get_response(db, path)
 }
 
+/// The row a reservations answer holds for one server id (list or single read).
+fn reservation_row_in_answer<'a>(data: &'a Value, server_id: &str) -> Option<&'a Value> {
+    if let Some(items) = data.get("reservations").and_then(Value::as_array) {
+        return items
+            .iter()
+            .find(|row| row["id"].as_str() == Some(server_id));
+    }
+    data.get("reservation")
+        .filter(|row| row["id"].as_str() == Some(server_id))
+}
+
+/// Overlay this till's local reservation documents on a reservations answer.
+///
+/// `only_pending` (a fresh server answer): only a reservation with a change
+/// still to replay shows its local document. A conflict parked on an existing
+/// reservation is a kept draft, not a pending change, so the server row stays
+/// on screen (vertical salon follow-ups item 3, 21/10/2026: a status refused
+/// after another till's change is never shown over the server row). A create
+/// in conflict still shows: that reservation exists nowhere else. Every other
+/// local document, with nothing left to replay, takes the server's row from
+/// this answer, so the offline fallback never brings a refused state back.
+///
+/// Otherwise (offline fallback) every local document is overlaid.
 fn overlay_pending_reservations(
     db: &db::DbState,
     path: &str,
@@ -877,21 +900,51 @@ fn overlay_pending_reservations(
     let branch = crate::db::get_setting(&conn, "terminal", "branch_id")
         .or_else(|| crate::storage::get_credential("branch_id"))
         .unwrap_or_default();
-    let mut stmt=conn.prepare("SELECT l.local_id,l.server_id,l.data FROM reservation_local_identity l WHERE l.organization_id=?1 AND l.branch_id=?2
-      AND (?3=0 OR EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.organization_id=l.organization_id AND q.table_name='reservations'
-        AND q.record_id IN (l.local_id,l.server_id)))").map_err(|e|e.to_string())?;
-    let rows = stmt
-        .query_map(rusqlite::params![org, branch, only_pending], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?;
+    let rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT l.local_id, l.server_id, l.data,
+                        EXISTS(SELECT 1 FROM parity_sync_queue q
+                                WHERE q.organization_id = l.organization_id
+                                  AND q.table_name = 'reservations'
+                                  AND q.record_id IN (l.local_id, l.server_id)
+                                  AND (q.status <> 'conflict' OR q.operation = 'INSERT'))
+                   FROM reservation_local_identity l
+                  WHERE l.organization_id = ?1 AND l.branch_id = ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![org, branch], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
     let url = reqwest::Url::parse(&format!("http://local{path}")).map_err(|e| e.to_string())?;
-    for row in rows {
-        let (local, server, text) = row.map_err(|e| e.to_string())?;
+    let mut refreshed: Vec<(String, String)> = Vec::new();
+    for (local, server, text, live) in rows {
+        if only_pending && !live {
+            let server_row = server
+                .as_deref()
+                .and_then(|server_id| reservation_row_in_answer(data, server_id))
+                .filter(|row| {
+                    row["organization_id"].as_str() == Some(org.as_str())
+                        && row["branch_id"].as_str() == Some(branch.as_str())
+                });
+            if let Some(row) = server_row {
+                if serde_json::from_str::<Value>(&text).ok().as_ref() != Some(row) {
+                    refreshed.push((local, row.to_string()));
+                }
+            }
+            continue;
+        }
         let reservation: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         if let Some(items) = data.get_mut("reservations").and_then(Value::as_array_mut) {
             items.retain(|v| {
@@ -940,6 +993,14 @@ fn overlay_pending_reservations(
         {
             data["reservation"] = reservation;
         }
+    }
+    for (local, row) in refreshed {
+        conn.execute(
+            "UPDATE reservation_local_identity SET data = ?1
+              WHERE local_id = ?2 AND organization_id = ?3 AND branch_id = ?4",
+            rusqlite::params![row, local, org, branch],
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1797,6 +1858,167 @@ mod dto_tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    // Vertical salon follow-ups item 3 (21/10/2026).
+    fn reservation_overlay_state() -> db::DbState {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::db::run_migrations_for_test(&conn);
+        crate::sync_queue::create_tables(&conn).expect("create sync queue tables");
+        crate::db::set_setting(&conn, "terminal", "organization_id", OLD_ORG).unwrap();
+        crate::db::set_setting(&conn, "terminal", "branch_id", OLD_BRANCH).unwrap();
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    fn reservation_row(id: &str, status: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "organization_id": OLD_ORG,
+            "branch_id": OLD_BRANCH,
+            "status": status,
+            "reservation_date": "2026-10-21",
+            "customer_name": "Guest",
+        })
+    }
+
+    fn reservation_status_in(answer: &Value, id: &str) -> Option<String> {
+        answer["reservations"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == id))
+            .and_then(|row| row["status"].as_str())
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn reservation_overlay_never_shows_a_refused_status_over_the_server_row() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = reservation_overlay_state();
+        let (refused, created, edited) = ("res-refused", "res-local-create", "res-edited");
+        {
+            let conn = db.conn.lock().unwrap();
+            for (local, server, doc) in [
+                (
+                    refused,
+                    Some(refused),
+                    reservation_row(refused, "confirmed"),
+                ),
+                (created, None, reservation_row(created, "pending")),
+                (edited, Some(edited), reservation_row(edited, "confirmed")),
+            ] {
+                conn.execute(
+                    "INSERT INTO reservation_local_identity(local_id,server_id,organization_id,branch_id,data)
+                     VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![local, server, OLD_ORG, OLD_BRANCH, doc.to_string()],
+                )
+                .unwrap();
+            }
+            for (id, record, operation, status) in [
+                // The status change the server refused, kept as a draft.
+                ("q-refused", refused, "UPDATE", "conflict"),
+                // Legitimate pending rows keep showing.
+                ("q-create", created, "INSERT", "pending"),
+                ("q-edit", edited, "UPDATE", "pending"),
+            ] {
+                conn.execute(
+                    "INSERT INTO parity_sync_queue(id,table_name,record_id,operation,data,organization_id,module_type,status)
+                     VALUES(?1,'reservations',?2,?3,'{\"status\":\"confirmed\"}',?4,'hospitality',?5)",
+                    rusqlite::params![id, record, operation, OLD_ORG, status],
+                )
+                .unwrap();
+            }
+        }
+        let path = "/api/pos/reservations?date=2026-10-21";
+
+        let mut answer = serde_json::json!({"success": true, "reservations": [
+            reservation_row(refused, "cancelled"),
+            reservation_row(edited, "pending"),
+        ]});
+        overlay_pending_reservations(&db, path, &mut answer, true).unwrap();
+        assert_eq!(
+            reservation_status_in(&answer, refused).as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(
+            reservation_status_in(&answer, edited).as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            reservation_status_in(&answer, created).as_deref(),
+            Some("pending")
+        );
+
+        // The local document took the server row, so the offline fallback
+        // (every local document) never brings the refused status back.
+        let stored: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT data FROM reservation_local_identity WHERE local_id=?1",
+                [refused],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).unwrap(),
+            reservation_row(refused, "cancelled")
+        );
+        let mut offline = serde_json::json!({"success": true, "reservations": []});
+        overlay_pending_reservations(&db, path, &mut offline, false).unwrap();
+        assert_eq!(
+            reservation_status_in(&offline, refused).as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(
+            reservation_status_in(&offline, edited).as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            reservation_status_in(&offline, created).as_deref(),
+            Some("pending")
+        );
+
+        // A single read keeps the server row too.
+        let mut single = serde_json::json!({"success": true, "reservation": reservation_row(refused, "cancelled")});
+        overlay_pending_reservations(
+            &db,
+            &format!("/api/pos/reservations/{refused}"),
+            &mut single,
+            true,
+        )
+        .unwrap();
+        assert_eq!(single["reservation"]["status"], "cancelled");
+
+        // A server row of another branch never lands in this branch's document.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE reservation_local_identity SET data=?1 WHERE local_id=?2",
+                rusqlite::params![reservation_row(refused, "confirmed").to_string(), refused],
+            )
+            .unwrap();
+        }
+        let mut foreign = reservation_row(refused, "no_show");
+        foreign["branch_id"] = serde_json::json!(NEW_BRANCH);
+        let mut answer = serde_json::json!({"success": true, "reservations": [foreign]});
+        overlay_pending_reservations(&db, path, &mut answer, true).unwrap();
+        let stored: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT data FROM reservation_local_identity WHERE local_id=?1",
+                [refused],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).unwrap()["status"],
+            "confirmed"
+        );
     }
 
     #[test]

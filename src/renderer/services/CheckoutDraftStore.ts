@@ -77,6 +77,38 @@ const draftSignature = (value: unknown): string => JSON.stringify(value, (_key, 
   item && typeof item === 'object' && !Array.isArray(item)
     ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 
+/**
+ * Tomikro 22/10/2026: native read about 9% of full-precision coordinates back
+ * a bit off (40.658475344543604 -> 40.6584753445436), so a frozen delivery
+ * never matched its confirmation and the order could not be completed. A
+ * float within 1e-12 of itself is the same value here (far below a cent or a
+ * metre); every other difference is a change.
+ */
+export function sameDraftValue(a: unknown, b: unknown): boolean {
+  if (typeof a === 'number' && typeof b === 'number') {
+    return a === b || (Number.isFinite(a) && Number.isFinite(b) &&
+      Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b)) * 1e-12);
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((item, index) => sameDraftValue(item, b[index]));
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const left = a as Record<string, unknown>;
+    const right = b as Record<string, unknown>;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length &&
+      keys.every(key => Object.prototype.hasOwnProperty.call(right, key) && sameDraftValue(left[key], right[key]));
+  }
+  return a === b;
+}
+
+/** The same frozen checkout: identity, phase and admission, content up to float noise. */
+function sameFrozenRequest(durable: CheckoutDraft | null, own: CheckoutDraft | null): boolean {
+  return Boolean(durable && own && durable.phase === 'checkout_pending' && own.phase === 'checkout_pending' &&
+    durable.draftId === own.draftId && durable.checkoutRequestId === own.checkoutRequestId &&
+    durable.state.paymentAdmission === own.state.paymentAdmission && sameDraftValue(durable, own));
+}
+
 // Confirmation may add receipt evidence; the admitted money and identity stay frozen.
 export function confirmPaymentAdmission(draft: CheckoutDraft, paymentData: Record<string, any>): CheckoutDraft {
   const next = copy(draft);
@@ -117,6 +149,10 @@ export class CheckoutDraftStore {
   private retired = new Set<string>();
   private retiredCheckouts = new Set<string>();
   private editingTicket = 0;
+  /** The frozen request this store wrote, as the renderer built it. */
+  private frozenSent: CheckoutDraft | null = null;
+  /** A freeze native kept differently: no money moved, so it may go back to the cart. */
+  private refusedFreeze: { generation: number; signature: string } | null = null;
   invalidation: CheckoutDraftReply['invalidation'];
 
   constructor(private scope: CheckoutDraftScope, private readonly transport: DraftTransport = nativeTransport) {}
@@ -167,16 +203,38 @@ export class CheckoutDraftStore {
       if (this.retired.has(snapshot.draftId)) throw new Error('CHECKOUT_DRAFT_CHANGED');
       if (this.retiredCheckouts.has(snapshot.checkoutRequestId)) throw new Error('CHECKOUT_REQUEST_ID_CHANGED');
       if (this.draft?.phase === 'checkout_pending' && draftSignature(this.draft) !== draftSignature(snapshot) &&
-        !isPaymentAdmissionConfirmation(this.draft, snapshot)) {
+        !this.confirmsFrozen(snapshot)) {
         throw new Error('CHECKOUT_DRAFT_AWAITING_RECONCILIATION');
       }
+      const freezing = snapshot.phase === 'checkout_pending' && snapshot.state.paymentAdmission === 'admitted' &&
+        this.draft?.phase !== 'checkout_pending';
       const reply = await this.transport('checkout_draft_put', {
         ...this.scope, expectedGeneration: this.generation, draft: snapshot,
       });
       const result = this.accept(reply);
       this.loaded = Promise.resolve(result);
+      if (snapshot.phase === 'checkout_pending' && sameFrozenRequest(result, snapshot)) this.frozenSent = snapshot;
+      else if (freezing) {
+        // Tomikro 22/10/2026: before any money moves, native must keep the
+        // request the till will pay. A different readback fails the freeze;
+        // the cart goes back for editing (abandonUncommittedFreeze).
+        this.refusedFreeze = { generation: this.generation!, signature: draftSignature(result) };
+        throw new Error('CHECKOUT_DRAFT_READBACK_CHANGED');
+      }
       return result;
     });
+  }
+
+  /**
+   * Tomikro 22/10/2026: the confirmation is checked against the frozen request
+   * this store wrote, as the renderer built it, while native's durable copy is
+   * that request. A readback that differs only in float precision never
+   * refuses an order whose money was taken; a changed payment or identity does.
+   */
+  private confirmsFrozen(next: CheckoutDraft): boolean {
+    if (isPaymentAdmissionConfirmation(this.draft!, next)) return true;
+    const own = this.frozenSent;
+    return Boolean(own && sameFrozenRequest(this.draft, own) && isPaymentAdmissionConfirmation(own, next));
   }
 
   /** Explicit recovery of a failed freeze, including a committed write whose ACK was lost. */
@@ -193,14 +251,15 @@ export class CheckoutDraftStore {
       this.validateReply(reply);
       if (!isCurrent() || reply.scope.terminalId !== this.scope.terminalId || reply.invalidation ||
         reply.generation < this.generation!) throw new Error('CHECKOUT_DRAFT_CHANGED');
-      if (draftSignature(reply.draft) === draftSignature(snapshot)) {
-        // Fresh complete scoped readback proves this exact frozen request is durable.
+      if (sameFrozenRequest(reply.draft, snapshot)) {
+        // Fresh complete scoped readback proves this frozen request is durable.
         const result = this.accept(reply)!;
         this.loaded = Promise.resolve(result);
+        this.frozenSent = snapshot;
         return result;
       }
       if (reply.generation !== this.generation || draftSignature(reply.draft) !== draftSignature(this.draft) ||
-        (reply.draft && ((reply.draft.phase !== 'editing' && !isPaymentAdmissionConfirmation(reply.draft, snapshot)) || reply.draft.draftId !== snapshot.draftId ||
+        (reply.draft && ((reply.draft.phase !== 'editing' && !this.confirmsFrozen(snapshot)) || reply.draft.draftId !== snapshot.draftId ||
           reply.draft.checkoutRequestId !== snapshot.checkoutRequestId))) throw new Error('CHECKOUT_DRAFT_CHANGED');
       const saved: CheckoutDraftReply = await this.transport('checkout_draft_put', {
         ...this.scope, expectedGeneration: this.generation, draft: snapshot,
@@ -208,9 +267,10 @@ export class CheckoutDraftStore {
       this.validateReply(saved);
       if (!isCurrent() || saved.scope.terminalId !== this.scope.terminalId ||
         saved.generation !== reply.generation + 1 ||
-        draftSignature(saved.draft) !== draftSignature(snapshot)) throw new Error('CHECKOUT_DRAFT_CHANGED');
+        !sameFrozenRequest(saved.draft, snapshot)) throw new Error('CHECKOUT_DRAFT_CHANGED');
       const result = this.accept(saved)!;
       this.loaded = Promise.resolve(result);
+      this.frozenSent = snapshot;
       return result;
     });
   }
@@ -278,12 +338,18 @@ export class CheckoutDraftStore {
       const reply: CheckoutDraftReply = await this.transport('checkout_draft_get', this.scope);
       this.validateReply(reply);
       if (reply.invalidation || reply.scope.terminalId !== this.scope.terminalId) throw new Error('CHECKOUT_DRAFT_CHANGED');
-      if (draftSignature(reply.draft) === draftSignature(snapshot)) {
+      // The freeze this store refused on readback, still exactly as native kept it.
+      const refused = this.refusedFreeze;
+      const refusedHere = Boolean(refused && reply.draft && reply.generation === refused.generation &&
+        draftSignature(reply.draft) === refused.signature && reply.draft.draftId === snapshot.draftId &&
+        reply.draft.checkoutRequestId === snapshot.checkoutRequestId && reply.draft.state.paymentAdmission === 'admitted');
+      if (!refusedHere && sameFrozenRequest(reply.draft, snapshot)) {
         const committed = this.accept(reply);
         this.loaded = Promise.resolve(committed);
+        this.frozenSent = copy(snapshot);
         throw new Error('CHECKOUT_DRAFT_FREEZE_COMMITTED');
       }
-      if (reply.draft && (reply.draft.phase !== 'editing' || reply.draft.draftId !== snapshot.draftId ||
+      if (reply.draft && !refusedHere && (reply.draft.phase !== 'editing' || reply.draft.draftId !== snapshot.draftId ||
         reply.draft.checkoutRequestId !== snapshot.checkoutRequestId)) throw new Error('CHECKOUT_DRAFT_CHANGED');
       const durable = this.accept(reply);
       this.loaded = Promise.resolve(durable);
@@ -296,6 +362,7 @@ export class CheckoutDraftStore {
       // reservation is released, so a failed release retries from it.
       const result = this.accept(await this.transport('checkout_draft_put', { ...this.scope, expectedGeneration: this.generation, draft: editing }));
       this.loaded = Promise.resolve(result);
+      this.refusedFreeze = null;
       await this.releaseEditableLoyaltyReservation(editing);
       return result!;
     });

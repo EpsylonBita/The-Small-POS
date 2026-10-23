@@ -40,7 +40,10 @@
       "checkoutParked": "Pagesa u la mënjanë dhe mund të merren porosi të reja. Kontrolloni POS-in e bankës: nëse klientit iu tërhoq pagesa, mos e tërhiqni përsëri; e rregullon menaxheri. Statusi i POS-it e tregon këtë përpjekje.",
       "checkoutParkFailed": "Pagesa nuk mund të lihej mënjanë. Mbetet e mbrojtur; nuk ndryshoi asgjë.",
       "checkoutParkApprovalSubtitle": "Lënia mënjanë e një pagese kërkon të drejtën për të anuluar pagesa. Një person që e ka fut PIN-in e vet. Nuk tarifohet asgjë.",
-      "freezeNotSaved": "Shporta nuk u ruajt dot për pagesë, ndaj nuk nisi asnjë pagesë. Shtypni Paguaj për ta provuar përsëri."
+      "freezeNotSaved": "Shporta nuk u ruajt dot për pagesë, ndaj nuk nisi asnjë pagesë. Shtypni Paguaj për ta provuar përsëri.",
+      "orderNotSavedCartKept": "Porosia nuk u ruajt dhe nuk u regjistrua asnjë pagesë. Shporta mbetet: shtypni përsëri Paguaj. Nëse i keni marrë tashmë paratë, mos i merrni përsëri.",
+      "freezeReadbackChanged": "Nuk nisi asnjë pagesë: arka nuk e ruajti dot këtë shportë për pagesë saktësisht siç u fut. Zgjidhni përsëri klientin ose adresën, pastaj shtypni Paguaj. Nëse ndodh përsëri, kontaktoni mbështetjen.",
+      "orderConfirmationRefused": "Porosia nuk u ruajt: pagesa e ruajtur në arkë nuk përputhej me këtë arkëtim, ndaj shtypja përsëri e Paguaj pa ndryshim nuk ndihmon. Nuk u regjistrua asnjë pagesë dhe shporta mbetet. Nëse i keni marrë paratë, mos i merrni përsëri. Zgjidhni përsëri klientin ose adresën, pastaj shtypni Paguaj. Nëse ndodh përsëri, kontaktoni mbështetjen."
     }
   },
   "checkoutRecovery": {

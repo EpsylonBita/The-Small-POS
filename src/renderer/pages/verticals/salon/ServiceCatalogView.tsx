@@ -1,5 +1,6 @@
 import OrderFlow from '../../../components/OrderFlow';
 import { serviceSaleLine, serviceVatDefaults, type SalonSale } from './salon-sale';
+import { useStylistChoice } from './StylistPicker';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
 import React, { memo, useState, useEffect, useMemo, useCallback, useId, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -101,6 +102,8 @@ export const ServiceCatalogView: React.FC = memo(() => {
   const effectiveOrgId = organizationId || localOrgId || '';
 
   const [sale, setSale] = useState<SalonSale | null>(null);
+  // A walk-in service asks who does it, with "No stylist" as a choice (founder, 21/10/2026).
+  const { chooseStylist, stylistPicker } = useStylistChoice({ branchId: branchId || '', organizationId: effectiveOrgId });
   const [activeTab, setActiveTab] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -322,6 +325,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
       </motion.div>
 
       {sale && <OrderFlow salonSale={sale} showFab={false} restoreDraftOnMount={false} onSalonClose={() => setSale(null)} />}
+      {stylistPicker}
       {/* Header */}
       <motion.div variants={pageMotionItem} className={`rounded-2xl border p-4 mb-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
@@ -483,7 +487,8 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 </div>
 
                 {service.isActive && <button type="button" className="w-full mt-3 rounded-xl bg-amber-400 text-black p-2" onClick={event => {
-                  event.stopPropagation(); setSale({ items: [serviceSaleLine(service, undefined, undefined, serviceVatDefaults(getSetting))], customer: { id: '', name: '', phone: '' } });
+                  event.stopPropagation(); chooseStylist(service.name, stylist => setSale({
+                    items: [serviceSaleLine(service, undefined, undefined, serviceVatDefaults(getSetting), stylist)], customer: { id: '', name: '', phone: '' } }));
                 }}>{t('salonSale.add')}</button>}
                 {/* Quick Actions */}
                 <div className={`flex gap-2 mt-3 pt-3 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>

@@ -115,6 +115,7 @@ fn import_scoped(conn: &Connection, order: &Value) -> Result<String, String> {
                     .map_err(|e| e.to_string())?;
             }
         }
+        crate::fiscal::greece_vat::adopt_server_order_vat(conn, local, order);
         return Ok(id);
     }
     let now = chrono::Utc::now().to_rfc3339();
@@ -127,6 +128,7 @@ fn import_scoped(conn: &Connection, order: &Value) -> Result<String, String> {
       order.get("status").and_then(Value::as_str).unwrap_or("completed"),order.get("order_number").and_then(Value::as_str),
       order.get("staff_id").and_then(Value::as_str),order.get("staff_shift_id").and_then(Value::as_str),metadata.to_string(),
       order.get("created_at").and_then(Value::as_str).unwrap_or(&now)]).map_err(|e|format!("import folio settlement: {e}"))?;
+    crate::fiscal::greece_vat::adopt_server_order_vat(conn, local, order);
     Ok(local.into())
 }
 

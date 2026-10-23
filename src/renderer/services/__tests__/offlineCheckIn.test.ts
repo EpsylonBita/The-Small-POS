@@ -6,6 +6,7 @@ import {
   cachedGiftCardsStore,
   checkedOnTill,
   describeOfflineOpeningRefusal,
+  giftCardOrdinaryOpeningMessage,
 } from '../offlineCheckIn';
 
 const t = ((key: string) => `<${key}>`) as unknown as TFunction;
@@ -18,11 +19,13 @@ describe('offline check-in rules (renderer)', () => {
   });
 
   it('words each native offline opening refusal and nothing else', () => {
-    // The native shift open no longer refuses a role offline.
+    // The native shift open no longer refuses a role offline, nor a gift-card
+    // store's cashier (Ω7, founder 21/10/2026: an ordinary drawer, reviewed).
     expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_ROLE_NOT_ALLOWED', t)).toBeNull();
-    expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER', t)).toBe('<modals.staffShift.offlineCheckIn.giftCardsNeedServer>');
+    expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER', t)).toBeNull();
     expect(describeOfflineOpeningRefusal('OFFLINE_CHECK_IN_WAITER_TERMINAL', t)).toBe('<modals.staffShift.offlineCheckIn.waiterPhone>');
     expect(describeOfflineOpeningRefusal('Staff member already has an active shift (x)', t)).toBeNull();
+    expect(giftCardOrdinaryOpeningMessage(t)).toBe('<modals.staffShift.offlineCheckIn.giftCardOrdinaryOpening>');
   });
 
   it('reads a gift-card store from the cached module list, unknown as "no"', async () => {
@@ -36,7 +39,7 @@ describe('offline check-in rules (renderer)', () => {
   it('has every offline check-in sentence in all six languages', () => {
     const keys = [
       'offlineCheckIn.checkedInTitle', 'offlineCheckIn.checkedInMessage',
-      'offlineCheckIn.giftCardsNeedServer', 'offlineCheckIn.noPinOnTill', 'offlineCheckIn.locked',
+      'offlineCheckIn.giftCardOrdinaryOpening', 'offlineCheckIn.noPinOnTill', 'offlineCheckIn.locked',
       'offlineCheckIn.waiterPhone', 'pinLocked', 'staffNotFound', 'rateLimited', 'checkInUnavailable',
       'syncConflict.offlineTitle', 'syncConflict.reason.waiter_terminal', 'syncConflict.reason.staff_not_found',
       'syncConflict.reason.active_shift_elsewhere', 'syncConflict.reason.unresolved_shift',
@@ -52,8 +55,9 @@ describe('offline check-in rules (renderer)', () => {
           expect(value, `${language}: ${key} is translated`).not.toBe(englishValue);
         }
       }
-      // The role refusal is gone with the role list.
+      // The role refusal is gone with the role list, the gift-card one with Ω7.
       expect((bundle as any).modals.staffShift.offlineCheckIn?.roleNotAllowed, language).toBeUndefined();
+      expect((bundle as any).modals.staffShift.offlineCheckIn?.giftCardsNeedServer, language).toBeUndefined();
     }
   });
 });

@@ -299,6 +299,63 @@ fn collect_rollover_protection(conn: &Connection) -> Result<RolloverProtection, 
         }
     }
 
+    // Offline week (invariant 1, founder 21/10/2026): a parity queue row of
+    // any status keeps its shift, drawer, expense or staff payment, and the
+    // shift an expense or staff payment hangs on. A row a manager set aside
+    // keeps its status, so this covers it: it is never deleted.
+    let parity_present = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                            AND name = 'parity_sync_queue')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("inspect parity queue for rollover protection: {e}"))?;
+    if parity_present {
+        let mut stmt = conn
+            .prepare(
+                "SELECT table_name, record_id FROM parity_sync_queue
+                 WHERE table_name IN ('staff_shifts', 'cash_drawer_sessions',
+                                      'shift_expenses', 'staff_payments')",
+            )
+            .map_err(|e| format!("prepare parity rollover protection: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query parity rollover protection: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("collect parity rollover protection: {e}"))?;
+        for (table_name, record_id) in rows {
+            let parent_shift_sql = match table_name.as_str() {
+                "staff_shifts" => {
+                    protection.shift_ids.insert(record_id);
+                    continue;
+                }
+                "shift_expenses" => {
+                    protection.shift_expense_ids.insert(record_id.clone());
+                    "SELECT staff_shift_id FROM shift_expenses WHERE id = ?1"
+                }
+                "staff_payments" => {
+                    protection.staff_payment_ids.insert(record_id.clone());
+                    "SELECT cashier_shift_id FROM staff_payments WHERE id = ?1"
+                }
+                _ => "SELECT staff_shift_id FROM cash_drawer_sessions WHERE id = ?1",
+            };
+            // A schema without the column, or a record already gone, keeps
+            // nothing more.
+            if let Ok(Some(shift_id)) = conn
+                .query_row(parent_shift_sql, params![record_id], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .optional()
+                .map(Option::flatten)
+            {
+                protection.shift_ids.insert(shift_id);
+            }
+        }
+    }
+
     Ok(protection)
 }
 
@@ -355,6 +412,9 @@ pub(crate) struct PreparedZReportSubmission {
     pub created_new_z_report: bool,
     pub report_date: String,
     pub rollover_timestamp: String,
+    /// The frozen window's start (the last Z, or the inferred first activity):
+    /// a local close records it (`z_reports.window_period_start`).
+    pub period_start_at: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,8 +456,17 @@ fn resolve_lower_bound_mode(conn: &Connection) -> LowerBoundMode {
     }
 }
 
-fn report_date_for_business_window(period_start_at: &str, cutoff_at: &str) -> String {
-    business_day::report_date_for_business_window(period_start_at, cutoff_at)
+/// The store-zone report date of a window (POS audit Π8).
+fn report_date_for_business_window(
+    conn: &Connection,
+    period_start_at: &str,
+    cutoff_at: &str,
+) -> String {
+    business_day::report_date_for_business_window(
+        period_start_at,
+        cutoff_at,
+        crate::store_time::resolve_store_time_zone(conn),
+    )
 }
 
 /// The start of the Z window still open locally (the last Z): the window of
@@ -538,6 +607,7 @@ fn pos_day_report_date(
         day_start_at.as_deref(),
         period_start_at,
         fallback_at,
+        crate::store_time::resolve_store_time_zone(conn),
     );
     (day_start_at, report_date)
 }
@@ -602,18 +672,37 @@ fn pending_context_is_frozen(conn: &Connection, context: &PendingZReportContext)
     context.frozen || local_z_report_closes_window(conn, &context.branch_id, &context.cutoff_at)
 }
 
+/// A later Z already closed the window that ends at `cutoff_at`.
+fn later_z_closed_window(conn: &Connection, cutoff_at: &str) -> bool {
+    business_day::stored_period_start(conn)
+        .as_deref()
+        .filter(|value| !business_day::is_epoch_timestamp(value))
+        .map(|value| business_day::instant_at_or_after(value, cutoff_at))
+        .unwrap_or(false)
+}
+
+/// POS audit K5: the single pending-Z slot holds the issued (frozen) Z of
+/// another branch that no later Z has closed. Only possible when the terminal
+/// moved to another branch while that Z was still pending.
+fn other_branch_issued_z_context(
+    conn: &Connection,
+    branch_id: &str,
+) -> Option<PendingZReportContext> {
+    let raw = db::get_setting(conn, "system", PENDING_Z_REPORT_CONTEXT_KEY)?;
+    let stored: PendingZReportContext = serde_json::from_str(&raw).ok()?;
+    (stored.branch_id != branch_id
+        && pending_context_is_frozen(conn, &stored)
+        && !later_z_closed_window(conn, &stored.cutoff_at))
+    .then_some(stored)
+}
+
 fn load_pending_z_report_context(
     conn: &Connection,
     branch_id: &str,
 ) -> Option<PendingZReportContext> {
     if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
         // A later Z already closed this window.
-        if business_day::stored_period_start(conn)
-            .as_deref()
-            .filter(|value| !business_day::is_epoch_timestamp(value))
-            .map(|value| business_day::instant_at_or_after(value, &stored.cutoff_at))
-            .unwrap_or(false)
-        {
+        if later_z_closed_window(conn, &stored.cutoff_at) {
             let _ = clear_pending_z_report_context(conn);
             return None;
         }
@@ -698,6 +787,23 @@ pub(crate) fn ensure_pending_z_report_context_for_branch(
         if pending_context_is_frozen(conn, &existing) {
             return Ok(Some(serde_json::json!(existing)));
         }
+    }
+
+    // K5: never overwrite another branch's issued Z with this branch's offer.
+    // This branch's Z is still offered, computed on demand
+    // (`synthesize_pending_z_report_context`). A till moved to another branch
+    // while a Z is pending is a known residual risk of the single slot; the
+    // multi-slot pending-Z design (offline-week wave 2) is where it gets
+    // solved.
+    if let Some(other) = other_branch_issued_z_context(conn, branch_id) {
+        warn!(
+            branch_id = %branch_id,
+            pending_branch_id = %other.branch_id,
+            pending_report_date = %other.report_date,
+            pending_cutoff_at = %other.cutoff_at,
+            "Checkout left another branch's issued Z pending; this branch's Z offer is not stored"
+        );
+        return Ok(None);
     }
 
     let context = build_pending_z_report_context(conn, branch_id, cutoff_at);
@@ -795,6 +901,7 @@ fn canonicalize_report_json_report_date(report_json: &mut Value, report_date: &s
 
 pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let store_zone = crate::store_time::resolve_store_time_zone(&conn);
     let now = Utc::now().to_rfc3339();
     let mut repaired = 0usize;
 
@@ -855,6 +962,7 @@ pub(crate) fn repair_retryable_z_report_business_dates(db: &DbState) -> Result<u
             str_field(&report_json, BUSINESS_DAY_START_REPORT_KEY).as_deref(),
             &period_start,
             fallback_end,
+            store_zone,
         );
 
         if normalized_report_date == stored_report_date {
@@ -990,11 +1098,35 @@ pub(crate) fn unsettled_payment_blockers(
 /// server yet (sync blocker reason; the renderer localizes it).
 pub(crate) const MONEY_NOT_SYNCED_REASON: &str = "money_not_synced";
 
-/// Parity tables whose rows are money: payments, refunds/voids, staff cash
-/// handbacks, driver earnings, shift expenses and staff payments.
+/// Parity tables whose rows hold the Z: payments, refunds/voids, staff cash
+/// handbacks, driver earnings, shift expenses and staff payments, and (plan
+/// §3 #9, Android parity) the shifts and drawers. The server abandons a Main
+/// shift whose close is still queued when the Z lands, so a queued shift row
+/// of the window holds the Z like its money does.
 const MONEY_PARITY_TABLES_SQL: &str = "('payments', 'order_payments', 'payment_adjustments', \
      'staff_order_cash_returns', 'driver_earnings', 'driver_earning', 'shift_expenses', \
-     'staff_payments')";
+     'staff_payments', 'staff_shifts', 'cash_drawer_sessions')";
+
+/// A queue row (`alias.id`) a manager set aside (Ω4, founder 21/10/2026): it
+/// keeps its own status and its record, and no Z gate counts it.
+fn not_set_aside_predicate(conn: &Connection, alias: &str) -> Result<String, String> {
+    let present = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                            AND name = 'parity_sync_set_aside')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("inspect parity_sync_set_aside: {e}"))?;
+    Ok(if present {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM parity_sync_set_aside set_aside
+                         WHERE set_aside.queue_id = {alias}.id)"
+        )
+    } else {
+        "1 = 1".to_string()
+    })
+}
 
 /// Which orders the day rollover at `cutoff_param` (an SQL parameter holding
 /// the Z cutoff) deletes, together with their payments, adjustments and
@@ -1084,6 +1216,11 @@ pub(crate) struct UnsyncedMoneyRow {
 /// settlement orders are never rolled over), and so are rows whose local
 /// record is already gone: nothing is left for this Z to delete, and the
 /// queue's own failed or conflict state shows them.
+///
+/// Offline week (founder 21/10/2026): a queued shift or drawer row of a
+/// shift the Z closes counts too (plan §3 #9), and a row a manager set aside
+/// (`parity_sync_set_aside`, Ω4) never does: it is listed on the Z as "not on
+/// the server" instead, and its record is kept.
 pub(crate) fn load_unsynced_money_for_cutoff(
     conn: &Connection,
     cutoff_at: &str,
@@ -1158,6 +1295,28 @@ pub(crate) fn load_unsynced_money_for_cutoff(
                AND julianday(sp.created_at) <= julianday(?1)"
         ));
     }
+    // Plan §3 #9: a queued shift or drawer row of a shift the Z closes (the
+    // same timestamp the rollover deletes it by).
+    if table_present("staff_shifts")? {
+        branches.push(format!(
+            "SELECT {columns}, NULL, NULL, live.created_at
+             FROM live
+             JOIN staff_shifts ss ON ss.id = live.record_id
+             WHERE live.table_name = 'staff_shifts'
+               AND julianday(COALESCE(ss.check_out_time, ss.check_in_time, ss.created_at))
+                   <= julianday(?1)"
+        ));
+    }
+    if table_present("cash_drawer_sessions")? {
+        branches.push(format!(
+            "SELECT {columns}, NULL, NULL, live.created_at
+             FROM live
+             JOIN cash_drawer_sessions cds ON cds.id = live.record_id
+             WHERE live.table_name = 'cash_drawer_sessions'
+               AND julianday(COALESCE(cds.closed_at, cds.opened_at, cds.created_at))
+                   <= julianday(?1)"
+        ));
+    }
     if table_present("unresolved_remote_payments")? {
         // Incoming mirrors are not outgoing charges, but a retained financial
         // row belonging to this closing order still fences its Z/rollover.
@@ -1175,6 +1334,7 @@ pub(crate) fn load_unsynced_money_for_cutoff(
     if branches.is_empty() {
         return Ok(Vec::new());
     }
+    let not_set_aside = not_set_aside_predicate(conn, "q")?;
     let sql = format!(
         "WITH window_orders AS (
              SELECT o.id AS id, NULLIF(TRIM(COALESCE(o.order_number, '')), '') AS order_number
@@ -1187,6 +1347,7 @@ pub(crate) fn load_unsynced_money_for_cutoff(
              FROM parity_sync_queue q
              WHERE q.table_name IN {MONEY_PARITY_TABLES_SQL}
                AND COALESCE(q.module_type, '') <> 'repairs'
+               AND {not_set_aside}
          )
          {}
          ORDER BY 9, 1",
@@ -1346,6 +1507,32 @@ pub(crate) fn fiscal_close_blocked_response(
     }
 }
 
+/// Why a Z cannot close on this till without the server (founder decision
+/// 21/10/2026, Ω3 α), or `None` when it may. A waiter phone never owns its Z
+/// offline (it validates against the cloud). With an active fiscal plugin, or
+/// a verdict this branch never had confirmed, the offline Z stays refused:
+/// only the stored "inactive" answer (`fiscal::active_cache::closeout_verdict`,
+/// no TTL) lets a store close the day locally.
+pub(crate) fn local_close_refusal(
+    db: &DbState,
+    payload: &Value,
+) -> Result<Option<&'static str>, String> {
+    let branch_id = resolve_closeout_branch_id(payload);
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if crate::offline_check_in::waiter_terminal(&conn) {
+            return Ok(Some("waiter_terminal"));
+        }
+    }
+    Ok(
+        match crate::fiscal::active_cache::closeout_verdict(&branch_id) {
+            crate::fiscal::active_cache::CacheVerdict::Inactive => None,
+            crate::fiscal::active_cache::CacheVerdict::Active => Some("fiscal_plugin_active"),
+            crate::fiscal::active_cache::CacheVerdict::Unknown => Some("fiscal_status_unknown"),
+        },
+    )
+}
+
 const LAST_CLOSEOUT_ATTEMPT_CATEGORY: &str = "diagnostics";
 const LAST_CLOSEOUT_ATTEMPT_KEY: &str = "last_closeout_attempt";
 
@@ -1358,9 +1545,10 @@ pub(crate) struct CloseoutAttempt {
     pub at: String,
     /// The step it reached: `pre_z_sync`, `unit_shifts` (the phone shifts of
     /// the unit), `sync_blocked`, `payment_blockers`, `fiscal_guard`,
-    /// `prepare`, `post_submission_sync`, `finalize` or `submitted`.
+    /// `prepare`, `post_submission_sync`, `finalize` or `submitted`; a Z
+    /// closed without the server: `local_close`, then `closed_local`.
     pub stage: String,
-    /// `SUBMITTED`, the refusal's `errorCode`, or `ERROR`.
+    /// `SUBMITTED`, `CLOSED_LOCAL`, the refusal's `errorCode`, or `ERROR`.
     pub code: String,
     /// Bounded, sanitized operational text; never customer data.
     pub message: Option<String>,
@@ -1413,6 +1601,10 @@ pub(crate) fn closeout_attempt_from_result(
                     .map(ToString::to_string),
             ),
         ),
+        // A Z closed on this till without the server (offline week, 21/10/2026).
+        Ok(value) if value.get("localClose").and_then(Value::as_bool) == Some(true) => {
+            ("CLOSED_LOCAL".to_string(), None)
+        }
         Ok(_) => ("SUBMITTED".to_string(), None),
         Err(error) => ("ERROR".to_string(), bounded(Some(error.clone()))),
     };
@@ -4389,61 +4581,172 @@ fn load_server_repair_projection(
     }))
 }
 
-/// The order columns a slip's printed VAT reads, in the order
-/// [`printed_order_vat_cents`] reads them: the inputs
-/// `print::build_order_receipt_doc` hands to `fiscal::receipt_vat` (the REAL
-/// total and tip, the computed VAT with its cents column first).
-const PRINTED_ORDER_VAT_COLUMNS: &str = "SELECT o.branch_id, COALESCE(o.total_amount, 0),
-        COALESCE(o.tip_amount, 0), o.tax_amount_cents, COALESCE(o.tax_amount, 0), o.order_context";
+/// The order columns the Z's VAT reads, in the order [`order_vat_cents`]
+/// reads them: the order's stored (computed) VAT, its cents column first.
+const ORDER_VAT_COLUMNS: &str = "SELECT o.tax_amount_cents, COALESCE(o.tax_amount, 0), o.order_type, o.plugin, COALESCE(o.total_amount_cents, CAST(ROUND(o.total_amount * 100) AS INTEGER), 0), COALESCE(o.tip_amount_cents, CAST(ROUND(o.tip_amount * 100) AS INTEGER), 0), o.tax_breakdown";
 
-/// The Z's VAT, in cents: the sum of the VAT each order's slip prints
-/// (founder, 07/10/2026, as Android's `sales.taxTotal`). Every order goes
-/// through the receipt's own rule, `fiscal::receipt_vat`, so an order whose
-/// slip prints no VAT line adds nothing. Server-owned repair revenue has no
-/// local order and adds none, as on Android.
-fn printed_order_vat_cents(
+/// Read the VAT total and table together over precisely the same counted orders.
+fn order_vat_cents(
     conn: &Connection,
     sql: &str,
     params: impl rusqlite::Params,
-) -> Result<i64, String> {
-    let context = crate::fiscal::receipt_vat::PrintedVatContext::load(conn);
+) -> Result<(i64, Value), String> {
     let mut stmt = conn
         .prepare(sql)
-        .map_err(|e| format!("prepare printed VAT query: {e}"))?;
-    let rows = stmt
-        .query_map(params, |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, f64>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })
-        .map_err(|e| format!("query printed VAT: {e}"))?;
-    let mut total_cents = 0_i64;
-    for row in rows {
-        let (branch_id, total_amount, tip_amount, tax_amount_cents, tax_amount, order_context) =
-            row.map_err(|e| format!("read printed VAT: {e}"))?;
-        let computed_vat_amount = tax_amount_cents
-            .map(|cents| Cents::new(cents).to_f64_dp2())
-            .unwrap_or(tax_amount);
-        if order_context.as_deref() == Some("folio_settlement") {
-            total_cents +=
-                tax_amount_cents.unwrap_or_else(|| Cents::round_half_even(tax_amount).as_i64());
-            continue;
-        }
-        total_cents += context
-            .order_vat_cents(
-                branch_id.as_deref(),
-                total_amount,
-                tip_amount,
-                Some(computed_vat_amount),
-            )
-            .unwrap_or(0);
+        .map_err(|e| format!("prepare order VAT query: {e}"))?;
+    let rows = stmt.query_map(params, |row| {
+        let vat = row.get::<_, Option<i64>>(0)?.map(|v| v.max(0)).unwrap_or_else(|| crate::fiscal::receipt_vat::resolve_z_order_vat_cents(row.get::<_, f64>(1).ok()));
+        let breakdown = row.get::<_, Option<String>>(6)?.and_then(|v| serde_json::from_str::<Value>(&v).ok()).filter(Value::is_array);
+        Ok(serde_json::json!({"vatCents":vat, "orderType":row.get::<_, Option<String>>(2)?, "platform":row.get::<_, Option<String>>(3)?, "totalCents":row.get::<_, i64>(4)?, "tipCents":row.get::<_, i64>(5)?, "taxBreakdown":breakdown}))
+    }).map_err(|e| format!("query order VAT: {e}"))?;
+    let orders = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read order VAT: {e}"))?;
+    let breakdown = build_z_vat_breakdown(&orders);
+    Ok((breakdown["vatCents"].as_i64().unwrap_or(0), breakdown))
+}
+
+/// Mirror shared/reports/z-vat-breakdown.ts. Stored VAT wins; missing rates stay unknown.
+fn build_z_vat_breakdown(orders: &[Value]) -> Value {
+    #[derive(Clone)]
+    struct Bucket {
+        code: String,
+        rate: Option<f64>,
+        gross: i64,
+        vat: i64,
     }
-    Ok(total_cents)
+    fn cents(v: &Value) -> i64 {
+        let n = v
+            .as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0);
+        crate::fiscal::greece_vat::js_round(n * 100.0) as i64
+    }
+    fn largest(b: &[Bucket], vat: bool) -> usize {
+        let mut best = 0;
+        for i in 1..b.len() {
+            if (if vat { b[i].vat } else { b[i].gross }).abs()
+                > (if vat { b[best].vat } else { b[best].gross }).abs()
+            {
+                best = i;
+            }
+        }
+        best
+    }
+    let mut rates: Vec<Bucket> = vec![];
+    let mut channels: Vec<(&str, i64, i64, i64)> = vec![];
+    let mut vat_total = 0;
+    let mut tips_total = 0;
+    for order in orders {
+        let whole = |key: &str| {
+            crate::fiscal::greece_vat::js_round(order[key].as_f64().unwrap_or(0.0)) as i64
+        };
+        let total = whole("totalCents");
+        let tip = whole("tipCents").max(0);
+        let vat = whole("vatCents");
+        let mut stored: Vec<Bucket> = order["taxBreakdown"]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|e| {
+                        let code = e["vatCategoryCode"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|c| !c.is_empty())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let rate = if code == "unknown" {
+                            None
+                        } else {
+                            e["vatRate"].as_f64().filter(|v| v.is_finite())
+                        };
+                        Bucket {
+                            code,
+                            rate,
+                            gross: cents(&e["grossAmount"]),
+                            vat: cents(&e["vatAmount"]),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut left = tip;
+        for b in &mut stored {
+            if left <= 0 {
+                break;
+            }
+            if b.code.ends_with("_out_of_scope") && b.vat == 0 {
+                let taken = left.min(b.gross.max(0));
+                b.gross -= taken;
+                left -= taken;
+            }
+        }
+        let outside = if stored.is_empty() { tip } else { tip - left };
+        let gross = (total - outside).max(0);
+        let mut buckets: Vec<Bucket> = stored
+            .into_iter()
+            .filter(|b| b.gross != 0 || b.vat != 0)
+            .collect();
+        if buckets.is_empty() {
+            buckets.push(Bucket {
+                code: "unknown".into(),
+                rate: None,
+                gross,
+                vat,
+            });
+        } else {
+            let diff = vat - buckets.iter().map(|b| b.vat).sum::<i64>();
+            if diff != 0 {
+                let i = largest(&buckets, buckets.iter().any(|b| b.vat != 0));
+                buckets[i].vat += diff;
+            }
+            let diff = gross - buckets.iter().map(|b| b.gross).sum::<i64>();
+            if diff != 0 {
+                let i = largest(&buckets, false);
+                buckets[i].gross += diff;
+            }
+        }
+        vat_total += vat;
+        tips_total += outside;
+        let channel = crate::fiscal::greece_vat::normalize_vat_sale_channel(
+            order["orderType"].as_str(),
+            order["platform"].as_str(),
+        )
+        .unwrap_or("other");
+        if let Some(c) = channels.iter_mut().find(|c| c.0 == channel) {
+            c.1 += 1;
+            c.2 += gross;
+            c.3 += vat;
+        } else {
+            channels.push((channel, 1, gross, vat));
+        }
+        for b in buckets {
+            if let Some(r) = rates
+                .iter_mut()
+                .find(|r| r.code == b.code && r.rate == b.rate)
+            {
+                r.gross += b.gross;
+                r.vat += b.vat;
+            } else {
+                rates.push(b);
+            }
+        }
+    }
+    rates.retain(|r| r.gross != 0 || r.vat != 0);
+    rates.sort_by(|a, b| {
+        a.rate
+            .is_none()
+            .cmp(&b.rate.is_none())
+            .then_with(|| b.rate.unwrap_or(0.0).total_cmp(&a.rate.unwrap_or(0.0)))
+            .then(a.code.cmp(&b.code))
+    });
+    let by_rate:Vec<Value> = rates.into_iter().map(|r| {
+        let rate = r.rate.map(|v| if v.fract() == 0.0 { serde_json::json!(v as i64) } else { serde_json::json!(v) });
+        serde_json::json!({"vatCategoryCode":r.code,"vatRatePercent":rate,"grossCents":r.gross,"netCents":r.gross-r.vat,"vatCents":r.vat})
+    }).collect();
+    let by_channel:Vec<Value> = ["dine_in","takeaway","own_delivery","platform","other"].iter().filter_map(|key| channels.iter().find(|c| c.0 == *key)).map(|c| serde_json::json!({"channel":c.0,"orders":c.1,"grossCents":c.2,"netCents":c.2-c.3,"vatCents":c.3})).collect();
+    serde_json::json!({"version":1,"vatCents":vat_total,"tipsCents":tips_total,"byRate":by_rate,"byChannel":by_channel})
 }
 
 /// Folio transfers were recognised by their source order. Never sell them twice.
@@ -4610,6 +4913,158 @@ fn shift_unrecorded_gift_returns_by_order_type(
         *unrecorded.entry(order_type).or_insert(0) += (floor - refunded_cents).max(0);
     }
     Ok(unrecorded)
+}
+
+/// The order line's name for a staff member: `metadata.staff_name`, else the
+/// line's own `staff_name` / `staffName` (walk-in and appointment lines).
+fn staff_name_from_order_lines(items_json: Option<&str>, staff_id: &str) -> Option<String> {
+    let lines: Value = serde_json::from_str(items_json?).ok()?;
+    lines.as_array()?.iter().find_map(|line| {
+        let names_staff = [
+            line.get("staff_id"),
+            line.get("staffId"),
+            line.pointer("/metadata/staff_id"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|value| value.trim() == staff_id);
+        if !names_staff {
+            return None;
+        }
+        [
+            line.pointer("/metadata/staff_name"),
+            line.get("staff_name"),
+            line.get("staffName"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(ToString::to_string)
+    })
+}
+
+/// A staff member's name when no order line carries it: the branch staff
+/// list this till cached (the stylist picker's source), then their latest shift.
+fn staff_name_from_staff_list(
+    conn: &Connection,
+    staff_id: &str,
+    branch_id: Option<&str>,
+) -> Option<String> {
+    let cached: Option<String> = conn
+        .query_row(
+            "SELECT TRIM(json_extract(member.value, '$.name'))
+             FROM branch_ops_cache cache,
+                  json_each(CASE WHEN json_valid(cache.payload_json) THEN cache.payload_json ELSE '{}' END, '$.staff') member
+             WHERE cache.cache_key = 'staff_schedule'
+               AND cache.branch_id = ?2
+               AND json_extract(member.value, '$.id') = ?1
+               AND TRIM(COALESCE(json_extract(member.value, '$.name'), '')) <> ''
+             ORDER BY cache.synced_at DESC
+             LIMIT 1",
+            params![staff_id, branch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    cached.or_else(|| {
+        conn.query_row(
+            "SELECT TRIM(staff_name) FROM staff_shifts
+             WHERE staff_id = ?1 AND branch_id = ?2 AND TRIM(COALESCE(staff_name, '')) <> ''
+             ORDER BY check_in_time DESC
+             LIMIT 1",
+            params![staff_id, branch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    })
+}
+
+/// Tips that went to a stylist of the order (`tip_recipient_role = 'staff'`,
+/// salon 21/10/2026), per staff member, over the Z's own order population.
+/// Only completed payments count: a voided, refunded or set-aside payment
+/// (and an unbacked reconstructed one) never does. The shape is shared with
+/// Android: `staffTips: [{ staffId, staffName, amount }]`, amounts summed in
+/// cents, entries above zero only, sorted by name (case-insensitive) then id.
+/// A stylist without a shift appears here and not in any shift summary.
+fn load_staff_tips<P: rusqlite::Params>(
+    conn: &Connection,
+    orders_from: &str,
+    params: P,
+) -> Result<Vec<Value>, String> {
+    let sql = format!(
+        "SELECT TRIM(op.tip_recipient_staff_id),
+                COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0),
+                reported.items, reported.branch_id
+         FROM order_payments op
+         JOIN (SELECT o.id AS id, o.items AS items, o.branch_id AS branch_id {orders_from}) reported
+           ON reported.id = op.order_id
+         WHERE op.tip_recipient_role = 'staff'
+           AND TRIM(COALESCE(op.tip_recipient_staff_id, '')) <> ''
+           AND op.status = 'completed'
+           AND NOT (COALESCE(op.payment_origin, '') = 'sync_reconstructed'
+                    AND TRIM(COALESCE(op.remote_payment_id, '')) = '')
+         ORDER BY op.created_at, op.id"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare staff tips: {e}"))?;
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query staff tips: {e}"))?;
+    let mut by_staff: Vec<(String, i64, Option<String>, Option<String>)> = Vec::new();
+    for row in rows {
+        let (staff_id, cents, items, branch_id) =
+            row.map_err(|e| format!("read staff tip: {e}"))?;
+        let line_name = staff_name_from_order_lines(items.as_deref(), &staff_id);
+        match by_staff.iter_mut().find(|entry| entry.0 == staff_id) {
+            Some(entry) => {
+                entry.1 += cents;
+                if entry.2.is_none() {
+                    entry.2 = line_name;
+                }
+            }
+            None => by_staff.push((staff_id, cents, line_name, branch_id)),
+        }
+    }
+    let mut tips: Vec<(String, String, i64)> = by_staff
+        .into_iter()
+        .filter(|(_, cents, _, _)| *cents > 0)
+        .map(|(staff_id, cents, name, branch_id)| {
+            let name = name
+                .or_else(|| staff_name_from_staff_list(conn, &staff_id, branch_id.as_deref()))
+                .unwrap_or_else(|| staff_id.clone());
+            (staff_id, name, cents)
+        })
+        .collect();
+    tips.sort_by(|left, right| {
+        left.1
+            .to_lowercase()
+            .cmp(&right.1.to_lowercase())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    Ok(tips
+        .into_iter()
+        .map(|(staff_id, staff_name, cents)| {
+            serde_json::json!({
+                "staffId": staff_id,
+                "staffName": staff_name,
+                "amount": Cents::new(cents).to_f64_dp2(),
+            })
+        })
+        .collect())
 }
 
 pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
@@ -4829,9 +5284,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (ordinary_total_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
-    let tax_total_cents = printed_order_vat_cents(
+    let staff_tips = load_staff_tips(&conn, &single_shift_orders_from, params![shift_id])?;
+    let (tax_total_cents, vat_breakdown) = order_vat_cents(
         &conn,
-        &format!("{PRINTED_ORDER_VAT_COLUMNS} {single_shift_orders_from}"),
+        &format!("{ORDER_VAT_COLUMNS} {single_shift_orders_from}"),
         params![shift_id],
     )?;
     let total_orders = ordinary_total_orders + repair_orders_count;
@@ -5290,6 +5746,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
 
             period_start_at.as_deref().map(|period_start_at| {
                 report_date_for_business_window(
+                    &conn,
                     period_start_at,
                     check_out_time.as_deref().unwrap_or_else(|| {
                         check_in_time.as_deref().unwrap_or("1970-01-01T00:00:00Z")
@@ -5297,7 +5754,13 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                 )
             })
         })
-        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+        .unwrap_or_else(|| {
+            // The store's today, never the UTC date (POS audit Π8).
+            crate::store_time::format_now(
+                crate::store_time::resolve_store_time_zone(&conn),
+                "%Y-%m-%d",
+            )
+        });
 
     // Build payments breakdown JSON
     let payments_breakdown = serde_json::json!({
@@ -5365,6 +5828,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let currency = common_report_currency(report_currency_from_staff(&staff_reports, &gift_close));
     let presentation = load_z_report_presentation(db, &conn, &branch_id);
     let mut report_json = serde_json::json!({
+        "vatBreakdown": vat_breakdown,
         "currency": currency,
         "presentation": presentation,
         "hotel": hotel,
@@ -5387,7 +5851,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "refundsTotal_cents": Cents::round_half_even(refunds_total).as_i64(),
             "voidsTotal": voids_total,
             "voidsTotal_cents": Cents::round_half_even(voids_total).as_i64(),
-            // The VAT this shift's slips print (`printed_order_vat_cents`).
+            // The VAT this shift's orders carry (`order_vat_cents`).
             "taxTotal": Cents::new(tax_total_cents).to_f64_dp2(),
             "taxTotal_cents": tax_total_cents,
             "discountsTotal": discounts_total,
@@ -5451,6 +5915,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "total": tips_total,
             "total_cents": Cents::round_half_even(tips_total).as_i64(),
         },
+        "staffTips": staff_tips,
         "daySummary": {
             "cashTotal": cash_sales,
             "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
@@ -6430,9 +6895,14 @@ fn build_z_report_for_window(
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (ordinary_orders, ordinary_gross_sales, discounts_total, tips_total) = order_agg;
-    let tax_total_cents = printed_order_vat_cents(
+    let staff_tips = load_staff_tips(
         &conn,
-        &format!("{PRINTED_ORDER_VAT_COLUMNS} {reportable_orders_from}"),
+        &reportable_orders_from,
+        params![period_start, cutoff_param, branch_id, last_z_anchor],
+    )?;
+    let (tax_total_cents, vat_breakdown) = order_vat_cents(
+        &conn,
+        &format!("{ORDER_VAT_COLUMNS} {reportable_orders_from}"),
         params![period_start, cutoff_param, branch_id, last_z_anchor],
     )?;
 
@@ -7313,6 +7783,7 @@ fn build_z_report_for_window(
     };
     let presentation = load_z_report_presentation(db, &conn, &branch_id);
     let mut report_json = serde_json::json!({
+        "vatBreakdown": vat_breakdown,
         "currency": currency,
         "presentation": presentation,
         "hotel": hotel,
@@ -7340,7 +7811,7 @@ fn build_z_report_for_window(
             "refundsTotal_cents": Cents::round_half_even(refunds_total).as_i64(),
             "voidsTotal": voids_total,
             "voidsTotal_cents": Cents::round_half_even(voids_total).as_i64(),
-            // The VAT the slips of these orders print (`printed_order_vat_cents`).
+            // The VAT these orders carry (`order_vat_cents`).
             "taxTotal": Cents::new(tax_total_cents).to_f64_dp2(),
             "taxTotal_cents": tax_total_cents,
             "discountsTotal": discounts_total,
@@ -7402,6 +7873,7 @@ fn build_z_report_for_window(
             "total": tips_total,
             "total_cents": Cents::round_half_even(tips_total).as_i64(),
         },
+        "staffTips": staff_tips,
         "daySummary": {
             "cashTotal": cash_sales,
             "cashTotal_cents": Cents::round_half_even(cash_sales).as_i64(),
@@ -7592,6 +8064,42 @@ fn generate_z_report_for_window(
             Value::Array(phone_shifts.to_vec()),
         );
     }
+    // Offline week (founder 21/10/2026): the orders this window counted, by
+    // the client id the server knows them by, so the server closes exactly
+    // these under this Z whenever it arrives (replayed payments carry the
+    // replay day); and the records a manager set aside (Ω4), listed as "not
+    // on the server". Stored in the report itself: the server keeps the Z the
+    // till stored and printed (founder rule 14/10/2026).
+    let lower_bound_mode = closing_window
+        .map(|window| window.lower_bound_mode)
+        .unwrap_or_else(|| resolve_lower_bound_mode(&conn));
+    let closed_order_client_ids = load_window_closed_order_client_ids(
+        &conn,
+        built.branch_id.as_str(),
+        period_start.as_str(),
+        period_end.as_str(),
+        lower_bound_mode,
+    )?;
+    let not_on_server = load_not_on_server_entries(&conn, None, period_end.as_str())?;
+    if let Some(report) = built.report_json.as_object_mut() {
+        if !closed_order_client_ids.is_empty() {
+            report.insert(
+                CLOSED_ORDER_CLIENT_IDS_REPORT_KEY.to_string(),
+                serde_json::json!(closed_order_client_ids),
+            );
+        }
+        if !not_on_server.is_empty() {
+            report.insert(
+                NOT_ON_SERVER_REPORT_KEY.to_string(),
+                Value::Array(
+                    not_on_server
+                        .iter()
+                        .map(|entry| entry.value.clone())
+                        .collect(),
+                ),
+            );
+        }
+    }
     let payments_json_str = built.payments_breakdown.to_string();
     let report_json_str = built.report_json.to_string();
     // The new row and its submission carry the same report.
@@ -7732,6 +8240,21 @@ fn generate_z_report_for_window(
             ],
         )
         .map_err(|e| format!("insert z_report: {e}"))?;
+
+        // The frozen window and the counted orders (migration v104).
+        conn.execute(
+            "UPDATE z_reports
+                SET window_period_start = ?2, window_cutoff = ?3, closed_order_client_ids = ?4
+              WHERE id = ?1",
+            params![
+                z_report_id,
+                period_start,
+                period_end,
+                serde_json::json!(closed_order_client_ids).to_string()
+            ],
+        )
+        .map_err(|e| format!("store the z_report window: {e}"))?;
+        attribute_not_on_server_entries(&conn, &z_report_id, &not_on_server)?;
 
         ensure_z_report_sync_queue_row(&conn, &z_report_id, &sync_payload, &built.generated_at)?;
         Ok(())
@@ -7993,6 +8516,21 @@ fn prepare_z_report_submission_at_with_phone_shifts(
         let conn = db
             .lock_traced("z_report_submit")
             .map_err(|e| e.to_string())?;
+        // K5: the slot is single (founder decision). This Z is already
+        // written and queued and needs its frozen window for a safe retry,
+        // so it takes the slot; the other branch's queued Z still delivers.
+        // A till moved to another branch while a Z is pending is a known
+        // residual risk; the multi-slot pending-Z design (offline-week wave
+        // 2) is where it gets solved.
+        if let Some(other) = other_branch_issued_z_context(&conn, &branch_id) {
+            warn!(
+                branch_id = %branch_id,
+                pending_branch_id = %other.branch_id,
+                pending_report_date = %other.report_date,
+                pending_cutoff_at = %other.cutoff_at,
+                "Issued Z replaces another branch's pending Z window in the single slot"
+            );
+        }
         persist_pending_z_report_context(
             &conn,
             &PendingZReportContext {
@@ -8018,6 +8556,7 @@ fn prepare_z_report_submission_at_with_phone_shifts(
         created_new_z_report,
         report_date: window.report_date,
         rollover_timestamp,
+        period_start_at: window.period_start_at,
     })
 }
 
@@ -8025,6 +8564,16 @@ pub(crate) fn finalize_prepared_z_report_submission(
     db: &DbState,
     prepared: &PreparedZReportSubmission,
 ) -> Result<Value, String> {
+    // An earlier Z closed on this till still waits for the server: this Z
+    // must not delete its window (offline week, invariant 1). Refused before
+    // the rollover, so the issued Z and its queued submission stay as they
+    // are (the submission closes it locally instead, `commands::analytics`).
+    {
+        let conn = db
+            .lock_traced("z_report_submit")
+            .map_err(|e| e.to_string())?;
+        refuse_rollover_over_unconfirmed_local_z(&conn, &prepared.rollover_timestamp)?;
+    }
     // Step 2: Atomically advance the business-day cutoff, reset counters, and
     // clear the local operational day tables.
     let cleanup = match apply_local_day_rollover(
@@ -8132,11 +8681,19 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     // open; the tab belongs to the business day it is eventually settled on.
     // The strict variant keeps cancelled/refunded/settled tabs deletable.
     // `rollover_order_predicate` is also the unsent-money gate's selector.
+    //
+    // Offline week (invariant 1, founder 21/10/2026): an order a queue row of
+    // any status still needs stays, whole, with its payments, refunds and
+    // earnings: a row a manager set aside (kept on its terminal status, out
+    // of the gate above), an order update, its fiscal receipt. It goes with a
+    // later rollover once nothing references it.
     let target_order_ids_sql = format!(
         "SELECT o.id
          FROM orders o
-         WHERE {}",
-        rollover_order_predicate(conn, "?1")?
+         WHERE {}
+           AND NOT {}",
+        rollover_order_predicate(conn, "?1")?,
+        business_day::order_referenced_by_sync_queue_expr(conn, "o")?
     );
 
     let target_order_ids: Vec<String> = conn
@@ -8204,7 +8761,7 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     let unsent_money = load_unsynced_money_for_cutoff(conn, cutoff_at)?;
     if !unsent_money.is_empty() {
         return Err(format!(
-            "Cannot close the day: {} payment, refund or staff money record(s) of this day have not reached the server yet ({MONEY_NOT_SYNCED_REASON})",
+            "Cannot close the day: {} payment, refund, shift or staff money record(s) of this day have not reached the server yet ({MONEY_NOT_SYNCED_REASON})",
             unsent_money.len()
         ));
     }
@@ -8712,6 +9269,11 @@ fn apply_local_day_rollover(
     }
 
     let result = (|| -> Result<Value, String> {
+        // A window an earlier Z closed on this till (offline) that the server
+        // has not confirmed lies below this cutoff: deleting up to here would
+        // delete it (invariant 1). The submission takes the local close
+        // instead (`commands::analytics`); this refusal only guards the seam.
+        refuse_rollover_over_unconfirmed_local_z(&conn, rollover_timestamp)?;
         // THIS is the moment the working day closes — the founder's model has
         // no other: a day opens with its first activity and ends only here,
         // whether it ran two hours or five days. The marker anchors the local
@@ -8721,33 +9283,28 @@ fn apply_local_day_rollover(
         // transaction — the atomic rollover whose failure also discards the
         // freshly generated Z — never at Z *generation*, which previews
         // exercise and discard.
+        advance_day_cursor(&conn, rollover_timestamp)?;
+
+        let counts = finalize_end_of_day_counts(&conn, rollover_timestamp)?;
+        // Confirmed local windows below this cutoff were deleted with it.
+        mark_confirmed_local_windows_swept(&conn, rollover_timestamp)?;
+        // The deletion floor follows the day cursor on a confirmed Z.
         db::set_setting(
             &conn,
             "system",
-            "last_z_report_timestamp",
+            business_day::LAST_CONFIRMED_Z_CUTOFF_KEY,
             rollover_timestamp,
         )?;
-        db::set_setting(&conn, "sync", "orders_since", rollover_timestamp)?;
-        clear_pending_z_report_context(&conn)?;
-
-        conn.execute(
-            "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at) \
-             VALUES ('orders', 'order_counter', '0', datetime('now')) \
-             ON CONFLICT(setting_category, setting_key) DO UPDATE SET \
-                setting_value = '0', updated_at = datetime('now')",
-            [],
-        )
-        .map_err(|e| format!("reset order counter: {e}"))?;
-
-        info!("Order counter reset to 0 after Z-report");
-
-        finalize_end_of_day_counts(&conn, rollover_timestamp)
+        Ok(counts)
     })();
 
     match result {
         Ok(counts) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit local rollover: {e}"))?;
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+                return Err(format!("commit local rollover: {error}"));
+            }
             let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
             info!(report_date = %report_date, "Local Z-report day rollover complete: {}", counts);
             Ok(counts)
@@ -8759,6 +9316,911 @@ fn apply_local_day_rollover(
             Err(e)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Z without a connection: local close, server confirmation, deferred sweep
+// (offline week Ω3 α, founder 21/10/2026; design-o3-o4, ADR-0006)
+// ---------------------------------------------------------------------------
+
+/// `z_reports.close_state` once a local Z's window was cleaned after the
+/// server confirmed it (migration v104).
+pub(crate) const Z_CLOSE_STATE_SWEPT: &str = "swept";
+
+/// Typed refusal when an online rollover would run over a window an earlier
+/// local Z still holds (invariant 1).
+pub(crate) const Z_LOCAL_PENDING_REASON: &str = "z_local_pending";
+
+/// Advance the day cursor to `cutoff`: `last_z_report_timestamp`,
+/// `sync/orders_since`, the pending-context clear and the order counter
+/// reset. The online rollover and the local close share it, inside their own
+/// transaction. The deletion floor is not touched here.
+fn advance_day_cursor(conn: &Connection, cutoff: &str) -> Result<(), String> {
+    db::set_setting(conn, "system", "last_z_report_timestamp", cutoff)?;
+    db::set_setting(conn, "sync", "orders_since", cutoff)?;
+    clear_pending_z_report_context(conn)?;
+
+    conn.execute(
+        "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at) \
+         VALUES ('orders', 'order_counter', '0', datetime('now')) \
+         ON CONFLICT(setting_category, setting_key) DO UPDATE SET \
+            setting_value = '0', updated_at = datetime('now')",
+        [],
+    )
+    .map_err(|e| format!("reset order counter: {e}"))?;
+
+    info!("Order counter reset to 0 after Z-report");
+    Ok(())
+}
+
+fn refuse_rollover_over_unconfirmed_local_z(conn: &Connection, cutoff: &str) -> Result<(), String> {
+    let unconfirmed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM z_reports
+             WHERE close_state = ?1
+               AND COALESCE(sync_state, '') <> 'applied'
+               AND (window_cutoff IS NULL OR julianday(window_cutoff) <= julianday(?2))",
+            params![business_day::Z_CLOSE_STATE_LOCAL, cutoff],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read the Zs closed on this till: {e}"))?;
+    if unconfirmed > 0 {
+        return Err(format!(
+            "Cannot close the day: {unconfirmed} earlier Z(s) closed on this till have not been confirmed by the server yet ({Z_LOCAL_PENDING_REASON})"
+        ));
+    }
+    Ok(())
+}
+
+fn mark_confirmed_local_windows_swept(conn: &Connection, cutoff: &str) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE z_reports
+            SET close_state = ?1, updated_at = ?3
+          WHERE close_state = ?2
+            AND sync_state = 'applied'
+            AND julianday(window_cutoff) <= julianday(?4)",
+        params![
+            Z_CLOSE_STATE_SWEPT,
+            business_day::Z_CLOSE_STATE_LOCAL,
+            Utc::now().to_rfc3339(),
+            cutoff
+        ],
+    )
+    .map_err(|e| format!("mark swept local Z windows: {e}"))
+}
+
+/// Z reports closed on this till that the server has not confirmed yet, in
+/// window order (oldest first).
+pub(crate) fn unconfirmed_local_z_count(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM z_reports
+         WHERE close_state = ?1 AND COALESCE(sync_state, '') <> 'applied'",
+        params![business_day::Z_CLOSE_STATE_LOCAL],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("count the Zs closed on this till: {e}"))
+}
+
+/// A new Z must close behind the local Zs still waiting for the server
+/// (design: "even online, it waits behind them"): any other local Z is
+/// unconfirmed, or this one is not confirmed while others wait.
+pub(crate) fn must_close_behind_local_zs(
+    db: &DbState,
+    z_report_id: Option<&str>,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let others: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM z_reports
+             WHERE close_state = ?1 AND COALESCE(sync_state, '') <> 'applied'
+               AND (?2 IS NULL OR id <> ?2)",
+            params![business_day::Z_CLOSE_STATE_LOCAL, z_report_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("count the Zs closed on this till: {e}"))?;
+    Ok(others > 0)
+}
+
+/// The local close of a prepared Z (Ω3 α), one transaction (invariant 2):
+/// the day cursor, `sync/orders_since`, the pending-context clear, the
+/// counter reset, and `close_state = 'closed_local'` with the frozen window.
+/// The stored report and its queued submission were written by the prepare.
+/// Nothing is deleted: the window is swept once the server confirms the Z
+/// (`sweep_confirmed_z_windows`). The deletion floor stays where it was; a
+/// till that never stored one keeps the previous day cursor as its floor.
+fn apply_local_day_close(
+    conn: &Connection,
+    prepared: &PreparedZReportSubmission,
+    z_report_id: &str,
+) -> Result<(), String> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin local Z close transaction: {e}"))?;
+    let result = (|| -> Result<(), String> {
+        if db::get_setting(conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY).is_none() {
+            let floor = business_day::last_z_anchor_utc(conn)
+                .unwrap_or_else(|| business_day::EPOCH_RFC3339.to_string());
+            db::set_setting(
+                conn,
+                "system",
+                business_day::LAST_CONFIRMED_Z_CUTOFF_KEY,
+                &floor,
+            )?;
+        }
+        advance_day_cursor(conn, &prepared.rollover_timestamp)?;
+        let closed = conn
+            .execute(
+                "UPDATE z_reports
+                    SET close_state = ?2,
+                        window_period_start = COALESCE(window_period_start, ?3),
+                        window_cutoff = COALESCE(window_cutoff, ?4),
+                        updated_at = ?5
+                  WHERE id = ?1 AND close_state IS NULL",
+                params![
+                    z_report_id,
+                    business_day::Z_CLOSE_STATE_LOCAL,
+                    prepared.period_start_at,
+                    prepared.rollover_timestamp,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|e| format!("mark the Z closed on this till: {e}"))?;
+        if closed != 1 {
+            return Err(format!(
+                "Cannot close the day on this till: the stored Z {z_report_id} is missing or already closed"
+            ));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            format!("commit local Z close: {e}")
+        }),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+/// Close a prepared Z on this till without the server (Ω3 α). Answers
+/// `{ success, localClose, pendingUpload, zReportId, reportDate }`, with
+/// `localDayClosed` so the renderer ends the day as after any Z.
+pub(crate) fn close_prepared_z_report_locally(
+    db: &DbState,
+    prepared: &PreparedZReportSubmission,
+) -> Result<Value, String> {
+    let z_report_id = prepared
+        .z_report_id
+        .clone()
+        .ok_or("Cannot close the day on this till: the Z has no stored report to send later")?;
+    let conn = db
+        .lock_traced("z_report_submit")
+        .map_err(|e| e.to_string())?;
+    apply_local_day_close(&conn, prepared, &z_report_id)?;
+    info!(
+        z_report_id = %z_report_id,
+        report_date = %prepared.report_date,
+        cutoff = %prepared.rollover_timestamp,
+        "Z closed on this till; it is sent once the server is reachable"
+    );
+    // Confirmed already (a drain sent it before this close): sweep it now.
+    if let Err(error) = sweep_confirmed_z_windows(&conn) {
+        warn!(error = %error, "Sweep after a local Z close deferred");
+    }
+    let sync_state = current_z_report_sync_state(&conn, &z_report_id);
+    Ok(serde_json::json!({
+        "success": true,
+        "localClose": true,
+        "pendingUpload": sync_state.as_deref() != Some("applied"),
+        "localDayClosed": true,
+        "zReportId": z_report_id,
+        "reportDate": prepared.report_date,
+        "data": prepared.generated.clone(),
+        "lastZReportTimestamp": prepared.rollover_timestamp,
+        "syncQueued": true,
+        "syncState": sync_state,
+    }))
+}
+
+/// The server confirmed this Z (`/api/pos/z-report/submit` 2xx): the queue
+/// (`sync_queue.rs`, W1) calls this on the Z row's success. It marks the Z
+/// `applied` and sweeps every confirmed local window in order. Inside a
+/// caller's transaction foreign keys cannot be switched off, so the sweep is
+/// deferred there: the next Z submission, the Health read and every local
+/// close run it. A sweep that cannot run is logged, never a failure of the
+/// confirmation: the window's data stays until it can.
+pub(crate) fn on_z_report_confirmed(conn: &Connection, z_report_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE z_reports
+            SET sync_state = 'applied',
+                sync_retry_count = 0,
+                sync_last_error = NULL,
+                sync_next_retry_at = NULL,
+                updated_at = ?2
+          WHERE id = ?1 AND COALESCE(sync_state, '') <> 'applied'",
+        params![z_report_id, Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| format!("mark z-report {z_report_id} confirmed: {e}"))?;
+    if !conn.is_autocommit() {
+        info!(
+            z_report_id = %z_report_id,
+            "Z confirmed inside a transaction; its window sweep is deferred"
+        );
+        return Ok(());
+    }
+    if let Err(error) = sweep_confirmed_z_windows(conn) {
+        warn!(z_report_id = %z_report_id, error = %error, "Confirmed Z window sweep deferred");
+    }
+    Ok(())
+}
+
+/// Sweep, in window order, every local Z the server confirmed (design (b)):
+/// `finalize_end_of_day_counts` bounded by that Z's cutoff (the deletion
+/// floor it earns), with every existing protection, then `close_state =
+/// 'swept'` and the floor advanced, each in one transaction. It stops at the
+/// first local Z that is not confirmed (invariant 3: an earlier window is
+/// never left behind) or whose sweep refuses (its data stays; Health shows
+/// it). Answers how many windows were swept. Inside a caller's transaction it
+/// does nothing.
+pub(crate) fn sweep_confirmed_z_windows(conn: &Connection) -> Result<usize, String> {
+    if !conn.is_autocommit() {
+        return Ok(0);
+    }
+    let mut swept = 0;
+    loop {
+        let next: Option<(String, Option<String>, String)> = conn
+            .query_row(
+                "SELECT id, window_cutoff, COALESCE(sync_state, '')
+                 FROM z_reports
+                 WHERE close_state = ?1
+                 ORDER BY julianday(COALESCE(window_cutoff, generated_at)) ASC,
+                          generated_at ASC, id ASC
+                 LIMIT 1",
+                params![business_day::Z_CLOSE_STATE_LOCAL],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| format!("read the oldest Z closed on this till: {e}"))?;
+        let Some((z_report_id, window_cutoff, sync_state)) = next else {
+            break;
+        };
+        if sync_state != "applied" {
+            break;
+        }
+        let cutoff = window_cutoff
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("the local Z {z_report_id} has no frozen window cutoff"))?;
+        sweep_one_confirmed_window(conn, &z_report_id, &cutoff)?;
+        swept += 1;
+    }
+    Ok(swept)
+}
+
+fn sweep_one_confirmed_window(
+    conn: &Connection,
+    z_report_id: &str,
+    cutoff: &str,
+) -> Result<(), String> {
+    // As the online rollover: `z_reports.shift_id` cascades from
+    // `staff_shifts`, so the sweep runs with foreign keys off and never
+    // cascades into a Z row.
+    conn.execute_batch("PRAGMA foreign_keys = OFF")
+        .map_err(|e| format!("disable FK for the Z window sweep: {e}"))?;
+    if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
+        let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+        return Err(format!("begin the Z window sweep: {e}"));
+    }
+    let result = (|| -> Result<Value, String> {
+        let counts = finalize_end_of_day_counts(conn, cutoff)?;
+        let marked = conn
+            .execute(
+                "UPDATE z_reports SET close_state = ?2, updated_at = ?3
+                  WHERE id = ?1 AND close_state = ?4 AND sync_state = 'applied'",
+                params![
+                    z_report_id,
+                    Z_CLOSE_STATE_SWEPT,
+                    Utc::now().to_rfc3339(),
+                    business_day::Z_CLOSE_STATE_LOCAL
+                ],
+            )
+            .map_err(|e| format!("mark the local Z {z_report_id} swept: {e}"))?;
+        if marked != 1 {
+            return Err(format!(
+                "the local Z {z_report_id} changed during its sweep"
+            ));
+        }
+        // The floor never moves back (a later window was already swept).
+        let advance = db::get_setting(conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY)
+            .filter(|stored| !business_day::is_epoch_timestamp(stored))
+            .map(|stored| !business_day::instant_at_or_after(&stored, cutoff))
+            .unwrap_or(true);
+        if advance {
+            db::set_setting(
+                conn,
+                "system",
+                business_day::LAST_CONFIRMED_Z_CUTOFF_KEY,
+                cutoff,
+            )?;
+        }
+        Ok(counts)
+    })();
+    match result {
+        Ok(counts) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+                return Err(format!("commit the Z window sweep: {error}"));
+            }
+            let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+            info!(z_report_id = %z_report_id, cutoff = %cutoff, "Confirmed local Z window swept: {}", counts);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+            warn!(z_report_id = %z_report_id, error = %error, "Confirmed local Z window kept");
+            Err(error)
+        }
+    }
+}
+
+/// Run the deferred sweeps on a pool connection (best effort), and bring the
+/// "not on the server" list of every unconfirmed Z up to date.
+pub(crate) fn sweep_confirmed_z_windows_now(db: &DbState) {
+    match db.lock_traced("z_report_sweep") {
+        Ok(conn) => {
+            if let Err(error) = sweep_confirmed_z_windows(&conn) {
+                warn!(error = %error, "Confirmed local Z windows kept for now");
+            }
+            if let Err(error) = refresh_not_on_server_for_unconfirmed_zs(&conn) {
+                warn!(error = %error, "Could not refresh the set-aside list of the waiting Zs");
+            }
+        }
+        Err(error) => warn!(error = %error, "Confirmed local Z window sweep skipped"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Health: the Zs closed on this till, and the rows refused for good (Ω3/Ω4)
+// ---------------------------------------------------------------------------
+
+/// A queue row a manager may set aside (design-o3-o4 §Ω4), as the Health view
+/// lists it: refused for good (`failed` / `conflict` with a typed refusal, a
+/// 4xx other than 408/425/429, a refused batch item, a refused offline
+/// check-in, an unknown 409 parked as `UNKNOWN_CONFLICT_REVIEW`), or pending
+/// on a shift the server holds and this till does not queue
+/// (`SHIFT_WAITING_ON_SERVER`, Ω1). A transport failure, a rate limit, a 5xx,
+/// a "not yet" item or a missing terminal identity heals by itself and is
+/// not. The queue (`sync_queue::set_aside_queue_row`) decides again before it
+/// writes; this mirrors its rule.
+pub(crate) fn queue_row_refused_for_good(status: &str, error_message: Option<&str>) -> bool {
+    let error = error_message.unwrap_or_default().trim();
+    let code = error.split(':').next().unwrap_or_default().trim();
+    if status == "pending" {
+        return error.starts_with(crate::sync_queue::SHIFT_WAITING_ON_SERVER);
+    }
+    if !matches!(status, "failed" | "conflict") || error.is_empty() {
+        return false;
+    }
+    let transient = matches!(code, "NETWORK_ERROR" | "PARITY_ITEM_RETRYABLE")
+        || ["HTTP_5", "HTTP_408", "HTTP_425", "HTTP_429"]
+            .iter()
+            .any(|prefix| code.starts_with(prefix));
+    let lower = error.to_ascii_lowercase();
+    !transient && !lower.contains("terminal_id") && !lower.contains("rate limit")
+}
+
+/// The code and the server's sentence of a stored queue error
+/// (`CODE: sentence`), bounded and sanitized for the Health view.
+fn split_queue_error(error_message: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(error) = error_message
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (None, None);
+    };
+    let (code, message) = match error.split_once(':') {
+        Some((code, message)) => (code.trim(), Some(message.trim().to_string())),
+        None => (error, None),
+    };
+    (
+        crate::print::safe_operational_error(Some(code.to_string()), 120),
+        crate::print::safe_operational_error(message.filter(|value| !value.is_empty()), 512),
+    )
+}
+
+/// What the Health view lists for the Z gates (offline week, founder
+/// 21/10/2026): every Z closed on this till still waiting for the server,
+/// oldest first, with what it waits for; and every queue row of a Z-gate
+/// table the server refused for good, with its code and the server's
+/// sentence, and whether a manager set it aside. Runs the deferred sweeps
+/// first. No customer data.
+pub(crate) fn local_z_health(conn: &Connection) -> Result<Value, String> {
+    if let Err(error) = sweep_confirmed_z_windows(conn) {
+        warn!(error = %error, "Confirmed local Z windows kept for now");
+    }
+    let set_aside_present = set_aside_table_present(conn)?;
+    let not_set_aside = not_set_aside_predicate(conn, "q")?;
+
+    let mut statement = conn
+        .prepare(
+            "SELECT zr.id, zr.report_date, zr.window_period_start, zr.window_cutoff,
+                    zr.close_state, COALESCE(zr.sync_state, ''),
+                    q.status, q.error_message, q.next_retry_at
+             FROM z_reports zr
+             LEFT JOIN parity_sync_queue q
+               ON q.table_name = 'z_reports' AND q.record_id = zr.id
+             WHERE zr.close_state = ?1
+             ORDER BY julianday(COALESCE(zr.window_cutoff, zr.generated_at)) ASC, zr.id ASC",
+        )
+        .map_err(|e| format!("prepare the Zs closed on this till: {e}"))?;
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = statement
+        .query_map(params![business_day::Z_CLOSE_STATE_LOCAL], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ))
+        })
+        .map_err(|e| format!("query the Zs closed on this till: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read the Zs closed on this till: {e}"))?;
+    drop(statement);
+
+    let mut local_zs = Vec::new();
+    let mut earlier_unconfirmed = false;
+    for (
+        z_report_id,
+        report_date,
+        period_start,
+        cutoff,
+        _close_state,
+        sync_state,
+        queue_status,
+        queue_error,
+        next_retry_at,
+    ) in rows
+    {
+        let confirmed = sync_state == "applied";
+        let window_rows: i64 = match cutoff.as_deref() {
+            Some(cutoff) => conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM parity_sync_queue q
+                         WHERE q.table_name IN {MONEY_PARITY_TABLES_SQL}
+                           AND COALESCE(q.module_type, '') <> 'repairs'
+                           AND julianday(q.created_at) <= julianday(?1)
+                           AND {not_set_aside}"
+                    ),
+                    params![cutoff],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("count the rows a local Z waits for: {e}"))?,
+            None => 0,
+        };
+        let refused = queue_status
+            .as_deref()
+            .is_some_and(|status| queue_row_refused_for_good(status, queue_error.as_deref()));
+        let waits_for = if confirmed {
+            "cleanup"
+        } else if earlier_unconfirmed {
+            "earlier_z"
+        } else if refused {
+            "server_refusal"
+        } else if window_rows > 0 {
+            "window_rows"
+        } else {
+            "sending"
+        };
+        let (error_code, server_message) = split_queue_error(queue_error.as_deref());
+        local_zs.push(serde_json::json!({
+            "zReportId": z_report_id,
+            "reportDate": report_date,
+            "periodStartAt": period_start,
+            "cutoffAt": cutoff,
+            "confirmed": confirmed,
+            "waitsFor": waits_for,
+            "windowRowsPending": window_rows,
+            "queueStatus": queue_status,
+            "errorCode": error_code,
+            "serverMessage": server_message,
+            "nextRetryAt": next_retry_at,
+        }));
+        if !confirmed {
+            earlier_unconfirmed = true;
+        }
+    }
+
+    let set_aside_columns = if set_aside_present {
+        "sa.set_aside_at, sa.set_aside_by_staff_id, sa.reason_code"
+    } else {
+        "NULL, NULL, NULL"
+    };
+    let set_aside_join = if set_aside_present {
+        "LEFT JOIN parity_sync_set_aside sa ON sa.queue_id = q.id"
+    } else {
+        ""
+    };
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT q.id, q.table_name, q.record_id, q.status, q.error_message, q.created_at,
+                    CASE WHEN json_valid(q.data) THEN COALESCE(
+                        json_extract(q.data, '$.amount_cents'),
+                        json_extract(q.data, '$.amountCents'),
+                        CAST(ROUND(json_extract(q.data, '$.amount') * 100) AS INTEGER)) END,
+                    {set_aside_columns}
+             FROM parity_sync_queue q
+             {set_aside_join}
+             WHERE q.table_name IN {MONEY_PARITY_TABLES_SQL}
+               AND COALESCE(q.module_type, '') <> 'repairs'
+               AND (q.status IN ('failed', 'conflict')
+                    OR (q.status = 'pending' AND q.error_message LIKE ?1 || '%'))
+             ORDER BY julianday(q.created_at) ASC, q.id ASC
+             LIMIT 200"
+        ))
+        .map_err(|e| format!("prepare the refused Z-gate rows: {e}"))?;
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = statement
+        .query_map(params![crate::sync_queue::SHIFT_WAITING_ON_SERVER], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+            ))
+        })
+        .map_err(|e| format!("query the refused Z-gate rows: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read the refused Z-gate rows: {e}"))?;
+    let refused: Vec<Value> = rows
+        .into_iter()
+        .filter(|row| row.7.is_some() || queue_row_refused_for_good(&row.3, row.4.as_deref()))
+        .map(
+            |(
+                queue_id,
+                table_name,
+                record_id,
+                status,
+                error_message,
+                created_at,
+                amount_cents,
+                set_aside_at,
+                set_aside_by,
+                set_aside_reason,
+            )| {
+                let (error_code, server_message) = split_queue_error(error_message.as_deref());
+                serde_json::json!({
+                    "queueId": queue_id,
+                    "tableName": table_name,
+                    "recordId": record_id,
+                    "status": status,
+                    "errorCode": error_code,
+                    "serverMessage": server_message,
+                    "createdAt": created_at,
+                    "amountCents": amount_cents,
+                    "setAside": set_aside_at.is_some(),
+                    "setAsideAt": set_aside_at,
+                    "setAsideByStaffId": set_aside_by,
+                    "setAsideReason": set_aside_reason,
+                })
+            },
+        )
+        .collect();
+
+    Ok(serde_json::json!({
+        "success": true,
+        "localZs": local_zs,
+        "unconfirmedLocalZs": unconfirmed_local_z_count(conn)?,
+        "refused": refused,
+    }))
+}
+
+/// The refused row a manager is about to set aside (or bring back), checked
+/// before the approval is asked, so a refusal never consumes a grant:
+/// `(table_name, error code)`.
+pub(crate) fn set_aside_candidate(
+    conn: &Connection,
+    queue_id: &str,
+    undo: bool,
+) -> Result<(String, String), String> {
+    let row: Option<(String, String, Option<String>)> = conn
+        .query_row(
+            &format!(
+                "SELECT table_name, status, error_message FROM parity_sync_queue
+                 WHERE id = ?1 AND table_name IN {MONEY_PARITY_TABLES_SQL}
+                   AND COALESCE(module_type, '') <> 'repairs'"
+            ),
+            params![queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("read the row to set aside: {e}"))?;
+    let Some((table_name, status, error_message)) = row else {
+        return Err("SET_ASIDE_NOT_ELIGIBLE: the row is not a Z-gate row in the queue".to_string());
+    };
+    let listed = set_aside_table_present(conn)?
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM parity_sync_set_aside WHERE queue_id = ?1)",
+                params![queue_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| format!("read the set-aside listing: {e}"))?;
+    if undo {
+        if !listed {
+            return Err("SET_ASIDE_NOT_LISTED: the row is not set aside".to_string());
+        }
+    } else {
+        if listed {
+            return Err("SET_ASIDE_ALREADY: the row is already set aside".to_string());
+        }
+        if !queue_row_refused_for_good(&status, error_message.as_deref()) {
+            return Err(
+                "SET_ASIDE_NOT_ELIGIBLE: the server has not refused this row for good".to_string(),
+            );
+        }
+    }
+    let code = split_queue_error(error_message.as_deref())
+        .0
+        .unwrap_or_else(|| status.to_ascii_uppercase());
+    Ok((table_name, code))
+}
+
+/// `report_json` key: the client ids of the orders the window counted
+/// (`report_data.closedOrderClientIds` on the server, at most 5,000).
+pub(crate) const CLOSED_ORDER_CLIENT_IDS_REPORT_KEY: &str = "closedOrderClientIds";
+/// `report_json` key: the records of the window a manager set aside (Ω4),
+/// `[{table, recordId, amountCents?, reason}]`, printed as "Not on the server".
+pub(crate) const NOT_ON_SERVER_REPORT_KEY: &str = "notOnServer";
+/// The server closes at most this many listed orders per Z.
+const CLOSED_ORDER_CLIENT_IDS_MAX: i64 = 5_000;
+
+/// The client ids of the orders a window counted: the Z's order population
+/// (`build_z_report_for_window`), cancelled orders of the window included,
+/// by the id the order sync sends as `client_order_id` (`client_request_id`,
+/// else the local id). Open table tabs, repair settlements, test and ghost
+/// orders and orders an earlier Z closed are not listed.
+fn load_window_closed_order_client_ids(
+    conn: &Connection,
+    branch_id: &str,
+    period_start: &str,
+    period_end: &str,
+    lower_bound_mode: LowerBoundMode,
+) -> Result<Vec<String>, String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
+    let reportable_order = business_day::z_report_reportable_order_expr("o", "?4");
+    let history_terminal_id = db::get_setting(conn, "terminal", "terminal_id")
+        .or_else(|| storage::get_credential("terminal_id"))
+        .unwrap_or_default();
+    let returned_history_order = returned_history_order_filter_sql(&history_terminal_id);
+    let sql = format!(
+        "SELECT DISTINCT COALESCE(NULLIF(TRIM(COALESCE(o.client_request_id, '')), ''), o.id)
+         FROM orders o
+         WHERE {financial_predicate}
+           AND julianday({financial_expr}) <= julianday(?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND COALESCE(o.is_test, 0) = 0
+           AND COALESCE(o.order_context, '') <> 'repair_settlement'
+           AND {reportable_order}
+           AND {returned_history_order}
+         ORDER BY 1
+         LIMIT {CLOSED_ORDER_CLIENT_IDS_MAX}"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare the window's order ids: {e}"))?;
+    let ids = statement
+        .query_map(
+            params![
+                period_start,
+                period_end,
+                branch_id,
+                business_day::last_z_anchor_utc(conn)
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("query the window's order ids: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read the window's order ids: {e}"))?;
+    if ids.len() as i64 >= CLOSED_ORDER_CLIENT_IDS_MAX {
+        warn!(
+            count = ids.len(),
+            "The Z lists the most order ids the server accepts; the rest close by window"
+        );
+    }
+    Ok(ids)
+}
+
+/// One record of a Z's "not on the server" list.
+#[derive(Clone, Debug)]
+struct NotOnServerEntry {
+    queue_id: String,
+    value: Value,
+}
+
+fn set_aside_table_present(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                        AND name = 'parity_sync_set_aside')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(|e| format!("inspect parity_sync_set_aside: {e}"))
+}
+
+/// The set-aside records a Z lists (Ω4): the ones already attributed to
+/// `z_report_id`, and every one not attributed yet whose queue row was made
+/// at or before `period_end` (a record belongs to the first window that
+/// closes after it). No customer data: table, record id, amount, reason.
+fn load_not_on_server_entries(
+    conn: &Connection,
+    z_report_id: Option<&str>,
+    period_end: &str,
+) -> Result<Vec<NotOnServerEntry>, String> {
+    if !set_aside_table_present(conn)? {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT sa.queue_id, sa.table_name, sa.record_id, sa.reason_code,
+                    CASE WHEN json_valid(q.data) THEN COALESCE(
+                        json_extract(q.data, '$.amount_cents'),
+                        json_extract(q.data, '$.amountCents'),
+                        CAST(ROUND(json_extract(q.data, '$.amount') * 100) AS INTEGER)) END
+             FROM parity_sync_set_aside sa
+             LEFT JOIN parity_sync_queue q ON q.id = sa.queue_id
+             WHERE (?1 IS NOT NULL AND sa.z_report_id = ?1)
+                OR (sa.z_report_id IS NULL
+                    AND julianday(COALESCE(q.created_at, sa.set_aside_at)) <= julianday(?2))
+             ORDER BY julianday(COALESCE(q.created_at, sa.set_aside_at)) ASC, sa.queue_id ASC",
+        )
+        .map_err(|e| format!("prepare the set-aside records of a Z: {e}"))?;
+    let rows = statement
+        .query_map(params![z_report_id, period_end], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .map_err(|e| format!("query the set-aside records of a Z: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read the set-aside records of a Z: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(queue_id, table, record_id, reason, amount_cents)| {
+            let mut value = serde_json::json!({
+                "table": table,
+                "recordId": record_id,
+                "reason": reason,
+            });
+            if let Some(amount_cents) = amount_cents {
+                value["amountCents"] = serde_json::json!(amount_cents);
+            }
+            NotOnServerEntry { queue_id, value }
+        })
+        .collect())
+}
+
+fn attribute_not_on_server_entries(
+    conn: &Connection,
+    z_report_id: &str,
+    entries: &[NotOnServerEntry],
+) -> Result<(), String> {
+    for entry in entries {
+        conn.execute(
+            "UPDATE parity_sync_set_aside SET z_report_id = ?1
+              WHERE queue_id = ?2 AND z_report_id IS NULL",
+            params![z_report_id, entry.queue_id],
+        )
+        .map_err(|e| format!("attribute a set-aside record to its Z: {e}"))?;
+    }
+    Ok(())
+}
+
+/// After a set-aside or its undo (Ω4), every Z the server has not confirmed
+/// gets its current "not on the server" list, oldest window first, in its
+/// stored report and in its queued submission (the stored Z is what the
+/// server gets). A submission being sent right now keeps its body; the next
+/// refresh corrects it. Answers how many Zs changed.
+pub(crate) fn refresh_not_on_server_for_unconfirmed_zs(conn: &Connection) -> Result<usize, String> {
+    if !set_aside_table_present(conn)? {
+        return Ok(0);
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT id, report_json FROM z_reports
+             WHERE COALESCE(sync_state, '') <> 'applied'
+             ORDER BY julianday(COALESCE(window_cutoff, generated_at)) ASC, id ASC",
+        )
+        .map_err(|e| format!("prepare the unconfirmed Zs: {e}"))?;
+    let zs = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("query the unconfirmed Zs: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read the unconfirmed Zs: {e}"))?;
+    drop(statement);
+    let mut changed = 0;
+    for (z_report_id, report_json) in zs {
+        let mut report: Value = serde_json::from_str(&report_json).unwrap_or_default();
+        let Some(period_end) = extract_period_bounds_from_report_json(&report).1 else {
+            continue;
+        };
+        let entries = load_not_on_server_entries(conn, Some(&z_report_id), &period_end)?;
+        let listed = Value::Array(entries.iter().map(|entry| entry.value.clone()).collect());
+        let current = report.get(NOT_ON_SERVER_REPORT_KEY).cloned();
+        let unchanged = match &current {
+            Some(current) => *current == listed,
+            None => entries.is_empty(),
+        };
+        attribute_not_on_server_entries(conn, &z_report_id, &entries)?;
+        if unchanged {
+            continue;
+        }
+        let Some(object) = report.as_object_mut() else {
+            continue;
+        };
+        if entries.is_empty() {
+            object.remove(NOT_ON_SERVER_REPORT_KEY);
+        } else {
+            object.insert(NOT_ON_SERVER_REPORT_KEY.to_string(), listed);
+        }
+        conn.execute(
+            "UPDATE z_reports SET report_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![z_report_id, report.to_string(), Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| format!("update the set-aside list of Z {z_report_id}: {e}"))?;
+        let payload = stored_z_report_sync_payload(conn, &z_report_id)?;
+        conn.execute(
+            "UPDATE parity_sync_queue SET data = ?2
+              WHERE table_name = 'z_reports' AND record_id = ?1 AND status <> 'processing'",
+            params![z_report_id, payload],
+        )
+        .map_err(|e| format!("update the queued Z {z_report_id}: {e}"))?;
+        changed += 1;
+    }
+    Ok(changed)
 }
 
 // ---------------------------------------------------------------------------
@@ -9065,6 +10527,22 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn z_vat_breakdown_matches_every_shared_vector() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../shared/reports/__fixtures__/z-vat-breakdown-vectors.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            assert_eq!(
+                super::build_z_vat_breakdown(case["orders"].as_array().unwrap()),
+                case["expected"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     #[test]
     fn confirmed_edit_refund_pending_blocks_cleanup_before_any_deletion() {
         let db = test_db();
@@ -9843,6 +11321,89 @@ mod tests {
     }
 
     #[test]
+    fn staff_tips_use_completed_ledger_rows_names_and_the_report_scope() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "term-1"),
+            ("branch_id", "branch-1"),
+            ("organization_id", "org-test"),
+        ]);
+        let db = test_db();
+        seed_original_currency_report(&db);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE orders SET items = ?1, total_amount = 14, total_amount_cents = 1400,
+                tip_amount = 4, tip_amount_cents = 400 WHERE id = 'currency-order'", [
+                serde_json::json!([{ "staff_id": "stylist", "metadata": { "staff_name": "Maria" } }]).to_string()
+            ]).unwrap();
+            for (id, staff, cents, status, origin, remote) in [
+                ("tip-a", "stylist", 123, "completed", "manual", None),
+                ("tip-b", "stylist", 77, "completed", "manual", None),
+                ("tip-refunded", "stylist", 500, "refunded", "manual", None),
+                ("tip-voided", "stylist", 600, "voided", "manual", None),
+                (
+                    "tip-unbacked",
+                    "stylist",
+                    700,
+                    "completed",
+                    "sync_reconstructed",
+                    None,
+                ),
+                (
+                    "tip-backed",
+                    "stylist",
+                    50,
+                    "completed",
+                    "sync_reconstructed",
+                    Some("remote-tip"),
+                ),
+                (
+                    "tip-fallback",
+                    "cached-stylist",
+                    150,
+                    "completed",
+                    "manual",
+                    None,
+                ),
+                ("tip-zero", "zero-stylist", 0, "completed", "manual", None),
+            ] {
+                conn.execute("INSERT INTO order_payments (id, order_id, method, amount, amount_cents,
+                    tip_amount, tip_amount_cents, tip_recipient_role, tip_recipient_staff_id,
+                    status, payment_origin, remote_payment_id, currency, created_at, updated_at)
+                    VALUES (?1, 'currency-order', 'cash', ?2 / 100.0, ?2, ?2 / 100.0, ?2, 'staff', ?3, ?4, ?5, ?6, 'CHF', 'now', 'now')",
+                    params![id, cents, staff, status, origin, remote]).unwrap();
+            }
+            for (branch, name) in [("branch-1", "Ana"), ("other-branch", "Wrong branch")] {
+                conn.execute("INSERT INTO branch_ops_cache (branch_id, cache_key, scope_key, payload_json, synced_at)
+                    VALUES (?1, 'staff_schedule', 'all', ?2, '2026-02-16T19:00:00Z')",
+                    params![branch, serde_json::json!({ "staff": [{ "id": "cached-stylist", "name": name }] }).to_string()]).unwrap();
+            }
+            let scoped = load_staff_tips(
+                &conn,
+                "FROM orders o WHERE o.branch_id = ?1",
+                ["other-branch"],
+            )
+            .unwrap();
+            assert!(scoped.is_empty());
+        }
+        // Both builders expose the exact same public shape, including a
+        // stylist without a shift. Ordinary cashier tips are excluded.
+        let expected = serde_json::json!([
+            { "staffId": "cached-stylist", "staffName": "Ana", "amount": 1.5 },
+            { "staffId": "stylist", "staffName": "Maria", "amount": 2.5 }
+        ]);
+        let day = build_z_report_for_date(
+            &db,
+            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(day.report_json["staffTips"], expected);
+        let shift =
+            generate_z_report(&db, &serde_json::json!({ "shiftId": "currency-shift" })).unwrap();
+        assert_eq!(shift["report"]["reportJson"]["staffTips"], expected);
+    }
+
+    #[test]
     fn z_report_currency_is_frozen_and_never_relabelled_by_current_country() {
         let db = test_db();
         seed_original_currency_report(&db);
@@ -10478,14 +12039,13 @@ mod tests {
                         |r| r.get::<_, String>(0)
                     )
                     .unwrap(),
-                    if amount == 10.0 {
-                        "pending"
-                    } else {
-                        "partially_paid"
-                    }
+                    // Ω12: a customer return keeps the sale paid; a full
+                    // return still reads pending (D4).
+                    if amount == 10.0 { "pending" } else { "paid" }
                 );
-                assert!(
-                    !crate::payments::ledger_backs_claimed_status(&conn, "ord-1", "paid").unwrap()
+                assert_eq!(
+                    crate::payments::ledger_backs_claimed_status(&conn, "ord-1", "paid").unwrap(),
+                    amount != 10.0
                 );
             }
             let local_z =
@@ -10590,7 +12150,8 @@ mod tests {
                     |r| r.get::<_, String>(0)
                 )
                 .unwrap(),
-            "partially_paid"
+            // Ω12: a customer return keeps the sale paid.
+            "paid"
         );
     }
 
@@ -11754,32 +13315,42 @@ mod tests {
         }
     }
 
-    /// Founder (07/10/2026), as Android's `sales.taxTotal`: the Z's VAT is
-    /// the sum of the VAT each order's slip prints, over the orders of
-    /// `sales.totalSales`, in both stored-Z builders.
+    /// Founder (21/10/2026), as Android's `sales.taxTotal`: the Z's VAT is
+    /// the sum of the VAT every counted order carries, over the orders of
+    /// `sales.totalSales`, in both stored-Z builders, whatever the slips
+    /// print. Slips print the same number only when the owner's «VAT on
+    /// receipts» switch is on.
     #[test]
-    fn z_tax_total_is_the_vat_the_slips_of_the_days_orders_print() {
+    #[serial_test::serial]
+    fn z_tax_total_is_the_stored_vat_of_the_days_orders_whatever_the_slips_print() {
+        crate::fiscal::active_cache::reset_for_tests();
         let db = test_db();
         let shift_id = seed_closed_shift(&db);
         {
             let conn = db.conn.lock().unwrap();
-            // The owner's rate (Admin -> POS settings -> Taxes), included in
-            // the prices: without a fiscal plugin the slip prints its VAT.
+            // Tomikro: the switch is off; the old owner rate no longer counts.
+            db::set_setting(&conn, "tax", "vat_print_on_receipt", "false").unwrap();
             db::set_setting(&conn, "tax", "default_tax_rate", "8.1").unwrap();
-            // A tip never carries VAT, and the stored VAT is not what such a
-            // slip prints.
+            // The cents column wins over a stale REAL value; a row written
+            // before the cents existed counts its REAL value; ord-3 has none.
+            conn.execute(
+                "UPDATE orders SET tax_amount = 9.99, tax_amount_cents = 484 WHERE id = 'ord-1'",
+                [],
+            )
+            .unwrap();
             conn.execute(
                 "UPDATE orders SET tip_amount = 2.0, tip_amount_cents = 200,
-                        tax_amount = 9.99, tax_amount_cents = 999
+                        tax_amount = 6.39, tax_amount_cents = NULL
                  WHERE id = 'ord-2'",
                 [],
             )
             .unwrap();
-            // A cancelled order is no sale: its slip's VAT is not the day's.
+            // A cancelled order is no sale: its VAT is not the day's.
             conn.execute(
                 "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                    tax_amount, tax_amount_cents,
                     status, order_type, payment_status, staff_shift_id, sync_status, created_at, updated_at)
-                 VALUES ('ord-cancelled', '#9', '[]', 18.0, 1800, 'cancelled', 'dine-in', 'paid',
+                 VALUES ('ord-cancelled', '#9', '[]', 18.0, 1800, 3.48, 348, 'cancelled', 'dine-in', 'paid',
                     ?1, 'pending', '2026-02-16T18:00:00Z', '2026-02-16T18:00:00Z')",
                 params![shift_id],
             )
@@ -11794,31 +13365,54 @@ mod tests {
                 .map(|line| Cents::round_half_even(line.amount).as_i64())
                 .unwrap_or(0)
         };
-        let day_slips_vat: i64 = ["ord-1", "ord-2", "ord-3"]
-            .into_iter()
-            .map(slip_vat_cents)
-            .sum();
-        // 25, 35 less the 2 tip, and 40, each at 8.1% included.
-        assert_eq!(day_slips_vat, 187 + 247 + 300);
-        assert!(slip_vat_cents("ord-cancelled") > 0);
+        let day_slips_vat = || -> i64 {
+            ["ord-1", "ord-2", "ord-3"]
+                .into_iter()
+                .map(slip_vat_cents)
+                .sum()
+        };
+        assert_eq!(day_slips_vat(), 0, "the switch is off: no slip prints VAT");
 
-        let built = build_z_report_for_date(
-            &db,
-            &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
-            false,
-        )
-        .expect("day Z builds");
-        let shift_z = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
-            .expect("shift Z generates");
-        for sales in [
-            &built.report_json["sales"],
-            &shift_z["report"]["reportJson"]["sales"],
-        ] {
-            assert_eq!(sales["taxTotal_cents"], day_slips_vat, "{sales}");
-            assert_eq!(sales["taxTotal"], 7.34, "{sales}");
+        let z_vat = |db: &DbState| {
+            let built = build_z_report_for_date(
+                db,
+                &serde_json::json!({ "branchId": "branch-1", "date": "2026-02-16" }),
+                false,
+            )
+            .expect("day Z builds");
+            let shift_z = generate_z_report(db, &serde_json::json!({ "shiftId": shift_id }))
+                .expect("shift Z generates");
+            // A fresh shift response carries an object; an idempotent retry
+            // carries the frozen SQLite JSON string. Verify the same stored
+            // VAT in both shapes, without rebuilding the saved Z.
+            let shift_report = &shift_z["report"]["reportJson"];
+            let shift_report: Value = match shift_report.as_str() {
+                Some(raw) => serde_json::from_str(raw).expect("stored shift Z JSON"),
+                None => shift_report.clone(),
+            };
+            [
+                built.report_json["sales"].clone(),
+                shift_report["sales"].clone(),
+            ]
+        };
+        for sales in z_vat(&db) {
+            assert_eq!(sales["taxTotal_cents"], 484 + 639, "{sales}");
+            assert_eq!(sales["taxTotal"], 11.23, "{sales}");
         }
 
-        // A store whose slips print no VAT records none.
+        // The owner turns the switch on: the slips print the same VAT the Z
+        // totals, and the Z does not change.
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "tax", "vat_print_on_receipt", "true").unwrap();
+        }
+        assert_eq!(day_slips_vat(), 484 + 639);
+        assert_eq!(slip_vat_cents("ord-cancelled"), 348);
+        for sales in z_vat(&db) {
+            assert_eq!(sales["taxTotal_cents"], 484 + 639, "{sales}");
+        }
+
+        // A store whose orders carry no VAT (not VAT-registered) records none.
         let untaxed = test_db();
         seed_closed_shift(&untaxed);
         let built = build_z_report_for_date(
@@ -11829,6 +13423,7 @@ mod tests {
         .expect("untaxed day Z builds");
         assert_eq!(built.report_json["sales"]["taxTotal_cents"], 0);
         assert_eq!(built.report_json["sales"]["taxTotal"], 0.0);
+        crate::fiscal::active_cache::reset_for_tests();
     }
 
     #[test]
@@ -14330,13 +15925,161 @@ mod tests {
         assert!(db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_some());
     }
 
+    /// POS audit K5: the terminal moved to branch-2 while branch-1's issued Z
+    /// was still pending. A branch-2 checkout keeps branch-1's frozen window
+    /// in the single slot and still offers branch-2's Z.
+    #[test]
+    fn test_another_branch_checkout_never_overwrites_a_frozen_pending_z() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let issued = PendingZReportContext {
+            branch_id: "branch-1".to_string(),
+            report_date: "2026-10-20".to_string(),
+            cutoff_at: utc_rfc3339_from_local(2026, 10, 20, 23, 0, 0),
+            period_start_at: utc_rfc3339_from_local(2026, 10, 20, 9, 0, 0),
+            day_start_at: Some(utc_rfc3339_from_local(2026, 10, 20, 9, 0, 0)),
+            frozen: true,
+        };
+        persist_pending_z_report_context(&conn, &issued).expect("persist issued Z window");
+        let stored_raw = db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY)
+            .expect("issued Z window stored");
+
+        let check_in = utc_rfc3339_from_local(2026, 10, 21, 9, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 10, 21, 17, 0, 0);
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'b2-shift', 'b2-staff', 'Maria', 'branch-2', 'term-1', 'cashier',
+                100.0, 10000, ?1, ?2, 'closed', 2, 'pending', ?1, ?2
+             )",
+            params![check_in, check_out],
+        )
+        .expect("insert branch-2 shift");
+
+        let offered = ensure_pending_z_report_context_for_branch(&conn, "branch-2", &check_out)
+            .expect("the checkout never fails on the guard");
+        assert!(offered.is_none(), "branch-2's offer is not stored");
+        assert_eq!(
+            db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).as_deref(),
+            Some(stored_raw.as_str()),
+            "branch-1's issued Z window is untouched"
+        );
+
+        // Branch-2's Z is still offered, computed on demand, and loading it
+        // does not clear branch-1's slot either.
+        let branch_2 = load_pending_z_report_context(&conn, "branch-2")
+            .expect("branch-2's Z is still offered");
+        assert_eq!(branch_2.branch_id, "branch-2");
+        assert_eq!(branch_2.cutoff_at, check_out);
+        assert!(!branch_2.frozen);
+        assert_eq!(
+            db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).as_deref(),
+            Some(stored_raw.as_str())
+        );
+        let branch_1 = load_pending_z_report_context(&conn, "branch-1")
+            .expect("branch-1's issued Z is still pending");
+        assert!(branch_1.frozen);
+        assert_eq!(branch_1.cutoff_at, issued.cutoff_at);
+
+        // An offer that was never issued is not protected: it is replaced.
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                frozen: false,
+                ..issued.clone()
+            },
+        )
+        .unwrap();
+        ensure_pending_z_report_context_for_branch(&conn, "branch-2", &check_out)
+            .expect("branch-2 offer");
+        let replaced = load_stored_pending_z_report_context(&conn, "branch-2")
+            .expect("branch-2 took the unissued slot");
+        assert_eq!(replaced.cutoff_at, check_out);
+    }
+
+    /// K5: an issued Z of another branch that a later Z already closed is
+    /// stale and does not hold the slot.
+    #[test]
+    fn test_a_closed_other_branch_z_window_does_not_hold_the_slot() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let cutoff = utc_rfc3339_from_local(2026, 10, 20, 23, 0, 0);
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                branch_id: "branch-1".to_string(),
+                report_date: "2026-10-20".to_string(),
+                cutoff_at: cutoff.clone(),
+                period_start_at: utc_rfc3339_from_local(2026, 10, 20, 9, 0, 0),
+                day_start_at: None,
+                frozen: true,
+            },
+        )
+        .unwrap();
+        assert!(other_branch_issued_z_context(&conn, "branch-2").is_some());
+        assert!(other_branch_issued_z_context(&conn, "branch-1").is_none());
+
+        db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            &utc_rfc3339_from_local(2026, 10, 21, 1, 0, 0),
+        )
+        .unwrap();
+        assert!(other_branch_issued_z_context(&conn, "branch-2").is_none());
+    }
+
+    /// POS audit Π8: the store's zone dates the Z (its `report_date` label);
+    /// the window instants stay exactly the same.
+    #[test]
+    fn test_store_zone_dates_the_z_without_moving_its_window() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        // Auckland (UTC+13): the shift opens 14/10 01:30 and closes 14/10 09:00.
+        let check_in = "2026-10-13T12:30:00Z";
+        let check_out = "2026-10-13T20:00:00Z";
+        insert_day_shift(
+            &conn,
+            "zone-shift",
+            "Ana",
+            "cashier",
+            check_in,
+            Some(check_out),
+        );
+
+        let device = build_pending_z_report_context(&conn, "branch-1", check_out);
+        db::set_setting(&conn, "terminal", "branch_id", "branch-1").unwrap();
+        db::set_setting(&conn, "terminal", "hotel_timezone", "Pacific/Auckland").unwrap();
+        db::set_setting(&conn, "terminal", "hotel_timezone_branch_id", "branch-1").unwrap();
+        let store = build_pending_z_report_context(&conn, "branch-1", check_out);
+
+        assert_eq!(store.report_date, "2026-10-14");
+        assert_eq!(
+            device.report_date,
+            business_day::local_report_date_from_timestamp(check_in, None)
+        );
+        assert_eq!(store.period_start_at, device.period_start_at);
+        assert_eq!(store.day_start_at, device.day_start_at);
+        assert_eq!(store.day_start_at.as_deref(), Some(check_in));
+        assert_eq!(store.cutoff_at, device.cutoff_at);
+
+        // Another branch's retained zone is not this store's: device zone.
+        db::set_setting(&conn, "terminal", "hotel_timezone_branch_id", "branch-9").unwrap();
+        let other = build_pending_z_report_context(&conn, "branch-1", check_out);
+        assert_eq!(other.report_date, device.report_date);
+    }
+
     #[test]
     fn test_pos_day_report_date_falls_back_to_period_start_local_date() {
         let period_start = utc_rfc3339_from_local(2026, 4, 2, 0, 44, 47);
         let fallback_now = utc_rfc3339_from_local(2026, 4, 2, 1, 38, 24);
 
         assert_eq!(
-            business_day::report_date_for_pos_day(None, &period_start, &fallback_now),
+            business_day::report_date_for_pos_day(None, &period_start, &fallback_now, None),
             "2026-04-02",
             "with no day start the report date follows the local date implied by periodStart"
         );
@@ -14346,8 +16089,11 @@ mod tests {
     fn test_repair_retryable_z_report_business_dates_requeues_failed_rows() {
         let db = test_db();
         seed_closed_shift(&db);
-        let expected_report_date =
-            report_date_for_business_window("2026-04-01T22:44:47.248Z", "2026-04-01T23:38:24.403Z");
+        let expected_report_date = business_day::report_date_for_business_window(
+            "2026-04-01T22:44:47.248Z",
+            "2026-04-01T23:38:24.403Z",
+            None,
+        );
 
         let generated = generate_z_report_for_date(
             &db,
@@ -17589,14 +19335,14 @@ mod hotel_z_tests {
         )
         .unwrap();
         crate::db::set_setting(&conn, "tax", "default_tax_rate", "24").unwrap();
-        let vat = printed_order_vat_cents(
+        let vat = order_vat_cents(
             &conn,
-            &format!("{PRINTED_ORDER_VAT_COLUMNS} FROM orders o WHERE id='settle'"),
+            &format!("{ORDER_VAT_COLUMNS} FROM orders o WHERE id='settle'"),
             [],
         )
         .unwrap();
         assert_eq!(
-            vat, 1300,
+            vat.0, 1300,
             "Never apply the owner's default VAT to transfers or accommodation tax"
         );
         let hotel = hotel_report_totals(&conn, "FROM orders o", []).unwrap();
@@ -17624,5 +19370,995 @@ mod hotel_z_tests {
             150.0 - hotel["transferGross"].as_f64().unwrap() - revenue_refunds,
             0.0
         );
+    }
+}
+
+/// Offline week (founder 21/10/2026, Ω3 α + Ω4; design-o3-o4): a Z without a
+/// connection closes the day on this till and deletes nothing; the server's
+/// confirmation sweeps each window in order; a manager can set a refused row
+/// aside. Each invariant of the design is pinned here.
+#[cfg(test)]
+mod offline_week_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    const BRANCH: &str = "branch-1";
+    /// The Z before the outage.
+    const T0: &str = "2026-10-19T03:00:00Z";
+
+    fn test_db() -> DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("set pragmas");
+        db::run_migrations_for_test(&conn);
+        db::set_setting(&conn, "terminal", "terminal_id", "term-1").unwrap();
+        db::set_setting(&conn, "system", "last_z_report_timestamp", T0).unwrap();
+        DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn payload() -> Value {
+        serde_json::json!({ "branchId": BRANCH })
+    }
+
+    /// One closed shift with its drawer, and one paid order of it.
+    struct Day<'a> {
+        shift: &'a str,
+        check_in: &'a str,
+        check_out: &'a str,
+        order: &'a str,
+        client_request_id: Option<&'a str>,
+        paid_at: &'a str,
+    }
+
+    fn seed_day(conn: &Connection, day: &Day<'_>) {
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, opening_cash_amount_cents,
+                closing_cash_amount, closing_cash_amount_cents,
+                expected_cash_amount, expected_cash_amount_cents,
+                cash_variance, cash_variance_cents,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (?1, ?1, 'Cashier', 'branch-1', 'term-1', 'cashier',
+                       100.0, 10000, 112.5, 11250, 112.5, 11250, 0.0, 0,
+                       ?2, ?3, 'closed', 2, 'synced', ?2, ?3)",
+            params![day.shift, day.check_in, day.check_out],
+        )
+        .expect("insert shift");
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opening_amount_cents,
+                closing_amount, closing_amount_cents,
+                expected_amount, expected_amount_cents,
+                variance_amount, variance_amount_cents,
+                reconciled, opened_at, closed_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?2, 'branch-1', 'term-1',
+                       100.0, 10000, 112.5, 11250, 112.5, 11250, 0.0, 0,
+                       1, ?3, ?4, ?3, ?4)",
+            params![
+                format!("drawer-{}", day.shift),
+                day.shift,
+                day.check_in,
+                day.check_out
+            ],
+        )
+        .expect("insert drawer");
+        conn.execute(
+            "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents, status,
+                                 order_type, payment_status, staff_shift_id, branch_id,
+                                 sync_status, client_request_id, created_at, updated_at)
+             VALUES (?1, ?1, '[]', 12.5, 1250, 'completed', 'pickup', 'paid', ?2, 'branch-1',
+                     'synced', ?3, ?4, ?4)",
+            params![day.order, day.shift, day.client_request_id, day.paid_at],
+        )
+        .expect("insert order");
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                                         staff_shift_id, currency, created_at, updated_at)
+             VALUES (?1, ?2, 'cash', 12.5, 1250, 'completed', ?3, 'EUR', ?4, ?4)",
+            params![
+                format!("pay-{}", day.order),
+                day.order,
+                day.shift,
+                day.paid_at
+            ],
+        )
+        .expect("insert payment");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_row(
+        conn: &Connection,
+        id: &str,
+        table: &str,
+        record: &str,
+        status: &str,
+        error: Option<&str>,
+        created_at: &str,
+        data: Value,
+    ) {
+        conn.execute(
+            "INSERT INTO parity_sync_queue (
+                 id, table_name, record_id, operation, data, organization_id, created_at,
+                 attempts, status, error_message, module_type, conflict_strategy
+             ) VALUES (?1, ?2, ?3, 'INSERT', ?4, 'org-1', ?5, 1, ?6, ?7, 'financial', 'manual')",
+            params![
+                id,
+                table,
+                record,
+                data.to_string(),
+                created_at,
+                status,
+                error
+            ],
+        )
+        .expect("seed queue row");
+    }
+
+    fn set_aside(conn: &Connection, queue_id: &str, table: &str, record: &str) {
+        // The listing `sync_queue::set_aside_queue_row` (W1) writes, as the
+        // v104 table defines it.
+        conn.execute(
+            "INSERT INTO parity_sync_set_aside (
+                 queue_id, table_name, record_id, z_report_id, reason_code, server_message,
+                 set_aside_by_staff_id, set_aside_at, organization_id
+             ) VALUES (?1, ?2, ?3, NULL, 'HTTP_422_CLIENT_ERROR', 'Order total changed',
+                       'manager-1', '2026-10-22T08:00:00Z', 'org-1')",
+            params![queue_id, table, record],
+        )
+        .expect("set the row aside");
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn z_state(conn: &Connection, z_report_id: &str) -> (Option<String>, String) {
+        conn.query_row(
+            "SELECT close_state, sync_state FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    fn day_one() -> Day<'static> {
+        Day {
+            shift: "shift-d1",
+            check_in: "2026-10-19T14:00:00Z",
+            check_out: "2026-10-20T02:00:00Z",
+            order: "ord-d1",
+            client_request_id: Some("client-d1"),
+            paid_at: "2026-10-19T20:00:00Z",
+        }
+    }
+
+    fn day_two() -> Day<'static> {
+        Day {
+            shift: "shift-d2",
+            check_in: "2026-10-20T14:00:00Z",
+            check_out: "2026-10-21T02:00:00Z",
+            order: "ord-d2",
+            client_request_id: None,
+            paid_at: "2026-10-20T20:00:00Z",
+        }
+    }
+
+    fn insert_next_day_shift(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO staff_shifts (id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                                       opening_cash_amount, opening_cash_amount_cents,
+                                       check_in_time, status, calculation_version, sync_status,
+                                       created_at, updated_at)
+             VALUES ('shift-next', 'cashier-next', 'Next', 'branch-1', 'term-1', 'cashier',
+                     50.0, 5000, '2026-10-20T15:00:00Z', 'active', 2, 'pending',
+                     '2026-10-20T15:00:00Z', '2026-10-20T15:00:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// Prepare and close a Z on this till at `at`; answers it and its id.
+    fn close_locally(db: &DbState, at: &str) -> (PreparedZReportSubmission, String) {
+        let prepared =
+            prepare_z_report_submission_at(db, &payload(), utc(at)).expect("prepare the Z");
+        let result = close_prepared_z_report_locally(db, &prepared).expect("close locally");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["localClose"], true);
+        assert_eq!(result["localDayClosed"], true);
+        let id = prepared.z_report_id.clone().expect("a stored Z");
+        assert_eq!(result["zReportId"], id.as_str());
+        (prepared, id)
+    }
+
+    fn stored_and_queued(conn: &Connection, z_report_id: &str) -> (Value, Value) {
+        conn.query_row(
+            "SELECT zr.report_json, q.data FROM z_reports zr
+             JOIN parity_sync_queue q ON q.table_name = 'z_reports' AND q.record_id = zr.id
+             WHERE zr.id = ?1",
+            params![z_report_id],
+            |row| {
+                Ok((
+                    serde_json::from_str(&row.get::<_, String>(0)?).unwrap(),
+                    serde_json::from_str(&row.get::<_, String>(1)?).unwrap(),
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    /// An offline Z without a fiscal plugin closes the day on this till: the
+    /// day cursor moves, the deletion floor does not, nothing is deleted, the
+    /// queued submission stays, and the next check-in opens a new POS day
+    /// dated by its own check-in.
+    #[test]
+    fn an_offline_z_closes_the_day_locally_and_deletes_nothing() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+            // The day's payment never reached the server.
+            queue_row(
+                &conn,
+                "q-pay-d1",
+                "payments",
+                "pay-ord-d1",
+                "pending",
+                None,
+                "2026-10-19T20:00:00Z",
+                serde_json::json!({ "paymentId": "pay-ord-d1", "amount": 12.5 }),
+            );
+        }
+        let (prepared, z_id) = close_locally(&db, "2026-10-20T02:30:00Z");
+        let cutoff = prepared.rollover_timestamp.clone();
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "system", "last_z_report_timestamp").as_deref(),
+            Some(cutoff.as_str()),
+            "the day cursor moved"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY).as_deref(),
+            Some(T0),
+            "the deletion floor stays at the last confirmed Z"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "sync", "orders_since").as_deref(),
+            Some(cutoff.as_str())
+        );
+        assert_eq!(
+            db::get_setting(&conn, "orders", "order_counter").as_deref(),
+            Some("0")
+        );
+        assert!(db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none());
+
+        for (table, expected) in [
+            ("orders", 1),
+            ("order_payments", 1),
+            ("staff_shifts", 1),
+            ("cash_drawer_sessions", 1),
+        ] {
+            assert_eq!(
+                count(&conn, &format!("SELECT COUNT(*) FROM {table}")),
+                expected,
+                "{table}: nothing is deleted before the server confirms the Z"
+            );
+        }
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'q-pay-d1'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE table_name = 'z_reports'"
+            ),
+            1,
+            "the Z's submission is queued"
+        );
+        let (close_state, sync_state) = z_state(&conn, &z_id);
+        assert_eq!(
+            close_state.as_deref(),
+            Some(business_day::Z_CLOSE_STATE_LOCAL)
+        );
+        assert_eq!(sync_state, "pending");
+        let (window_start, window_cutoff): (String, String) = conn
+            .query_row(
+                "SELECT window_period_start, window_cutoff FROM z_reports WHERE id = ?1",
+                params![z_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(window_start, T0);
+        assert!(report_window_timestamp_matches(
+            Some(window_cutoff.as_str()),
+            Some(cutoff.as_str())
+        ));
+
+        // The next POS day starts after the local Z and is dated by its own
+        // check-in.
+        assert_eq!(
+            business_day::resolve_period_start(&conn, BRANCH, None),
+            cutoff
+        );
+        insert_next_day_shift(&conn);
+        assert_eq!(
+            business_day::resolve_day_start_at(&conn, BRANCH, &cutoff, false, None).as_deref(),
+            Some("2026-10-20T15:00:00Z")
+        );
+
+        // The day view no longer shows the closed window; deletion keeps it.
+        assert_eq!(
+            business_day::retention_cutoff_utc(&conn).as_deref(),
+            Some("2026-10-20T02:30:00+00:00")
+        );
+        let floor = business_day::retention_deletion_cutoff_utc(&conn).expect("a floor");
+        assert_eq!(floor, "2026-10-19T03:00:00+00:00");
+        assert_eq!(
+            crate::commands::sync::clear_old_orders_before(&conn, &floor).unwrap(),
+            0,
+            "Clear old orders stays below the unconfirmed window"
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 1);
+    }
+
+    /// The Z carries the client ids the server knows its orders by: the
+    /// order sync sends `client_request_id` as `client_order_id`, else the
+    /// local id (`sync::create_order`, `sync_queue::prepare_order_request`).
+    /// They are stored with the Z and travel in its submission body.
+    #[test]
+    fn the_z_lists_the_server_client_ids_of_the_orders_its_window_counted() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                                     status, order_type, payment_status, staff_shift_id,
+                                     branch_id, sync_status, created_at, updated_at)
+                 VALUES ('ord-d1-local', 'ord-d1-local', '[]', 12.5, 1250, 'completed', 'pickup',
+                         'paid', 'shift-d1', 'branch-1', 'synced',
+                         '2026-10-19T21:00:00Z', '2026-10-19T21:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, status,
+                                             staff_shift_id, currency, created_at, updated_at)
+                 VALUES ('pay-ord-d1-local', 'ord-d1-local', 'card', 12.5, 1250, 'completed',
+                         'shift-d1', 'EUR', '2026-10-19T21:00:00Z', '2026-10-19T21:00:00Z')",
+                [],
+            )
+            .unwrap();
+            // An order of the day the previous Z closed is not this window's.
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, total_amount_cents,
+                                     status, order_type, payment_status, branch_id, sync_status,
+                                     client_request_id, created_at, updated_at)
+                 VALUES ('ord-before', 'ord-before', '[]', 5.0, 500, 'cancelled', 'pickup',
+                         'pending', 'branch-1', 'synced', 'client-before',
+                         '2026-10-18T20:00:00Z', '2026-10-18T20:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        let prepared = prepare_z_report_submission_at(&db, &payload(), utc("2026-10-20T02:30:00Z"))
+            .expect("prepare the Z");
+        let z_id = prepared.z_report_id.clone().expect("a stored Z");
+
+        let conn = db.conn.lock().unwrap();
+        let column: String = conn
+            .query_row(
+                "SELECT closed_order_client_ids FROM z_reports WHERE id = ?1",
+                params![z_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (report_json, queued) = stored_and_queued(&conn, &z_id);
+        let expected = serde_json::json!(["client-d1", "ord-d1-local"]);
+        assert_eq!(report_json[CLOSED_ORDER_CLIENT_IDS_REPORT_KEY], expected);
+        assert_eq!(serde_json::from_str::<Value>(&column).unwrap(), expected);
+        assert_eq!(
+            queued["report_data"][CLOSED_ORDER_CLIENT_IDS_REPORT_KEY], expected,
+            "the submission body carries report_data.closedOrderClientIds"
+        );
+        assert_eq!(
+            queued["report_data"], report_json,
+            "the stored Z is what the server gets"
+        );
+    }
+
+    /// Two local Zs, then the connection is back. Confirmations are applied
+    /// in window order only: Z2 confirmed first sweeps nothing. Each sweep
+    /// deletes only its window, and a day-2 refund of a day-1 order keeps the
+    /// day-1 order (with its payment and the refund) until the refund syncs.
+    #[test]
+    fn two_local_zs_are_swept_in_window_order_and_a_late_refund_keeps_its_order() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+        }
+        let (prepared_one, z1) = close_locally(&db, "2026-10-20T02:30:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_two());
+            // Day 2: a refund of the day-1 order, still on its way.
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type,
+                                                  amount, amount_cents, reason, sync_state,
+                                                  created_at, updated_at)
+                 VALUES ('adj-d1', 'pay-ord-d1', 'ord-d1', 'refund', 5.0, 500, 'late refund',
+                         'pending', '2026-10-20T21:00:00Z', '2026-10-20T21:00:00Z')",
+                [],
+            )
+            .unwrap();
+            queue_row(
+                &conn,
+                "q-adj-d1",
+                "payment_adjustments",
+                "adj-d1",
+                "pending",
+                None,
+                "2026-10-20T21:00:00Z",
+                serde_json::json!({ "adjustmentId": "adj-d1", "amount": 5.0 }),
+            );
+        }
+        let (prepared_two, z2) = close_locally(&db, "2026-10-21T02:30:00Z");
+        assert!(must_close_behind_local_zs(&db, None).unwrap());
+
+        let conn = db.conn.lock().unwrap();
+        let health = local_z_health(&conn).unwrap();
+        assert_eq!(health["localZs"][0]["zReportId"], z1.as_str());
+        assert_eq!(health["localZs"][1]["zReportId"], z2.as_str());
+        assert_eq!(
+            health["localZs"][1]["waitsFor"], "earlier_z",
+            "Z2 waits for Z1"
+        );
+        assert_eq!(health["unconfirmedLocalZs"], 2);
+
+        // Out of order: Z2 confirmed first sweeps nothing (invariant 3).
+        on_z_report_confirmed(&conn, &z2).unwrap();
+        assert_eq!(
+            z_state(&conn, &z2),
+            (
+                Some(business_day::Z_CLOSE_STATE_LOCAL.to_string()),
+                "applied".to_string()
+            )
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM staff_shifts"), 2);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 2);
+
+        // Z1 confirmed: its window is swept; Z2's sweep waits for the refund.
+        on_z_report_confirmed(&conn, &z1).unwrap();
+        assert_eq!(
+            z_state(&conn, &z1).0.as_deref(),
+            Some(Z_CLOSE_STATE_SWEPT),
+            "Z1's window was swept"
+        );
+        assert_eq!(
+            z_state(&conn, &z2).0.as_deref(),
+            Some(business_day::Z_CLOSE_STATE_LOCAL),
+            "Z2's sweep waits for the refund of its window"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = 'shift-d1'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM cash_drawer_sessions WHERE id = 'drawer-shift-d1'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = 'shift-d2'"
+            ),
+            1,
+            "Z1's sweep never reaches day 2"
+        );
+        for (sql, what) in [
+            (
+                "SELECT COUNT(*) FROM orders WHERE id = 'ord-d1'",
+                "the day-1 order",
+            ),
+            (
+                "SELECT COUNT(*) FROM order_payments WHERE id = 'pay-ord-d1'",
+                "its payment",
+            ),
+            (
+                "SELECT COUNT(*) FROM payment_adjustments WHERE id = 'adj-d1'",
+                "the refund",
+            ),
+            (
+                "SELECT COUNT(*) FROM orders WHERE id = 'ord-d2'",
+                "the day-2 order",
+            ),
+        ] {
+            assert_eq!(count(&conn, sql), 1, "{what} is kept");
+        }
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM z_reports"),
+            2,
+            "a sweep never cascades into a Z row"
+        );
+        assert!(business_day::instant_at_or_after(
+            &db::get_setting(&conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY).unwrap(),
+            &prepared_one.rollover_timestamp
+        ));
+        assert_eq!(
+            business_day::retention_deletion_cutoff_utc(&conn).as_deref(),
+            Some("2026-10-20T02:30:00+00:00"),
+            "the floor stays below Z2's window"
+        );
+
+        // The refund reached the server: Z2's window goes too.
+        conn.execute("DELETE FROM parity_sync_queue WHERE id = 'q-adj-d1'", [])
+            .unwrap();
+        assert_eq!(sweep_confirmed_z_windows(&conn).unwrap(), 1);
+        assert_eq!(z_state(&conn, &z2).0.as_deref(), Some(Z_CLOSE_STATE_SWEPT));
+        for table in [
+            "orders",
+            "order_payments",
+            "payment_adjustments",
+            "staff_shifts",
+            "cash_drawer_sessions",
+        ] {
+            assert_eq!(
+                count(&conn, &format!("SELECT COUNT(*) FROM {table}")),
+                0,
+                "{table} after both windows were confirmed"
+            );
+        }
+        assert_eq!(
+            db::get_setting(&conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY).as_deref(),
+            Some(prepared_two.rollover_timestamp.as_str())
+        );
+        assert_eq!(unconfirmed_local_z_count(&conn).unwrap(), 0);
+    }
+
+    /// The online rollover never deletes over a local window the server has
+    /// not confirmed; once confirmed, it sweeps it with its own and the floor
+    /// follows the day cursor. A confirmation inside a caller's transaction
+    /// only marks the Z.
+    #[test]
+    fn the_online_rollover_waits_behind_an_unconfirmed_local_z() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+        }
+        let (_one, z1) = close_locally(&db, "2026-10-20T02:30:00Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_two());
+        }
+        let prepared_two =
+            prepare_z_report_submission_at(&db, &payload(), utc("2026-10-21T02:30:00Z"))
+                .expect("prepare Z2");
+        assert!(must_close_behind_local_zs(&db, prepared_two.z_report_id.as_deref()).unwrap());
+        let error = finalize_prepared_z_report_submission(&db, &prepared_two)
+            .expect_err("Z1 is not confirmed");
+        assert!(error.contains(Z_LOCAL_PENDING_REASON), "{error}");
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 2);
+        }
+
+        // Z1 confirmed inside a caller's transaction: marked, sweep deferred.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            on_z_report_confirmed(&conn, &z1).unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+            assert_eq!(
+                z_state(&conn, &z1),
+                (
+                    Some(business_day::Z_CLOSE_STATE_LOCAL.to_string()),
+                    "applied".to_string()
+                ),
+                "a sweep never runs inside a caller's transaction"
+            );
+        }
+        assert!(!must_close_behind_local_zs(&db, prepared_two.z_report_id.as_deref()).unwrap());
+        let retry = prepare_z_report_submission_at(&db, &payload(), utc("2026-10-21T02:40:00Z"))
+            .expect("retry Z2 (its frozen window)");
+        assert_eq!(retry.z_report_id, prepared_two.z_report_id);
+        finalize_prepared_z_report_submission(&db, &retry).expect("the online rollover");
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(z_state(&conn, &z1).0.as_deref(), Some(Z_CLOSE_STATE_SWEPT));
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM orders"), 0);
+        assert_eq!(
+            db::get_setting(&conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY),
+            db::get_setting(&conn, "system", "last_z_report_timestamp"),
+            "the floor follows the day cursor on a confirmed Z"
+        );
+    }
+
+    /// Invariant 2: a local close is one transaction. A crash inside it (here
+    /// the counter reset aborts) leaves the issued Z as it was: no cursor
+    /// move, no floor, no `closed_local`, the frozen window kept for a retry.
+    #[test]
+    fn a_local_close_that_fails_leaves_nothing_half_done() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+        }
+        let prepared = prepare_z_report_submission_at(&db, &payload(), utc("2026-10-20T02:30:00Z"))
+            .expect("prepare the Z");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER crash_on_counter_insert BEFORE INSERT ON local_settings
+                 WHEN NEW.setting_key = 'order_counter'
+                 BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;
+                 CREATE TRIGGER crash_on_counter_update BEFORE UPDATE ON local_settings
+                 WHEN NEW.setting_key = 'order_counter'
+                 BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;",
+            )
+            .unwrap();
+        }
+        let error = close_prepared_z_report_locally(&db, &prepared).expect_err("the close aborts");
+        assert!(error.contains("simulated crash"), "{error}");
+
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "system", "last_z_report_timestamp").as_deref(),
+            Some(T0)
+        );
+        assert!(
+            db::get_setting(&conn, "system", business_day::LAST_CONFIRMED_Z_CUTOFF_KEY).is_none()
+        );
+        let z_id = prepared.z_report_id.clone().unwrap();
+        assert_eq!(z_state(&conn, &z_id).0, None);
+        let context = load_pending_z_report_context(&conn, BRANCH).expect("the issued Z");
+        assert!(context.frozen);
+        assert_eq!(context.cutoff_at, prepared.rollover_timestamp);
+    }
+
+    /// Ω4: a payment the server refused for good holds the Z until a manager
+    /// sets it aside. Then it holds no gate, every Z of its day lists it as
+    /// "not on the server", and no rollover or prune deletes it or its order.
+    #[test]
+    fn a_set_aside_payment_no_longer_blocks_the_z_is_listed_and_is_never_deleted() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+            queue_row(
+                &conn,
+                "q-refused",
+                "payments",
+                "pay-ord-d1",
+                "failed",
+                Some("HTTP_422_CLIENT_ERROR: Order total changed"),
+                "2026-10-19T20:00:00Z",
+                serde_json::json!({
+                    "paymentId": "pay-ord-d1",
+                    "orderId": "ord-d1",
+                    "amount": 12.5,
+                }),
+            );
+            let held = load_unsynced_money_for_cutoff(&conn, "2026-10-20T02:30:00Z").unwrap();
+            assert_eq!(held.len(), 1, "the refused payment holds the Z");
+            assert_eq!(
+                set_aside_candidate(&conn, "q-refused", false).unwrap(),
+                ("payments".to_string(), "HTTP_422_CLIENT_ERROR".to_string())
+            );
+            let health = local_z_health(&conn).unwrap();
+            assert_eq!(health["refused"][0]["queueId"], "q-refused");
+            assert_eq!(health["refused"][0]["serverMessage"], "Order total changed");
+            assert_eq!(health["refused"][0]["amountCents"], 1250);
+            assert_eq!(health["refused"][0]["setAside"], false);
+
+            set_aside(&conn, "q-refused", "payments", "pay-ord-d1");
+            assert!(
+                load_unsynced_money_for_cutoff(&conn, "2026-10-20T02:30:00Z")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(unsynced_money_in_closing_window(&conn, BRANCH)
+                .unwrap()
+                .is_empty());
+            assert!(set_aside_candidate(&conn, "q-refused", false)
+                .unwrap_err()
+                .starts_with("SET_ASIDE_ALREADY"));
+            assert!(set_aside_candidate(&conn, "q-refused", true).is_ok());
+            assert_eq!(
+                local_z_health(&conn).unwrap()["refused"][0]["setAside"],
+                true
+            );
+        }
+
+        let prepared = prepare_z_report_submission_at(&db, &payload(), utc("2026-10-20T02:30:00Z"))
+            .expect("prepare the Z");
+        let z_id = prepared.z_report_id.clone().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let (report_json, queued) = stored_and_queued(&conn, &z_id);
+            let listed = &report_json[NOT_ON_SERVER_REPORT_KEY];
+            assert_eq!(
+                listed,
+                &serde_json::json!([{
+                    "table": "payments",
+                    "recordId": "pay-ord-d1",
+                    "reason": "HTTP_422_CLIENT_ERROR",
+                    "amountCents": 1250,
+                }])
+            );
+            assert_eq!(&queued["report_data"][NOT_ON_SERVER_REPORT_KEY], listed);
+            let attributed: Option<String> = conn
+                .query_row(
+                    "SELECT z_report_id FROM parity_sync_set_aside WHERE queue_id = 'q-refused'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(attributed.as_deref(), Some(z_id.as_str()));
+        }
+
+        // The rollover runs (the set-aside row holds no gate) and keeps it.
+        finalize_prepared_z_report_submission(&db, &prepared).expect("the day closes");
+        let conn = db.conn.lock().unwrap();
+        for (sql, what) in [
+            (
+                "SELECT COUNT(*) FROM order_payments WHERE id = 'pay-ord-d1'",
+                "the payment",
+            ),
+            (
+                "SELECT COUNT(*) FROM orders WHERE id = 'ord-d1'",
+                "its order",
+            ),
+            (
+                "SELECT COUNT(*) FROM parity_sync_queue WHERE id = 'q-refused'",
+                "its queue row",
+            ),
+            (
+                "SELECT COUNT(*) FROM parity_sync_set_aside WHERE queue_id = 'q-refused'",
+                "its listing",
+            ),
+        ] {
+            assert_eq!(count(&conn, sql), 1, "{what} is never deleted");
+        }
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM staff_shifts"),
+            0,
+            "the rest of the day closed as usual"
+        );
+        assert_eq!(
+            crate::commands::sync::clear_old_orders_before(&conn, "2026-10-25T00:00:00+00:00")
+                .unwrap(),
+            0,
+            "Clear old orders keeps the order a queue row still needs"
+        );
+    }
+
+    /// A set-aside after a local close updates the stored Z of its window
+    /// and its queued body; an undo takes it off again.
+    #[test]
+    fn a_set_aside_after_the_local_close_reaches_the_waiting_z() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+            queue_row(
+                &conn,
+                "q-late",
+                "payments",
+                "pay-ord-d1",
+                "failed",
+                Some("HTTP_422_CLIENT_ERROR"),
+                "2026-10-19T20:00:00Z",
+                serde_json::json!({ "paymentId": "pay-ord-d1", "amount_cents": 1250 }),
+            );
+        }
+        let (_prepared, z_id) = close_locally(&db, "2026-10-20T02:30:00Z");
+        let conn = db.conn.lock().unwrap();
+        assert!(stored_and_queued(&conn, &z_id)
+            .0
+            .get(NOT_ON_SERVER_REPORT_KEY)
+            .is_none());
+
+        set_aside(&conn, "q-late", "payments", "pay-ord-d1");
+        assert_eq!(refresh_not_on_server_for_unconfirmed_zs(&conn).unwrap(), 1);
+        let (report, queued) = stored_and_queued(&conn, &z_id);
+        assert_eq!(
+            report[NOT_ON_SERVER_REPORT_KEY][0]["recordId"],
+            "pay-ord-d1"
+        );
+        assert_eq!(report[NOT_ON_SERVER_REPORT_KEY][0]["amountCents"], 1250);
+        assert_eq!(queued["report_data"], report);
+        assert_eq!(
+            refresh_not_on_server_for_unconfirmed_zs(&conn).unwrap(),
+            0,
+            "idempotent"
+        );
+
+        conn.execute(
+            "DELETE FROM parity_sync_set_aside WHERE queue_id = 'q-late'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(refresh_not_on_server_for_unconfirmed_zs(&conn).unwrap(), 1);
+        let (report, queued) = stored_and_queued(&conn, &z_id);
+        assert!(report.get(NOT_ON_SERVER_REPORT_KEY).is_none());
+        assert_eq!(queued["report_data"], report);
+    }
+
+    /// Plan §3 #9: a queued shift row of a shift the Z closes holds the Z, as
+    /// on Android; one of the next day's shift does not. Set aside, it holds
+    /// nothing and its shift is kept.
+    #[test]
+    fn queued_shift_rows_of_the_window_hold_the_z() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            seed_day(&conn, &day_one());
+            queue_row(
+                &conn,
+                "q-shift-close",
+                "staff_shifts",
+                "shift-d1",
+                "pending",
+                None,
+                "2026-10-20T02:00:00Z",
+                serde_json::json!({ "event": "shift_close" }),
+            );
+            insert_next_day_shift(&conn);
+            queue_row(
+                &conn,
+                "q-shift-open-next",
+                "staff_shifts",
+                "shift-next",
+                "pending",
+                None,
+                "2026-10-20T15:00:00Z",
+                serde_json::json!({ "event": "shift_open" }),
+            );
+
+            let held = load_unsynced_money_for_cutoff(&conn, "2026-10-20T02:30:00Z").unwrap();
+            assert_eq!(held.len(), 1, "{held:?}");
+            assert_eq!(held[0].queue_id, "q-shift-close");
+            assert_eq!(held[0].table_name, "staff_shifts");
+        }
+        let error = apply_local_day_rollover(&db, "2026-10-19", "2026-10-20T02:30:00Z")
+            .expect_err("the queued shift close holds the Z");
+        assert!(error.contains(MONEY_NOT_SYNCED_REASON), "{error}");
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM staff_shifts"), 2);
+            set_aside(&conn, "q-shift-close", "staff_shifts", "shift-d1");
+            assert!(
+                load_unsynced_money_for_cutoff(&conn, "2026-10-20T02:30:00Z")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        apply_local_day_rollover(&db, "2026-10-19", "2026-10-20T02:30:00Z")
+            .expect("a set-aside shift row holds nothing");
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = 'shift-d1'"
+            ),
+            1,
+            "the set-aside shift is kept"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = 'shift-next'"
+            ),
+            1
+        );
+    }
+
+    /// Only a store whose fiscal plugin the server last confirmed inactive
+    /// closes a Z without the server; an active or never-confirmed plugin and
+    /// a waiter phone keep today's refusal.
+    #[test]
+    #[serial_test::serial]
+    fn only_a_store_without_an_active_fiscal_plugin_closes_locally() {
+        crate::fiscal::active_cache::reset_for_tests();
+        let db = test_db();
+        assert_eq!(
+            local_close_refusal(&db, &payload()).unwrap(),
+            Some("fiscal_status_unknown")
+        );
+        crate::fiscal::active_cache::update(BRANCH, true);
+        assert_eq!(
+            local_close_refusal(&db, &payload()).unwrap(),
+            Some("fiscal_plugin_active")
+        );
+        crate::fiscal::active_cache::update(BRANCH, false);
+        assert_eq!(local_close_refusal(&db, &payload()).unwrap(), None);
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "terminal_type", "mobile_waiter").unwrap();
+        }
+        assert_eq!(
+            local_close_refusal(&db, &payload()).unwrap(),
+            Some("waiter_terminal")
+        );
+        crate::fiscal::active_cache::reset_for_tests();
+    }
+
+    #[test]
+    fn only_a_refusal_for_good_may_be_set_aside() {
+        for (status, error) in [
+            ("conflict", Some("UNKNOWN_CONFLICT_REVIEW")),
+            ("failed", Some("HTTP_422_CLIENT_ERROR")),
+            (
+                "failed",
+                Some("HTTP_403_CLIENT_ERROR: TERMINAL_FEATURE_DISABLED"),
+            ),
+            ("failed", Some("PARITY_ITEM_REJECTED: shift not found")),
+            (
+                "failed",
+                Some("SHIFT_SYNC: OFFLINE_CHECK_IN_CONFLICT unresolved_shift"),
+            ),
+            (
+                "failed",
+                Some("HTTP_409_CLIENT_ERROR: POS_ORDER_EDIT_CONFLICT"),
+            ),
+            ("pending", Some("SHIFT_WAITING_ON_SERVER: shift-1")),
+        ] {
+            assert!(
+                queue_row_refused_for_good(status, error),
+                "{status} {error:?}"
+            );
+        }
+        for (status, error) in [
+            ("pending", Some("HTTP_422_CLIENT_ERROR")),
+            ("processing", None),
+            ("failed", Some("NETWORK_ERROR")),
+            ("failed", Some("HTTP_429_CLIENT_ERROR")),
+            ("failed", Some("HTTP_408_CLIENT_ERROR")),
+            ("failed", Some("HTTP_425_CLIENT_ERROR")),
+            ("failed", Some("HTTP_500_SERVER_ERROR")),
+            (
+                "failed",
+                Some("Parity sync request is missing terminal_id context"),
+            ),
+            ("failed", None),
+            ("failed", Some("HTTP_503_SERVER_ERROR")),
+            (
+                "failed",
+                Some("PARITY_ITEM_RETRYABLE:SHIFT_PREDECESSOR_PENDING"),
+            ),
+            ("conflict", Some("NETWORK_ERROR")),
+        ] {
+            assert!(
+                !queue_row_refused_for_good(status, error),
+                "{status} {error:?}"
+            );
+        }
     }
 }

@@ -16,6 +16,8 @@ import { useProductCatalog } from '../../hooks/useProductCatalog';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
+import { useOfflineDeliveryZoneChoice } from '../../hooks/useOfflineDeliveryZoneChoice';
+import { OfflineDeliveryZonePicker } from '../menu/OfflineDeliveryZonePicker';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useOnBarcodeScan, useBarcodeScannerContext } from '../../contexts/barcode-scanner-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -25,6 +27,14 @@ import {
 } from './PaymentModal';
 import type { Product, ProductFilters, BarcodeScanResult } from '../../services/ProductCatalogService';
 import { RetailSaleError, scannedRetailLine, scaleQuantity, variantBlocked } from '../../utils/retail-sale';
+import {
+  blockOversellingFromSettings,
+  catalogCartStockLine,
+  desktopRetailStockVerdict,
+  loadUnsyncedRetailQuantities,
+  refuseOversell,
+  type UnsyncedRetailQuantities,
+} from '../../services/retail-stock-guard';
 import { useScale } from '../../hooks/useScale';
 import toast from 'react-hot-toast';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
@@ -174,10 +184,23 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [barcodeInput, setBarcodeInput] = useState('');
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  // The cart as of the last change, so a second scan before a re-render
+  // checks stock against the first one (retail.block_overselling).
+  const cartRef = useRef<CartItem[]>(cartItems);
+  cartRef.current = cartItems;
+  const commitCart = (next: CartItem[]) => {
+    cartRef.current = next;
+    setCartItems(next);
+  };
   const [variantPicker, setVariantPicker] = useState<Product | null>(null);
-  // No stock policy exists in the current terminal contract. Respect the
-  // explicit retail setting when supplied; otherwise retain overselling.
+  // `retail.block_overselling` (branch pos_configurations row, default false):
+  // when on, the shared rule refuses any add or edit beyond the stock left.
   const [blockOverselling, setBlockOverselling] = useState(false);
+  const blockOversellingRef = useRef(blockOverselling);
+  blockOversellingRef.current = blockOverselling;
+  // This till's sales not yet on the server: no snapshot counts them.
+  const [unsyncedRetail, setUnsyncedRetail] = useState<UnsyncedRetailQuantities>(() => new Map());
+  const unsyncedRetailRef = useRef<UnsyncedRetailQuantities>(unsyncedRetail);
   const [scaleSettings, setScaleSettings] = useState<{ scale_port?: string; scale_baud_rate?: number; scale_protocol?: string }>({});
   const [scaleEnabled, setScaleEnabled] = useState(false);
   const scale = useScale(isOpen && scaleEnabled, scaleSettings);
@@ -213,7 +236,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       if (disposed) return;
       const setting = (group: string, key: string) => value?.[group]?.[key] ?? value?.[`${group}.${key}`];
       const enabled = (value: unknown) => value === true || value === 'true' || value === 1 || value === '1';
-      setBlockOverselling(enabled(setting('retail', 'block_overselling')));
+      setBlockOverselling(blockOversellingFromSettings(value));
       setScaleEnabled(enabled(setting('scale', 'enabled') ?? setting('hardware', 'scale_enabled')));
       setScaleSettings({
         scale_port: setting('scale', 'port') ?? setting('hardware', 'scale_port'),
@@ -292,6 +315,42 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     filters,
     enableRealtime: true,
   });
+  const productsRef = useRef(products);
+  productsRef.current = products;
+
+  const refreshUnsyncedRetail = useCallback((force = false) => {
+    void loadUnsyncedRetailQuantities({ force }).then(value => {
+      unsyncedRetailRef.current = value;
+      setUnsyncedRetail(value);
+    });
+  }, []);
+  useEffect(() => {
+    if (isOpen) refreshUnsyncedRetail(true);
+  }, [isOpen, refreshUnsyncedRetail]);
+
+  /** Latest snapshot stock of a cart line's product or variant; the line's own copy otherwise. */
+  const currentStock = useCallback((productId: string, variantId: string | null | undefined, fallback: number) => {
+    const product = productsRef.current.find(candidate => candidate.id === productId);
+    if (!product) return fallback;
+    if (variantId) return product.variants?.find(variant => variant.id === variantId)?.quantity ?? fallback;
+    return product.quantity;
+  }, []);
+
+  /** The shared overselling rule on one add or edit; shows the block and returns true when refused. */
+  const oversold = useCallback((change: {
+    productId: string; variantId?: string | null; stock: number | null | undefined; nextQuantity: number;
+    editedLineId?: string; previousQuantity?: number; unit?: string | null;
+  }, cart: CartItem[] = cartRef.current): boolean => refuseOversell(t, desktopRetailStockVerdict({
+    blockOverselling: blockOversellingRef.current,
+    productId: change.productId,
+    variantId: change.variantId ?? null,
+    stock: change.stock,
+    nextQuantity: change.nextQuantity,
+    editedLineId: change.editedLineId,
+    previousQuantity: change.previousQuantity,
+    lines: cart.map(catalogCartStockLine),
+    unsynced: unsyncedRetailRef.current,
+  }), change.unit), [t]);
 
   // Parents rebuild the address object on every render; the zone check keys
   // on its content so an identical address is never searched again.
@@ -304,7 +363,31 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   // A caller's "not checked" verdict does not stop this modal from
   // geolocating the address and checking the zone itself.
   const isProvidedZoneInfoUsable = Boolean(deliveryZoneInfo) && !isDeliveryZoneUnchecked(deliveryZoneInfo);
+  // The store's zones, local-first: offline this is the till's cached list.
+  const loadStoreDeliveryZones = useCallback(async (preferredBranchId: string | null) => {
+    const resolvedBranchId = preferredBranchId || getCachedTerminalCredentials().branchId;
+    if (!resolvedBranchId) {
+      return [];
+    }
+    return bridge.branchData.getDeliveryZones({ branch_id: resolvedBranchId });
+  }, [bridge.branchData]);
+  // Offline week Ω6β, as in the menu: offline, an address that cannot be
+  // located (Google point older than 28 days, or none) gets its zone from the
+  // cashier. Never fee 0 without that choice; never the expired point.
+  const offlineZoneChoice = useOfflineDeliveryZoneChoice({
+    enabled: isOpen && orderType === 'delivery' && hasDeliveryPro,
+    address: zoneSelectedAddress,
+    addressKey: zoneAddressKey,
+    located: Boolean(resolvedSelectedAddressCoordinates ?? extractSavedAddressCoordinates(zoneSelectedAddress)),
+    resolving: isResolvingSelectedAddressCoordinates,
+    providedZoneUsable: isProvidedZoneInfoUsable,
+    branchId,
+    loadZones: loadStoreDeliveryZones,
+  });
 
+  // Re-runs when the connection changes (offlineZoneChoice.offline): offline
+  // the address is never searched, so once the connection returns it is
+  // located online again.
   useEffect(() => {
     let cancelled = false;
 
@@ -377,7 +460,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [branchId, bridge.customers, hasDeliveryPro, isOpen, orderType, selectedCustomer?.id, zoneSelectedAddress]);
+  }, [branchId, bridge.customers, hasDeliveryPro, isOpen, offlineZoneChoice.offline, orderType, selectedCustomer?.id, zoneSelectedAddress]);
 
   useEffect(() => {
     if (!hasDeliveryPro) {
@@ -482,33 +565,36 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       toast.error(t(`productCatalog.retailReadiness.${error instanceof RetailSaleError ? error.code : 'variantUnavailable'}`));
       return;
     }
-    const variant = product.variants?.find(value => value.id === retailVariantId);
-    if (variant && variantBlocked(variant, blockOverselling)) return;
+    const cart = cartRef.current;
+    // Merge only into a plain line for the same product at its default
+    // price: scale-scanned and price-overridden lines always stay distinct.
+    const existing = cart.find(item =>
+      item.id === product.id
+      && (item.retail_variant_id ?? null) === retailVariantId
+      && item.is_offer_reward !== true
+      && item.scaleScanned !== true
+      && item.originalUnitPrice === undefined
+    );
+    // The line's stock is the variant's for a variant (variantProduct), else the product's.
+    if (oversold({
+      productId: product.id, variantId: retailVariantId, stock: line.quantity,
+      nextQuantity: (existing?.cartQuantity ?? 0) + line.cartQuantity,
+      editedLineId: existing?.lineId, previousQuantity: existing?.cartQuantity, unit: product.unitOfMeasure,
+    })) return;
     if (!passesAgeCheck(product)) {
       return;
     }
     const lineId = nextCartLineId(product.id);
-    setCartItems(prev => {
-      // Merge only into a plain line for the same product at its default
-      // price: scale-scanned and price-overridden lines always stay distinct.
-      const existing = prev.find(item =>
-        item.id === product.id
-        && (item.retail_variant_id ?? null) === retailVariantId
-        && item.is_offer_reward !== true
-        && item.scaleScanned !== true
-        && item.originalUnitPrice === undefined
-      );
-      if (existing) {
-        return prev.map(item =>
+    commitCart(existing
+      ? cart.map(item =>
           item.lineId === existing.lineId
             ? { ...item, cartQuantity: item.cartQuantity + 1 }
             : item
-        );
-      }
-      return [...prev, { ...line, lineId }];
-    });
+        )
+      : [...cart, { ...line, lineId }]);
     setVariantPicker(null);
-  }, [passesAgeCheck, blockOverselling, t]);
+    refreshUnsyncedRetail();
+  }, [passesAgeCheck, oversold, refreshUnsyncedRetail, t]);
 
   // Add a scanned product, applying scale/embedded-value data: a weight label
   // sets the line quantity; a price label derives the measured quantity and
@@ -521,17 +607,25 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       addToCart(product, variantId);
       return;
     }
+    let line: ReturnType<typeof scannedRetailLine>;
+    try {
+      line = scannedRetailLine(scan);
+    } catch (error) {
+      toast.error(t(`productCatalog.retailReadiness.${error instanceof RetailSaleError ? error.code : 'invalidScaleLabel'}`));
+      return;
+    }
+    // A scale label is refused whole: its printed amount is never cut down.
+    if (oversold({
+      productId: product.id, variantId: line.retail_variant_id ?? null, stock: line.quantity,
+      nextQuantity: line.cartQuantity, unit: product.unitOfMeasure,
+    })) return;
     if (!passesAgeCheck(product)) {
       return;
     }
     const lineId = nextCartLineId(product.id);
-    try {
-      const line = scannedRetailLine(scan);
-      setCartItems(prev => [...prev, { ...line, lineId }]);
-    } catch (error) {
-      toast.error(t(`productCatalog.retailReadiness.${error instanceof RetailSaleError ? error.code : 'invalidScaleLabel'}`));
-    }
-  }, [addToCart, passesAgeCheck, t]);
+    commitCart([...cartRef.current, { ...line, lineId }]);
+    refreshUnsyncedRetail();
+  }, [addToCart, passesAgeCheck, oversold, refreshUnsyncedRetail, t]);
 
   // Handle barcode scan from input field
   const handleBarcodeScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -563,13 +657,18 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   useOnBarcodeScan(handleGlobalBarcodeScan, [isOpen, scanBarcode, addScannedToCart]);
 
   const updateCartQuantity = (lineId: string, delta: number) => {
-    setCartItems(prev => prev
-      .map(item => item.lineId === lineId && item.is_offer_reward !== true
-        ? { ...item, cartQuantity: Math.max(0, item.cartQuantity + delta) }
-        : item
-      )
-      .filter(item => item.cartQuantity > 0)
-    );
+    const cart = cartRef.current;
+    const line = cart.find(item => item.lineId === lineId && item.is_offer_reward !== true);
+    if (!line) return;
+    const nextQuantity = Math.max(0, line.cartQuantity + delta);
+    if (delta > 0 && oversold({
+      productId: line.id, variantId: line.retail_variant_id ?? null,
+      stock: currentStock(line.id, line.retail_variant_id, line.quantity), nextQuantity,
+      editedLineId: lineId, previousQuantity: line.cartQuantity, unit: line.unitOfMeasure,
+    })) return;
+    commitCart(cart
+      .map(item => item.lineId === lineId ? { ...item, cartQuantity: nextQuantity } : item)
+      .filter(item => item.cartQuantity > 0));
   };
 
   const clearMeasuredQuantityDraft = (lineId: string) => {
@@ -594,9 +693,18 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     if (!Number.isFinite(parsed) || parsed <= 0) {
       return;
     }
-    setCartItems(prev => prev.map(item =>
-      item.lineId === lineId && item.is_offer_reward !== true
-        ? { ...item, price: item.originalUnitPrice ?? item.price, originalUnitPrice: undefined, cartQuantity: Math.max(0.001, Math.round(parsed * 1000) / 1000) }
+    const quantity = Math.max(0.001, Math.round(parsed * 1000) / 1000);
+    const cart = cartRef.current;
+    const line = cart.find(item => item.lineId === lineId && item.is_offer_reward !== true);
+    if (!line) return;
+    if (oversold({
+      productId: line.id, variantId: line.retail_variant_id ?? null,
+      stock: currentStock(line.id, line.retail_variant_id, line.quantity), nextQuantity: quantity,
+      editedLineId: lineId, previousQuantity: line.cartQuantity, unit: line.unitOfMeasure,
+    })) return;
+    commitCart(cart.map(item =>
+      item.lineId === lineId
+        ? { ...item, price: item.originalUnitPrice ?? item.price, originalUnitPrice: undefined, cartQuantity: quantity }
         : item
     ));
   };
@@ -762,9 +870,11 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
   const discountableSubtotal = Math.max(subtotal - offerDiscountAmount, 0);
   const discountAmount = discountableSubtotal * (discountPercentage / 100);
-  const effectiveDeliveryZoneInfo = isProvidedZoneInfoUsable
-    ? deliveryZoneInfo
-    : localDeliveryZoneInfo || deliveryZoneInfo || null;
+  const effectiveDeliveryZoneInfo = offlineZoneChoice.active
+    ? offlineZoneChoice.zoneInfo
+    : isProvidedZoneInfoUsable
+      ? deliveryZoneInfo
+      : localDeliveryZoneInfo || deliveryZoneInfo || null;
   const exactDeliveryCoordinates =
     resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(zoneSelectedAddress);
   const deliveryValidationTarget =
@@ -780,6 +890,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         ? 'resolved'
         : !hasDeliveryPro
           ? 'resolved'
+          : offlineZoneChoice.active
+            ? (offlineZoneChoice.zoneInfo ? 'resolved' : 'requires_zone_choice')
           : !deliveryValidationTarget
             ? 'requires_selection'
             : isProvidedZoneInfoUsable
@@ -817,6 +929,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       ? formatCurrency(deliveryFee)
       : deliveryFeeStatus === 'not_checked'
         ? t('menu.cart.deliveryFeeZoneNotChecked')
+      : deliveryFeeStatus === 'requires_zone_choice'
+        ? t('menu.cart.deliveryFeeChooseZone')
       : deliveryFeeStatus === 'requires_selection'
         ? t('menu.cart.deliveryFeeNeedsExactAddress')
         : deliveryFeeStatus === 'out_of_zone'
@@ -834,6 +948,28 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     if (discountCapUnavailable) {
       notifyMoneySettingsUnavailable(t, retryDiscountSettings);
       return;
+    }
+
+    if (orderType === 'delivery' && hasDeliveryPro && offlineZoneChoice.active && !offlineZoneChoice.zoneInfo) {
+      toast.error(t('menu.cart.offlineZoneChoiceRequired'));
+      return;
+    }
+
+    // Final stock check with fresh unsynced sales: a sale on this till since
+    // the cart was built may have taken the last unit.
+    if (blockOversellingRef.current) {
+      const unsynced = await loadUnsyncedRetailQuantities({ force: true });
+      unsyncedRetailRef.current = unsynced;
+      setUnsyncedRetail(unsynced);
+      const cart = cartRef.current;
+      for (const item of cart) {
+        if (isOfferRewardLine(item)) continue;
+        if (oversold({
+          productId: item.id, variantId: item.retail_variant_id ?? null,
+          stock: currentStock(item.id, item.retail_variant_id, item.quantity), nextQuantity: item.cartQuantity,
+          editedLineId: item.lineId, unit: item.unitOfMeasure,
+        }, cart)) return;
+      }
     }
 
     if (orderType === 'delivery' && hasDeliveryPro && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus)) {
@@ -877,6 +1013,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         original_unit_price: item.originalUnitPrice,
         // Per-product Greek VAT category — the fiscal pipeline falls back to
         // the org default when null, so 6%/13% goods must carry their code.
+        vat_class: item.vatClass ?? 'standard',
         vat_category_code: item.vatCategoryCode ?? null,
         price_includes_vat: item.priceIncludesVat ?? null,
         tax_exemption_reason: item.taxExemptionReason ?? null,
@@ -899,6 +1036,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         name: t('productCatalog.depositLineName', { name: item.name, defaultValue: 'Deposit — {{name}}' }),
         quantity: item.cartQuantity,
         price: item.depositAmount ?? 0,
+        vat_class: item.vatClass ?? 'standard',
         vat_category_code: item.vatCategoryCode ?? null,
         price_includes_vat: item.priceIncludesVat ?? null,
         tax_exemption_reason: item.taxExemptionReason ?? null,
@@ -1221,6 +1359,14 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   <span>{formatCurrency(depositTotal)}</span>
                 </div>
               )}
+              {orderType === 'delivery' && hasDeliveryPro && offlineZoneChoice.active && (
+                <OfflineDeliveryZonePicker
+                  options={offlineZoneChoice.options}
+                  loading={offlineZoneChoice.loading}
+                  selectedZoneId={offlineZoneChoice.selectedZoneId}
+                  onChoose={offlineZoneChoice.choose}
+                />
+              )}
               {orderType === 'delivery' && hasDeliveryPro && deliveryFeeStatus === 'not_checked' && (
                 <p
                   role="status"
@@ -1289,7 +1435,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         <div className="flex flex-col gap-2">
           {variantPicker?.variants?.filter(variant => variant.isActive).map(variant => (
             <button key={variant.id} type="button"
-              disabled={variantBlocked(variant, blockOverselling)}
+              disabled={variantBlocked(variant, blockOverselling, {
+                productId: variantPicker.id, lines: cartItems.map(catalogCartStockLine), unsynced: unsyncedRetail,
+              })}
               onClick={() => addToCart(variantPicker, variant.id)}
               className="rounded-2xl p-3 bg-white/10 text-white text-left disabled:opacity-40">
               <span>{variant.name} · {formatCurrency(variantPicker.price + variant.priceAdjustment)}</span>

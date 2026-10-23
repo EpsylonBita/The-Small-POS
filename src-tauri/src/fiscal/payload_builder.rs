@@ -75,6 +75,8 @@ use crate::money::Cents;
 /// "no such column: payment_method" against a real terminal DB.
 #[derive(Debug)]
 struct OrderHeader {
+    order_type: Option<String>,
+    platform: Option<String>,
     organization_id: String,
     receipt_number: String,
     issued_at: String,
@@ -108,14 +110,25 @@ pub fn build_fiscal_receipt_input(
     branch_id: &str,
 ) -> Result<Value, String> {
     let header = read_order_header(conn, order_id)?;
+    let order_vat = order_vat_for_receipt(conn, &header);
+    let tips_in_turnover = order_vat.as_ref().is_some_and(|vat| {
+        vat.breakdown.lines.iter().any(|line| {
+            line.line_kind == FiscalLineKind::Tip
+                && !line.vat_category_code.ends_with("_out_of_scope")
+        })
+    });
+    let outside_tip_cents = if tips_in_turnover {
+        0
+    } else {
+        header.tip_cents
+    };
     let ReceiptTenders {
         rows: mut payments,
         carried_tip_cents,
-    } = read_completed_payments(conn, order_id)?;
+    } = read_completed_payments(conn, order_id, tips_in_turnover)?;
 
     // A partial settlement must never reduce the invoice to the paid amount.
     // Keep actual payments separate so adapter validation can detect a mismatch.
-    let order_vat = order_vat_for_receipt(conn, &header);
     let source_items: Vec<Value> = serde_json::from_str(&header.items_json).unwrap_or_default();
     let folio_lines = folio_fiscal_lines(conn, order_id)?;
     let lines = folio_lines
@@ -136,14 +149,14 @@ pub fn build_fiscal_receipt_input(
             }),
         // No lines to compute: the order total without its tip, VAT unknown.
         None => {
-            let gross = (header.total_cents - header.tip_cents).max(0);
+            let gross = (header.total_cents - outside_tip_cents).max(0);
             (gross, 0, gross)
         }
     };
     let expected_gross_cents = if folio_lines.is_some() {
         gross_cents
     } else {
-        (header.total_cents - header.tip_cents).max(0)
+        (header.total_cents - outside_tip_cents).max(0)
     };
     if gross_cents != expected_gross_cents {
         tracing::warn!(
@@ -153,11 +166,13 @@ pub fn build_fiscal_receipt_input(
             "[fiscal.payload] the computed lines differ from the order total without its tip"
         );
     }
-    exclude_uncarried_order_tip(
-        &mut payments,
-        expected_gross_cents,
-        header.tip_cents - carried_tip_cents,
-    );
+    if !tips_in_turnover {
+        exclude_uncarried_order_tip(
+            &mut payments,
+            expected_gross_cents,
+            header.tip_cents - carried_tip_cents,
+        );
+    }
 
     if folio_lines.is_some() && header.total_cents > 0 {
         // Allocate actual tenders to revenue proportionally; never invent money.
@@ -323,12 +338,14 @@ fn read_order_header(conn: &Connection, order_id: &str) -> Result<OrderHeader, S
             staff_id,
             discount_amount_cents, COALESCE(discount_amount, 0.0),
             COALESCE(discount_percentage, 0.0),
-            delivery_fee_cents, COALESCE(delivery_fee, 0.0)
+            delivery_fee_cents, COALESCE(delivery_fee, 0.0), order_type, plugin
          FROM orders
          WHERE id = ?1",
         params![order_id],
         |row| {
             Ok(OrderHeader {
+                order_type: row.get(14)?,
+                platform: row.get(15)?,
                 organization_id: row.get(0)?,
                 receipt_number: row.get(1)?,
                 issued_at: row.get(2)?,
@@ -395,10 +412,12 @@ fn parse_issued_at(raw: &str) -> Option<DateTime<Utc>> {
 /// discount and delivery fee as the create request sends them, with the
 /// branch VAT settings the till holds. `None` when the order has no lines.
 fn order_vat_for_receipt(conn: &Connection, header: &OrderHeader) -> Option<GreeceOrderVatResult> {
-    // The generic order-create normalizer currently drops the four per-line
-    // fiscal fields. Preserve them here, while retaining its monetary input
-    // normalization (quantity, unit-price aliases and total-price fallback).
-    // This is receipt construction only; order replay remains with its owner.
+    // The stored line's fiscal fields (category, VAT-inclusive flag,
+    // exemption reason, document profile) and role, read the way the order
+    // create body forwards them (`sync_queue::normalize_order_insert_items`),
+    // with the same monetary input normalization (quantity, unit-price
+    // aliases and total-price fallback). This is receipt construction only;
+    // order replay remains with its owner.
     let source_items: Vec<Value> = serde_json::from_str(&header.items_json).ok()?;
     let items: Vec<Value> = source_items.iter().map(|item| {
         let number = |keys: &[&str]| keys.iter().find_map(|key| item.get(*key).and_then(|value| value.as_f64().or_else(|| value.as_str().and_then(|text| text.trim().parse::<f64>().ok()))));
@@ -415,6 +434,7 @@ fn order_vat_for_receipt(conn: &Connection, header: &OrderHeader) -> Option<Gree
             "name": text(&["name", "menu_item_name", "menuItemName"]),
             "quantity": quantity,
             "unit_price": unit_price,
+            "vat_class": text(&["vat_class", "vatClass"]),
             "vat_category_code": text(&["vat_category_code", "vatCategoryCode"]),
             "price_includes_vat": price_includes_vat,
             "tax_exemption_reason": text(&["tax_exemption_reason", "taxExemptionReason"]),
@@ -423,10 +443,13 @@ fn order_vat_for_receipt(conn: &Connection, header: &OrderHeader) -> Option<Gree
         })
     }).collect();
     let order = json!({
+        "order_type": header.order_type,
+        "platform": header.platform,
         "items": items,
         "discount_amount": header.discount_amount,
         "discount_percentage": header.discount_percentage,
         "delivery_fee": header.delivery_fee,
+        "tip_amount": header.tip_cents as f64 / 100.0,
     });
     let settings = super::greece_vat::branch_vat_settings(conn);
     Some(super::greece_vat::calculate_order_vat_from_order_body(
@@ -441,7 +464,11 @@ struct ReceiptTenders {
     carried_tip_cents: i64,
 }
 
-fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<ReceiptTenders, String> {
+fn read_completed_payments(
+    conn: &Connection,
+    order_id: &str,
+    tips_in_turnover: bool,
+) -> Result<ReceiptTenders, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, method, amount_cents, amount, transaction_ref,
@@ -487,12 +514,12 @@ fn read_completed_payments(conn: &Connection, order_id: &str) -> Result<ReceiptT
         let kept_cents = (payment.amount_cents - reversed_cents).max(0);
         // A tender's amount includes its tip (the principal rule of
         // `payments.rs`, a refund coming off the principal first). The tip is
-        // no line and outside the totals, so the tender pays only its
-        // principal (07/10/2026): the AADE and HR validators want the
-        // payments equal to the receipt total.
+        // outside VAT unless the Swiss profile treats it as turnover. Only
+        // an outside-VAT tip leaves the tender, keeping payments equal to
+        // the receipt total without changing the stored payment ledger.
         let tip_cents = tip_cents.min(kept_cents);
         carried_tip_cents += tip_cents;
-        payment.amount_cents = kept_cents - tip_cents;
+        payment.amount_cents = kept_cents - if tips_in_turnover { 0 } else { tip_cents };
         // A tender refunded or voided in full, or all tip, is not part of the
         // receipt.
         if !((reversed_cents > 0 || tip_cents > 0) && payment.amount_cents == 0) {
@@ -555,7 +582,7 @@ fn build_lines(order_vat: Option<&GreeceOrderVatResult>, source_items: &[Value])
         .lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.line_kind != FiscalLineKind::Tip)
+        .filter(|(_, line)| line.line_kind != FiscalLineKind::Tip || !line.vat_category_code.ends_with("_out_of_scope"))
         .map(|(index, line)| {
             let occurrence = seen_ids.entry(line.id.clone()).or_insert(0);
             *occurrence += 1;
@@ -911,6 +938,8 @@ mod audit_1_tests {
             "
             CREATE TABLE orders (
                 id TEXT PRIMARY KEY,
+                order_type TEXT,
+                plugin TEXT,
                 supabase_id TEXT,
                 client_request_id TEXT,
                 organization_id TEXT,
@@ -1010,6 +1039,75 @@ mod audit_1_tests {
             params![category, key, value],
         )
         .expect("set local setting");
+    }
+
+    #[test]
+    fn fiscal_vat_uses_class_and_fulfillment_and_only_the_delivery_platform_column() {
+        let conn = make_test_db();
+        seed_simple_order(&conn);
+        set_setting(&conn, "tax", "vat_country", "CH");
+        set_setting(
+            &conn,
+            "tax",
+            "vat_class_category_codes",
+            r#"{"food":{"dine_in":"ch_standard_81","takeaway":"ch_reduced_26","platform":"ch_exempt_platform"}}"#,
+        );
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN ghost_source TEXT; UPDATE orders SET order_type='pickup',ghost_source='qr_recovery';").unwrap();
+        conn.execute(
+            "UPDATE orders SET items=?1 WHERE id='ord-1'",
+            [json!([{"name":"Meal","quantity":1,"unit_price":5,"vat_class":"food"}]).to_string()],
+        )
+        .unwrap();
+        let vat = || {
+            order_vat_for_receipt(&conn, &read_order_header(&conn, "ord-1").unwrap())
+                .unwrap()
+                .tax_amount_cents
+        };
+        assert_eq!(vat(), 13, "QR recovery is not a delivery platform");
+        conn.execute("UPDATE orders SET order_type='dine-in'", [])
+            .unwrap();
+        assert_eq!(vat(), 37);
+        conn.execute("UPDATE orders SET plugin='wolt'", []).unwrap();
+        assert_eq!(vat(), 0);
+    }
+
+    #[test]
+    fn swiss_turnover_tips_stay_in_fiscal_lines_and_tenders_while_outside_tips_leave_both() {
+        for outside in [false, true] {
+            let conn = make_test_db();
+            seed_simple_order(&conn);
+            set_setting(&conn, "tax", "vat_country", "CH");
+            set_setting(
+                &conn,
+                "tax",
+                "vat_class_category_codes",
+                r#"{"food":{"takeaway":"ch_reduced_26"}}"#,
+            );
+            set_setting(
+                &conn,
+                "tax",
+                "vat_tips_outside_vat",
+                if outside { "true" } else { "false" },
+            );
+            let vat = if outside { 26 } else { 29 };
+            let gross = if outside { 1026 } else { 1126 };
+            conn.execute("UPDATE orders SET currency='CHF',order_type='pickup',total_amount=11.26,total_amount_cents=1126,tip_amount=1,tip_amount_cents=100,tax_amount=?2,tax_amount_cents=?3,items=?1 WHERE id='ord-1'",params![json!([{"name":"Meal","quantity":1,"unit_price":10.26,"vat_class":"food"}]).to_string(),vat as f64/100.0,vat]).unwrap();
+            conn.execute("UPDATE order_payments SET currency='CHF',amount=11.26,amount_cents=1126,tip_amount=1,tip_amount_cents=100",[]).unwrap();
+            let payload = build_fiscal_receipt_input(&conn, "ord-1", "branch-swiss-tip").unwrap();
+            assert_eq!(payload["totals"]["grossCents"], json!(gross));
+            assert_eq!(payload["totals"]["vatCents"], json!(vat));
+            assert_eq!(
+                payload["lines"].as_array().unwrap().len(),
+                if outside { 1 } else { 2 }
+            );
+            let tender: i64 = payload["payments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["amountCents"].as_i64().unwrap())
+                .sum();
+            assert_eq!(tender, gross);
+        }
     }
 
     /// Connectivity audit 13/10/2026: the receipt sent the local `orders.id`,

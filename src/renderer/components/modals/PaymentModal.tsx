@@ -31,6 +31,7 @@ import {
   TipModal,
   type TipRecipientRole,
   type TipSelection,
+  type TipStaffOption,
 } from './TipModal';
 
 const formatMoney = formatCurrency;
@@ -126,6 +127,8 @@ interface PaymentModalProps {
   onSplitPayment?: (tipSelection: TipSelection | null) => void;
   roomChargeContext?: RoomChargeContext | null;
   allowTips?: boolean;
+  /** The order's stylists (`staff_id` on its lines): a tip may go to one of them. */
+  tipStaffOptions?: TipStaffOption[];
   allowTwint?: boolean;
   /**
    * Collect the outstanding balance of this existing order: cash/card confirms
@@ -255,6 +258,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   allowTips = true,
   allowTwint = true,
   existingOrder,
+  tipStaffOptions,
 }) => {
   const { t } = useTranslation();
   const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
@@ -524,7 +528,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     let admittedHere = false;
     try {
       const paymentData: PaymentCompletionData = { method: 'twint', amount: payableTotal, currency: 'CHF',
-        idempotencyKey: crypto.randomUUID(), tipAmount: tipSelection?.amount, tipRecipientRole: tipSelection?.recipientRole };
+        idempotencyKey: crypto.randomUUID(), tipAmount: tipSelection?.amount,
+        tipRecipientRole: tipSelection?.recipientRole,
+        tipRecipientStaffId: tipSelection?.recipientRole === 'staff' ? tipSelection.recipientStaffId : undefined };
       if (onBeforePayment && !await onBeforePayment(paymentData)) return;
       const admission = await admitTwintCollection({
         orderId: existingOrder?.orderId,
@@ -631,6 +637,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         change: method === 'cash' ? (changeAmount > 0 ? changeAmount : 0) : undefined,
         tipAmount: tipSelection?.amount,
         tipRecipientRole: tipSelection?.recipientRole,
+        tipRecipientStaffId: tipSelection?.recipientRole === 'staff' ? tipSelection.recipientStaffId : undefined,
         ...(method === 'room_charge' && roomChargeContext
           ? {
               currency: roomChargeContext.currency ?? undefined,
@@ -964,7 +971,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   </span>
                   <span className="block text-xs liquid-glass-modal-text-muted">
                     {tipSelection
-                      ? t(`modals.tip.recipients.${tipSelection.recipientRole}`)
+                      ? tipSelection.recipientRole === 'staff'
+                        ? tipSelection.recipientStaffName || t('salonStaff.tipRecipient', 'Staff member')
+                        : t(`modals.tip.recipients.${tipSelection.recipientRole}`)
                       : t('modals.payment.tipOptional', 'Optional — added before payment')}
                   </span>
                 </span>
@@ -1290,6 +1299,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       orderType={orderType}
       selection={tipSelection}
       onApply={setTipSelection}
+      staffOptions={tipStaffOptions}
     />
     </>
   );

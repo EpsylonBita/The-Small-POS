@@ -23,6 +23,19 @@ function ledger() {
   return db;
 }
 
+// `load_coverage_cents_scoped` (payments.rs) builds one query for both refund
+// scopes. Money readers take the net scope (master arithmetic); the order's
+// paid label takes the label scope (offline week Ω12, 22/10/2026).
+const ADJUSTMENT_CENTS = 'COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))';
+const netScope = (sql: string) => sql
+  .replaceAll('{adjustment_cents_sql}', ADJUSTMENT_CENTS)
+  .replaceAll('{label_refund_sql}', ADJUSTMENT_CENTS)
+  .replaceAll('{reversed_sql}', 'COALESCE(refunds.refunded_cents, 0)');
+const labelScope = (sql: string) => sql
+  .replaceAll('{adjustment_cents_sql}', ADJUSTMENT_CENTS)
+  .replaceAll('{label_refund_sql}', `CASE WHEN LOWER(TRIM(COALESCE(adjustment_context, 'manual'))) = 'edit_settlement' THEN ${ADJUSTMENT_CENTS} ELSE 0 END`)
+  .replaceAll('{reversed_sql}', '(CASE WHEN COALESCE(refunds.refunded_cents, 0) >= {gross_cents_sql} THEN {gross_cents_sql} ELSE COALESCE(refunds.label_refunded_cents, 0) END)');
+
 describe('canonical ordinary return SQL', () => {
   for (const returned of [600, 1000]) {
     it(`returned reconstructed receipt (${returned} cents) contributes no Z tender, gross or refunds`, () => {
@@ -129,7 +142,8 @@ describe('canonical ordinary return SQL', () => {
 
   it('v102 owns the payment recovery migration', () => {
     const rust = source('db.rs');
-    expect(/CURRENT_SCHEMA_VERSION: i32 = 102;/.test(rust)).toBe(true);
+    // Later migrations (v103 staff tip recipients, v104 offline week, v105 VAT) keep v102's own block.
+    expect(Number(/CURRENT_SCHEMA_VERSION: i32 = (\d+);/.exec(rust)?.[1])).toBeGreaterThanOrEqual(102);
     expect(/if current < 102 \{\s*run_migration_tx\(conn, 102,/.test(rust)).toBe(true);
   });
 
@@ -139,10 +153,12 @@ describe('canonical ordinary return SQL', () => {
     const sql = fn.match(/"(SELECT COALESCE\(SUM\([\s\S]*?AND op.method IS NOT \?2)"/)?.[1];
     expect(Boolean(sql)).toBe(true);
     expect(rust.includes('for_collection')).toBe(false);
-    const query = sql!
+    const expand = (scoped: string) => scoped
       .replaceAll('{gross_cents_sql}', 'op.amount_cents')
       .replaceAll('{tip_cents_sql}', 'MAX(COALESCE(op.tip_amount_cents,0),0)')
       .replaceAll('{row_filter}', "op.status = 'completed'");
+    const query = expand(netScope(sql!));
+    const label = expand(labelScope(sql!));
     const db = new DatabaseSync(':memory:');
     db.exec(`CREATE TABLE order_payments(id TEXT,order_id TEXT,method TEXT,amount_cents INTEGER,tip_amount_cents INTEGER,status TEXT);
       CREATE TABLE payment_adjustments(payment_id TEXT,amount_cents INTEGER,amount REAL,adjustment_type TEXT,adjustment_context TEXT);
@@ -150,8 +166,14 @@ describe('canonical ordinary return SQL', () => {
       INSERT INTO payment_adjustments VALUES('p',600,6,'refund','manual');`);
     try {
       expect(Object.values(db.prepare(query).get('o','gift_card'))[1]).toBe(400);
+      // The label: a partial customer return keeps the receipt's coverage.
+      expect(Object.values(db.prepare(label).get('o','gift_card'))[1]).toBe(1000);
       db.exec("UPDATE payment_adjustments SET adjustment_context='edit_settlement'");
       expect(Object.values(db.prepare(query).get('o','gift_card'))[1]).toBe(400);
+      expect(Object.values(db.prepare(label).get('o','gift_card'))[1]).toBe(400);
+      // A full return in manual parts counts nothing for the label either.
+      db.exec("UPDATE payment_adjustments SET adjustment_context='manual', amount_cents=1000, amount=10");
+      expect(Object.values(db.prepare(label).get('o','gift_card'))[1]).toBe(0);
       db.exec("UPDATE order_payments SET status='voided'");
       expect(Object.values(db.prepare(query).get('o','gift_card'))[1]).toBe(0);
     } finally { db.close(); }
@@ -211,7 +233,7 @@ describe('canonical ordinary return SQL', () => {
     const sql = rust.slice(start).match(/SELECT payment_id,\s*SUM[\s\S]*?GROUP BY payment_id/)?.[0];
     expect(sql).toBeTruthy();
     const db = ledger();
-    try { expect(db.prepare(sql!).get().refunded_cents).toBe(700); }
+    try { expect(db.prepare(netScope(sql!)).get().refunded_cents).toBe(700); }
     finally { db.close(); }
   });
 

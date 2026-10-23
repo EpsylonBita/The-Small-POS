@@ -835,9 +835,9 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty());
     if let Some(role) = requested_tip_recipient_role.as_deref() {
-        if !matches!(role, "waiter" | "cashier" | "driver") {
+        if !matches!(role, "waiter" | "cashier" | "driver" | "staff") {
             return Err(format!(
-                "Invalid tip recipient role: {role}. Must be waiter, cashier, or driver"
+                "Invalid tip recipient role: {role}. Must be waiter, cashier, driver, or staff"
             ));
         }
     }
@@ -1396,15 +1396,69 @@ impl CoverageCents {
     }
 }
 
+/// Which refunds a coverage read takes off the receipts (Ω12, 22/10/2026).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefundScope {
+    /// Every refund: the money the receipts still hold. The balance, the
+    /// admission of a new payment, the refundable remainder, cancellation,
+    /// the edit math and the Z read this.
+    Net,
+    /// The order's payment LABEL only: an ordinary receipt loses just its
+    /// `edit_settlement` refunds. A customer return (`manual`, an old NULL
+    /// context counts as manual) on a receipt that is still `completed` keeps
+    /// the sale paid; voided and fully refunded receipts drop out by status as
+    /// before, and gift card rows keep their netting. Server
+    /// `summarizeCanonicalPayments` and Android `orderPaymentLabel` read the
+    /// label the same way. Symptom before: a 10.00 order paid 10.00 with a
+    /// 6.00 return read `partially_paid`, and staff were offered to collect
+    /// money the customer had paid and got back on purpose.
+    Label,
+}
+
 fn load_coverage_cents_matching(
     conn: &rusqlite::Connection,
     order_id: &str,
     row_filter: &str,
 ) -> Result<CoverageCents, String> {
+    load_coverage_cents_scoped(conn, order_id, row_filter, RefundScope::Net)
+}
+
+fn load_coverage_cents_scoped(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    row_filter: &str,
+    scope: RefundScope,
+) -> Result<CoverageCents, String> {
     let load_err = |e: rusqlite::Error| format!("load net paid for order {order_id}: {e}");
     let tip_cents_sql =
         "MAX(COALESCE(op.tip_amount_cents, CAST(ROUND(op.tip_amount * 100) AS INTEGER), 0), 0)";
     let gross_cents_sql = "COALESCE(op.amount_cents, CAST(ROUND(op.amount * 100) AS INTEGER), 0)";
+    let adjustment_cents_sql = "COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))";
+    // A schema without the v37 context column keeps the net reading.
+    let label_refunds_only = scope == RefundScope::Label
+        && crate::db::column_exists(conn, "payment_adjustments", "adjustment_context")?;
+    let (label_refund_sql, reversed_sql) = if label_refunds_only {
+        (
+            // Server `adjustmentLowersPaymentLabel`: trimmed, case-insensitive.
+            format!(
+                "CASE WHEN LOWER(TRIM(COALESCE(adjustment_context, 'manual'))) = 'edit_settlement' \
+                 THEN {adjustment_cents_sql} ELSE 0 END"
+            ),
+            // A receipt whose refunds of any context add up to its whole
+            // amount counts nothing, also while it still reads `completed`
+            // (several partial returns, an imported adjustment): a full return
+            // stays `pending` (D4; Android `giftRowCoverage` label mode).
+            format!(
+                "(CASE WHEN COALESCE(refunds.refunded_cents, 0) >= {gross_cents_sql} \
+                 THEN {gross_cents_sql} ELSE COALESCE(refunds.label_refunded_cents, 0) END)"
+            ),
+        )
+    } else {
+        (
+            adjustment_cents_sql.to_string(),
+            "COALESCE(refunds.refunded_cents, 0)".to_string(),
+        )
+    };
     let (retained_cents, principal_cents, retained_tip_cents): (i64, i64, i64) = conn
         .query_row(
             // W4b: aggregate using cents-with-real-fallback shim. The shim
@@ -1414,18 +1468,19 @@ fn load_coverage_cents_matching(
             // the REAL columns are dropped.
             &format!(
                 "SELECT COALESCE(SUM(
-                        MAX({gross_cents_sql} - COALESCE(refunds.refunded_cents, 0), 0)
+                        MAX({gross_cents_sql} - {reversed_sql}, 0)
                     ), 0),
                     COALESCE(SUM(
-                        MAX({gross_cents_sql} - COALESCE(refunds.refunded_cents, 0) - {tip_cents_sql}, 0)
+                        MAX({gross_cents_sql} - {reversed_sql} - {tip_cents_sql}, 0)
                     ), 0),
                     COALESCE(SUM(
-                        MIN({tip_cents_sql}, MAX({gross_cents_sql} - COALESCE(refunds.refunded_cents, 0), 0))
+                        MIN({tip_cents_sql}, MAX({gross_cents_sql} - {reversed_sql}, 0))
                     ), 0)
                  FROM order_payments op
                  LEFT JOIN (
                      SELECT payment_id,
-                            SUM(COALESCE(amount_cents, CAST(ROUND(amount * 100) AS INTEGER))) AS refunded_cents
+                            SUM({adjustment_cents_sql}) AS refunded_cents,
+                            SUM({label_refund_sql}) AS label_refunded_cents
                      FROM payment_adjustments
                      WHERE adjustment_type = 'refund'
                      GROUP BY payment_id
@@ -1488,6 +1543,46 @@ fn load_coverage_cents_matching(
         coverage.retained_tip_cents += tip_cents.min(kept_cents);
     }
     Ok(coverage)
+}
+
+/// What the order's counted receipts cover for its payment LABEL, in cents
+/// ([`RefundScope::Label`]): [`load_principal_paid_for_order`] without the
+/// customer returns of receipts that still stand. Never a money reader.
+pub(crate) fn load_label_covered_cents(conn: &Connection, order_id: &str) -> Result<i64, String> {
+    load_coverage_cents_scoped(
+        conn,
+        order_id,
+        &counted_financial_payment_sql(conn, "op")?,
+        RefundScope::Label,
+    )
+    .map(|coverage| coverage.covered_cents())
+}
+
+/// [`load_net_paid_for_order`] for the LABEL ([`RefundScope::Label`]): the
+/// received money, tips included, that a paid label proved, in cents.
+pub(crate) fn load_label_retained_cents(conn: &Connection, order_id: &str) -> Result<i64, String> {
+    load_coverage_cents_scoped(
+        conn,
+        order_id,
+        &counted_financial_payment_sql(conn, "op")?,
+        RefundScope::Label,
+    )
+    .map(|coverage| coverage.retained_cents)
+}
+
+/// The order total and its label coverage ([`load_label_covered_cents`]), in
+/// cents. The total is read as [`load_order_payment_balance_snapshot`] reads it.
+fn load_order_label_cents(conn: &Connection, order_id: &str) -> Result<(i64, i64), String> {
+    let order_total_cents: i64 = conn
+        .query_row(
+            "SELECT COALESCE(total_amount_cents, CAST(ROUND(total_amount * 100) AS INTEGER), 0)
+             FROM orders
+             WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load order total for payment balance snapshot {order_id}: {e}"))?;
+    Ok((order_total_cents, load_label_covered_cents(conn, order_id)?))
 }
 
 /// Cents a payment row no longer covers. An ordinary row: its recorded
@@ -1783,28 +1878,49 @@ pub(crate) fn derive_payment_method(
     })
 }
 
+/// The payment status the counted ledger proves, in integer cents (no
+/// tolerance): no coverage is `pending`, the whole total or more is `paid`,
+/// anything between is `partially_paid`. The callers pass the label
+/// coverage ([`load_label_covered_cents`], Ω12), so a customer return on a
+/// receipt that still stands keeps a paid order paid. The one ladder of
+/// [`recompute_order_payment_state`], the downgrade in
+/// [`enforce_paid_status_requires_ledger_coverage`] and
+/// [`settle_order_label_down_to_counted_rows`].
+///
+/// Equal to the shared `coverageBackedPaymentStatus`
+/// (`shared/platforms/payment-coverage.ts`) for every positive total. A zero
+/// total is the callers' own call: the guard and the label settle exempt it,
+/// while `recompute_order_payment_state` asks this ladder, which answers
+/// `pending` without money where the shared rule answers `paid` (decision
+/// A2, connectivity plan 21/10/2026, not decided). The shared vectors
+/// (`shared/platforms/__fixtures__/payment-coverage-vectors.json`, test
+/// `payment_coverage_vectors_pin_recompute_order_payment_state`) pin both.
+pub(crate) fn ledger_proven_payment_status(
+    order_total_cents: i64,
+    net_paid_cents: i64,
+) -> &'static str {
+    if net_paid_cents <= 0 {
+        "pending"
+    } else if net_paid_cents >= order_total_cents {
+        "paid"
+    } else {
+        "partially_paid"
+    }
+}
+
 pub(crate) fn recompute_order_payment_state(
     conn: &Connection,
     order_id: &str,
     now: &str,
     payment_id: &str,
 ) -> Result<(), String> {
-    let balance_snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
-    let total_paid = balance_snapshot.net_paid;
-    let order_total = balance_snapshot.order_total;
-
     // W4e: integer-cent comparison. Wave 2a C3's symmetric MONEY_EPSILON
     // is no longer needed — the tolerance was a workaround for f64
-    // aggregation drift, and integer cents have neither.
-    let total_paid_cents = Cents::round_half_even(total_paid).as_i64();
-    let order_total_cents = Cents::round_half_even(order_total).as_i64();
-    let new_payment_status = if total_paid_cents <= 0 {
-        "pending"
-    } else if total_paid_cents >= order_total_cents {
-        "paid"
-    } else {
-        "partially_paid"
-    };
+    // aggregation drift, and integer cents have neither. Ω12 (22/10/2026):
+    // the label reads label coverage, so a customer return on a receipt that
+    // still stands keeps the order paid; the balance stays net.
+    let (order_total_cents, label_cents) = load_order_label_cents(conn, order_id)?;
+    let new_payment_status = ledger_proven_payment_status(order_total_cents, label_cents);
 
     // W6: `orders.payment_method` was dropped in migration v55. The
     // method classification is now derived on read via
@@ -1916,17 +2032,10 @@ pub(crate) fn enforce_paid_status_requires_ledger_coverage(
         }
     }
 
-    // (2) Nothing backs the claim. Downgrade to what the ledger proves.
-    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
-    let net_paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
-    let order_total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
-    let derived = if net_paid_cents <= 0 {
-        "pending"
-    } else if net_paid_cents >= order_total_cents {
-        "paid"
-    } else {
-        "partially_paid"
-    };
+    // (2) Nothing backs the claim. Downgrade to what the ledger proves, read
+    // as the label reads it (Ω12).
+    let (order_total_cents, net_paid_cents) = load_order_label_cents(conn, order_id)?;
+    let derived = ledger_proven_payment_status(order_total_cents, net_paid_cents);
 
     if derived == claimed {
         return Ok(PaidStatusGuardOutcome::AlreadyConsistent);
@@ -1954,15 +2063,15 @@ pub(crate) fn enforce_paid_status_requires_ledger_coverage(
 }
 
 /// Does the completed ledger back this exact claim? `paid` needs the whole
-/// total, `partially_paid` needs some money to exist at all.
+/// total, `partially_paid` needs some money to exist at all. Read as the
+/// label reads it ([`RefundScope::Label`]): a customer return on a receipt
+/// that still stands does not undo the claim.
 pub(crate) fn ledger_backs_claimed_status(
     conn: &Connection,
     order_id: &str,
     claimed: &str,
 ) -> Result<bool, String> {
-    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
-    let net_paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
-    let order_total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
+    let (order_total_cents, net_paid_cents) = load_order_label_cents(conn, order_id)?;
     // A zero-total order (comp, fully discounted) is coherent as paid with an
     // empty ledger — there is no money to record.
     if order_total_cents <= 0 {
@@ -2011,19 +2120,12 @@ pub(crate) fn settle_order_label_down_to_counted_rows(
     if current_rank == 0 {
         return Ok(None);
     }
-    let snapshot = load_order_payment_balance_snapshot(conn, order_id)?;
-    let order_total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
+    // Label coverage (Ω12): a customer return never lowers the label here.
+    let (order_total_cents, net_paid_cents) = load_order_label_cents(conn, order_id)?;
     if order_total_cents <= 0 {
         return Ok(None);
     }
-    let net_paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
-    let proven = if net_paid_cents <= 0 {
-        "pending"
-    } else if net_paid_cents >= order_total_cents {
-        "paid"
-    } else {
-        "partially_paid"
-    };
+    let proven = ledger_proven_payment_status(order_total_cents, net_paid_cents);
     if rank(proven) >= current_rank {
         return Ok(None);
     }
@@ -2073,7 +2175,9 @@ pub(crate) fn server_ledger_backs_claimed_status(
     if order_is_folio_charged(conn, order_id)? {
         return Ok(true);
     }
-    let held_cents = load_net_paid_cents_matching(
+    // The server reads its label the same way (Ω12): only `edit_settlement`
+    // refunds come off a receipt that still stands.
+    let held_cents = load_coverage_cents_scoped(
         conn,
         order_id,
         &format!(
@@ -2081,12 +2185,47 @@ pub(crate) fn server_ledger_backs_claimed_status(
             counted_financial_payment_sql(conn, "op")?,
             server_held_payment_sql("op")
         ),
-        true,
-    )?;
+        RefundScope::Label,
+    )?
+    .covered_cents();
     Ok(match claimed {
         "paid" => held_cents >= order_total_cents,
         _ => held_cents > 0,
     })
+}
+
+/// Whether an order's own lines name this staff member (`staff_id`, its
+/// camelCase twin, or `metadata.staff_id`): the only people a `staff` tip
+/// may go to (salon walk-in and appointment lines, 21/10/2026).
+fn order_lines_name_staff(
+    conn: &Connection,
+    order_id: &str,
+    staff_id: &str,
+) -> Result<bool, String> {
+    let items: Option<String> = conn
+        .query_row(
+            "SELECT items FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load order lines for staff tip: {e}"))?
+        .flatten();
+    let lines = items
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    Ok(lines.iter().any(|line| {
+        [
+            line.get("staff_id"),
+            line.get("staffId"),
+            line.pointer("/metadata/staff_id"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|value| value.trim() == staff_id)
+    }))
 }
 
 fn resolve_tip_recipient(
@@ -2233,6 +2372,65 @@ fn resolve_tip_recipient(
             let (shift_id, staff_id) =
                 cashier_assignment.ok_or("No active cashier is available to receive this tip")?;
             Ok((Some(role), Some(staff_id), Some(shift_id)))
+        }
+        "staff" => {
+            // One stylist of the order's own lines; their active shift if they
+            // have one, else none (a stylist without a shift shows in the Z only).
+            let staff_id = input
+                .requested_tip_recipient_staff_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or("A staff tip must name the staff member who receives it")?;
+            if !order_lines_name_staff(conn, &input.order_id, staff_id)? {
+                return Err(format!(
+                    "Tip staff member {staff_id} is not on this order's lines"
+                ));
+            }
+            if !crate::db::order_payments_support_staff_tips(conn)? {
+                return Err(
+                    "Staff tips are unavailable on this terminal: its payment ledger could not be upgraded"
+                        .to_string(),
+                );
+            }
+            let shift_id = if let Some(requested_shift_id) = input
+                .requested_tip_recipient_staff_shift_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let shift_is_in_branch: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM staff_shifts WHERE id = ?1 AND branch_id = ?2)",
+                    params![requested_shift_id, branch_id], |row| row.get(0),
+                ).map_err(|e| format!("load tip staff shift branch: {e}"))?;
+                match load_shift_role_status_and_staff(conn, requested_shift_id)? {
+                    Some((_, shift_staff_id, status))
+                        if shift_is_in_branch && shift_staff_id == staff_id && status == "active" =>
+                    {
+                        Some(requested_shift_id.to_string())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Requested shift {requested_shift_id} is not an active shift of tip staff member {staff_id}"
+                        ))
+                    }
+                }
+            } else {
+                conn.query_row(
+                    "SELECT id
+                     FROM staff_shifts
+                    WHERE staff_id = ?1
+                       AND branch_id = ?2
+                       AND status = 'active'
+                     ORDER BY check_in_time DESC
+                     LIMIT 1",
+                    params![staff_id, branch_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| format!("load tip staff shift: {e}"))?
+            };
+            Ok((Some(role), Some(staff_id.to_string()), shift_id))
         }
         _ => Err(format!("Unsupported tip recipient role: {role}")),
     }
@@ -8437,6 +8635,132 @@ mod tests {
     }
 
     #[test]
+    fn staff_tip_records_only_an_order_stylist_and_their_active_branch_shift() {
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", "test-terminal"),
+            ("branch_id", "b1"),
+            ("organization_id", "org-test"),
+        ]);
+        let db = test_db();
+        configure_current_money_fixture(&db, "b1", "EUR", true);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, currency, branch_id, items, order_type, total_amount,
+                     total_amount_cents, tip_amount, tip_amount_cents, status, created_at, updated_at)
+                 VALUES ('salon-tip', 'EUR', 'b1', ?1, 'pickup', 12, 1200, 2, 200, 'pending', 'now', 'now')",
+                [serde_json::json!([{ "service_id": "haircut", "staff_id": "stylist",
+                    "metadata": { "staff_name": "Maria" } }]).to_string()],
+            ).unwrap();
+        }
+        let payload = |staff: Option<&str>| {
+            serde_json::json!({
+                "orderId": "salon-tip", "method": "cash", "amount": 12,
+                "tipAmount": 2, "tipRecipientRole": "staff", "tipRecipientStaffId": staff,
+            })
+        };
+        for staff in [None, Some("not-on-lines")] {
+            assert!(record_payment(&db, &payload(staff)).is_err());
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT payment_status FROM orders WHERE id='salon-tip'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "pending"
+            );
+        }
+        // A stylist need not have checked in. Another branch's active shift
+        // must not receive this branch's tip.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO staff_shifts (id, staff_id, branch_id, role_type, check_in_time, status, created_at, updated_at)
+                VALUES ('foreign-shift', 'stylist', 'b2', 'cashier', '2026-10-21T09:00:00Z', 'active', 'now', 'now')", []).unwrap();
+        }
+        let first = record_payment(&db, &payload(Some("stylist"))).unwrap();
+        let payments = get_order_payments(&db, "salon-tip").unwrap();
+        assert_eq!(payments[0]["id"], first["paymentId"]);
+        assert_eq!(payments[0]["tipAmount"], 2.0);
+        {
+            let conn = db.conn.lock().unwrap();
+            let allocation: (String, String, Option<String>) = conn.query_row(
+                "SELECT tip_recipient_role, tip_recipient_staff_id, tip_recipient_staff_shift_id
+                 FROM order_payments WHERE id = ?1",
+                [first["paymentId"].as_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(allocation, ("staff".into(), "stylist".into(), None));
+            let sync: Value = serde_json::from_str(
+                &build_payment_sync_payload_for_payment(
+                    &conn,
+                    first["paymentId"].as_str().unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(sync["tipRecipientRole"], "staff");
+            assert_eq!(sync["tipRecipientStaffId"], "stylist");
+            assert!(sync["tipRecipientStaffShiftId"].is_null());
+        }
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT payment_status FROM orders WHERE id='salon-tip'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "paid"
+        );
+
+        // Resolve another payment's allocation after the stylist checks in.
+        let conn = db.conn.lock().unwrap();
+        // A staff member can have only one active shift, across branches.
+        conn.execute(
+            "UPDATE staff_shifts SET status = 'closed', check_out_time = '2026-10-21T09:59:00Z'
+             WHERE id = 'foreign-shift'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (id, staff_id, branch_id, role_type, check_in_time, status, created_at, updated_at)
+            VALUES ('stylist-shift', 'stylist', 'b1', 'cashier', '2026-10-21T10:00:00Z', 'active', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let input = build_payment_record_input(&payload(Some("stylist"))).unwrap();
+        let resolved = resolve_tip_recipient(
+            &conn,
+            &input,
+            "pickup",
+            "b1",
+            "test-terminal",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            (
+                Some("staff".into()),
+                Some("stylist".into()),
+                Some("stylist-shift".into())
+            )
+        );
+    }
+
+    #[test]
     fn test_record_payment_accepts_supabase_order_id() {
         let db = test_db();
         configure_current_money_fixture(&db, "b1", "EUR", true);
@@ -10754,10 +11078,15 @@ mod tests {
                         (balance.net_paid, balance.outstanding_amount, remainder),
                         (10.0 - amount, amount, 10.0 - amount)
                     );
+                    // Ω12: only the label changes. A customer return keeps
+                    // the sale paid, an edit settlement refund lowers it, a
+                    // full return still reads pending (D4).
                     assert_eq!(
                         status,
                         if amount == 10.0 {
                             "pending"
+                        } else if context == "manual" {
+                            "paid"
                         } else {
                             "partially_paid"
                         }
@@ -10777,6 +11106,170 @@ mod tests {
                 assert_eq!(states[0], states[1], "{context} return {amount}");
             }
         }
+    }
+
+    /// Ω12 (22/10/2026): a 10.00 sale paid 10.00 with a 6.00 customer return
+    /// read `partially_paid`, and the till offered to collect again. A return
+    /// on a receipt that still stands keeps the label paid and raises a stale
+    /// `pending` header, local or imported; the money stays net.
+    #[test]
+    fn a_customer_return_keeps_the_sale_paid_and_raises_a_stale_pending_label() {
+        for imported in [false, true] {
+            for header in ["paid", "pending"] {
+                let db = test_db();
+                {
+                    let conn = db.conn.lock().unwrap();
+                    seed_order_with_payments(
+                        &conn,
+                        "return-label",
+                        &[("return-label-payment", "cash", 10.0, "completed")],
+                    );
+                    conn.execute(
+                        "UPDATE orders SET payment_status = ?1 WHERE id = 'return-label'",
+                        params![header],
+                    )
+                    .unwrap();
+                    if imported {
+                        // No context on the wire counts as a customer return.
+                        crate::sync::sync_remote_payment_into_local_for_test(&conn, &serde_json::json!({"id":"return-label-canonical","order_id":"return-label","metadata":{"local_payment_id":"return-label-payment"},"payment_method":"cash","amount":10,"currency":"EUR","status":"completed","adjustments":[{"id":"return-label-adjustment","adjustment_type":"refund","amount_cents":600,"currency":"EUR","created_at":"2026-10-22T12:00:00Z"}]})).unwrap();
+                    }
+                }
+                if !imported {
+                    crate::refunds::refund_payment(&db, &serde_json::json!({"paymentId":"return-label-payment","amount":6.0,"reason":"customer return","refundMethod":"cash"})).unwrap();
+                }
+                let conn = db.conn.lock().unwrap();
+                let case = format!("{header} header, imported {imported}");
+                assert_eq!(
+                    stored_payment_status(&conn, "return-label"),
+                    "paid",
+                    "{case}"
+                );
+                let balance = load_order_payment_balance_snapshot(&conn, "return-label").unwrap();
+                assert_eq!(
+                    (balance.net_paid, balance.outstanding_amount),
+                    (4.0, 6.0),
+                    "{case}"
+                );
+                assert_eq!(
+                    load_label_covered_cents(&conn, "return-label").unwrap(),
+                    1000
+                );
+                assert!(ledger_backs_claimed_status(&conn, "return-label", "paid").unwrap());
+                assert_eq!(
+                    settle_order_label_down_to_counted_rows(&conn, "return-label").unwrap(),
+                    None,
+                    "{case}"
+                );
+                assert_eq!(
+                    enforce_paid_status_requires_ledger_coverage(&conn, "return-label", "now")
+                        .unwrap(),
+                    PaidStatusGuardOutcome::AlreadyConsistent,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// Ω12: the label rule is the label's only. An `edit_settlement` refund
+    /// still lowers it, a void still empties it, and a gift card return keeps
+    /// today's netting (D6).
+    #[test]
+    fn label_coverage_still_nets_edit_settlement_refunds_and_voids() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order_with_payments(
+            &conn,
+            "label-scope",
+            &[
+                ("label-scope-edit", "cash", 5.0, "completed"),
+                ("label-scope-return", "card", 5.0, "completed"),
+            ],
+        );
+        conn.execute_batch(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, adjustment_context, created_at, updated_at)
+             VALUES ('label-edit-refund', 'label-scope-edit', 'label-scope', 'refund', 2, 200, 'edit', 'edit_settlement', 'now', 'now'),
+                    ('label-return', 'label-scope-return', 'label-scope', 'refund', 3, 300, 'return', 'manual', 'now', 'now');",
+        )
+        .unwrap();
+        assert_eq!(load_label_covered_cents(&conn, "label-scope").unwrap(), 800);
+        assert_eq!(
+            load_label_retained_cents(&conn, "label-scope").unwrap(),
+            800
+        );
+        assert_eq!(
+            Cents::round_half_even(load_net_paid_for_order(&conn, "label-scope").unwrap()).as_i64(),
+            500
+        );
+        recompute_order_payment_state(&conn, "label-scope", "now", "label-scope-edit").unwrap();
+        assert_eq!(
+            stored_payment_status(&conn, "label-scope"),
+            "partially_paid"
+        );
+        conn.execute(
+            "UPDATE order_payments SET status = 'voided' WHERE id = 'label-scope-return'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(load_label_covered_cents(&conn, "label-scope").unwrap(), 300);
+        assert_eq!(ledger_proven_payment_status(1000, 0), "pending");
+        assert_eq!(ledger_proven_payment_status(1000, 1000), "paid");
+        assert_eq!(ledger_proven_payment_status(1000, 999), "partially_paid");
+    }
+
+    /// Ω12 parity with Android (W11, 22/10/2026): a receipt still `completed`
+    /// whose customer returns add up to its whole amount (several partial
+    /// returns, or an imported adjustment) is a full return. It counts nothing
+    /// for the label, which stays `pending` like a void or a full return (D4).
+    /// Before: the label ignored every manual refund and read it `paid`.
+    #[test]
+    fn partial_returns_adding_up_to_the_whole_receipt_leave_the_label_pending() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_order_with_payments(
+            &conn,
+            "returned-in-parts",
+            &[("returned-in-parts-payment", "cash", 10.0, "completed")],
+        );
+        conn.execute(
+            "UPDATE orders SET payment_status = 'paid' WHERE id = 'returned-in-parts'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, adjustment_context, created_at, updated_at)
+             VALUES ('return-part-1', 'returned-in-parts-payment', 'returned-in-parts', 'refund', 4, 400, 'return', 'manual', 'now', 'now');",
+        )
+        .unwrap();
+        // One partial return: the sale stays paid, the money is net.
+        assert_eq!(
+            load_label_covered_cents(&conn, "returned-in-parts").unwrap(),
+            1000
+        );
+        conn.execute_batch(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, amount_cents, reason, adjustment_context, created_at, updated_at)
+             VALUES ('return-part-2', 'returned-in-parts-payment', 'returned-in-parts', 'refund', 6, 600, 'return', 'manual', 'now', 'now');",
+        )
+        .unwrap();
+        // The receipt still reads `completed`, but nothing of it is kept.
+        assert_eq!(
+            load_label_covered_cents(&conn, "returned-in-parts").unwrap(),
+            0
+        );
+        assert_eq!(
+            load_label_retained_cents(&conn, "returned-in-parts").unwrap(),
+            0
+        );
+        assert!(!ledger_backs_claimed_status(&conn, "returned-in-parts", "paid").unwrap());
+        recompute_order_payment_state(
+            &conn,
+            "returned-in-parts",
+            "now",
+            "returned-in-parts-payment",
+        )
+        .unwrap();
+        assert_eq!(stored_payment_status(&conn, "returned-in-parts"), "pending");
+        let balance = load_order_payment_balance_snapshot(&conn, "returned-in-parts").unwrap();
+        assert_eq!((balance.net_paid, balance.outstanding_amount), (0.0, 10.0));
     }
 
     #[test]
@@ -11627,5 +12120,131 @@ mod tests {
 
         // Fully settled: a second delivered/completed transition is a no-op.
         assert!(!auto_settle_platform_order(&conn, "ord-ps1").unwrap());
+    }
+
+    const PAYMENT_COVERAGE_VECTORS: &str =
+        include_str!("../../../shared/platforms/__fixtures__/payment-coverage-vectors.json");
+
+    /// The shared "paid" vectors (connectivity plan Σ3, 21/10/2026) through
+    /// [`recompute_order_payment_state`]: each neutral case stored as this till
+    /// stores it (`orders`, `order_payments`, refund `payment_adjustments`),
+    /// then the label the ledger proves. The server, Android and the shared
+    /// rule run the same file. `desktopExpected` pins where the desktop answers
+    /// differently today (decision A2: a zero total without money is
+    /// `pending` here, `paid` in the shared rule). Deciding A2 for `paid`
+    /// means dropping those `desktopExpected` lines and giving
+    /// `recompute_order_payment_state` a zero-total branch.
+    #[test]
+    fn payment_coverage_vectors_pin_recompute_order_payment_state() {
+        let vectors: Value = serde_json::from_str(PAYMENT_COVERAGE_VECTORS)
+            .expect("parse shared payment coverage vectors");
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let cents = |value: &Value, key: &str| value.get(key).and_then(Value::as_i64).unwrap_or(0);
+        let text =
+            |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        let json_text = |value: &Value, key: &str| {
+            value
+                .get(key)
+                .filter(|inner| !inner.is_null())
+                .map(Value::to_string)
+        };
+        let mut ran = 0;
+        for (index, case) in vectors["cases"]
+            .as_array()
+            .expect("vector cases")
+            .iter()
+            .enumerate()
+        {
+            let name = case["name"].as_str().expect("vector name");
+            if case.pointer("/notStorableOn/desktop").is_some() {
+                continue;
+            }
+            let order = &case["input"]["order"];
+            let order_id = format!("vector-order-{index}");
+            let total = cents(order, "totalCents");
+            let tip = cents(order, "tipCents");
+            conn.execute(
+                "INSERT INTO orders(id,items,total_amount,total_amount_cents,tip_amount,tip_amount_cents,status,order_type,payment_status,sync_status,branch_id,currency,plugin,external_plugin_order_id,ghost_metadata,created_at,updated_at)
+                 VALUES (?1,'[]',?2,?3,?4,?5,'completed','takeaway','pending','pending','b1','EUR',?6,?7,?8,'now','now')",
+                params![
+                    order_id,
+                    Cents::new(total).to_f64_dp2(),
+                    total,
+                    Cents::new(tip).to_f64_dp2(),
+                    tip,
+                    text(order, "platform"),
+                    text(order, "externalPlatformOrderId"),
+                    json_text(order, "ghostMetadata"),
+                ],
+            )
+            .unwrap_or_else(|error| panic!("vector {name}: insert order: {error}"));
+            for payment in case["input"]["payments"]
+                .as_array()
+                .expect("vector payments")
+            {
+                let payment_id = format!(
+                    "{order_id}-{}",
+                    payment["id"].as_str().expect("vector payment id")
+                );
+                let amount = cents(payment, "amountCents");
+                let payment_tip = cents(payment, "tipCents");
+                conn.execute(
+                    "INSERT INTO order_payments(id,order_id,method,amount,amount_cents,tip_amount,tip_amount_cents,currency,status,transaction_ref,idempotency_key,metadata,created_at,updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,'EUR',?8,?9,?10,?11,'now','now')",
+                    params![
+                        payment_id,
+                        order_id,
+                        payment["method"].as_str().expect("vector payment method"),
+                        Cents::new(amount).to_f64_dp2(),
+                        amount,
+                        Cents::new(payment_tip).to_f64_dp2(),
+                        payment_tip,
+                        payment["status"].as_str().expect("vector payment status"),
+                        text(payment, "transactionRef"),
+                        text(payment, "idempotencyKey"),
+                        json_text(payment, "metadata"),
+                    ],
+                )
+                .unwrap_or_else(|error| panic!("vector {name}: insert payment: {error}"));
+                let refunded = cents(payment, "refundedCents");
+                if refunded > 0 {
+                    conn.execute(
+                        "INSERT INTO payment_adjustments(id,payment_id,order_id,adjustment_type,adjustment_context,amount,amount_cents,reason,created_at,updated_at)
+                         VALUES (?1,?2,?3,'refund',?4,?5,?6,'payment coverage vector','now','now')",
+                        params![
+                            format!("{payment_id}-refund"),
+                            payment_id,
+                            order_id,
+                            // A refund without a context reads as a customer
+                            // return, like a legacy row (NOT NULL here).
+                            text(payment, "refundContext").unwrap_or_else(|| "manual".to_string()),
+                            Cents::new(refunded).to_f64_dp2(),
+                            refunded,
+                        ],
+                    )
+                    .unwrap_or_else(|error| panic!("vector {name}: insert refund: {error}"));
+                }
+            }
+
+            recompute_order_payment_state(&conn, &order_id, "now", "vector-recompute")
+                .unwrap_or_else(|error| panic!("vector {name}: recompute: {error}"));
+
+            let expected = case
+                .get("desktopExpected")
+                .and_then(Value::as_str)
+                .or_else(|| case["expected"].as_str())
+                .expect("vector expected status");
+            assert_eq!(
+                stored_payment_status(&conn, &order_id),
+                expected,
+                "vector {name}"
+            );
+            ran += 1;
+        }
+        assert!(
+            ran >= 12,
+            "only {ran} payment coverage vectors ran on the desktop"
+        );
     }
 }

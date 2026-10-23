@@ -1,16 +1,18 @@
-import { computeOwnerConfiguredVat } from '../../../../shared/services/ReceiptVat';
+import { calculateGreeceOrderVat, type GreeceOrderVatInput } from '../../../../shared/services/GreeceOrderVat';
+import { resolvePrintVatOnReceipt } from '../../../../shared/services/ReceiptVat';
+import { settingBoolean, type TerminalSettingReader } from './branchVatSettings';
 
 /**
- * The VAT the till shows (founder rule 07/10/2026, `shared/services/ReceiptVat.ts`).
+ * The VAT the till shows (founder rule 21/10/2026, `shared/services/ReceiptVat.ts`).
  *
- * Every order now stores its canonical computed VAT in `tax_amount`, but a
- * screen shows only what the customer slip prints: with an active fiscal
- * plugin (or a myDATA fiscal device) the computed VAT, otherwise the VAT of
- * the rate the owner set in Admin → POS settings → Taxes, included in the
- * prices, and nothing when no rate (or 0%) is set. The native order readers
- * resolve that rule and send it as `printedVatAmount`; an order object that
- * does not carry it shows no VAT. Prices always include VAT, so a shown VAT
- * is never added to any total.
+ * Every order carries ONE VAT, the computed `tax_amount` the server stores and
+ * the till adopts; the Z always totals it. A screen shows what the customer
+ * slip prints: that VAT when a fiscal plugin is active (or a myDATA fiscal
+ * device is set up) or the owner turned on «VAT on receipts», nothing
+ * otherwise. The native order readers resolve that rule and send it as
+ * `printedVatAmount`; an order object that does not carry it shows no VAT.
+ * Prices always include VAT, so a shown VAT is never added to any total, and
+ * no screen computes VAT at the owner's rate any more.
  */
 
 const record = (value: unknown): Record<string, unknown> =>
@@ -27,10 +29,8 @@ export function readPrintedVatAmount(order: unknown): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-/** The owner's VAT rate (`tax.default_tax_rate`), null when not set. */
-export function readOwnerVatRatePercent(
-  getSetting: <T = unknown>(category: string, key: string, defaultValue?: T) => T | undefined,
-): number | null {
+/** The owner's 07/10 VAT rate (`tax.default_tax_rate`), null when not set. Read only while the switch is missing. */
+function readOwnerVatRatePercent(getSetting: TerminalSettingReader): number | null {
   const raw = getSetting<number | string | null>('tax', 'default_tax_rate', undefined);
   if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
     return null;
@@ -40,9 +40,20 @@ export function readOwnerVatRatePercent(
 }
 
 /**
- * The VAT a price preview shows for an amount that already includes it: the
- * owner's configured rate, 0 when no rate (or 0%) is set. Never added on top.
+ * Whether this till's slips print VAT without a fiscal plugin: the owner's
+ * «VAT on receipts» switch (`tax.vat_print_on_receipt`), else, until the feed
+ * delivered it, an owner rate above 0 %. A fiscal plugin also prints it; that
+ * verdict is native and already in `printedVatAmount`.
  */
-export function ownerVatIncludedIn(amountIncludingVat: number, ratePercent: number | null): number {
-  return computeOwnerConfiguredVat({ totalAmount: amountIncludingVat, tipAmount: 0, ratePercent }) ?? 0;
+export function readSlipsPrintVat(getSetting: TerminalSettingReader, fiscalActive = false): boolean {
+  if (settingBoolean(getSetting<unknown>('tax', 'vat_registered')) === false) return false;
+  return fiscalActive || resolvePrintVatOnReceipt({
+    printVatOnReceipt: settingBoolean(getSetting<unknown>('tax', 'vat_print_on_receipt')),
+    ratePercent: readOwnerVatRatePercent(getSetting),
+  });
+}
+
+/** The VAT the server will store for an order that is still a cart (prices include it). */
+export function previewOrderVat(input: GreeceOrderVatInput): number {
+  return calculateGreeceOrderVat(input).taxAmount;
 }

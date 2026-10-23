@@ -3,7 +3,8 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
-import { ownerVatIncludedIn } from '../../utils/printedVat';
+import { previewOrderVat } from '../../utils/printedVat';
+import type { GreeceOrderVatSettings } from '../../../../../shared/services/GreeceOrderVat';
 
 /**
  * CartSummary Component
@@ -15,9 +16,10 @@ import { ownerVatIncludedIn } from '../../utils/printedVat';
  * This component handles:
  * - Subtotal calculation from pre-priced items
  * - Discount application
- * - The VAT included in the total, as the slip prints it without a fiscal
- *   plugin (founder rule 07/10/2026): the owner's configured rate, 0 when no
- *   rate is set. It is never added to the total.
+ * - The VAT included in the total (founder rule 21/10/2026): the VAT the
+ *   server will store for these lines (each at its own category, else the
+ *   branch default), shown only when the slip prints VAT. It is never added
+ *   to the total, and no row shows when it is zero.
  * - Delivery fee (only for delivery orders per Requirements 9.5)
  */
 
@@ -38,6 +40,10 @@ interface OrderItem {
   basePrice?: number;
   customizations?: SelectedCustomization[];
   totalPrice?: number;
+  unitPrice?: number;
+  priceIncludesVat?: boolean | null;
+  vatCategoryCode?: string | null;
+  vatClass?: string | null;
 }
 
 interface CustomerInfo {
@@ -53,12 +59,14 @@ interface CartSummaryProps {
   onEditCustomer: () => void;
   onUpdateQuantity: (itemId: string, newQuantity: number) => void;
   onRemoveItem: (itemId: string) => void;
-  onPlaceOrder: () => void;
+  onPlaceOrder: (discountAmount: number) => void;
   isPlacingOrder?: boolean;
   /** Delivery fee from delivery zone (only used for delivery orders) */
   deliveryFee?: number;
-  /** The owner's VAT rate (`tax.default_tax_rate`), null when not set. */
-  ownerVatRatePercent?: number | null;
+  /** The branch VAT profile this till holds (`tax.*`). */
+  vatSettings?: GreeceOrderVatSettings | null;
+  /** The slip prints VAT («VAT on receipts», see `readSlipsPrintVat`). */
+  slipsPrintVat?: boolean;
 }
 
 export const CartSummary: React.FC<CartSummaryProps> = ({
@@ -71,7 +79,8 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
   onPlaceOrder,
   isPlacingOrder = false,
   deliveryFee: deliveryFeeProp = 0,
-  ownerVatRatePercent = null
+  vatSettings = null,
+  slipsPrintVat = false
 }) => {
   const { t } = useTranslation();
 
@@ -80,33 +89,40 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
   // `general.tax_rate` only gates the money settings' readiness; it is no VAT source.
   const { maxDiscountPercentage, isLoading: isLoadingSettings } = useDiscountSettings();
 
-  const subtotal = cartItems.reduce((sum, item) => {
-    // Always use totalPrice if available (includes customizations)
-    // Otherwise calculate from base price and customizations
-    if (item.totalPrice) {
-      return sum + (item.totalPrice * item.quantity);
-    }
-
-    // Fallback calculation including customizations
-    const customizationPrice = (item.customizations || []).reduce((custSum, c) => custSum + (c.price || 0), 0);
-    const itemTotal = (item.price + customizationPrice) * item.quantity;
-    return sum + itemTotal;
-  }, 0);
+  // New carts carry an explicit unit price, also sent unchanged to native.
+  const unitPrice = (item: OrderItem) => item.unitPrice ?? item.totalPrice ??
+    (item.price + (item.customizations || []).reduce((sum, c) => sum + (c.price || 0), 0));
+  const subtotal = cartItems.reduce((sum, item) => sum + unitPrice(item) * item.quantity, 0);
 
   // Calculate discount
   const discountValue = parseFloat(discountPercentage) || 0;
   const isDiscountValid = discountValue >= 0 && discountValue <= maxDiscountPercentage;
-  const discountAmount = isDiscountValid ? subtotal * (discountValue / 100) : 0;
+  const discountAmount = isDiscountValid ? Math.round(subtotal * discountValue) / 100 : 0;
   const subtotalAfterDiscount = subtotal - discountAmount;
 
   // Use delivery fee from prop (from delivery zone) only for delivery orders
   const deliveryFee = orderType === 'delivery' ? deliveryFeeProp : 0;
   const total = subtotalAfterDiscount + deliveryFee;
-  // The VAT inside the total at the owner's rate; prices include VAT.
-  const vatRatePercent = ownerVatRatePercent !== null && ownerVatRatePercent > 0 && ownerVatRatePercent <= 100
-    ? ownerVatRatePercent
+  // The order's one VAT, inside the total; prices include VAT.
+  const tax = slipsPrintVat
+    ? previewOrderVat({
+        ...(vatSettings ?? {}),
+        items: cartItems.map((item) => {
+          return {
+            menuItemId: item.menuItemId ?? null,
+            name: item.name,
+            quantity: item.quantity,
+            unitPrice: unitPrice(item),
+            priceIncludesVat: item.priceIncludesVat,
+            vatClass: item.vatClass ?? 'standard',
+            vatCategoryCode: item.vatCategoryCode ?? null,
+          };
+        }),
+        orderType,
+        discountAmount,
+        deliveryFee,
+      })
     : 0;
-  const tax = ownerVatIncludedIn(total, ownerVatRatePercent);
 
   if (cartItems.length === 0) {
     return (
@@ -208,7 +224,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
                 </button>
               </div>
               <span className="font-semibold text-gray-900">
-                {formatCurrency((item.totalPrice || item.price * item.quantity))}
+                {formatCurrency(unitPrice(item) * item.quantity)}
               </span>
             </div>
           </div>
@@ -263,10 +279,12 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
           )}
         </div>
 
-        <div className="flex justify-between text-sm">
-          <span className="text-gray-600">{t('menu.cart.tax', { percent: vatRatePercent })}</span>
-          <span className="text-gray-900">{formatCurrency(tax)}</span>
-        </div>
+        {tax > 0 && (
+          <div className="flex justify-between text-sm">
+            <span className="text-gray-600">{t('modals.orderDetails.tax')}</span>
+            <span className="text-gray-900">{formatCurrency(tax)}</span>
+          </div>
+        )}
         {orderType === 'delivery' && (
           <div className="flex justify-between text-sm">
             <span className="text-gray-600">{t('menu.cart.deliveryFee')}</span>
@@ -283,7 +301,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
 
       {/* Place Order Button */}
       <button
-        onClick={onPlaceOrder}
+        onClick={() => onPlaceOrder(discountAmount)}
         disabled={
           isPlacingOrder ||
           !customerInfo.name ||

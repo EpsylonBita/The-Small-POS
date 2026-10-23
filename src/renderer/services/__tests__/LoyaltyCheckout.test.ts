@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { saveOrderWithLoyalty, LoyaltyCheckoutRefused } from '../LoyaltyCheckout';
+import {
+  loyaltyCheckoutMessageKey,
+  LoyaltyCheckoutRefused,
+  LoyaltyRedemptionUnconfirmed,
+  saveOrderWithLoyalty,
+  secureLoyaltyCheckout,
+} from '../LoyaltyCheckout';
 
 const order = { clientRequestId: 'checkout-1', customer_id: '11111111-1111-4111-8111-111111111111' };
 const redemption = { customer_id: '11111111-1111-4111-8111-111111111111', points_redeemed: 100 };
@@ -58,4 +64,47 @@ it('never re-secures or releases a confirmed receipt redemption during save reco
   expect(result.success).toBe(false);
   expect(loyalty.redeemPoints).not.toHaveBeenCalled();
   expect(loyalty.releaseRedemption).not.toHaveBeenCalled();
+});
+
+// Ω11 (22/10/2026): points are redeemed only with a live server answer.
+describe('typed live redemption answers', () => {
+  it.each([
+    [{ success: false, errorCode: 'LOYALTY_REDEEM_OFFLINE' }, 'loyalty.redeem.offlineRefused'],
+    [{ success: false, errorCode: 'LOYALTY_REDEEM_REFUSED', reason: 'HTTP_400' }, 'loyalty.redeem.refusedBody'],
+    [{ success: false, errorCode: 'LOYALTY_REDEEM_REFUSED', reason: 'LOYALTY_REDEMPTION_RELEASED' }, 'loyalty.redeem.releasedForCheckout'],
+    [{ success: false }, null],
+  ])('offline or refused: nothing is saved, the sale continues without points (%o)', async (answer, key) => {
+    const loyalty = setup();
+    loyalty.redeemPoints.mockResolvedValue(answer as any);
+    const save = vi.fn();
+    const refusal = await saveOrderWithLoyalty(order, redemption, loyalty, save).catch(error => error);
+    expect(refusal).toBeInstanceOf(LoyaltyCheckoutRefused);
+    expect(loyaltyCheckoutMessageKey(refusal)).toBe(key);
+    expect(save).not.toHaveBeenCalled();
+    expect(loyalty.releaseRedemption).toHaveBeenCalledWith({ orderId: 'checkout-1' });
+  });
+
+  it('unconfirmed: keeps the attempt for Retry and never releases it', async () => {
+    const loyalty = setup();
+    loyalty.redeemPoints.mockResolvedValue({ success: false, errorCode: 'LOYALTY_REDEEM_UNCONFIRMED' } as any);
+    const save = vi.fn();
+    const pending = await saveOrderWithLoyalty(order, redemption, loyalty, save).catch(error => error);
+    expect(pending).toBeInstanceOf(LoyaltyRedemptionUnconfirmed);
+    expect(pending).not.toBeInstanceOf(LoyaltyCheckoutRefused);
+    expect(loyaltyCheckoutMessageKey(pending)).toBe('loyalty.redeem.confirmationRequired');
+    expect(save).not.toHaveBeenCalled();
+    expect(loyalty.releaseRedemption).not.toHaveBeenCalled();
+    // Retry sends the same checkout identity; the server's replay confirms it.
+    loyalty.redeemPoints.mockResolvedValue({ success: true, alreadyRedeemed: true } as any);
+    await secureLoyaltyCheckout(order, redemption, loyalty);
+    expect(loyalty.redeemPoints).toHaveBeenLastCalledWith({ customerId: '11111111-1111-4111-8111-111111111111', points: 100, orderId: 'checkout-1', checkoutReservation: true });
+    expect(loyalty.releaseRedemption).not.toHaveBeenCalled();
+  });
+
+  it('a refusal whose release is not confirmed is reported as such', async () => {
+    const loyalty = setup();
+    loyalty.redeemPoints.mockResolvedValue({ success: false, errorCode: 'LOYALTY_REDEEM_OFFLINE' } as any);
+    loyalty.releaseRedemption.mockResolvedValue({ success: false } as any);
+    await expect(secureLoyaltyCheckout(order, redemption, loyalty)).rejects.toThrow('LOYALTY_RELEASE_NOT_CONFIRMED');
+  });
 });

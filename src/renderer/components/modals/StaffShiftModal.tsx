@@ -74,7 +74,7 @@ import {
   cachedGiftCardsStore,
   checkedOnTill,
   describeOfflineOpeningRefusal,
-  offlineGiftCardsMessage,
+  giftCardOrdinaryOpeningMessage,
 } from '../../services/offlineCheckIn';
 import { getCachedTerminalCredentials } from '../../services/terminal-credentials';
 import { financialOpening, openingMatchesScope, parseOpeningCents, type FinancialOpeningScope } from '../../lib/financial-opening';
@@ -532,6 +532,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     scope?: FinancialOpeningScope;
     currency?: string;
     original?: ShiftFinancialOpeningView;
+    /** Ω7: an ordinary drawer where gift cards need the hosted opening; the server reviews it. */
+    ordinaryOpeningOffline?: boolean;
   }>({ status: 'checking' });
   const financialAttempts = useRef(new Map<string, {
     openingKey: string; openingCents: number; currency: string; issuanceRefused?: boolean;
@@ -542,7 +544,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const financialClear = useRef<Promise<boolean>>(Promise.resolve(true));
   // The person whose PIN this till checked itself because the server could not
   // be reached (native `source: 'offline'`): any role opens (founder,
-  // 15/10/2026), but a gift-card store's drawer opening needs the server.
+  // 15/10/2026), and a gift-card store's cashier opens an ordinary drawer the
+  // server reviews (founder, 21/10/2026, Ω7).
   const offlineCheckInStaffId = useRef<string | null>(null);
   const checkInGeneration = useRef(0);
   const checkInMounted = useRef(true);
@@ -624,23 +627,23 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           setFinancialEntry({ status: 'ready', scope, currency: frozen.currency, original });
           return;
         }
-        // A gift-card store's cashier opening is the hosted original opening:
-        // without the server it is refused, never an ordinary opening
-        // (Android parity: requiresOriginalFinancialOpening).
+        // A gift-card store's cashier opening is the hosted original opening,
+        // which needs the server. Without it (a PIN this till checked, or a
+        // gift-card status that can no longer be read) the cashier opens an
+        // ordinary drawer, flagged `ordinary_opening_offline` for the
+        // server's review (founder, 21/10/2026, Ω7; Android parity:
+        // requiresOriginalFinancialOpening). Gift-card sales stay online-only.
         const giftCardsStore = await cachedGiftCardsStore(bridge);
         if (!valid()) return;
-        const refuseWithoutServer = () => {
-          setFinancialEntry({ status: 'blocked' });
-          setError(offlineGiftCardsMessage(t));
-        };
+        const openOrdinaryForReview = () => setFinancialEntry({ status: 'ordinary', scope, ordinaryOpeningOffline: true });
         if (giftCardsStore && offlineCheckInStaffId.current === selectedStaff.id) {
-          refuseWithoutServer();
+          openOrdinaryForReview();
           return;
         }
         const capability = await new GiftCardsApiService(bridge).getStatus();
         if (!valid()) return;
         if (!capability.ok && giftCardsStore) {
-          refuseWithoutServer();
+          openOrdinaryForReview();
           return;
         }
         const optedIn = capability.ok && capability.data.enabled && capability.data.moduleEnabled &&
@@ -3254,20 +3257,30 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         ...(selectedRoleType === 'driver' || selectedRoleType === 'server'
           ? { startingAmount: usedStartingAmount }
           : { openingCash: usedOpeningCash }),
+        // \u03a97: asks the native open to flag this ordinary drawer for the
+        // server's review; a PIN this till checked is flagged natively anyway.
+        ...(selectedRoleType === 'cashier' && financialEntry.ordinaryOpeningOffline
+          ? { ordinaryOpeningOffline: true }
+          : {}),
       }) as unknown as ShiftIpcResult;
 
       if (result.success) {
         const shiftId = result?.shiftId || result?.data?.shiftId || result?.data?.id;
         emitCompatEvent('shift-updated', { shiftId, status: 'active' });
-        if ((result as { offlineCheckIn?: unknown }).offlineCheckIn === true) {
+        const offlineCheckIn = (result as { offlineCheckIn?: unknown }).offlineCheckIn === true;
+        const ordinaryOpeningOffline = (result as { ordinaryOpeningOffline?: unknown }).ordinaryOpeningOffline === true;
+        if (offlineCheckIn || ordinaryOpeningOffline) {
           // The queued open carries the offline_check_in marker the server
-          // re-checks once the connection is back.
-          offlineCheckInStaffId.current = null;
+          // re-checks once the connection is back, and \u03a97's
+          // ordinary_opening_offline flag it reviews.
+          if (offlineCheckIn) offlineCheckInStaffId.current = null;
+          const message = ordinaryOpeningOffline
+            ? giftCardOrdinaryOpeningMessage(t)
+            : t('modals.staffShift.offlineCheckIn.checkedInMessage', 'The server checks this check-in once the connection is back.');
           toast(
-            `${t('modals.staffShift.offlineCheckIn.checkedInTitle', 'Checked in without a connection')}. ${t(
-              'modals.staffShift.offlineCheckIn.checkedInMessage',
-              'The server checks this check-in once the connection is back.',
-            )}`,
+            offlineCheckIn
+              ? `${t('modals.staffShift.offlineCheckIn.checkedInTitle', 'Checked in without a connection')}. ${message}`
+              : message,
             { duration: 8000, icon: '\u2139\ufe0f' },
           );
         }

@@ -29,6 +29,22 @@ export interface ScheduleImportResult {
   shifts: ImportedScheduleShift[];
   format: 'json' | 'csv' | 'xlsx' | 'ics' | 'pdf' | 'docx' | 'txt' | null;
   unmatchedStaffLabels?: string[];
+  /** Rows skipped because a time could not be read; never sent raw. */
+  invalidRows?: number;
+}
+
+/** What `toBranchInstant` needs: the branch zone and the workbook's date system. */
+export interface BranchInstantContext {
+  timeZone?: string;
+  /** The workbook counts serial dates from 1904-01-01 (Mac Excel). */
+  date1904?: boolean;
+}
+
+type RowsContext = ScheduleImportContext & BranchInstantContext;
+
+interface RowsResult {
+  shifts: ImportedScheduleShift[];
+  invalidRows: number;
 }
 
 export const STAFF_SCHEDULE_IMPORT_ACCEPT =
@@ -178,36 +194,276 @@ function resolveStaffFromRow(row: Record<string, unknown>, ctx?: ScheduleImportC
   return null;
 }
 
-function rowsToShifts(rows: Array<Record<string, unknown>>, ctx?: ScheduleImportContext): ImportedScheduleShift[] {
+const DAY_MS = 86_400_000;
+const PLAIN_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DATE_TIME_RE =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+
+interface WallClock {
+  date: string;
+  hour: number;
+  minute: number;
+  second: number;
+  millisecond: number;
+}
+
+interface ResolvedInstant {
+  iso: string;
+  /** Read as a clock time on the row's date column. */
+  timeOnly: boolean;
+}
+
+const pad = (value: number, width = 2) => String(value).padStart(width, '0');
+
+function isBlank(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === 'string' && value.trim() === '');
+}
+
+function validCalendarDate(year: number, month: number, day: number): string | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return `${pad(year, 4)}-${pad(month)}-${pad(day)}`;
+}
+
+function validClock(hour: number, minute: number, second: number): boolean {
+  return hour >= 0 && hour < 24 && minute >= 0 && minute < 60 && second >= 0 && second < 60;
+}
+
+/** An Excel serial (days since the workbook epoch) as calendar parts, read in UTC. */
+function excelSerialParts(serial: number, date1904: boolean): { date: string; seconds: number } {
+  const epoch = date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
+  const instant = new Date(epoch + Math.round(serial * 86_400) * 1000);
+  return {
+    date: instant.toISOString().slice(0, 10),
+    seconds: instant.getUTCHours() * 3600 + instant.getUTCMinutes() * 60 + instant.getUTCSeconds(),
+  };
+}
+
+function addCalendarDays(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** The calendar date a date column holds: `YYYY-MM-DD`, an Excel serial or a Date. */
+function readDateHint(value: unknown, ctx?: BranchInstantContext): string | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 1 ? excelSerialParts(Math.floor(value), Boolean(ctx?.date1904)).date : null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? null
+      : validCalendarDate(value.getFullYear(), value.getMonth() + 1, value.getDate());
+  }
+  const text = readString(value);
+  const match = text?.match(PLAIN_DATE_RE);
+  return match ? validCalendarDate(Number(match[1]), Number(match[2]), Number(match[3])) : null;
+}
+
+function wallClockToIso(wall: WallClock, ctx: BranchInstantContext | undefined): string {
+  const timeZone = ctx?.timeZone;
+  if (!timeZone) {
+    throw new Error('TIMEZONE_UNAVAILABLE');
+  }
+  const iso = branchWallTimeToIso(`${wall.date}T${pad(wall.hour)}:${pad(wall.minute)}:${pad(wall.second)}`, timeZone);
+  return wall.millisecond ? new Date(Date.parse(iso) + wall.millisecond).toISOString() : iso;
+}
+
+function fractionToMilliseconds(fraction: string | undefined): number {
+  return fraction ? Math.round(Number(`0.${fraction}`) * 1000) : 0;
+}
+
+/** Minutes east of UTC for `Z`, `+03`, `+0300` or `+03:00`; null when malformed. */
+function offsetMinutes(zone: string): number | null {
+  if (zone.toUpperCase() === 'Z') {
+    return 0;
+  }
+  const match = zone.match(/^([+-])(\d{2}):?(\d{2})?$/);
+  if (!match) {
+    return null;
+  }
+  const hours = Number(match[2]);
+  const minutes = match[3] ? Number(match[3]) : 0;
+  if (hours > 23 || minutes > 59) {
+    return null;
+  }
+  return (match[1] === '-' ? -1 : 1) * (hours * 60 + minutes);
+}
+
+function wallFromSeconds(date: string, seconds: number): WallClock {
+  return { date, hour: Math.floor(seconds / 3600), minute: Math.floor((seconds % 3600) / 60), second: seconds % 60, millisecond: 0 };
+}
+
+function resolveInstant(value: unknown, ctx: BranchInstantContext | undefined, dateHint: unknown): ResolvedInstant | null {
+  const hintDate = () => readDateHint(dateHint, ctx);
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value < 0) {
+      return null;
+    }
+    if (value < 1) {
+      // A time-only cell: a fraction of a day on the row's date.
+      const date = hintDate();
+      if (!date) {
+        return null;
+      }
+      const seconds = Math.round(value * 86_400);
+      if (seconds >= 86_400) {
+        return null;
+      }
+      return { iso: wallClockToIso(wallFromSeconds(date, seconds), ctx), timeOnly: true };
+    }
+    const { date, seconds } = excelSerialParts(value, Boolean(ctx?.date1904));
+    return { iso: wallClockToIso(wallFromSeconds(date, seconds), ctx), timeOnly: false };
+  }
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      return null;
+    }
+    const date = validCalendarDate(value.getFullYear(), value.getMonth() + 1, value.getDate());
+    if (!date) {
+      return null;
+    }
+    const wall = { date, hour: value.getHours(), minute: value.getMinutes(), second: value.getSeconds(), millisecond: value.getMilliseconds() };
+    return { iso: wallClockToIso(wall, ctx), timeOnly: false };
+  }
+
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) {
+    return null;
+  }
+
+  const dateTime = text.match(DATE_TIME_RE);
+  if (dateTime) {
+    const [, y, mo, d, h, mi, s, fraction, zone] = dateTime;
+    const date = validCalendarDate(Number(y), Number(mo), Number(d));
+    const hour = Number(h);
+    const minute = Number(mi);
+    const second = s ? Number(s) : 0;
+    if (!date || !validClock(hour, minute, second)) {
+      return null;
+    }
+    const millisecond = fractionToMilliseconds(fraction);
+    if (zone) {
+      const offset = offsetMinutes(zone);
+      if (offset === null) {
+        return null;
+      }
+      const utc = Date.UTC(Number(y), Number(mo) - 1, Number(d), hour, minute, second, millisecond) - offset * 60_000;
+      return { iso: new Date(utc).toISOString(), timeOnly: false };
+    }
+    return { iso: wallClockToIso({ date, hour, minute, second, millisecond }, ctx), timeOnly: false };
+  }
+
+  const timeOnly = text.match(TIME_ONLY_RE);
+  if (timeOnly) {
+    const hour = Number(timeOnly[1]);
+    const minute = Number(timeOnly[2]);
+    const second = timeOnly[3] ? Number(timeOnly[3]) : 0;
+    const date = hintDate();
+    if (!date || !validClock(hour, minute, second)) {
+      return null;
+    }
+    return { iso: wallClockToIso({ date, hour, minute, second, millisecond: 0 }, ctx), timeOnly: true };
+  }
+
+  return null;
+}
+
+/**
+ * One imported shift time as an instant (ISO, `Z`), read in the branch zone.
+ *
+ * - an Excel serial (days since 1899-12-30, or 1904-01-01 when the workbook
+ *   says so) is a wall-clock time; below 1 it is a time on `dateHint`;
+ * - `YYYY-MM-DD[ T]HH:MM[:SS[.f]]` without a zone is a branch wall-clock time;
+ * - a value with `Z` or an offset is already an instant;
+ * - a bare `HH:MM[:SS]` is a time on `dateHint` (the row's date column);
+ * - a Date object counts by its wall-clock parts.
+ *
+ * Anything else returns null: the row is skipped, never sent raw. A branch
+ * time without a branch zone throws `TIMEZONE_UNAVAILABLE`; a wall-clock time
+ * inside a DST gap throws `BRANCH_TIME_INVALID`.
+ */
+export function toBranchInstant(value: unknown, ctx?: BranchInstantContext, dateHint?: unknown): string | null {
+  return resolveInstant(value, ctx, dateHint)?.iso ?? null;
+}
+
+/**
+ * A time after the shift start. A clock time read on the row's date that
+ * falls before the start belongs to the next day (an overnight shift).
+ */
+function resolveAfterStart(
+  value: unknown,
+  ctx: RowsContext | undefined,
+  dateHint: unknown,
+  start: string,
+): string | null {
+  const resolved = resolveInstant(value, ctx, dateHint);
+  if (!resolved) {
+    return null;
+  }
+  if (!resolved.timeOnly || Date.parse(resolved.iso) >= Date.parse(start)) {
+    return resolved.iso;
+  }
+  const date = readDateHint(dateHint, ctx);
+  return date ? resolveInstant(value, ctx, addCalendarDays(date, 1))?.iso ?? null : null;
+}
+
+function rowsToShifts(rows: Array<Record<string, unknown>>, ctx?: RowsContext): RowsResult {
   const shifts: ImportedScheduleShift[] = [];
+  let invalidRows = 0;
 
   for (const row of rows) {
     const staffId = resolveStaffFromRow(row, ctx);
-    const startTime = readString(row.startTime ?? row.start_time ?? row['Start Time']);
-    const endTime = readString(row.endTime ?? row.end_time ?? row['End Time']);
-    if (!staffId || !startTime || !endTime) {
+    const startRaw = row.startTime ?? row.start_time ?? row['Start Time'];
+    const endRaw = row.endTime ?? row.end_time ?? row['End Time'];
+    if (!staffId || isBlank(startRaw) || isBlank(endRaw)) {
       continue;
     }
 
+    const dateHint = row.date ?? row.Date ?? row.shift_date ?? row.shiftDate ?? row['Shift Date'];
+    const startTime = resolveInstant(startRaw, ctx, dateHint)?.iso ?? null;
+    const endTime = startTime ? resolveAfterStart(endRaw, ctx, dateHint, startTime) : null;
     const breakStartRaw = row.breakStart ?? row.break_start ?? row['Break Start'];
     const breakEndRaw = row.breakEnd ?? row.break_end ?? row['Break End'];
+    const breakStart = startTime && !isBlank(breakStartRaw)
+      ? resolveAfterStart(breakStartRaw, ctx, dateHint, startTime)
+      : null;
+    const breakEnd = startTime && !isBlank(breakEndRaw)
+      ? resolveAfterStart(breakEndRaw, ctx, dateHint, startTime)
+      : null;
+    if (
+      !startTime ||
+      !endTime ||
+      (!isBlank(breakStartRaw) && !breakStart) ||
+      (!isBlank(breakEndRaw) && !breakEnd)
+    ) {
+      invalidRows += 1;
+      continue;
+    }
+
     const notesRaw = row.notes ?? row.Notes;
 
     shifts.push({
       staffId,
       startTime,
       endTime,
-      breakStart: readString(breakStartRaw),
-      breakEnd: readString(breakEndRaw),
+      breakStart,
+      breakEnd,
       status: normalizeStatus(row.status ?? row.Status),
       notes: readString(notesRaw),
     });
   }
 
-  return shifts;
+  return { shifts, invalidRows };
 }
 
-function extractMetaPayload(rawText: string, ctx?: ScheduleImportContext): ImportedScheduleShift[] | null {
+function extractMetaPayload(rawText: string, ctx?: ScheduleImportContext): RowsResult | null {
   const beginIdx = rawText.indexOf(META_BEGIN);
   const endIdx = rawText.indexOf(META_END, beginIdx + META_BEGIN.length);
   if (beginIdx === -1 || endIdx === -1) {
@@ -222,26 +478,30 @@ function extractMetaPayload(rawText: string, ctx?: ScheduleImportContext): Impor
     return null;
   }
 
+  let parsed: { shifts?: unknown };
   try {
-    const parsed = JSON.parse(inner.slice(start, end + 1)) as { shifts?: unknown };
-    if (!Array.isArray(parsed?.shifts)) {
-      return null;
-    }
-    return rowsToShifts(parsed.shifts as Array<Record<string, unknown>>, ctx);
+    parsed = JSON.parse(inner.slice(start, end + 1)) as { shifts?: unknown };
   } catch {
     return null;
   }
+  if (!Array.isArray(parsed?.shifts)) {
+    return null;
+  }
+  // Time errors (no branch zone, DST gap) reach the operator, as in a spreadsheet.
+  return rowsToShifts(parsed.shifts as Array<Record<string, unknown>>, ctx);
 }
 
-async function parseJSONFile(file: File, ctx?: ScheduleImportContext): Promise<ImportedScheduleShift[]> {
+const NO_ROWS: RowsResult = { shifts: [], invalidRows: 0 };
+
+async function parseJSONFile(file: File, ctx?: ScheduleImportContext): Promise<RowsResult> {
   const parsed = JSON.parse(await file.text()) as { shifts?: unknown };
   if (!Array.isArray(parsed?.shifts)) {
-    return [];
+    return NO_ROWS;
   }
   return rowsToShifts(parsed.shifts as Array<Record<string, unknown>>, ctx);
 }
 
-async function parseCSVFile(file: File, ctx?: ScheduleImportContext): Promise<ImportedScheduleShift[]> {
+async function parseCSVFile(file: File, ctx?: ScheduleImportContext): Promise<RowsResult> {
   const Papa = (await import('papaparse')).default;
   const result = Papa.parse<Record<string, unknown>>(await file.text(), {
     header: true,
@@ -439,15 +699,20 @@ function parseMatrixSheet(rows: unknown[][], ctx?: ScheduleImportContext): { shi
 async function parseXLSXFile(
   file: File,
   ctx?: ScheduleImportContext,
-): Promise<{ shifts: ImportedScheduleShift[]; unmatched: string[] }> {
+): Promise<{ shifts: ImportedScheduleShift[]; unmatched: string[]; invalidRows: number }> {
   const XLSX = await import('xlsx');
   const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
   const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
 
   if (firstSheet) {
-    const fromColumns = rowsToShifts(XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet), ctx);
-    if (fromColumns.length > 0) {
-      return { shifts: fromColumns, unmatched: [] };
+    // Raw cells: dates and times arrive as Excel serial numbers, read in the
+    // branch zone with the workbook's own date system.
+    const fromColumns = rowsToShifts(XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet), {
+      ...ctx,
+      date1904: Boolean(workbook.Workbook?.WBProps?.date1904),
+    });
+    if (fromColumns.shifts.length > 0 || fromColumns.invalidRows > 0) {
+      return { shifts: fromColumns.shifts, unmatched: [], invalidRows: fromColumns.invalidRows };
     }
   }
 
@@ -464,39 +729,74 @@ async function parseXLSXFile(
     unmatched.forEach((name) => allUnmatched.add(name));
   }
 
-  return { shifts: allShifts, unmatched: [...allUnmatched] };
+  return { shifts: allShifts, unmatched: [...allUnmatched], invalidRows: 0 };
 }
 
-async function parseICSFile(file: File, ctx?: ScheduleImportContext): Promise<ImportedScheduleShift[]> {
+/** The IANA zone an ICS `TZID` names, or null when this runtime does not know it. */
+function icsZone(params: string): string | null | undefined {
+  const match = params.match(/;TZID=([^;:]+)/i);
+  if (!match) {
+    return undefined;
+  }
+  const zone = match[1].trim().replace(/^"(.*)"$/, '$1');
+  try {
+    branchWallTime(new Date(0), zone);
+    return zone;
+  } catch {
+    return null;
+  }
+}
+
+/** An ICS date-time (`YYYYMMDDTHHMMSS[Z]`, local to its `TZID` or floating). */
+function icsInstant(property: { params: string; value: string } | null, ctx?: ScheduleImportContext): string | null {
+  if (!property || /;VALUE=DATE(?![-\w])/i.test(property.params)) {
+    return null;
+  }
+  const match = property.value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/i);
+  if (!match) {
+    return null;
+  }
+  const [, y, mo, d, h, mi, sec, z] = match;
+  const text = `${y}-${mo}-${d}T${h}:${mi}:${sec}${z ? 'Z' : ''}`;
+  if (z) {
+    return toBranchInstant(text);
+  }
+  const zone = icsZone(property.params);
+  if (zone === null) {
+    // A zone this till cannot read: never guess another one.
+    return null;
+  }
+  return toBranchInstant(text, { timeZone: zone ?? ctx?.timeZone });
+}
+
+async function parseICSFile(file: File, ctx?: ScheduleImportContext): Promise<RowsResult> {
   const text = await file.text();
   const shifts: ImportedScheduleShift[] = [];
+  let invalidRows = 0;
   const blocks = text.split(/BEGIN:VEVENT/i).slice(1);
 
   for (const block of blocks) {
     const segment = block.split(/END:VEVENT/i)[0] ?? '';
-    const get = (key: string) => {
-      const match = segment.match(new RegExp(`${key}[^:\n]*:([^\n\r]+)`, 'i'));
-      return match ? match[1].trim() : null;
+    const property = (key: string) => {
+      const match = segment.match(new RegExp(`(?:^|[\r\n])${key}([^:\r\n]*):([^\r\n]+)`, 'i'));
+      return match ? { params: match[1], value: match[2].trim() } : null;
     };
-    const dtstart = get('DTSTART');
-    const dtend = get('DTEND');
+    const get = (key: string) => property(key)?.value ?? null;
+    const dtstart = property('DTSTART');
+    const dtend = property('DTEND');
     if (!dtstart || !dtend) {
       continue;
     }
 
-    const toISO = (raw: string) => {
-      const match = raw.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/);
-      if (!match) {
-        return null;
-      }
-      const [, y, mo, d, h, mi, s, z] = match;
-      return `${y}-${mo}-${d}T${h}:${mi}:${s}${z || ''}`;
-    };
-    const startTime = toISO(dtstart);
-    const endTime = toISO(dtend);
     const staffLabel = (get('SUMMARY') || '').replace(/^Shift:\s*/i, '').trim();
     const staffId = resolveStaffId(staffLabel, ctx?.staffList);
-    if (!startTime || !endTime || !staffId) {
+    if (!staffId) {
+      continue;
+    }
+    const startTime = icsInstant(dtstart, ctx);
+    const endTime = icsInstant(dtend, ctx);
+    if (!startTime || !endTime) {
+      invalidRows += 1;
       continue;
     }
     shifts.push({
@@ -509,20 +809,20 @@ async function parseICSFile(file: File, ctx?: ScheduleImportContext): Promise<Im
     });
   }
 
-  return shifts;
+  return { shifts, invalidRows };
 }
 
-async function parseTXTFile(file: File, ctx?: ScheduleImportContext): Promise<ImportedScheduleShift[]> {
-  return extractMetaPayload(await file.text(), ctx) ?? [];
+async function parseTXTFile(file: File, ctx?: ScheduleImportContext): Promise<RowsResult> {
+  return extractMetaPayload(await file.text(), ctx) ?? NO_ROWS;
 }
 
-async function parseDOCXFile(file: File, ctx?: ScheduleImportContext): Promise<ImportedScheduleShift[]> {
+async function parseDOCXFile(file: File, ctx?: ScheduleImportContext): Promise<RowsResult> {
   const mammoth = await import('mammoth');
   const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-  return extractMetaPayload(result.value, ctx) ?? [];
+  return extractMetaPayload(result.value, ctx) ?? NO_ROWS;
 }
 
-async function parsePDFFile(file: File, ctx?: ScheduleImportContext): Promise<ImportedScheduleShift[]> {
+async function parsePDFFile(file: File, ctx?: ScheduleImportContext): Promise<RowsResult> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   (pdfjs as { GlobalWorkerOptions?: { workerSrc?: string } }).GlobalWorkerOptions = {
     ...(pdfjs as { GlobalWorkerOptions?: { workerSrc?: string } }).GlobalWorkerOptions,
@@ -541,40 +841,56 @@ async function parsePDFFile(file: File, ctx?: ScheduleImportContext): Promise<Im
     const textContent = await page.getTextContent();
     chunks.push(textContent.items.map((item) => item.str ?? '').join(' '));
   }
-  return extractMetaPayload(chunks.join('\n'), ctx) ?? [];
+  return extractMetaPayload(chunks.join('\n'), ctx) ?? NO_ROWS;
+}
+
+function rowsResult(format: ScheduleImportResult['format'], rows: RowsResult): ScheduleImportResult {
+  return { shifts: rows.shifts, format, invalidRows: rows.invalidRows };
 }
 
 export async function importStaffScheduleFile(file: File, ctx?: ScheduleImportContext): Promise<ScheduleImportResult> {
   const name = file.name.toLowerCase();
   if (name.endsWith('.json')) {
-    return { shifts: await parseJSONFile(file, ctx), format: 'json' };
+    return rowsResult('json', await parseJSONFile(file, ctx));
   }
   if (name.endsWith('.csv')) {
-    return { shifts: await parseCSVFile(file, ctx), format: 'csv' };
+    return rowsResult('csv', await parseCSVFile(file, ctx));
   }
   if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
     const result = await parseXLSXFile(file, ctx);
-    return { shifts: result.shifts, format: 'xlsx', unmatchedStaffLabels: result.unmatched };
+    return {
+      shifts: result.shifts,
+      format: 'xlsx',
+      unmatchedStaffLabels: result.unmatched,
+      invalidRows: result.invalidRows,
+    };
   }
   if (name.endsWith('.ics')) {
-    return { shifts: await parseICSFile(file, ctx), format: 'ics' };
+    return rowsResult('ics', await parseICSFile(file, ctx));
   }
   if (name.endsWith('.pdf')) {
-    return { shifts: await parsePDFFile(file, ctx), format: 'pdf' };
+    return rowsResult('pdf', await parsePDFFile(file, ctx));
   }
   if (name.endsWith('.docx') || name.endsWith('.doc')) {
-    return { shifts: await parseDOCXFile(file, ctx), format: 'docx' };
+    return rowsResult('docx', await parseDOCXFile(file, ctx));
   }
   if (name.endsWith('.txt')) {
-    return { shifts: await parseTXTFile(file, ctx), format: 'txt' };
+    return rowsResult('txt', await parseTXTFile(file, ctx));
   }
 
   try {
-    return { shifts: await parseJSONFile(file, ctx), format: 'json' };
-  } catch {
+    return rowsResult('json', await parseJSONFile(file, ctx));
+  } catch (jsonError) {
+    // Only an unreadable JSON file falls back; a time error reaches the operator.
+    if (!(jsonError instanceof SyntaxError)) {
+      throw jsonError;
+    }
     try {
-      return { shifts: await parseCSVFile(file, ctx), format: 'csv' };
-    } catch {
+      return rowsResult('csv', await parseCSVFile(file, ctx));
+    } catch (csvError) {
+      if (csvError instanceof Error && ['TIMEZONE_UNAVAILABLE', 'BRANCH_TIME_INVALID'].includes(csvError.message)) {
+        throw csvError;
+      }
       return { shifts: [], format: null };
     }
   }

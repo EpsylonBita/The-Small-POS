@@ -1855,6 +1855,11 @@ pub async fn report_submit_z_report(
 /// with what to do, instead of the native "pre-Z-report sync failed: reconcile
 /// remote orders: Cannot reach admin dashboard at …" a Greek cashier used to
 /// read. Nothing is generated, deleted or advanced; the day stays open.
+///
+/// Since the offline week (founder 21/10/2026) only a till that may not close
+/// the day locally answers it (`close_z_report_without_server`): a waiter
+/// phone, or a store whose fiscal plugin is active or never confirmed
+/// inactive. `localCloseRefused` names which.
 pub(crate) const Z_REPORT_OFFLINE_CODE: &str = "Z_REPORT_OFFLINE";
 
 fn z_report_offline_response(stage: &str) -> serde_json::Value {
@@ -2008,14 +2013,19 @@ async fn submit_z_report_through_stages(
     // held by the fiscal guard nor by its fiscal rows in the drain, while an
     // unreachable server keeps the fail-closed behaviour (29/09/2026).
     let _ = crate::fiscal::status::refresh_from_stored_credentials().await;
+    // Local Zs the server confirmed meanwhile: their windows are cleaned
+    // first, in order (offline week, founder 21/10/2026).
+    zreport::sweep_confirmed_z_windows_now(db);
 
     *stage = "pre_z_sync";
     let pre_closeout_drain =
         match crate::sync::force_sync_until_closeout_stable(db, sync_state, app).await {
             Ok(state) => state,
+            // Offline week (Ω3 α): the day closes on this till and its Z is
+            // sent once the server is reachable, unless the till may not.
             Err(error) if closeout_drain_failed_offline(&error).await => {
-                warn!(error = %error, "Z refused: the server cannot be reached");
-                return Ok(z_report_offline_response("pre_z_sync"));
+                warn!(error = %error, "Z without the server: closing the day on this till");
+                return close_z_report_without_server(payload, db, app, stage, None);
             }
             Err(error) => {
                 return Err(format!(
@@ -2054,10 +2064,8 @@ async fn submit_z_report_through_stages(
         match crate::sync::force_sync_until_closeout_stable(db, sync_state, app).await {
             Ok(_) => {}
             Err(error) if closeout_drain_failed_offline(&error).await => {
-                warn!(error = %error, "Z refused: the server cannot be reached");
-                return Ok(z_report_offline_response(
-                    crate::unit_shift_readiness::UNIT_SHIFTS_STAGE,
-                ));
+                warn!(error = %error, "Z without the server: closing the day on this till");
+                return close_z_report_without_server(payload, db, app, stage, None);
             }
             Err(error) => {
                 return Err(format!(
@@ -2065,6 +2073,18 @@ async fn submit_z_report_through_stages(
                 ))
             }
         }
+    }
+
+    // Earlier Zs closed on this till are still waiting for the server after
+    // this drain: this Z queues behind them, so it closes locally too and the
+    // window order holds (design-o3-o4, "a new Z while local Zs are pending").
+    // A till that may not close locally falls through to today's sync gate,
+    // which names the queued Zs.
+    if zreport::must_close_behind_local_zs(db, None)?
+        && zreport::local_close_refusal(db, payload)?.is_none()
+    {
+        info!("Earlier local Zs still wait for the server: this Z closes on this till too");
+        return close_z_report_without_server(payload, db, app, stage, None);
     }
 
     *stage = "sync_blocked";
@@ -2134,17 +2154,22 @@ async fn submit_z_report_through_stages(
     };
 
     *stage = "post_submission_sync";
-    let post_submission_drain =
-        match crate::sync::force_sync_until_closeout_stable(db, sync_state, app).await {
-            Ok(state) => state,
-            // The prepared Z stays queued and the day open: the next attempt
-            // sends it first, once the connection is back.
-            Err(error) if closeout_drain_failed_offline(&error).await => {
-                warn!(error = %error, "Z refused after prepare: the server cannot be reached");
-                return Ok(z_report_offline_response("post_submission_sync"));
-            }
-            Err(error) => return Err(format!("Cannot close day: Z-report sync failed: {error}")),
-        };
+    let post_submission_drain = match crate::sync::force_sync_until_closeout_stable(
+        db, sync_state, app,
+    )
+    .await
+    {
+        Ok(state) => state,
+        // The connection dropped after the prepare: the prepared Z closes
+        // on this till and is sent once the server is reachable. A till
+        // that may not close locally keeps it queued with the day open,
+        // as before: the next attempt sends it first.
+        Err(error) if closeout_drain_failed_offline(&error).await => {
+            warn!(error = %error, "Z after prepare without the server: closing the day on this till");
+            return close_z_report_without_server(payload, db, app, stage, Some(prepared));
+        }
+        Err(error) => return Err(format!("Cannot close day: Z-report sync failed: {error}")),
+    };
     info!(
         passes_executed = post_submission_drain.passes_executed,
         any_progress = post_submission_drain.any_progress,
@@ -2160,6 +2185,15 @@ async fn submit_z_report_through_stages(
     if let Some(response) = queued_z_held_for_phone_shifts(db, payload).await? {
         *stage = crate::unit_shift_readiness::UNIT_SHIFTS_STAGE;
         return Ok(response);
+    }
+    // This Z waits behind earlier local Zs the drain could not confirm: it
+    // closes on this till as they did (window order). Without earlier local
+    // Zs nothing changes here.
+    if zreport::must_close_behind_local_zs(db, prepared.z_report_id.as_deref())?
+        && zreport::local_close_refusal(db, payload)?.is_none()
+    {
+        info!("Earlier local Zs still wait for the server: this Z closes on this till too");
+        return close_z_report_without_server(payload, db, app, stage, Some(prepared));
     }
     if let Some(response) =
         crate::sync::build_sync_closeout_blocked_response_for_stage(db, "Z-report submission")?
@@ -2185,26 +2219,147 @@ async fn submit_z_report_through_stages(
         .or_else(|| extract_z_report_id_from_payload(payload));
 
     if let Some(z_report_id) = z_report_id {
-        if crate::print::is_print_action_enabled(db, "z_report") {
-            match print::enqueue_print_job(db, "z_report", &z_report_id, None, app) {
-                Ok(job) => {
-                    if let Some(obj) = result.as_object_mut() {
-                        obj.insert("autoPrintJob".to_string(), job);
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        z_report_id = %z_report_id,
-                        error = %error,
-                        "Failed to enqueue automatic z-report print job"
-                    );
-                }
-            }
-        }
+        enqueue_automatic_z_report_print(db, app, &z_report_id, &mut result);
     }
 
     let _ = app.emit("sync_complete", serde_json::json!({ "entity": "z_report" }));
     *stage = "submitted";
+    Ok(result)
+}
+
+/// The printed Z of a closed day, when the store prints Zs.
+fn enqueue_automatic_z_report_print(
+    db: &db::DbState,
+    app: &tauri::AppHandle,
+    z_report_id: &str,
+    result: &mut serde_json::Value,
+) {
+    if !crate::print::is_print_action_enabled(db, "z_report") {
+        return;
+    }
+    match print::enqueue_print_job(db, "z_report", z_report_id, None, app) {
+        Ok(job) => {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("autoPrintJob".to_string(), job);
+            }
+        }
+        Err(error) => {
+            warn!(
+                z_report_id = %z_report_id,
+                error = %error,
+                "Failed to enqueue automatic z-report print job"
+            );
+        }
+    }
+}
+
+/// The refusal of a Z the till cannot close without the server, naming why
+/// it may not close locally (waiter phone, active or unconfirmed fiscal
+/// plugin, nothing stored to send): today's `Z_REPORT_OFFLINE`.
+fn z_report_offline_refusal(stage: &str, reason: &str) -> serde_json::Value {
+    let mut response = z_report_offline_response(stage);
+    response["localCloseRefused"] = serde_json::Value::String(reason.to_string());
+    response
+}
+
+/// The Z without the server (offline week Ω3 α, founder 21/10/2026;
+/// design-o3-o4 §Desktop): the local stages
+/// ([`close_z_report_locally_core`]), then, once the day closed on this till,
+/// the printed Z and the `sync_complete` event.
+fn close_z_report_without_server(
+    payload: &serde_json::Value,
+    db: &db::DbState,
+    app: &tauri::AppHandle,
+    stage: &mut &'static str,
+    prepared: Option<zreport::PreparedZReportSubmission>,
+) -> Result<serde_json::Value, String> {
+    let mut result = close_z_report_locally_core(payload, db, stage, prepared)?;
+    if result
+        .get("localClose")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Ok(result);
+    }
+    let z_report_id = result
+        .get("zReportId")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    if let Some(z_report_id) = z_report_id {
+        enqueue_automatic_z_report_print(db, app, &z_report_id, &mut result);
+    }
+    let _ = app.emit("sync_complete", serde_json::json!({ "entity": "z_report" }));
+    Ok(result)
+}
+
+/// The local stages of a Z without the server, with no `AppHandle` (the
+/// offline-week tests drive this). They run in the online order minus the
+/// server: no phone-shift check (phones cannot work offline), no sync gate
+/// (unsent rows are expected), and today's payment blockers (without the
+/// mirror repair, which needs the server), active-shift rule R3, gift close
+/// and fiscal guard. Then the prepared Z closes on this till in one
+/// transaction (`zreport::close_prepared_z_report_locally`) instead of the
+/// post-submission drain and the rollover: nothing is deleted until the
+/// server confirms it. `prepared`: a Z already prepared in this attempt (the
+/// connection dropped after the prepare). Answers the local close, or the
+/// refusal or blocker that stopped it; `stage` ends at `closed_local`.
+pub(crate) fn close_z_report_locally_core(
+    payload: &serde_json::Value,
+    db: &db::DbState,
+    stage: &mut &'static str,
+    prepared: Option<zreport::PreparedZReportSubmission>,
+) -> Result<serde_json::Value, String> {
+    let reached = *stage;
+    if let Some(reason) = zreport::local_close_refusal(db, payload)? {
+        warn!(
+            reason,
+            "Z refused: this till may not close the day without the server"
+        );
+        return Ok(z_report_offline_refusal(reached, reason));
+    }
+
+    let prepared = match prepared {
+        Some(prepared) => prepared,
+        None => {
+            *stage = "payment_blockers";
+            let blockers = zreport::unsettled_payment_blockers(db, payload)?;
+            if !blockers.is_empty() {
+                return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+                    "Cannot generate Z-report",
+                    &blockers,
+                ));
+            }
+
+            *stage = "fiscal_guard";
+            if let Some(response) = zreport::fiscal_close_blocked_response(db, payload)? {
+                return Ok(response);
+            }
+
+            *stage = "prepare";
+            match zreport::prepare_z_report_submission_with_phone_shifts(db, payload, None) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let blockers = zreport::unsettled_payment_blockers(db, payload)?;
+                    if blockers.is_empty() {
+                        return Err(error);
+                    }
+                    return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+                        "Cannot generate Z-report",
+                        &blockers,
+                    ));
+                }
+            }
+        }
+    };
+    if prepared.z_report_id.is_none() {
+        // Nothing stored to send later (no closed shift in the window): the
+        // day closes once the server is reachable, as before.
+        return Ok(z_report_offline_refusal(reached, "no_report"));
+    }
+
+    *stage = "local_close";
+    let result = zreport::close_prepared_z_report_locally(db, &prepared)?;
+    *stage = "closed_local";
     Ok(result)
 }
 
@@ -3374,19 +3529,124 @@ mod dto_tests {
         assert_eq!(attempt.stage, "pre_z_sync");
     }
 
+    /// Offline week (founder 21/10/2026, Ω3 α): every drain that finds the
+    /// till offline closes the day on this till (the pre-Z drain, the drain
+    /// of a Z the phones held, and the post-submission drain with the Z it
+    /// already prepared). The typed `Z_REPORT_OFFLINE` refusal stays for a
+    /// till that may not close locally.
     #[test]
-    fn both_closeout_drains_answer_offline_with_the_typed_refusal() {
+    fn every_closeout_drain_that_finds_the_till_offline_closes_the_day_locally() {
         let source = include_str!("analytics.rs");
         let stages = source_slice(source, "async fn submit_z_report_through_stages(");
+        let body_end = stages
+            .find("\n/// The printed Z of a closed day")
+            .expect("the stage function ends before its helpers");
+        let body = &stages[..body_end];
         assert_eq!(
-            stages
-                .matches("closeout_drain_failed_offline(&error).await")
+            body.matches("closeout_drain_failed_offline(&error).await")
                 .count(),
             3,
             "the pre-Z drain, the drain of a Z the phones held and the post-submission drain all recognize an offline till"
         );
-        assert!(stages.contains("z_report_offline_response(\"pre_z_sync\")"));
-        assert!(stages.contains("crate::unit_shift_readiness::UNIT_SHIFTS_STAGE,"));
-        assert!(stages.contains("z_report_offline_response(\"post_submission_sync\")"));
+        assert_eq!(
+            body.matches("close_z_report_without_server(payload, db, app, stage, None)")
+                .count(),
+            3,
+            "both pre-prepare drains, and a Z behind local Zs, close without the server"
+        );
+        assert_eq!(
+            body.matches("close_z_report_without_server(payload, db, app, stage, Some(prepared))")
+                .count(),
+            2,
+            "the post-submission drain and a prepared Z behind local Zs close the prepared Z"
+        );
+        assert!(!body.contains("z_report_offline_response("));
+
+        // The command's wrapper runs the AppHandle-free core, then prints and
+        // emits; the core never prints.
+        let wrapper = source_slice(source, "fn close_z_report_without_server(");
+        let wrapper = &wrapper[..wrapper
+            .find("\npub(crate) fn close_z_report_locally_core(")
+            .expect("the core follows the wrapper")];
+        let core_call = wrapper
+            .find("close_z_report_locally_core(payload, db, stage, prepared)?")
+            .expect("the wrapper runs the core");
+        let print = wrapper
+            .find("enqueue_automatic_z_report_print(")
+            .expect("the wrapper prints the Z");
+        assert!(core_call < print);
+        assert!(wrapper.contains("app.emit(\"sync_complete\""));
+
+        // The local stages keep today's local gates and skip the server ones.
+        let local = source_slice(source, "pub(crate) fn close_z_report_locally_core(");
+        let position = |marker: &str| {
+            local
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker} in the local close"))
+        };
+        let refusal = position("zreport::local_close_refusal(db, payload)?");
+        let blockers = position("zreport::unsettled_payment_blockers(db, payload)?");
+        let fiscal = position("zreport::fiscal_close_blocked_response(db, payload)?");
+        let prepare =
+            position("zreport::prepare_z_report_submission_with_phone_shifts(db, payload, None)");
+        let close = position("zreport::close_prepared_z_report_locally(db, &prepared)?");
+        assert!(refusal < blockers && blockers < fiscal && fiscal < prepare && prepare < close);
+        let local_body = &local[..local.find("\n/// \"Record cash\"").unwrap_or(local.len())];
+        assert!(!local_body.contains("check_unit_phone_shifts"));
+        assert!(!local_body.contains("build_sync_closeout_blocked_response_for_stage"));
+        assert!(!local_body.contains("repair_local_payment_mirrors_for_orders"));
+        assert!(!local_body.contains("finalize_prepared_z_report_submission"));
+        assert!(!local_body.contains("enqueue_automatic_z_report_print"));
+        assert!(!local_body.contains("app.emit("));
+    }
+
+    /// A Z the till may not close locally keeps today's typed refusal, and
+    /// names why (support reads it in `lastCloseoutAttempt`).
+    #[test]
+    fn a_till_that_may_not_close_locally_keeps_the_typed_offline_refusal() {
+        let response = z_report_offline_refusal("pre_z_sync", "fiscal_plugin_active");
+        assert_eq!(response["success"], false);
+        assert_eq!(response["errorCode"], Z_REPORT_OFFLINE_CODE);
+        assert_eq!(response["stage"], "pre_z_sync");
+        assert_eq!(response["localCloseRefused"], "fiscal_plugin_active");
+        let attempt = zreport::closeout_attempt_from_result(
+            "pre_z_sync",
+            &Ok(response),
+            "2026-10-22T21:00:00Z",
+        );
+        assert_eq!(attempt.code, Z_REPORT_OFFLINE_CODE);
+
+        let closed = zreport::closeout_attempt_from_result(
+            "closed_local",
+            &Ok(serde_json::json!({ "success": true, "localClose": true })),
+            "2026-10-22T21:00:00Z",
+        );
+        assert_eq!(closed.code, "CLOSED_LOCAL");
+        assert_eq!(closed.stage, "closed_local");
+    }
+
+    /// Local Zs the server confirmed are swept before anything else, and a
+    /// new Z with earlier local Zs pending is checked before the sync gate
+    /// (which would otherwise name them) and before the post-submission gate.
+    #[test]
+    fn a_new_z_checks_the_earlier_local_zs_before_each_sync_gate() {
+        let source = include_str!("analytics.rs");
+        let stages = source_slice(source, "async fn submit_z_report_through_stages(");
+        let position = |marker: &str| {
+            stages
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing {marker} in the Z submission"))
+        };
+        let sweep = position("zreport::sweep_confirmed_z_windows_now(db)");
+        let drain = position("crate::sync::force_sync_until_closeout_stable(");
+        let behind = position("zreport::must_close_behind_local_zs(db, None)?");
+        let sync_gate =
+            position("build_sync_closeout_blocked_response_for_stage(db, \"pre-Z-report sync\")");
+        let behind_prepared =
+            position("zreport::must_close_behind_local_zs(db, prepared.z_report_id.as_deref())?");
+        let submission_gate =
+            position("build_sync_closeout_blocked_response_for_stage(db, \"Z-report submission\")");
+        assert!(sweep < drain && drain < behind && behind < sync_gate);
+        assert!(sync_gate < behind_prepared && behind_prepared < submission_gate);
     }
 }

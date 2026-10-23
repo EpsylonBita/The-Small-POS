@@ -1,3 +1,4 @@
+import { getBridge } from '../../lib';
 import { isModuleRequiredApiError, posApiPost } from '../utils/api-helpers';
 
 const COUPON_REDEMPTION_QUEUE_KEY = 'pos_coupon_redemption_queue_v1';
@@ -107,9 +108,23 @@ class CouponRedemptionService {
     payload: CouponRedemptionPayload
   ): Promise<{ applied: boolean; moduleDenied: boolean }> {
     try {
+      // Queue v1 persisted local orders.id. Keep that durable key for queue
+      // removal, but translate on every attempt (the parent may sync later).
+      let orderId = payload.orderId;
+      try {
+        const result = await getBridge().orders.getById(payload.orderId);
+        const order = ((result as any)?.data ?? result) as Record<string, unknown> | null;
+        const knownId = order && [order.supabase_id, order.supabaseId,
+          order.client_request_id, order.clientRequestId, order.client_order_id, order.clientOrderId]
+          .find((value) => typeof value === 'string' && value.trim().length > 0);
+        if (typeof knownId === 'string') orderId = knownId.trim();
+      } catch {
+        // A new redemption already carries a server-known reference. An older
+        // missing local row may still resolve through its recorded reference.
+      }
       const response = await posApiPost<CouponApplyResponse>('pos/coupons/apply', {
         coupon_id: payload.couponId,
-        order_id: payload.orderId,
+        order_id: orderId,
         discount_amount: Math.max(0, Number(payload.discountAmount) || 0),
       });
 

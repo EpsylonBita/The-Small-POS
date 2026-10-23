@@ -27,16 +27,55 @@ const TERMINAL_IDENTITY_ROLLBACK_AAD_DOMAIN: &str = "repair-terminal-identity-ro
 
 const IDENTITY_KEYS: &[&str] = &["organization_id", "branch_id", "terminal_id"];
 
+/// One mutex and Condvar, two gates. The terminal-binding side is what every
+/// identity-bound POS write admits through; the repair side only gates
+/// Repairs. A Repairs access decision never touches the binding side, so it
+/// can never refuse an ordinary sale (Tomikro 18–20/10/2026, PR #372 audit).
+/// Lock order stays: transition mutex -> this lifecycle -> SQLite.
 #[derive(Default)]
 struct LifecycleState {
+    // Terminal-binding side: rebind, rollback, operational clear and reset.
     blocked: bool,
     reset_latched: bool,
     maintenance_failed: bool,
+    /// Every lease: binding leases and repair leases alike. Binding writers
+    /// drain all of them.
     active_readers: usize,
+    /// Generation of the binding lease. Only binding writers advance it.
+    binding_epoch: u64,
+    // Repair side: modules access decisions, the janitor and the cache.
+    access_blocked: bool,
+    repair_maintenance_failed: bool,
+    /// Repair leases only. Access writers drain these and never wait for a
+    /// generic binding reader, such as a card payment at the ECR.
+    repair_readers: usize,
+    /// Repair scope epoch, rehydrated from the durable scope.
     epoch: u64,
     access_decision_generation: u64,
     terminal_identity_rollback_publication_pending: bool,
     terminal_identity_rollback_publication_abandoned: bool,
+}
+
+impl LifecycleState {
+    /// Close the terminal-binding barrier. Every closure publishes a new
+    /// binding generation, so a lease captured before it can never pass a
+    /// later per-item generation check.
+    fn close_binding(&mut self) {
+        self.blocked = true;
+        self.binding_epoch = self.binding_epoch.wrapping_add(1);
+    }
+
+    fn repair_closed(&self) -> bool {
+        self.blocked
+            || self.reset_latched
+            || self.maintenance_failed
+            || self.access_blocked
+            || self.repair_maintenance_failed
+    }
+
+    fn any_maintenance_failed(&self) -> bool {
+        self.maintenance_failed || self.repair_maintenance_failed
+    }
 }
 
 fn transition_mutex() -> &'static Mutex<()> {
@@ -104,6 +143,8 @@ struct RepairScopeState {
     offline_sequence_lease_end: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settings_cache: Option<StoredCiphertext>,
+    #[serde(default)]
+    disabled_with_quarantine: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -427,7 +468,9 @@ fn reject_conflicting_repair_transition() -> Result<(), String> {
         .0
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed {
+    // The rollback snapshot carries the repair scope and its key, so a repair
+    // maintenance latch refuses it as well; refusing closes nothing.
+    if state.reset_latched || state.any_maintenance_failed() {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
     Ok(())
@@ -438,16 +481,20 @@ fn set_terminal_identity_blocked(blocked: bool) -> Result<(), String> {
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    state.blocked = blocked;
-    if !blocked {
+    if blocked {
+        state.close_binding();
+    } else {
+        state.blocked = false;
         condition.notify_all();
     }
     Ok(())
 }
 
+/// Binding class: the identity transition could not remove the key it
+/// created, so the terminal binding itself is in doubt.
 fn latch_terminal_identity_preparation_cleanup_failure() {
     if let Ok(mut state) = lifecycle().0.lock() {
-        state.blocked = true;
+        state.close_binding();
         state.maintenance_failed = true;
         state.terminal_identity_rollback_publication_abandoned = true;
     }
@@ -493,14 +540,14 @@ where
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
     if state.reset_latched
-        || state.maintenance_failed
+        || state.any_maintenance_failed()
         || state.blocked
         || state.terminal_identity_rollback_publication_pending
         || state.terminal_identity_rollback_publication_abandoned
     {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
-    state.blocked = true;
+    state.close_binding();
     while state.active_readers > 0 {
         state = condition
             .wait(state)
@@ -584,7 +631,7 @@ where
             let mut state = mutex
                 .lock()
                 .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-            state.blocked = true;
+            state.close_binding();
             state.terminal_identity_rollback_publication_pending = true;
             state.terminal_identity_rollback_publication_abandoned = true;
             return Err(error);
@@ -708,10 +755,10 @@ pub(crate) fn arm_terminal_identity_transition(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed {
+    if state.reset_latched || state.any_maintenance_failed() {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
-    state.blocked = true;
+    state.close_binding();
     while state.active_readers > 0 {
         state = condition
             .wait(state)
@@ -751,7 +798,7 @@ pub(crate) fn arm_terminal_identity_transition(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed || !state.blocked {
+    if state.reset_latched || state.any_maintenance_failed() || !state.blocked {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
     state.epoch = old.scope_epoch.saturating_add(1);
@@ -771,10 +818,10 @@ pub(crate) fn restore_terminal_identity_scope_while_blocked(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed {
+    if state.reset_latched || state.any_maintenance_failed() {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
-    state.blocked = true;
+    state.close_binding();
     state.terminal_identity_rollback_publication_pending = true;
     while state.active_readers > 0 {
         state = condition
@@ -807,7 +854,7 @@ pub(crate) fn restore_terminal_identity_scope_while_blocked(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed || !state.blocked {
+    if state.reset_latched || state.any_maintenance_failed() || !state.blocked {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
     state.epoch = old.scope_epoch;
@@ -844,10 +891,10 @@ pub(crate) fn prepare_legacy_terminal_identity_rollback(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed {
+    if state.reset_latched || state.any_maintenance_failed() {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
-    state.blocked = true;
+    state.close_binding();
     state.terminal_identity_rollback_publication_pending = true;
     while state.active_readers > 0 {
         state = condition
@@ -867,7 +914,7 @@ impl Drop for TerminalIdentityRollbackPublication {
             return;
         }
         if let Ok(mut state) = lifecycle().0.lock() {
-            state.blocked = true;
+            state.close_binding();
             state.terminal_identity_rollback_publication_pending = true;
             state.terminal_identity_rollback_publication_abandoned = true;
         }
@@ -889,7 +936,7 @@ pub(crate) fn finish_terminal_identity_rollback(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.reset_latched || state.maintenance_failed {
+    if state.reset_latched || state.any_maintenance_failed() {
         return Err("REPAIR_TERMINAL_ROLLBACK_CONFLICT".to_string());
     }
     state.terminal_identity_rollback_publication_pending = false;
@@ -1158,6 +1205,49 @@ impl RepairLifecycleTestIsolation {
     }
 }
 
+/// Both gates as tests observe them.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LifecycleSnapshotForTest {
+    pub(crate) binding_blocked: bool,
+    pub(crate) binding_maintenance_failed: bool,
+    pub(crate) reset_latched: bool,
+    pub(crate) binding_epoch: u64,
+    pub(crate) access_blocked: bool,
+    pub(crate) repair_maintenance_failed: bool,
+    pub(crate) active_readers: usize,
+    pub(crate) repair_readers: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn lifecycle_snapshot_for_test() -> LifecycleSnapshotForTest {
+    let state = lifecycle()
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    LifecycleSnapshotForTest {
+        binding_blocked: state.blocked,
+        binding_maintenance_failed: state.maintenance_failed,
+        reset_latched: state.reset_latched,
+        binding_epoch: state.binding_epoch,
+        access_blocked: state.access_blocked,
+        repair_maintenance_failed: state.repair_maintenance_failed,
+        active_readers: state.active_readers,
+        repair_readers: state.repair_readers,
+    }
+}
+
+/// Close the terminal-binding gate as a rebind or clear writer does, for
+/// tests that need ordinary POS writes refused.
+#[cfg(test)]
+pub(crate) fn close_terminal_binding_for_test() {
+    let (mutex, _) = lifecycle();
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .close_binding();
+}
+
 #[cfg(test)]
 impl Drop for RepairLifecycleTestIsolation {
     fn drop(&mut self) {
@@ -1167,7 +1257,9 @@ impl Drop for RepairLifecycleTestIsolation {
 
 /// Owned read lease held across prepare, HTTP await and final queue/cache
 /// transition. It contains no mutex guard, so it is safe to move across an
-/// await; `Drop` only decrements the active-reader counter.
+/// await; `Drop` only decrements the reader counters. It counts as a repair
+/// reader (drained by Repairs access decisions) and as a binding reader
+/// (drained by rebind, clear and reset).
 #[derive(Debug)]
 pub(crate) struct RepairLifecycleLease {}
 
@@ -1176,16 +1268,24 @@ impl Drop for RepairLifecycleLease {
         let (mutex, condition) = lifecycle();
         if let Ok(mut state) = mutex.lock() {
             state.active_readers = state.active_readers.saturating_sub(1);
+            state.repair_readers = state.repair_readers.saturating_sub(1);
             condition.notify_all();
         }
     }
 }
 
+fn admit_repair_reader(state: &mut LifecycleState) -> RepairLifecycleLease {
+    state.active_readers = state.active_readers.saturating_add(1);
+    state.repair_readers = state.repair_readers.saturating_add(1);
+    RepairLifecycleLease {}
+}
+
 /// Entitlement-independent read lease for generic terminal-bound transports.
 ///
-/// The immutable generation binds a credential snapshot to the same lifecycle
-/// epoch that rebind/reset writers advance. Like the repair lease, this guard
-/// owns no mutex across await and participates in the existing writer drain.
+/// The immutable generation binds a credential snapshot to the binding epoch
+/// that only rebind, rollback, clear and reset writers advance. It reads the
+/// binding side alone: no Repairs access decision can refuse it or move its
+/// generation. Like the repair lease, this guard owns no mutex across await.
 #[derive(Debug)]
 pub(crate) struct TerminalBindingLease {
     generation: u64,
@@ -1221,7 +1321,7 @@ pub(crate) fn acquire_terminal_binding_lease() -> Result<TerminalBindingLease, S
     if state.blocked {
         return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
     }
-    let generation = state.epoch;
+    let generation = state.binding_epoch;
     state.active_readers = state.active_readers.saturating_add(1);
     Ok(TerminalBindingLease { generation })
 }
@@ -1244,7 +1344,9 @@ fn acquire_lifecycle_lease(scope: &RepairScopeState) -> Result<RepairLifecycleLe
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.blocked || state.reset_latched || state.maintenance_failed {
+    // A repair reader needs both gates open: the binding it is bound to and
+    // the latest Repairs access decision.
+    if state.repair_closed() {
         return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
     }
     let current = load_scope_raw()?.ok_or_else(|| "REPAIR_SCOPE_REQUIRED".to_string())?;
@@ -1261,8 +1363,7 @@ fn acquire_lifecycle_lease(scope: &RepairScopeState) -> Result<RepairLifecycleLe
         return Err("REPAIR_SCOPE_EPOCH_MISMATCH".to_string());
     }
     require_entitlement(&current)?;
-    state.active_readers = state.active_readers.saturating_add(1);
-    Ok(RepairLifecycleLease {})
+    Ok(admit_repair_reader(&mut state))
 }
 
 fn mark_identity_transition_pending(key: &str, new_value: Option<&str>) -> Result<(), String> {
@@ -1288,14 +1389,24 @@ fn mark_identity_transition_pending(key: &str, new_value: Option<&str>) -> Resul
     if state.reset_latched || scope.reset_pending {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    if state.maintenance_failed {
+    if state.any_maintenance_failed() {
         return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
     }
     if scope.transition_pending {
         if state.active_readers > 0 || (state.epoch != 0 && state.epoch != scope.scope_epoch) {
             return Err("REPAIR_SCOPE_TRANSITION_BUSY".to_string());
         }
-        state.blocked = true;
+        // A pending Repairs access decision never holds the binding closed
+        // across a restart, so an identity change made on top of it must
+        // relabel the durable marker as the identity transition it now is.
+        if matches!(
+            scope.pending_purpose,
+            Some(RepairPendingPurpose::AccessReconciliation { .. })
+        ) {
+            scope.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
+            persist_scope(&scope)?;
+        }
+        state.close_binding();
         state.epoch = scope.scope_epoch;
         return Ok(());
     }
@@ -1310,7 +1421,7 @@ fn mark_identity_transition_pending(key: &str, new_value: Option<&str>) -> Resul
         .checked_add(1)
         .filter(|epoch| *epoch <= MAX_SAFE_INTEGER)
         .ok_or_else(|| "REPAIR_SCOPE_EPOCH_EXHAUSTED".to_string())?;
-    state.blocked = true;
+    state.close_binding();
     scope.transition_pending = true;
     scope.pending_purpose = Some(RepairPendingPurpose::IdentityTransition);
     scope.scope_epoch = next_epoch;
@@ -1413,6 +1524,7 @@ fn new_scope(
         offline_sequence_lease_start: None,
         offline_sequence_lease_end: None,
         settings_cache: None,
+        disabled_with_quarantine: false,
     }
 }
 
@@ -1440,6 +1552,7 @@ pub(crate) struct RepairAccessReconciliation {
     /// nothing was blocked, purged or republished.
     unchanged: bool,
     access_decision_generation: u64,
+    retained_numbering: Option<(String, u64, u64)>,
 }
 
 impl RepairAccessReconciliation {
@@ -1532,10 +1645,12 @@ pub(crate) fn latch_authoritative_access_pending(
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
     require_current_access_decision(&state, decision)?;
-    state.blocked = true;
+    // Repairs only: the binding gate and its generation stay as they are.
+    state.access_blocked = true;
     // A later authoritative refusal must survive process restart. Only the
     // new access purpose is invalidated; legacy/identity/reset/clear scopes
-    // retain their original guarded lifecycle and crypto shape.
+    // retain their original guarded lifecycle and crypto shape. The access
+    // purpose itself never counts as a pending terminal rebind.
     if let Some(mut scope) = load_scope_raw()? {
         if let Some(RepairPendingPurpose::AccessReconciliation {
             verified,
@@ -1596,12 +1711,19 @@ fn settled_disabled_scope_unchanged(
     // revoke did not finish, or Repairs was granted since.
     for key in [
         crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
-        crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1,
         crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,
     ] {
         if !matches!(crate::storage::get_credential_strict(key), Ok(None)) {
             return false;
         }
+    }
+    if !scope.disabled_with_quarantine
+        && !matches!(
+            crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_QUEUE_AES_KEY_V1),
+            Ok(None)
+        )
+    {
+        return false;
     }
     let identity = (
         organization_id.to_string(),
@@ -1617,12 +1739,13 @@ fn settled_disabled_scope_unchanged(
     // A process starts at epoch 0, and every transition publishes a non-zero
     // epoch, so 0 means nothing has run since start. Requiring the scope's
     // epoch there made the first modules sync after every restart re-run the
-    // full revoke and move the binding generation under an in-flight parity
-    // sync (TERMINAL_REBIND_PENDING in Tomikro's bundle after a restart).
+    // full revoke (TERMINAL_REBIND_PENDING in Tomikro's bundle after a
+    // restart). Only the repair side is consulted: a binding latch is not
+    // something a modules answer can settle or clear.
     require_current_access_decision(&state, decision).is_ok()
-        && !state.blocked
+        && !state.access_blocked
         && !state.reset_latched
-        && !state.maintenance_failed
+        && !state.repair_maintenance_failed
         && (state.epoch == scope.scope_epoch || state.epoch == 0)
 }
 
@@ -1642,9 +1765,16 @@ fn settled_disabled_scope_current(decision: RepairAccessDecision) -> bool {
     settled_disabled_scope_unchanged(&scope, &organization, &branch, &terminal, decision)
 }
 
+/// Close Repairs for one authoritative modules decision and drain repair
+/// readers only: a card payment waiting at the ECR holds a binding lease and
+/// must neither delay nor be refused by a modules sync. `rewrites_binding`
+/// is set only when applying the decision writes a terminal identity that
+/// differs from the stored one; that is a real binding change, so it also
+/// closes the binding gate and drains every reader.
 fn block_access_reconciliation(
     scope: Option<&mut RepairScopeState>,
     decision: RepairAccessDecision,
+    rewrites_binding: bool,
 ) -> Result<(), String> {
     note_access_barrier_closure();
     let (mutex, condition) = lifecycle();
@@ -1655,7 +1785,16 @@ fn block_access_reconciliation(
     if state.reset_latched || scope.as_ref().is_some_and(|scope| scope.reset_pending) {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    state.blocked = true;
+    // Never rewrite an identity under a binding owned by another writer (an
+    // armed rebind) or one latched in doubt: this decision could not tell
+    // whose barrier it would reopen.
+    if rewrites_binding && (state.blocked || state.maintenance_failed) {
+        return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
+    }
+    state.access_blocked = true;
+    if rewrites_binding {
+        state.close_binding();
+    }
     state.epoch = state.epoch.saturating_add(1);
     if let Some(scope) = scope {
         scope.transition_pending = true;
@@ -1666,7 +1805,7 @@ fn block_access_reconciliation(
         });
         persist_scope(scope)?;
     }
-    while state.active_readers > 0 {
+    while state.repair_readers > 0 || (rewrites_binding && state.active_readers > 0) {
         state = condition
             .wait(state)
             .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
@@ -1684,13 +1823,52 @@ fn block_access_decision_in_memory(decision: RepairAccessDecision) -> Result<(),
     if state.reset_latched {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    state.blocked = true;
-    while state.active_readers > 0 {
+    state.access_blocked = true;
+    while state.repair_readers > 0 {
         state = condition
             .wait(state)
             .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
         require_current_access_decision(&state, decision)?;
     }
+    Ok(())
+}
+
+/// Whether applying an authoritative identity writes a terminal identity that
+/// differs from the stored keyring or SQLite one. The modules fetch checks
+/// its answer against the keyring identity first, so this is normally false:
+/// it is true only for an incomplete or diverged binding, such as an
+/// organization first learned from the answer. A read failure counts as a
+/// rewrite.
+fn decision_rewrites_binding(
+    connection: &Connection,
+    organization_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+) -> bool {
+    let answer = (
+        organization_id.to_string(),
+        branch_id.to_string(),
+        terminal_id.to_string(),
+    );
+    !matches!(runtime_scope_identity_from_keyring(), Ok(keyring) if keyring == answer)
+        || !matches!(sqlite_runtime_identity(connection), Ok(sqlite) if sqlite == answer)
+}
+
+/// Reopen the binding gate that a binding-rewriting access decision closed,
+/// once the new identity is written and verified.
+fn reopen_binding_after_access_rewrite() -> Result<(), String> {
+    let (mutex, condition) = lifecycle();
+    let mut state = mutex
+        .lock()
+        .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
+    if state.reset_latched {
+        return Err("REPAIR_RESET_PENDING".to_string());
+    }
+    if state.maintenance_failed {
+        return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
+    }
+    state.blocked = false;
+    condition.notify_all();
     Ok(())
 }
 
@@ -1722,7 +1900,10 @@ fn persist_runtime_identity(
     })();
 
     if let Err(error) = sqlite_result {
-        crate::storage::restore_repair_identity_uncoordinated(&previous)?;
+        // Binding class: a keyring identity that cannot be restored leaves the
+        // terminal binding itself in doubt.
+        crate::storage::restore_repair_identity_uncoordinated(&previous)
+            .inspect_err(|_| latch_startup_binding_maintenance_failure())?;
         return Err(error);
     }
     Ok(())
@@ -1789,7 +1970,7 @@ fn verified_delete_repair_credentials() -> Result<(), String> {
         Ok(())
     })();
     if result.is_err() {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
     }
     result
 }
@@ -2317,7 +2498,7 @@ fn prepare_external_cleanup(
 ) -> Result<PreparedExternalCleanup, String> {
     let root = staging_root(connection)?;
     if root.exists() && !safe_staging_directory_state(&root)? {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_STAGING_PATH_UNSAFE".to_string());
     }
     let original_directory = scope_staging_dir(connection, &journal.old_scope)?;
@@ -2326,7 +2507,7 @@ fn prepare_external_cleanup(
         journal.old_scope.scope_token
     ));
     if safe_staging_directory_state(&staged_directory)? {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
     }
     let directory_staged = safe_staging_directory_state(&original_directory)?;
@@ -2372,7 +2553,7 @@ fn rollback_external_cleanup(
         Ok(())
     };
     if directory.is_err() {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         Err("REPAIR_EXTERNAL_CLEANUP_COMPENSATION_FAILED".to_string())
     } else {
         Ok(())
@@ -2537,7 +2718,7 @@ fn durable_remove_authenticated_transition_directory(
     already_finalizing: bool,
 ) -> Result<(), String> {
     if !safe_staging_directory_state(directory)? {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
     }
     let identity = transition_file_identity(directory)?;
@@ -2546,7 +2727,7 @@ fn durable_remove_authenticated_transition_directory(
         secondary: journal.directory_identity_secondary.unwrap_or_default(),
     };
     if identity.primary == 0 || identity.secondary == 0 || identity != persisted_identity {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
     }
     validate_transition_marker(directory, journal)?;
@@ -2556,29 +2737,29 @@ fn durable_remove_authenticated_transition_directory(
     let finalizing = transition_finalizing_path(parent, journal);
     if !already_finalizing {
         if fs::symlink_metadata(&finalizing).is_ok() {
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
         }
         journal.phase = RepairTransitionJournalPhase::Finalizing;
         persist_transition_journal(journal)?;
         durable_rename_no_replace(directory, &finalizing).map_err(|_| {
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             "REPAIR_EXTERNAL_CLEANUP_PENDING".to_string()
         })?;
         if transition_file_identity(&finalizing)? != identity {
             let _ = durable_rename(&finalizing, directory);
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
         }
     } else if directory != finalizing || transition_file_identity(&finalizing)? != identity {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
     }
     if !safe_staging_directory_state(&finalizing).unwrap_or(false)
         || validate_transition_marker(&finalizing, journal).is_err()
         || transition_file_identity(&finalizing).ok() != Some(identity)
     {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
     }
     let completion = transition_completion_path(parent, journal);
@@ -2588,10 +2769,10 @@ fn durable_remove_authenticated_transition_directory(
         validate_authenticated_transition_file(&completion, journal)?;
     }
     capability_remove_transition_directory(&finalizing, journal, identity).inspect_err(|_| {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
     })?;
     sync_directory_metadata(parent).map_err(|_| {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         "REPAIR_TRANSITION_DURABILITY_FAILED".to_string()
     })?;
     journal.phase = RepairTransitionJournalPhase::FilesFinalized;
@@ -2649,7 +2830,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
             && (journal.directory_identity_primary.unwrap_or_default() == 0
                 || journal.directory_identity_secondary.unwrap_or_default() == 0))
     {
-        latch_startup_maintenance_failure();
+        latch_repair_maintenance_failure();
         return Err("REPAIR_TRANSITION_JOURNAL_INVALID".to_string());
     }
     let original = scope_staging_dir(connection, &journal.old_scope)?;
@@ -2691,7 +2872,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                 if safe_staging_directory_state(path)?
                     && transition_file_identity(path)? != expected
                 {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
             }
@@ -2699,13 +2880,13 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
         match journal.phase {
             RepairTransitionJournalPhase::Intent => {
                 if journal.directory_staged || staged_exists {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
             }
             RepairTransitionJournalPhase::Prepared => {
                 if !journal.directory_staged || !original_exists || staged_exists {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
                 let marker = original.join(TRANSITION_MARKER_NAME);
@@ -2713,23 +2894,23 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                     Ok(_) => {
                         validate_transition_marker(&original, &journal)?;
                         durable_remove_file(&marker).map_err(|_| {
-                            latch_startup_maintenance_failure();
+                            latch_repair_maintenance_failure();
                             "REPAIR_EXTERNAL_CLEANUP_COMPENSATION_FAILED".to_string()
                         })?;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                 }
                 remove_owned_transition_temp(&original, &journal).inspect_err(|_| {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                 })?;
             }
             RepairTransitionJournalPhase::MarkerWritten => {
                 if !journal.directory_staged || original_exists == staged_exists {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
                 journal.phase = RepairTransitionJournalPhase::FilesRestored;
@@ -2737,7 +2918,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                 if staged_exists {
                     validate_transition_marker(&staged, &journal)?;
                     durable_rename(&staged, &original).map_err(|_| {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         "REPAIR_EXTERNAL_CLEANUP_COMPENSATION_FAILED".to_string()
                     })?;
                 } else {
@@ -2747,7 +2928,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
             RepairTransitionJournalPhase::FilesStaged => {
                 if !journal.directory_staged {
                     if original_exists || staged_exists {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                     persist_scope(&journal.old_scope)?;
@@ -2757,34 +2938,34 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                         &journal.old_scope.terminal_id,
                     )?;
                     crate::storage::delete_repair_transition_journal().map_err(|_| {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         "REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string()
                     })?;
-                    clear_maintenance_failure_after_destructive_recovery()?;
+                    clear_repair_maintenance_failure()?;
                     return Ok(());
                 }
                 if original_exists || !staged_exists {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
                 journal.phase = RepairTransitionJournalPhase::FilesRestored;
                 persist_transition_journal(&journal)?;
                 validate_transition_marker(&staged, &journal)?;
                 durable_rename(&staged, &original).map_err(|_| {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     "REPAIR_EXTERNAL_CLEANUP_COMPENSATION_FAILED".to_string()
                 })?;
             }
             RepairTransitionJournalPhase::FilesRestored => {
                 if !journal.directory_staged {
                     if original_exists || staged_exists {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                 } else if staged_exists && !original_exists {
                     validate_transition_marker(&staged, &journal)?;
                     durable_rename(&staged, &original).map_err(|_| {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         "REPAIR_EXTERNAL_CLEANUP_COMPENSATION_FAILED".to_string()
                     })?;
                 } else if original_exists && !staged_exists {
@@ -2793,7 +2974,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                         validate_transition_marker(&original, &journal)?;
                     }
                 } else {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
             }
@@ -2813,20 +2994,22 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
             if fs::symlink_metadata(&marker).is_ok() {
                 validate_transition_marker(&original, &journal)?;
                 durable_remove_file(&marker).map_err(|_| {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     "REPAIR_EXTERNAL_CLEANUP_COMPENSATION_FAILED".to_string()
                 })?;
             }
         }
         crate::storage::delete_repair_transition_journal().map_err(|_| {
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             "REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string()
         })?;
-        clear_maintenance_failure_after_destructive_recovery()?;
+        clear_repair_maintenance_failure()?;
         return Ok(());
     }
     if target_committed {
         verified_delete_repair_credentials()?;
+        crate::repair_attachment_cache::purge_scope(&journal.old_scope.scope_token)
+            .inspect_err(|_| latch_repair_maintenance_failure())?;
         let root = staging_root(connection)?;
         let completion = transition_completion_path(&root, &journal);
         if journal.directory_staged {
@@ -2838,20 +3021,20 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                 if safe_staging_directory_state(path)?
                     && transition_file_identity(path)? != expected
                 {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                 }
             }
             match journal.phase {
                 RepairTransitionJournalPhase::FilesStaged => {
                     if !staged_exists || finalizing_exists {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                     match fs::symlink_metadata(&completion) {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         _ => {
-                            latch_startup_maintenance_failure();
+                            latch_repair_maintenance_failure();
                             return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                         }
                     }
@@ -2869,7 +3052,7 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                         || finalizing_exists
                         || fs::symlink_metadata(&completion).is_ok()
                     {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                     durable_remove_authenticated_transition_directory(
@@ -2896,20 +3079,20 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                         journal.phase = RepairTransitionJournalPhase::FilesFinalized;
                         persist_transition_journal(&journal)?;
                     } else {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                 }
                 RepairTransitionJournalPhase::FilesFinalized => {
                     if staged_exists || finalizing_exists {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                     validate_authenticated_transition_file(&completion, &journal)?;
                 }
                 RepairTransitionJournalPhase::TargetPublished => {
                     if staged_exists || finalizing_exists {
-                        latch_startup_maintenance_failure();
+                        latch_repair_maintenance_failure();
                         return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
                     }
                     if fs::symlink_metadata(&completion).is_ok() {
@@ -2917,14 +3100,14 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
                     }
                 }
                 _ => {
-                    latch_startup_maintenance_failure();
+                    latch_repair_maintenance_failure();
                     return Err("REPAIR_TRANSITION_JOURNAL_IDENTITY_MISMATCH".to_string());
                 }
             }
         } else if safe_staging_directory_state(&staged)?
             || safe_staging_directory_state(&finalizing)?
         {
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             return Err("REPAIR_TRANSITION_MARKER_INVALID".to_string());
         }
         persist_scope(&journal.target_scope)?;
@@ -2933,25 +3116,25 @@ pub(crate) fn recover_interrupted_scope_transition(connection: &Connection) -> R
         if fs::symlink_metadata(&completion).is_ok() {
             validate_authenticated_transition_file(&completion, &journal)?;
             durable_remove_file(&completion).map_err(|_| {
-                latch_startup_maintenance_failure();
+                latch_repair_maintenance_failure();
                 "REPAIR_EXTERNAL_CLEANUP_PENDING".to_string()
             })?;
         }
         crate::storage::delete_repair_transition_journal().map_err(|_| {
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             "REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string()
         })?;
-        clear_maintenance_failure_after_destructive_recovery()?;
+        clear_repair_maintenance_failure()?;
         return Ok(());
     }
-    latch_startup_maintenance_failure();
+    latch_repair_maintenance_failure();
     Err("REPAIR_TRANSITION_JOURNAL_IDENTITY_MISMATCH".to_string())
 }
 
 /// Apply one authenticated `/api/pos/modules/enabled` decision. Enabled access
 /// remains durably pending until the server-issued offline lease is persisted;
-/// module removal performs a hard repair-only purge and publishes a fresh
-/// disabled scope immediately.
+/// same-identity module removal quarantines unacknowledged work and withdraws
+/// authority. Explicit identity changes still purge the old scope.
 pub(crate) fn begin_authoritative_access_reconciliation(
     db: &crate::db::DbState,
     organization_id: &str,
@@ -3046,7 +3229,9 @@ fn begin_authoritative_access_reconciliation_inner(
         return Err("REPAIR_ACCESS_RECOVERY_AUTHORITY_CHANGED".to_string());
     }
     if crate::storage::read_repair_transition_journal()?.is_some() {
-        latch_startup_maintenance_failure();
+        // A leftover repair transition journal is Repairs' own unfinished
+        // cleanup; the startup janitor owns it. It denies Repairs only.
+        latch_repair_maintenance_failure();
         return Err("REPAIR_EXTERNAL_CLEANUP_PENDING".to_string());
     }
     let mut prior = load_scope_raw()?;
@@ -3086,7 +3271,25 @@ fn begin_authoritative_access_reconciliation_inner(
                 identity_changed: false,
                 unchanged: true,
                 access_decision_generation: decision.generation,
+                retained_numbering: None,
             });
+        }
+    }
+    let rewrites_binding = {
+        let connection = db
+            .lock_traced("repairs_access_reconciliation")
+            .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
+        decision_rewrites_binding(&connection, organization_id, branch_id, terminal_id)
+    };
+    if rewrites_binding {
+        // Refuse before any durable journal exists: the binding is owned by
+        // another writer or latched in doubt.
+        let state = lifecycle()
+            .0
+            .lock()
+            .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
+        if state.blocked || state.maintenance_failed {
+            return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
         }
     }
     #[cfg(unix)]
@@ -3157,7 +3360,7 @@ fn begin_authoritative_access_reconciliation_inner(
     // Lock order invariant: transition -> lifecycle barrier/drain -> SQLite.
     // Native transports hold a lifecycle lease and may then need SQLite, so a
     // reconciliation must never own SQLite while waiting for those leases.
-    block_access_reconciliation(prior.as_mut(), decision)?;
+    block_access_reconciliation(prior.as_mut(), decision, rewrites_binding)?;
     let connection = db
         .lock_traced("repairs_access_reconciliation")
         .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
@@ -3174,13 +3377,15 @@ fn begin_authoritative_access_reconciliation_inner(
             purge_and_persist_runtime_identity(&connection, organization_id, branch_id, terminal_id)
         {
             if error == "REPAIR_IDENTITY_COMPENSATION_FAILED" {
+                // Binding class: the keyring identity could not be restored, so
+                // the terminal binding itself is in doubt.
                 if let Some(journal) = transition_journal.as_ref() {
                     if persist_scope(&journal.old_scope).is_err() {
-                        latch_startup_maintenance_failure();
+                        latch_startup_binding_maintenance_failure();
                         return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
                     }
                 }
-                latch_startup_maintenance_failure();
+                latch_startup_binding_maintenance_failure();
                 return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
             }
             if let Some(cleanup) = external_cleanup.as_ref() {
@@ -3198,7 +3403,7 @@ fn begin_authoritative_access_reconciliation_inner(
                         journal.old_scope.terminal_id.clone(),
                     )
                 {
-                    latch_startup_maintenance_failure();
+                    latch_startup_binding_maintenance_failure();
                     return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
                 }
                 if journal.directory_staged {
@@ -3231,18 +3436,41 @@ fn begin_authoritative_access_reconciliation_inner(
                 .ok_or_else(|| "REPAIR_TRANSITION_JOURNAL_INVALID".to_string())?;
             finalize_external_cleanup(cleanup, journal)?;
         }
-    } else if !enabled {
-        purge_repair_rows(&connection)?;
-        if let Some(scope) = prior.as_ref() {
-            delete_scope_files(&connection, scope)?;
+        if let Some(old) = prior.as_ref() {
+            crate::repair_attachment_cache::purge_scope(&old.scope_token)
+                .inspect_err(|_| latch_repair_maintenance_failure())?;
         }
-        verified_delete_repair_credentials()?;
+    } else if !enabled {
+        quarantine_repair_work(&connection)?;
+        if let Some(scope) = prior.as_ref() {
+            crate::repair_attachment_cache::purge_scope(&scope.scope_token)?;
+        }
+        for key in [
+            crate::storage::KEY_REPAIR_ENTITLEMENT_V1,
+            crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1,
+        ] {
+            if key == crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1 {
+                crate::storage::delete_repair_actor_attestation()?;
+            } else {
+                crate::storage::delete_credential(key)?;
+            }
+            if crate::storage::get_credential_strict(key)?.is_some() {
+                return Err("REPAIR_CREDENTIAL_DELETE_FAILED".to_string());
+            }
+        }
+        if !has_quarantined_repair_work(&connection)? {
+            if let Some(scope) = prior.as_ref() {
+                delete_scope_files(&connection, scope)?;
+            }
+            verified_delete_repair_credentials()?;
+        }
         persist_runtime_identity(&connection, organization_id, branch_id, terminal_id)?;
     } else {
         persist_runtime_identity(&connection, organization_id, branch_id, terminal_id)?;
     }
 
-    let next_epoch = if identity_changed || !enabled {
+    let quarantined = !identity_changed && !enabled && has_quarantined_repair_work(&connection)?;
+    let next_epoch = if identity_changed || (!enabled && !quarantined) {
         prior
             .as_ref()
             .map(|scope| scope.scope_epoch.saturating_add(1))
@@ -3265,7 +3493,7 @@ fn begin_authoritative_access_reconciliation_inner(
                     next_epoch,
                 )
             })
-    } else if !enabled {
+    } else if !enabled && !quarantined {
         new_scope(
             organization_id.to_string(),
             branch_id.to_string(),
@@ -3277,9 +3505,15 @@ fn begin_authoritative_access_reconciliation_inner(
             .take()
             .ok_or_else(|| "REPAIR_SCOPE_REQUIRED".to_string())?
     };
-    candidate.offline_terminal_token = None;
-    candidate.offline_sequence_lease_start = None;
-    candidate.offline_sequence_lease_end = None;
+    candidate.disabled_with_quarantine = quarantined;
+    if !enabled {
+        candidate.settings_cache = None;
+    }
+    if !enabled || identity_changed {
+        candidate.offline_terminal_token = None;
+        candidate.offline_sequence_lease_start = None;
+        candidate.offline_sequence_lease_end = None;
+    }
     candidate.transition_pending = enabled;
     candidate.reset_pending = false;
     let binding_digest = crate::commands::settings::current_access_binding_digest()?;
@@ -3306,16 +3540,21 @@ fn begin_authoritative_access_reconciliation_inner(
         if fs::symlink_metadata(&completion).is_ok() {
             validate_authenticated_transition_file(&completion, journal)?;
             durable_remove_file(&completion).map_err(|_| {
-                latch_startup_maintenance_failure();
+                latch_repair_maintenance_failure();
                 "REPAIR_EXTERNAL_CLEANUP_PENDING".to_string()
             })?;
         }
         transition_fault("after_candidate_scope")?;
         transition_fault("before_journal_delete")?;
         crate::storage::delete_repair_transition_journal().map_err(|_| {
-            latch_startup_maintenance_failure();
+            latch_repair_maintenance_failure();
             "REPAIR_TRANSITION_JOURNAL_DELETE_FAILED".to_string()
         })?;
+    }
+    if rewrites_binding {
+        // The new identity is written and read back: the binding this
+        // decision closed may admit ordinary POS writes again.
+        reopen_binding_after_access_rewrite()?;
     }
 
     let outcome = RepairAccessReconciliation {
@@ -3328,16 +3567,19 @@ fn begin_authoritative_access_reconciliation_inner(
         identity_changed,
         unchanged: false,
         access_decision_generation: decision.generation,
+        retained_numbering: complete_numbering_lease(&candidate),
     };
     if enabled {
         persist_entitlement_for_scope(&candidate, true)?;
-        // The verified unchanged terminal can run ordinary POS operations.
-        // Repairs still rejects transition_pending until its staff bootstrap.
+        // Repairs still rejects transition_pending until its staff bootstrap;
+        // ordinary POS writes never depended on this decision.
         if same_binding {
             unblock_at_epoch_for_decision(candidate.scope_epoch, decision)?;
         }
     } else {
-        clear_maintenance_failure_after_destructive_recovery()?;
+        // Repair access is withdrawn and replay dependencies are quarantined.
+        // A binding latch is not this decision's.
+        clear_repair_maintenance_failure()?;
         unblock_at_epoch_for_decision(candidate.scope_epoch, decision)?;
     }
     Ok(outcome)
@@ -3363,7 +3605,7 @@ pub(crate) fn finalize_authoritative_offline_access(
             .lock()
             .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
         require_current_access_decision(&state, decision)?;
-        if !state.blocked && !verified_access_pending()? {
+        if !state.access_blocked && !verified_access_pending()? {
             return Err("REPAIR_SCOPE_TRANSITION_NOT_ARMED".to_string());
         }
     }
@@ -3395,17 +3637,29 @@ pub(crate) fn finalize_authoritative_offline_access(
         return Err("REPAIR_SCOPE_EPOCH_MISMATCH".to_string());
     }
     require_entitlement(&scope)?;
+    if matches!(
+        numbering_lease,
+        crate::repair_transport::RepairNumberingLease::Retained {}
+    ) && (pending.retained_numbering.is_none()
+        || complete_numbering_lease(&scope) != pending.retained_numbering)
+    {
+        return Err("REPAIR_OFFLINE_BOOTSTRAP_INVALID".to_string());
+    }
     if let Some((token, start, end)) = numbering_lease.as_sequence() {
         scope.offline_terminal_token = Some(token.to_string());
         scope.offline_sequence_lease_start = Some(start);
         scope.offline_sequence_lease_end = Some(end);
-    } else {
+    } else if !matches!(
+        numbering_lease,
+        crate::repair_transport::RepairNumberingLease::Retained {}
+    ) {
         scope.offline_terminal_token = None;
         scope.offline_sequence_lease_start = None;
         scope.offline_sequence_lease_end = None;
     }
     scope.transition_pending = false;
     scope.pending_purpose = None;
+    scope.disabled_with_quarantine = false;
     validate_scope(&scope).map_err(|_| "REPAIR_OFFLINE_BOOTSTRAP_INVALID".to_string())?;
     persist_scope(&scope)?;
     unblock_at_epoch_for_decision(scope.scope_epoch, decision)
@@ -3431,7 +3685,9 @@ pub(crate) fn latch_startup_access_pending() -> Result<RepairAccessDecision, Str
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    state.blocked = true;
+    // Repairs only: a failed sign-out cleanup or a missing terminal id
+    // withdraws repair access, never the terminal binding.
+    state.access_blocked = true;
     condition.notify_all();
     Ok(decision)
 }
@@ -3444,7 +3700,7 @@ pub(crate) fn retain_verified_access_after_network_failure(
         .lock()
         .map_err(|_| "REPAIR_SCOPE_TRANSITION_UNAVAILABLE".to_string())?;
     // A settled disabled scope has no repair access to retain: answer as the
-    // blocked path below does, without closing the barrier for a network blip.
+    // path below does, without draining repair readers for a network blip.
     if let Some(scope) = load_scope_raw().ok().flatten() {
         let (organization, branch, terminal) = (
             scope.organization_id.clone(),
@@ -3464,8 +3720,9 @@ pub(crate) fn retain_verified_access_after_network_failure(
             }
         }
     }
-    // Drain active native operations before SQLite is acquired. This keeps
+    // Drain active repair operations before SQLite is acquired. This keeps
     // the same global lock order as authoritative enable/revoke processing.
+    // Every refusal below leaves Repairs closed and nothing else.
     block_access_decision_in_memory(decision)?;
     if let Some(scope) = load_scope_raw()? {
         if scope_has_verified_access_purpose(&scope)? {
@@ -3481,8 +3738,9 @@ pub(crate) fn retain_verified_access_after_network_failure(
             }
             crate::commands::settings::verify_current_access_binding(db, digest)?;
             unblock_at_epoch_for_decision(scope.scope_epoch, decision)?;
-            // Generic POS admission is retained, but a cached modules reply
-            // must not advertise pending Repairs as usable offline access.
+            // The pending scope keeps Repairs closed until its staff
+            // bootstrap, and a cached modules reply must not advertise it as
+            // usable offline access.
             return Err("REPAIR_OFFLINE_ACCESS_UNAVAILABLE".to_string());
         }
     }
@@ -3500,11 +3758,7 @@ pub(crate) fn retain_verified_access_after_network_failure(
     if let Err(error) = require_entitlement(&scope) {
         // This verified scope holds no Repairs entitlement: there is no repair
         // access to retain, and repair transport keeps refusing on its own.
-        // Release the barrier as an authoritative "disabled" answer does.
-        // Left blocked, every identity-bound write (order edits and
-        // cancellations, checkout drafts, fiscal checkout, parity sync, the
-        // table recovery status) failed with REPAIR_SCOPE_TRANSITION_PENDING
-        // until the next successful modules fetch (Tomikro, 06/10/2026).
+        // Settle the decision as an authoritative "disabled" answer does.
         if error == "REPAIR_MODULE_REQUIRED" {
             unblock_at_epoch_for_decision(scope.scope_epoch, decision)?;
         }
@@ -3537,6 +3791,39 @@ fn staging_root(connection: &Connection) -> Result<PathBuf, String> {
 
 fn scope_staging_dir(connection: &Connection, scope: &RepairScopeState) -> Result<PathBuf, String> {
     Ok(staging_root(connection)?.join(&scope.scope_token))
+}
+
+// A queue row exists until its acknowledgement deletes it. Keep all statuses,
+// including conflicts and failed rows, with their encrypted replay dependencies.
+fn has_quarantined_repair_work(connection: &Connection) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue
+          WHERE module_type = 'repairs' OR table_name IN ('repairs','repair_attachments'))
+          OR EXISTS(SELECT 1 FROM repair_cache WHERE dirty = 1 OR has_conflict = 1)
+          OR EXISTS(SELECT 1 FROM repair_attachment_staging WHERE state IN ('queued','conflict'))
+          OR EXISTS(SELECT 1 FROM repair_conflicts WHERE state = 'open')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "REPAIR_SCOPE_PURGE_FAILED".to_string())
+}
+
+fn quarantine_repair_work(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "DELETE FROM repair_cache WHERE dirty = 0 AND has_conflict = 0
+           AND repair_id NOT IN (SELECT COALESCE(repair_aggregate_id, record_id)
+             FROM parity_sync_queue WHERE module_type = 'repairs'
+               OR table_name IN ('repairs','repair_attachments'))
+           AND repair_id NOT IN (SELECT repair_id FROM repair_attachment_staging
+             WHERE state IN ('queued','conflict'));
+         DELETE FROM repair_alias_cache WHERE repair_id NOT IN (SELECT repair_id FROM repair_cache)
+           AND repair_id NOT IN (SELECT COALESCE(repair_aggregate_id, record_id)
+             FROM parity_sync_queue WHERE module_type = 'repairs'
+               OR table_name IN ('repairs','repair_attachments'));",
+        )
+        .map_err(|_| "REPAIR_SCOPE_PURGE_FAILED".to_string())
 }
 
 fn purge_repair_rows_inner(
@@ -3574,6 +3861,7 @@ fn purge_repair_rows_in_transaction(
         .map_err(|_| "REPAIR_SCOPE_PURGE_FAILED".to_string())
 }
 
+#[cfg(test)]
 fn purge_repair_rows(connection: &Connection) -> Result<(), String> {
     purge_repair_rows_inner(connection, false)
 }
@@ -3582,12 +3870,14 @@ fn purge_repair_operational_rows(connection: &Connection) -> Result<(), String> 
     purge_repair_rows_inner(connection, true)
 }
 
+/// Binding writer for operational clear and reset: closes the binding gate,
+/// which also closes Repairs, and drains every reader.
 fn block_and_wait(mut scope: Option<&mut RepairScopeState>, reset: bool) -> Result<(), String> {
     let (mutex, condition) = lifecycle();
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    state.blocked = true;
+    state.close_binding();
     state.reset_latched |= reset;
     if let Some(scope) = scope.as_mut() {
         let needs_epoch = !scope.transition_pending || (reset && !scope.reset_pending);
@@ -3639,6 +3929,7 @@ fn block_and_wait(mut scope: Option<&mut RepairScopeState>, reset: bool) -> Resu
     Ok(())
 }
 
+/// Binding unblock after a binding writer (operational clear) has finished.
 fn unblock_at_epoch(epoch: u64) -> Result<(), String> {
     let (mutex, condition) = lifecycle();
     let mut state = mutex
@@ -3647,7 +3938,7 @@ fn unblock_at_epoch(epoch: u64) -> Result<(), String> {
     if state.reset_latched {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    if state.maintenance_failed {
+    if state.any_maintenance_failed() {
         return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
     }
     state.blocked = false;
@@ -3656,6 +3947,8 @@ fn unblock_at_epoch(epoch: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Access unblock for one authoritative decision. It reopens Repairs only;
+/// an access decision never closed the binding gate.
 fn unblock_at_epoch_for_decision(epoch: u64, decision: RepairAccessDecision) -> Result<(), String> {
     let (mutex, condition) = lifecycle();
     let mut state = mutex
@@ -3665,15 +3958,16 @@ fn unblock_at_epoch_for_decision(epoch: u64, decision: RepairAccessDecision) -> 
     if state.reset_latched {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    if state.maintenance_failed {
+    if state.any_maintenance_failed() {
         return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
     }
-    state.blocked = false;
+    state.access_blocked = false;
     state.epoch = epoch;
     condition.notify_all();
     Ok(())
 }
 
+/// Binding unblock after an operational clear that left no scope.
 fn unblock_without_scope() -> Result<(), String> {
     let (mutex, condition) = lifecycle();
     let mut state = mutex
@@ -3682,7 +3976,7 @@ fn unblock_without_scope() -> Result<(), String> {
     if state.reset_latched {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    if state.maintenance_failed {
+    if state.any_maintenance_failed() {
         return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
     }
     state.blocked = false;
@@ -3690,12 +3984,26 @@ fn unblock_without_scope() -> Result<(), String> {
     Ok(())
 }
 
+/// A destructive binding recovery (operational clear) removed every repair
+/// and binding artefact the latches were about, so it settles both classes.
 fn clear_maintenance_failure_after_destructive_recovery() -> Result<(), String> {
     let (mutex, _) = lifecycle();
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
     state.maintenance_failed = false;
+    state.repair_maintenance_failed = false;
+    Ok(())
+}
+
+/// A repair-side recovery (a completed revoke purge or a repair journal
+/// recovery) settles only the repair maintenance latch.
+fn clear_repair_maintenance_failure() -> Result<(), String> {
+    let (mutex, _) = lifecycle();
+    let mut state = mutex
+        .lock()
+        .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
+    state.repair_maintenance_failed = false;
     Ok(())
 }
 
@@ -3788,7 +4096,7 @@ pub(crate) fn arm_scope_transition() -> Result<RepairTransitionGuard, String> {
         let mut state = mutex
             .lock()
             .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-        state.blocked = true;
+        state.close_binding();
         while state.active_readers > 0 {
             state = condition
                 .wait(state)
@@ -3939,11 +4247,26 @@ pub(crate) fn finish_operational_clear_publication(
     }
 }
 
+/// The durable binding marker behind `terminal_connection_rebind_pending`,
+/// the admin resolver, parity and startup. Only a binding transition counts:
+/// an identity transition, an operational clear or a reset, a legacy pending
+/// scope without a purpose (unknown, so fail closed) and a pending reset. A
+/// Repairs access decision, verified or not, never counts: it denies Repairs
+/// alone, and its API-key digest can never gate the resolver.
 pub(crate) fn operational_clear_transition_pending() -> Result<bool, String> {
     let Some(scope) = load_scope_raw()? else {
         return Ok(false);
     };
-    Ok(scope.transition_pending && !scope_has_verified_access_purpose(&scope)?)
+    Ok(scope_blocks_terminal_binding(&scope))
+}
+
+fn scope_blocks_terminal_binding(scope: &RepairScopeState) -> bool {
+    scope.reset_pending
+        || (scope.transition_pending
+            && !matches!(
+                scope.pending_purpose,
+                Some(RepairPendingPurpose::AccessReconciliation { .. })
+            ))
 }
 
 fn scope_has_verified_access_purpose(scope: &RepairScopeState) -> Result<bool, String> {
@@ -4025,7 +4348,7 @@ fn require_access_recovery_lifecycle(decision: RepairAccessDecision) -> Result<(
     if state.reset_latched || state.terminal_identity_rollback_publication_pending {
         return Err("REPAIR_RESET_PENDING".to_string());
     }
-    if state.maintenance_failed {
+    if state.any_maintenance_failed() {
         return Err("REPAIR_STAGING_MAINTENANCE_FAILED".to_string());
     }
     Ok(())
@@ -4055,7 +4378,12 @@ pub(crate) fn capture_access_recovery(
     }
     let now = chrono::Utc::now().timestamp_millis();
     match &scope.pending_purpose {
-        None => {} // Legacy: exact strict authority and fresh full responses are required.
+        // Legacy: exact strict authority and fresh full responses are
+        // required. Its purpose is unknown, so the scope stays exactly as it
+        // is (still a fail-closed binding marker) until a full authoritative
+        // answer replaces it; relabelling it before the await would turn an
+        // unverified legacy marker into an access-only one.
+        None => {}
         Some(RepairPendingPurpose::AccessReconciliation {
             binding_digest,
             retry_not_before,
@@ -4067,17 +4395,18 @@ pub(crate) fn capture_access_recovery(
             if retry_not_before.is_some_and(|instant| instant > now) {
                 return Err("REPAIR_ACCESS_RECOVERY_COOLDOWN".to_string());
             }
+            // Persist a bounded retry gate before any await. Eligibility never
+            // clears pending or grants entitlement; failure leaves Repairs
+            // closed.
+            scope.pending_purpose = Some(RepairPendingPurpose::AccessReconciliation {
+                binding_digest: Some(digest.to_string()),
+                verified: false,
+                retry_not_before: Some(now.saturating_add(30_000)),
+            });
+            persist_scope(&scope)?;
         }
         _ => return Err("REPAIR_ACCESS_RECOVERY_PURPOSE_MISMATCH".to_string()),
     }
-    // Persist a bounded retry gate before any await. Eligibility never clears
-    // pending or grants entitlement; failure leaves the protected scope closed.
-    scope.pending_purpose = Some(RepairPendingPurpose::AccessReconciliation {
-        binding_digest: Some(digest.to_string()),
-        verified: false,
-        retry_not_before: Some(now.saturating_add(30_000)),
-    });
-    persist_scope(&scope)?;
     let raw = crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_SCOPE_V1)?
         .ok_or("REPAIR_SCOPE_REQUIRED")?;
     Ok(RepairAccessRecoverySnapshot {
@@ -4168,7 +4497,7 @@ pub(crate) fn persist_verified_entitlement(
     );
     crate::storage::set_credential(crate::storage::KEY_REPAIR_ENTITLEMENT_V1, &serialized)
         .map_err(|_| "REPAIR_ENTITLEMENT_WRITE_FAILED".to_string())?;
-    unblock_at_epoch(scope.scope_epoch)
+    unblock_binding_and_access_for_test(scope.scope_epoch)
 }
 
 fn require_entitlement(scope: &RepairScopeState) -> Result<(), String> {
@@ -4217,7 +4546,21 @@ pub(crate) fn persist_offline_bootstrap(
     scope.offline_sequence_lease_end = Some(end);
     validate_scope(&scope).map_err(|_| "REPAIR_OFFLINE_BOOTSTRAP_INVALID".to_string())?;
     persist_scope(&scope)?;
-    unblock_at_epoch(scope.scope_epoch)
+    unblock_binding_and_access_for_test(scope.scope_epoch)
+}
+
+/// Test grant helpers model a whole authoritative grant: the binding writer
+/// they follow and the access decision they stand for both reopen.
+#[cfg(test)]
+fn unblock_binding_and_access_for_test(epoch: u64) -> Result<(), String> {
+    unblock_at_epoch(epoch)?;
+    let (mutex, condition) = lifecycle();
+    let mut state = mutex
+        .lock()
+        .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
+    state.access_blocked = false;
+    condition.notify_all();
+    Ok(())
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -4968,24 +5311,14 @@ fn validate_trusted_drain_command_shape(command: &RepairOfflineCommand) -> Resul
     }
 }
 
-fn allocate_offline_alias(
-    transaction: &Transaction<'_>,
+fn next_offline_sequence(
+    connection: &Connection,
     scope: &RepairScopeState,
-    repair_id: &str,
-    created_at: &str,
-) -> Result<(String, u64), String> {
-    let token = scope
-        .offline_terminal_token
-        .as_deref()
-        .ok_or_else(|| "REPAIR_OFFLINE_BOOTSTRAP_REQUIRED".to_string())?;
-    let start = scope
-        .offline_sequence_lease_start
-        .ok_or_else(|| "REPAIR_OFFLINE_BOOTSTRAP_REQUIRED".to_string())?;
-    let end = scope
-        .offline_sequence_lease_end
-        .ok_or_else(|| "REPAIR_OFFLINE_BOOTSTRAP_REQUIRED".to_string())?;
+    token: &str,
+    start: u64,
+) -> Result<u64, String> {
     let prefix = format!("R-OFF-{token}-");
-    let maximum: Option<u64> = transaction
+    let maximum: Option<u64> = connection
         .query_row(
             "SELECT MAX(CAST(substr(alias, ?1) AS INTEGER))
                FROM repair_alias_cache
@@ -5005,7 +5338,51 @@ fn allocate_offline_alias(
             |row| row.get(0),
         )
         .map_err(|_| "REPAIR_OFFLINE_ALIAS_LOOKUP_FAILED".to_string())?;
-    let next = maximum.map_or(start, |value| value.saturating_add(1));
+    let next = maximum.map_or(start, |value| value.saturating_add(1).max(start));
+    Ok(next)
+}
+
+fn complete_numbering_lease(scope: &RepairScopeState) -> Option<(String, u64, u64)> {
+    Some((
+        scope.offline_terminal_token.clone()?,
+        scope.offline_sequence_lease_start?,
+        scope.offline_sequence_lease_end?,
+    ))
+}
+
+pub(crate) fn keep_offline_numbering_lease(connection: &Connection) -> Result<bool, String> {
+    let Some(scope) = load_scope_raw()? else {
+        return Ok(false);
+    };
+    let (Some(token), Some(start), Some(end)) = (
+        scope.offline_terminal_token.as_deref(),
+        scope.offline_sequence_lease_start,
+        scope.offline_sequence_lease_end,
+    ) else {
+        return Ok(false);
+    };
+    let next = next_offline_sequence(connection, &scope, token, start)?;
+    Ok(next <= end && end - next + 1 >= 10)
+}
+
+fn allocate_offline_alias(
+    transaction: &Transaction<'_>,
+    scope: &RepairScopeState,
+    repair_id: &str,
+    created_at: &str,
+) -> Result<(String, u64), String> {
+    let token = scope
+        .offline_terminal_token
+        .as_deref()
+        .ok_or_else(|| "REPAIR_OFFLINE_BOOTSTRAP_REQUIRED".to_string())?;
+    let start = scope
+        .offline_sequence_lease_start
+        .ok_or_else(|| "REPAIR_OFFLINE_BOOTSTRAP_REQUIRED".to_string())?;
+    let end = scope
+        .offline_sequence_lease_end
+        .ok_or_else(|| "REPAIR_OFFLINE_BOOTSTRAP_REQUIRED".to_string())?;
+    let prefix = format!("R-OFF-{token}-");
+    let next = next_offline_sequence(transaction, scope, token, start)?;
     if next < start || next > end {
         return Err("REPAIR_OFFLINE_LEASE_EXHAUSTED".to_string());
     }
@@ -6001,10 +6378,18 @@ pub(crate) fn list_open_conflicts(
         .prepare(
             "SELECT conflict_id, repair_id, expected_version, current_version,
                     display_number, status_summary, updated_at_summary,
-                    allowed_transitions_json, created_at
+                    allowed_transitions_json, created_at, 0 AS session_refusal
                FROM repair_conflicts
               WHERE organization_id = ?1 AND branch_id = ?2 AND terminal_id = ?3
                 AND state = 'open'
+              UNION ALL
+             SELECT q.id, q.record_id, q.version, c.authoritative_version,
+                    c.display_number, c.authoritative_status, c.updated_at, '[]', q.created_at, 1
+               FROM parity_sync_queue q JOIN repair_cache c
+                 ON c.organization_id = q.organization_id AND c.repair_id = q.record_id
+              WHERE q.organization_id = ?1 AND c.branch_id = ?2 AND c.terminal_id = ?3
+                AND q.module_type = 'repairs' AND q.table_name = 'repairs'
+                AND q.status = 'conflict' AND q.error_message = 'STAFF_SESSION_MISMATCH'
               ORDER BY created_at ASC, conflict_id ASC",
         )
         .map_err(|_| "REPAIR_CONFLICT_READ_FAILED".to_string())?;
@@ -6022,6 +6407,7 @@ pub(crate) fn list_open_conflicts(
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, bool>(9)?,
                 ))
             },
         )
@@ -6035,7 +6421,8 @@ pub(crate) fn list_open_conflicts(
         if canonical_uuid(&row.0).is_none()
             || canonical_uuid(&row.1).is_none()
             || row.2 < 0
-            || row.3 <= row.2
+            || row.3 < 0
+            || (!row.9 && row.3 <= row.2)
             || !matches!(
                 row.5.as_str(),
                 "received"
@@ -6083,10 +6470,17 @@ pub(crate) fn accept_server_conflict(
         .map_err(|_| "REPAIR_CONFLICT_TRANSACTION_FAILED".to_string())?;
     let conflict = transaction
         .query_row(
-            "SELECT repair_id, current_version, display_number, status_summary
+            "SELECT repair_id, current_version, display_number, status_summary, 0
                FROM repair_conflicts
               WHERE organization_id = ?1 AND branch_id = ?2 AND terminal_id = ?3
-                AND conflict_id = ?4 AND state = 'open'",
+                AND conflict_id = ?4 AND state = 'open'
+              UNION ALL
+             SELECT c.repair_id, c.authoritative_version, c.display_number, c.authoritative_status, 1
+               FROM parity_sync_queue q JOIN repair_cache c
+                 ON c.organization_id = q.organization_id AND c.repair_id = q.record_id
+              WHERE q.organization_id = ?1 AND c.branch_id = ?2 AND c.terminal_id = ?3
+                AND q.id = ?4 AND q.module_type = 'repairs' AND q.table_name = 'repairs'
+                AND q.status = 'conflict' AND q.error_message = 'STAFF_SESSION_MISMATCH'",
             params![
                 scope.organization_id,
                 scope.branch_id,
@@ -6099,6 +6493,7 @@ pub(crate) fn accept_server_conflict(
                     row.get::<_, i64>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
                 ))
             },
         )
@@ -6106,11 +6501,12 @@ pub(crate) fn accept_server_conflict(
     let current_version =
         u64::try_from(conflict.1).map_err(|_| "REPAIR_CONFLICT_STATE_INVALID".to_string())?;
     if canonical_uuid(&conflict.0).is_none()
-        || current_version == 0
+        || (!conflict.4 && current_version == 0)
         || current_version > MAX_SAFE_INTEGER
     {
         return Err("REPAIR_CONFLICT_STATE_INVALID".to_string());
     }
+    let refusal = conflict.4;
     let file_keys = {
         let mut statement = transaction
             .prepare(
@@ -6163,10 +6559,12 @@ pub(crate) fn accept_server_conflict(
     let cache_updated = transaction
         .execute(
             "UPDATE repair_cache
-                SET display_number = COALESCE(?1, display_number),
-                    official_number = COALESCE(?1, official_number),
-                    status = ?2, authoritative_status = ?2,
-                    authoritative_version = ?3, optimistic_version = ?3,
+                SET display_number = CASE WHEN ?10 THEN display_number ELSE COALESCE(?1, display_number) END,
+                    official_number = CASE WHEN ?10 THEN official_number ELSE COALESCE(?1, official_number) END,
+                    status = CASE WHEN ?10 THEN authoritative_status ELSE ?2 END,
+                    authoritative_status = CASE WHEN ?10 THEN authoritative_status ELSE ?2 END,
+                    optimistic_version = CASE WHEN ?10 THEN authoritative_version ELSE ?3 END,
+                    authoritative_version = CASE WHEN ?10 THEN authoritative_version ELSE ?3 END,
                     workspace_nonce = NULL, workspace_ciphertext = NULL,
                     dirty = 0, has_conflict = 0, needs_refetch = 1,
                     updated_at = ?4
@@ -6182,6 +6580,7 @@ pub(crate) fn accept_server_conflict(
                 scope.terminal_id,
                 conflict.0,
                 i64::try_from(scope.scope_epoch).unwrap_or(i64::MAX),
+                refusal,
             ],
         )
         .map_err(|_| "REPAIR_CONFLICT_RESOLUTION_FAILED".to_string())?;
@@ -6203,7 +6602,7 @@ pub(crate) fn accept_server_conflict(
             ],
         )
         .map_err(|_| "REPAIR_CONFLICT_RESOLUTION_FAILED".to_string())?;
-    if resolved != 1 {
+    if resolved != usize::from(!refusal) {
         return Err("REPAIR_CONFLICT_STATE_INVALID".to_string());
     }
     transaction
@@ -6214,10 +6613,14 @@ pub(crate) fn accept_server_conflict(
             let _ = fs::remove_file(path);
         }
     }
+    let optimistic_version = connection.query_row(
+        "SELECT optimistic_version FROM repair_cache WHERE organization_id = ?1 AND branch_id = ?2 AND terminal_id = ?3 AND repair_id = ?4",
+        params![scope.organization_id, scope.branch_id, scope.terminal_id, conflict.0], |row| row.get::<_, u64>(0)
+    ).map_err(|_| "REPAIR_CONFLICT_CACHE_MISSING".to_string())?;
     Ok(RepairConflictResolutionResult {
         repair_id: conflict.0,
         state: "accepted_server",
-        optimistic_version: current_version,
+        optimistic_version,
         needs_refetch: true,
     })
 }
@@ -8615,6 +9018,111 @@ impl crate::repair_transport::RepairQueueHooks for NativeRepairQueueHooks {
         Ok(())
     }
 
+    fn park_session_refusal(
+        &self,
+        connection: &Connection,
+        context: &crate::repair_transport::RepairQueueContext,
+    ) -> Result<(), crate::repair_transport::RepairHookError> {
+        let scope = active_scope().map_err(hook_unavailable)?;
+        require_entitlement(&scope).map_err(hook_unavailable)?;
+        if context.organization_id != scope.organization_id
+            || context.queue_id != context.operation_id
+        {
+            return Err(hook_permanent("REPAIR_CONFLICT_SOURCE_INVALID".into()));
+        }
+        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+            .map_err(|_| hook_unavailable(String::new()))?;
+        // The encrypted command remains the durable refusal record. There is
+        // no server projection, version increment, or second-generation update.
+        let changed = transaction.execute(
+            "UPDATE parity_sync_queue SET status = 'conflict', error_message = 'STAFF_SESSION_MISMATCH',
+                    claim_generation = claim_generation + 1
+              WHERE id = ?1 AND organization_id = ?2 AND record_id = ?3
+                AND repair_aggregate_id = ?3 AND module_type = 'repairs' AND table_name = 'repairs'
+                AND operation = 'INSERT' AND conflict_strategy = 'manual'
+                AND version = ?4 AND status = 'processing' AND claim_generation = ?5",
+            params![context.queue_id, scope.organization_id, context.repair_id, context.expected_version, context.claim_generation]
+        ).map_err(|_| hook_unavailable(String::new()))?;
+        if changed != 1 {
+            return Err(hook_permanent("REPAIR_CONFLICT_CLAIM_INVALID".into()));
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE repair_cache SET has_conflict = 1, needs_refetch = 1
+              WHERE organization_id = ?1 AND branch_id = ?2 AND terminal_id = ?3
+                AND repair_id = ?4 AND scope_generation = ?5",
+                params![
+                    scope.organization_id,
+                    scope.branch_id,
+                    scope.terminal_id,
+                    context.repair_id,
+                    scope.scope_epoch
+                ],
+            )
+            .map_err(|_| hook_unavailable(String::new()))?;
+        if changed != 1 {
+            return Err(hook_permanent("REPAIR_CONFLICT_CACHE_MISSING".into()));
+        }
+        transaction
+            .execute(
+                "UPDATE parity_sync_queue
+                    SET status = 'conflict', error_message = 'REPAIR_DEPENDENCY_CONFLICT',
+                        claim_generation = CASE WHEN status = 'processing'
+                                                THEN claim_generation + 1
+                                                ELSE claim_generation END
+                  WHERE id <> ?1 AND organization_id = ?2
+                    AND COALESCE(module_type, '') = 'repairs'
+                    AND status IN ('pending', 'processing', 'failed')
+                    AND version > ?3
+                    AND (
+                         (table_name = 'repairs' AND record_id = ?4)
+                         OR (table_name = 'repair_attachments' AND record_id IN (
+                              SELECT attachment_id FROM repair_attachment_staging
+                               WHERE organization_id = ?2 AND branch_id = ?5
+                                 AND terminal_id = ?6 AND repair_id = ?4
+                                 AND scope_generation = ?7
+                          ))
+                     )",
+                params![
+                    context.queue_id,
+                    scope.organization_id,
+                    i64::try_from(context.expected_version).unwrap_or(i64::MAX),
+                    context.repair_id,
+                    scope.branch_id,
+                    scope.terminal_id,
+                    i64::try_from(scope.scope_epoch).unwrap_or(i64::MAX),
+                ],
+            )
+            .map_err(|_| hook_unavailable(String::new()))?;
+        transaction
+            .execute(
+                "UPDATE repair_attachment_staging
+                    SET state = 'conflict', updated_at = ?1
+                  WHERE organization_id = ?2 AND branch_id = ?3 AND terminal_id = ?4
+                    AND repair_id = ?5 AND scope_generation = ?6 AND state = 'queued'
+                    AND operation_id IN (
+                        SELECT id FROM parity_sync_queue
+                         WHERE organization_id = ?2
+                           AND COALESCE(module_type, '') = 'repairs'
+                           AND table_name = 'repair_attachments'
+                           AND status = 'conflict'
+                           AND error_message = 'REPAIR_DEPENDENCY_CONFLICT'
+                    )",
+                params![
+                    chrono::Utc::now().to_rfc3339(),
+                    scope.organization_id,
+                    scope.branch_id,
+                    scope.terminal_id,
+                    context.repair_id,
+                    i64::try_from(scope.scope_epoch).unwrap_or(i64::MAX),
+                ],
+            )
+            .map_err(|_| hook_unavailable(String::new()))?;
+        transaction
+            .commit()
+            .map_err(|_| hook_unavailable(String::new()))
+    }
+
     fn park_conflict(
         &self,
         connection: &Connection,
@@ -9069,17 +9577,36 @@ struct JanitorStagingRow {
     server_version: Option<u64>,
 }
 
+/// Repair class: the staging janitor, the repair transition journal, repair
+/// key cleanup and the plaintext attachment cache. It denies Repairs until a
+/// revoke or a restart settles it and never refuses an ordinary POS write.
 fn latch_janitor_failure() {
     let (mutex, condition) = lifecycle();
     if let Ok(mut state) = mutex.lock() {
-        state.blocked = true;
-        state.maintenance_failed = true;
+        state.repair_maintenance_failed = true;
         condition.notify_all();
     }
 }
 
-pub(crate) fn latch_startup_maintenance_failure() {
+fn latch_repair_maintenance_failure() {
     latch_janitor_failure();
+}
+
+/// Repair-class startup latch (attachment cache, janitor, access recovery).
+pub(crate) fn latch_startup_repair_maintenance_failure() {
+    latch_janitor_failure();
+}
+
+/// Binding-class startup latch: the terminal binding itself is in doubt
+/// (identity compensation, the protected-settings scrub, the startup binding
+/// reconcile). Every identity-bound POS write stays refused, as before.
+pub(crate) fn latch_startup_binding_maintenance_failure() {
+    let (mutex, condition) = lifecycle();
+    if let Ok(mut state) = mutex.lock() {
+        state.close_binding();
+        state.maintenance_failed = true;
+        condition.notify_all();
+    }
 }
 
 fn acquire_startup_maintenance_lease(
@@ -9088,10 +9615,16 @@ fn acquire_startup_maintenance_lease(
         return Ok(None);
     };
     if candidate.transition_pending || candidate.reset_pending {
-        // A fully authenticated same-binding module decision may be waiting
-        // only for staff bootstrap. Do not perform staging IO or latch a fatal
-        // filesystem failure for that supported deferred access state.
-        if scope_has_verified_access_purpose(&candidate)? {
+        // A pending Repairs access decision, verified or not, is a supported
+        // deferred state: the durable marker already denies Repairs until the
+        // next authoritative modules decision. Do not perform staging IO or
+        // latch a filesystem failure for it.
+        if !candidate.reset_pending
+            && matches!(
+                candidate.pending_purpose,
+                Some(RepairPendingPurpose::AccessReconciliation { .. })
+            )
+        {
             let state = lifecycle()
                 .0
                 .lock()
@@ -9117,12 +9650,13 @@ fn acquire_startup_maintenance_lease(
     let mut state = mutex
         .lock()
         .map_err(|_| "REPAIR_LIFECYCLE_UNAVAILABLE".to_string())?;
-    if state.blocked || state.reset_latched || state.maintenance_failed {
+    if state.repair_closed() {
         return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
     }
+    // Each refusal below closes Repairs only: the janitor is a repair reader.
     let current = load_scope_raw()?.ok_or_else(|| "REPAIR_SCOPE_EPOCH_MISMATCH".to_string())?;
     if current.transition_pending || current.reset_pending {
-        state.blocked = true;
+        state.access_blocked = true;
         return Err("REPAIR_SCOPE_TRANSITION_PENDING".to_string());
     }
     if current.scope_epoch != candidate.scope_epoch
@@ -9135,7 +9669,7 @@ fn acquire_startup_maintenance_lease(
         )
         || (state.epoch != 0 && state.epoch != current.scope_epoch)
     {
-        state.blocked = true;
+        state.access_blocked = true;
         return Err("REPAIR_SCOPE_EPOCH_MISMATCH".to_string());
     }
     let current_identity = runtime_scope_identity_from_keyring()?;
@@ -9145,11 +9679,11 @@ fn acquire_startup_maintenance_lease(
         &current_identity.1,
         &current_identity.2,
     ) {
-        state.blocked = true;
+        state.access_blocked = true;
         return Err("REPAIR_NATIVE_SCOPE_MISMATCH".to_string());
     }
-    state.active_readers = state.active_readers.saturating_add(1);
-    Ok(Some((current.clone(), RepairLifecycleLease {})))
+    let lease = admit_repair_reader(&mut state);
+    Ok(Some((current.clone(), lease)))
 }
 
 #[cfg(windows)]
@@ -9605,6 +10139,7 @@ mod tests {
             offline_sequence_lease_start: Some(1),
             offline_sequence_lease_end: Some(100),
             settings_cache: None,
+            disabled_with_quarantine: false,
         }
     }
 
@@ -10682,14 +11217,21 @@ mod tests {
                 files_before,
                 "case {case} mutated the staging filesystem"
             );
+            let state = lifecycle()
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
-                lifecycle()
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .blocked,
+                state.repair_closed(),
                 "fatal janitor case {case} must keep repair replay fail-closed"
             );
+            // A janitor failure is repair class: it never closes the binding.
+            if case != "blocked" {
+                assert!(
+                    !state.blocked && !state.maintenance_failed,
+                    "janitor case {case} closed the terminal binding"
+                );
+            }
         }
         reset_test_lifecycle();
     }
@@ -10725,13 +11267,11 @@ mod tests {
 
             assert_eq!(error, "REPAIR_STAGING_PATH_UNSAFE");
             assert_eq!(fs::read(&sentinel).unwrap(), before);
-            assert!(
-                lifecycle()
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .blocked
-            );
+            assert!(lifecycle()
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .repair_closed());
         }
         #[cfg(unix)]
         assert_eq!(
@@ -10843,8 +11383,9 @@ mod tests {
         let _serial = test_state_lock();
         reset_test_lifecycle();
 
-        latch_startup_maintenance_failure();
-        latch_startup_maintenance_failure();
+        // A startup DB lock failure is binding class: everything stays closed.
+        latch_startup_binding_maintenance_failure();
+        latch_startup_binding_maintenance_failure();
 
         let state = lifecycle()
             .0
@@ -10855,7 +11396,23 @@ mod tests {
             "startup DB lock failure must block repair replay"
         );
         assert!(state.maintenance_failed);
+        assert!(state.repair_closed());
         assert_eq!(state.active_readers, 0);
+        drop(state);
+
+        // A janitor or cache failure is repair class: Repairs closes, the
+        // binding does not (Π1, 21/10/2026).
+        reset_test_lifecycle();
+        latch_startup_repair_maintenance_failure();
+        let state = lifecycle()
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.repair_closed());
+        assert!(state.repair_maintenance_failed);
+        assert!(!state.blocked && !state.maintenance_failed);
+        drop(state);
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
     }
 
     #[test]
@@ -10866,7 +11423,7 @@ mod tests {
         let _keyring = install_native_state(&scope);
         let database = crate::tests::harness::TestDb::open();
         let connection = database.state.conn.lock().expect("lock repair database");
-        latch_startup_maintenance_failure();
+        latch_startup_repair_maintenance_failure();
         let transition = arm_scope_transition().expect("arm same-scope refresh while latched");
 
         let entitlement_error = persist_verified_entitlement(
@@ -10896,7 +11453,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(state.blocked);
-        assert!(state.maintenance_failed);
+        assert!(state.repair_maintenance_failed);
     }
 
     #[test]
@@ -10946,7 +11503,7 @@ mod tests {
             .unwrap()
             .join("35000000-0000-4000-8000-000000000001.bin");
         write_test_file(&old_file, b"old-scope-private-staging");
-        latch_startup_maintenance_failure();
+        latch_startup_repair_maintenance_failure();
         let transition = arm_scope_transition().expect("arm destructive scope rebind");
 
         persist_verified_entitlement(
@@ -10984,6 +11541,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(!state.blocked);
         assert!(!state.maintenance_failed);
+        assert!(!state.repair_maintenance_failed);
     }
 
     static JANITOR_SQL_TRACE: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
@@ -12354,26 +12912,24 @@ mod tests {
         assert_eq!(after.scope_epoch, settled.scope_epoch);
         assert!(!after.transition_pending && after.pending_purpose.is_none());
 
-        // Once Repairs state reappears, the same latch closes the barrier again.
+        // Once Repairs state reappears, the same latch closes Repairs again,
+        // and only Repairs (Π1, 21/10/2026).
         crate::storage::set_credential(crate::storage::KEY_REPAIR_ENTITLEMENT_V1, "{}")
             .expect("restore an entitlement");
         let refused = start_authoritative_access_decision().expect("start refused answer");
         latch_authoritative_access_pending(refused).expect("refused modules answer");
-        assert_eq!(
-            acquire_terminal_binding_lease().unwrap_err(),
-            "REPAIR_SCOPE_TRANSITION_PENDING"
-        );
+        assert!(lifecycle().0.lock().unwrap().access_blocked);
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
         reset_test_lifecycle();
         latch_startup_access_pending().expect("failed sign-out cleanup");
-        assert_eq!(
-            acquire_terminal_binding_lease().unwrap_err(),
-            "REPAIR_SCOPE_TRANSITION_PENDING"
-        );
+        assert!(lifecycle().0.lock().unwrap().access_blocked);
+        drop(acquire_terminal_binding_lease().expect("ordinary POS writes stay admitted"));
         reset_test_lifecycle();
     }
 
     #[test]
-    fn same_identity_module_revoke_preserves_money_but_removes_operational_repair_state() {
+    #[serial_test::serial]
+    fn same_identity_module_revoke_preserves_money_and_unacknowledged_repair_state() {
         let _serial = test_state_lock();
         reset_test_lifecycle();
         let initial = scope();
@@ -12447,8 +13003,8 @@ mod tests {
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("count purged direct repair queue"),
-            0
+                .expect("count quarantined direct repair queue"),
+            2
         );
         assert_eq!(
             connection
@@ -16761,7 +17317,7 @@ mod tests {
             .0
             .lock()
             .expect("read current terminal binding generation")
-            .epoch;
+            .binding_epoch;
 
         let lease = acquire_terminal_binding_lease()
             .expect("generic terminal binding must not require repair entitlement");
@@ -16845,7 +17401,13 @@ mod tests {
 
         let after = acquire_terminal_binding_lease().expect("capture published binding");
         assert_ne!(after.generation(), before_generation);
-        assert_eq!(after.generation(), transitioning.scope_epoch);
+        // Π1: the generation is the binding epoch, which only binding writers
+        // advance; the repair scope epoch is no longer the binding generation.
+        assert_eq!(
+            after.generation(),
+            lifecycle().0.lock().unwrap().binding_epoch
+        );
+        assert!(after.generation() > before_generation);
     }
 
     #[test]
@@ -17040,7 +17602,12 @@ mod tests {
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
-            if lifecycle().0.lock().expect("inspect lifecycle").blocked {
+            if lifecycle()
+                .0
+                .lock()
+                .expect("inspect lifecycle")
+                .access_blocked
+            {
                 database_locked_tx
                     .send(())
                     .expect("announce reconciliation barrier");
@@ -17577,4 +18144,576 @@ mod tests {
         .is_err());
         reset_test_lifecycle();
     }
+    #[test]
+    #[serial_test::serial]
+    fn repairs_p2_quarantine_reenable_replays_intake_note_and_photo() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        let path;
+        {
+            let connection = database.state.conn.lock().unwrap();
+            persist_runtime_identity(
+                &connection,
+                &original.organization_id,
+                &original.branch_id,
+                &original.terminal_id,
+            )
+            .unwrap();
+            path = stage_attachment_fixture(&connection, &original);
+            let mut note =
+                transition_input(TEST_OPERATION_3, 2, "diagnosing", "2026-08-26T11:01:00Z");
+            note.command = RepairOfflineCommand::AddNote {
+                note: "Private note".to_string(),
+                visibility: "internal".to_string(),
+            };
+            apply_offline_mutation(&connection, &note).unwrap();
+        }
+        let cache =
+            crate::repair_attachment_cache::seed_scope_cache_for_test(&original.scope_token);
+        let revoked = begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            false,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        assert!(revoked.is_disabled());
+        let disabled = load_scope_raw().unwrap().unwrap();
+        assert!(disabled.disabled_with_quarantine);
+        assert_eq!(disabled.scope_epoch, original.scope_epoch);
+        assert_eq!(disabled.scope_token, original.scope_token);
+        assert!(path.exists());
+        assert!(!cache.exists());
+        assert!(disabled.offline_terminal_token.is_none());
+        assert!(acquire_transport_lease().is_err());
+        {
+            let connection = database.state.conn.lock().unwrap();
+            assert_eq!(
+                crate::sync_queue::get_status(&connection).unwrap().pending,
+                3
+            );
+            assert_eq!(
+                decrypt_queued_envelope(
+                    &connection,
+                    &original,
+                    TEST_OPERATION_ID,
+                    TEST_REPAIR_ID,
+                    0
+                )["command"],
+                "create_intake"
+            );
+        }
+        let repeated = begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            false,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        assert!(repeated.is_unchanged());
+        let enabled = begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            true,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        finalize_authoritative_offline_access(
+            &database.state,
+            &enabled,
+            &crate::repair_transport::RepairNumberingLease::Sequence {
+                offline_terminal_token: "A19F".to_string(),
+                offline_sequence_lease_start: 101,
+                offline_sequence_lease_end: 200,
+            },
+        )
+        .unwrap();
+        let connection = database.state.conn.lock().unwrap();
+        let restored = load_scope_raw().unwrap().unwrap();
+        assert_eq!(restored.scope_token, original.scope_token);
+        let context = processing_context(&connection, &restored, TEST_OPERATION_ID, 0, 1);
+        NATIVE_REPAIR_QUEUE_HOOKS
+            .reconcile_success(
+                &connection,
+                &context,
+                &success_signal(
+                    crate::repair_transport::RepairStatus::Received,
+                    1,
+                    Some("R-ATH-26-000001"),
+                    Some("R-OFF-A19F-000001"),
+                ),
+            )
+            .unwrap();
+        crate::sync_queue::mark_success(&connection, TEST_OPERATION_ID, 1).unwrap();
+        let upload = NATIVE_REPAIR_QUEUE_HOOKS
+            .decode_attachment_upload(
+                &connection,
+                &queue_item(&connection, TEST_ATTACHMENT_OPERATION_ID),
+            )
+            .unwrap();
+        assert!(!upload.bytes.is_empty());
+        let context =
+            processing_context(&connection, &restored, TEST_ATTACHMENT_OPERATION_ID, 1, 1);
+        NATIVE_REPAIR_QUEUE_HOOKS
+            .reconcile_attachment_success(
+                &connection,
+                &context,
+                &attachment_result(crate::repair_transport::RepairStatus::Received, 2),
+            )
+            .unwrap();
+        let context = processing_context(&connection, &restored, TEST_OPERATION_3, 2, 1);
+        assert_eq!(
+            decrypt_queued_envelope(&connection, &restored, TEST_OPERATION_3, TEST_REPAIR_ID, 2)
+                ["payload"]["note"],
+            "Private note"
+        );
+        NATIVE_REPAIR_QUEUE_HOOKS
+            .reconcile_success(
+                &connection,
+                &context,
+                &success_signal(
+                    crate::repair_transport::RepairStatus::Received,
+                    3,
+                    Some("R-ATH-26-000001"),
+                    None,
+                ),
+            )
+            .unwrap();
+        crate::sync_queue::mark_success(&connection, TEST_OPERATION_3, 1).unwrap();
+        assert_eq!(crate::sync_queue::get_status(&connection).unwrap().total, 0);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repairs_p3_renewal_starts_at_new_range_and_retained_keeps_lease() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let mut connection = database.state.conn.lock().unwrap();
+            persist_runtime_identity(
+                &connection,
+                &original.organization_id,
+                &original.branch_id,
+                &original.terminal_id,
+            )
+            .unwrap();
+            let tx = connection.transaction().unwrap();
+            assert_eq!(
+                allocate_offline_alias(&tx, &original, TEST_REPAIR_ID, "2026-08-26T10:00:00Z")
+                    .unwrap()
+                    .1,
+                1
+            );
+            tx.commit().unwrap();
+            assert!(keep_offline_numbering_lease(&connection).unwrap());
+        }
+        let enabled = begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            true,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_scope_raw()
+                .unwrap()
+                .unwrap()
+                .offline_sequence_lease_start,
+            Some(1)
+        );
+        finalize_authoritative_offline_access(
+            &database.state,
+            &enabled,
+            &crate::repair_transport::RepairNumberingLease::Retained {},
+        )
+        .unwrap();
+        assert_eq!(
+            load_scope_raw()
+                .unwrap()
+                .unwrap()
+                .offline_sequence_lease_end,
+            Some(100)
+        );
+        let enabled = begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            true,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        finalize_authoritative_offline_access(
+            &database.state,
+            &enabled,
+            &crate::repair_transport::RepairNumberingLease::Sequence {
+                offline_terminal_token: "A19F".to_string(),
+                offline_sequence_lease_start: 101,
+                offline_sequence_lease_end: 200,
+            },
+        )
+        .unwrap();
+        let renewed = load_scope_raw().unwrap().unwrap();
+        let mut connection = database.state.conn.lock().unwrap();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            allocate_offline_alias(&tx, &renewed, TEST_OTHER_REPAIR_ID, "2026-08-26T10:00:00Z")
+                .unwrap()
+                .1,
+            101
+        );
+        tx.commit().unwrap();
+        let mut almost_empty = renewed.clone();
+        almost_empty.offline_sequence_lease_end = Some(110);
+        persist_scope(&almost_empty).unwrap();
+        assert!(!keep_offline_numbering_lease(&connection).unwrap());
+        almost_empty.offline_sequence_lease_end = Some(111);
+        persist_scope(&almost_empty).unwrap();
+        assert!(keep_offline_numbering_lease(&connection).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repairs_p5_identity_change_purges_plaintext_and_quarantined_work() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            persist_runtime_identity(
+                &connection,
+                &original.organization_id,
+                &original.branch_id,
+                &original.terminal_id,
+            )
+            .unwrap();
+            apply_offline_mutation(&connection, &create_standard_input()).unwrap();
+        }
+        begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            false,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        let cache =
+            crate::repair_attachment_cache::seed_scope_cache_for_test(&original.scope_token);
+        begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            "terminal-beta",
+            true,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        assert!(!cache.exists());
+        let connection = database.state.conn.lock().unwrap();
+        assert_eq!(crate::sync_queue::get_status(&connection).unwrap().total, 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM repair_cache", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repairs_p5_producer_refuses_5001_utf16_units() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        let connection = database.state.conn.lock().unwrap();
+        let mut input = create_standard_input();
+        if let RepairOfflineCommand::CreateIntake { intake_notes, .. } = &mut input.command {
+            *intake_notes = Some("\u{03b1}".repeat(5001));
+        }
+        assert!(apply_offline_mutation(&connection, &input).is_err());
+        if let RepairOfflineCommand::CreateIntake { intake_notes, .. } = &mut input.command {
+            *intake_notes = Some("\u{03b1}".repeat(4000));
+        }
+        apply_offline_mutation(&connection, &input).unwrap();
+    }
+
+    async fn review_refusal_round_trip(expected_version: u64) {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            if expected_version == 0 {
+                apply_offline_mutation(&connection, &create_standard_input()).unwrap();
+            } else {
+                let access = acquire_renderer_access(&connection).unwrap();
+                cache_clean_authoritative_repair(
+                    &connection,
+                    &access,
+                    TEST_REPAIR_ID,
+                    expected_version,
+                );
+                apply_offline_mutation(
+                    &connection,
+                    &RepairOfflineMutationInput {
+                        operation_id: TEST_OPERATION_ID.into(),
+                        repair_id: TEST_REPAIR_ID.into(),
+                        expected_version,
+                        staff_session_id: TEST_SESSION_ID.into(),
+                        occurred_at: "2026-08-26T10:00:00Z".into(),
+                        command: RepairOfflineCommand::AddNote {
+                            note: "Private review note".into(),
+                            visibility: "internal".into(),
+                        },
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let server = crate::tests::fake_http::MockServer::new(
+            serde_json::json!({"results":[{
+                "operation_id":TEST_OPERATION_ID,"repair_id":TEST_REPAIR_ID,"ok":false,"status":403,
+                "error":{"code":"STAFF_SESSION_MISMATCH"}
+            }]})
+            .to_string(),
+        );
+        let result = crate::sync_queue::process_queue_with_repair_hooks(
+            &database.state.conn,
+            &server.url,
+            "native-api-key",
+            &NATIVE_REPAIR_QUEUE_HOOKS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.count(), 1);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(result.failed, 0);
+        let connection = database.state.conn.lock().unwrap();
+        let (kind, generation): (String, i64) = connection
+            .query_row(
+                "SELECT error_message, claim_generation FROM parity_sync_queue WHERE id=?1",
+                [TEST_OPERATION_ID],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "STAFF_SESSION_MISMATCH");
+        assert_eq!(generation, 2);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM repair_conflicts", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "a refusal has no server projection"
+        );
+        let access = acquire_renderer_access(&connection).unwrap();
+        let listed = list_open_conflicts(&connection, &access).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].current_version, expected_version);
+        assert!(rebase_repair_conflict(&connection, &access, TEST_OPERATION_ID).is_err());
+        let result = accept_server_conflict(&connection, &access, TEST_OPERATION_ID).unwrap();
+        assert_eq!(result.optimistic_version, expected_version);
+        assert!(result.needs_refetch);
+        assert_eq!(crate::sync_queue::get_status(&connection).unwrap().total, 0);
+        assert!(list_open_conflicts(&connection, &access)
+            .unwrap()
+            .is_empty());
+        let (version, dirty, refetch): (u64, bool, bool) = connection
+            .query_row(
+                "SELECT authoritative_version, dirty, needs_refetch FROM repair_cache",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((version, dirty, refetch), (expected_version, false, true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn review_intake_session_refusal_http_native_park_discard() {
+        review_refusal_round_trip(0).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn review_version_three_session_refusal_http_native_park_discard() {
+        review_refusal_round_trip(3).await;
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn review_retained_finalization_requires_complete_matching_lease() {
+        for changed in [false, true] {
+            let _state = test_state_lock();
+            reset_test_lifecycle();
+            let mut original = scope();
+            if !changed {
+                original.offline_terminal_token = None;
+                original.offline_sequence_lease_start = None;
+                original.offline_sequence_lease_end = None;
+            }
+            let _keys = install_native_state(&original);
+            let database = crate::tests::harness::TestDb::open();
+            persist_runtime_identity(
+                &database.state.conn.lock().unwrap(),
+                &original.organization_id,
+                &original.branch_id,
+                &original.terminal_id,
+            )
+            .unwrap();
+            let pending = begin_authoritative_access_reconciliation(
+                &database.state,
+                &original.organization_id,
+                &original.branch_id,
+                &original.terminal_id,
+                true,
+                start_authoritative_access_decision().unwrap(),
+            )
+            .unwrap();
+            if changed {
+                let mut scope = load_scope_raw().unwrap().unwrap();
+                scope.offline_sequence_lease_start = Some(101);
+                scope.offline_sequence_lease_end = Some(200);
+                persist_scope(&scope).unwrap();
+            }
+            assert_eq!(
+                finalize_authoritative_offline_access(
+                    &database.state,
+                    &pending,
+                    &crate::repair_transport::RepairNumberingLease::Retained {}
+                )
+                .unwrap_err(),
+                "REPAIR_OFFLINE_BOOTSTRAP_INVALID"
+            );
+            assert!(load_scope_raw().unwrap().unwrap().transition_pending);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn review_modules_response_after_logout_cannot_bootstrap() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        persist_runtime_identity(
+            &database.state.conn.lock().unwrap(),
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+        )
+        .unwrap();
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let server = crate::tests::fake_http::MockServer::new_with_request_hook(serde_json::json!({
+            "organization_id":original.organization_id,"branch_id":original.branch_id,"terminal_id":original.terminal_id,"modules":[{"module_id":"repairs"}]
+        }).to_string(), move || { reached_tx.send(()).unwrap(); release_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5)).unwrap(); });
+        let request = crate::commands::modules::fetch_bound_repair_access(
+            &server.url,
+            "native-api-key",
+            &original.terminal_id,
+        );
+        let logout = async {
+            while reached_rx.try_recv().is_err() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            crate::commands::auth::logout_staff_session(&crate::auth::AuthState::new()).unwrap();
+            release_tx.send(()).unwrap();
+        };
+        let (access, ()) = tokio::join!(request, logout);
+        let access = access.unwrap();
+        assert!(
+            crate::storage::repair_session_snapshot()
+                .unwrap()
+                .1
+                .is_none(),
+            "late modules response must not capture a signed-out session"
+        );
+        let pending = begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            &original.terminal_id,
+            true,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::commands::modules::finalize_repair_access_if_signed_in(
+                &database.state,
+                &access,
+                &pending
+            )
+            .await
+            .unwrap(),
+            "pending_staff_session"
+        );
+        assert!(crate::storage::session_get_strict().unwrap().is_none());
+        assert!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1)
+                .is_none()
+        );
+        assert_eq!(server.count(), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn repairs_p5_identity_change_always_removes_old_plaintext_cache() {
+        let _state = test_state_lock();
+        reset_test_lifecycle();
+        let original = scope();
+        let _keys = install_native_state(&original);
+        let database = crate::tests::harness::TestDb::open();
+        {
+            let connection = database.state.conn.lock().unwrap();
+            persist_runtime_identity(
+                &connection,
+                &original.organization_id,
+                &original.branch_id,
+                &original.terminal_id,
+            )
+            .unwrap();
+        }
+        let cache =
+            crate::repair_attachment_cache::seed_scope_cache_for_test(&original.scope_token);
+        begin_authoritative_access_reconciliation(
+            &database.state,
+            &original.organization_id,
+            &original.branch_id,
+            "terminal-beta",
+            true,
+            start_authoritative_access_decision().unwrap(),
+        )
+        .unwrap();
+        assert!(!cache.exists(), "old identity plaintext survived rebind");
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/repairs_binding_split.rs"]
+mod binding_split_tests;

@@ -1,4 +1,10 @@
 {
+  "missedPlatformOrders": {
+    "title_one": "{{count}} ordine della piattaforma rifiutato mentre la cassa era offline",
+    "title_other": "{{count}} ordini della piattaforma rifiutati mentre la cassa era offline",
+    "body": "≈{{total}} di ordini rifiutati automaticamente (cassa offline). Tieni la cassa connessa per ricevere gli ordini delle piattaforme.",
+    "dismiss": "OK"
+  },
   "twintPayment": {
     "receiptNotSaved": "Confermato, non salvato",
     "receiptConfirmedAt": "Confermato dal cassiere alle",
@@ -953,6 +959,13 @@
       "deliveryFeeZoneNotChecked": "Zona non verificata",
       "deliveryZoneNotCheckedNotice": "La zona di consegna non è stata verificata. Seleziona di nuovo l'indirizzo.",
       "repickDeliveryAddress": "Seleziona di nuovo l'indirizzo",
+      "deliveryFeeChooseZone": "Scegli la zona",
+      "offlineZoneChoiceTitle": "Scegli la zona di consegna",
+      "offlineZoneChoiceHint": "Nessuna connessione: questo indirizzo non può essere localizzato. Scegli la sua zona; si applica la tariffa di consegna di quella zona.",
+      "offlineZoneChoiceLoading": "Caricamento delle zone del negozio…",
+      "offlineZoneChoiceNoZones": "Su questa cassa non sono salvate zone di consegna. Connettiti una volta per scaricarle, oppure cambia il tipo di ordine.",
+      "offlineZoneChoiceRequired": "Scegli prima la zona di consegna.",
+      "zoneChosenManually": "Zona scelta manualmente",
       "deliveryFeeOutOfZone": "Fuori zona di consegna",
       "deliveryFeeUnavailable": "Costo di consegna non disponibile",
       "total": "Totale:",
@@ -3447,6 +3460,40 @@
     }
   },
   "sync": {
+    "zGate": {
+      "approvalTitle": "Approva con il tuo PIN",
+      "approvalSubtitle": "Mettere da parte una registrazione richiede il diritto di annullare pagamenti. Un membro del personale che lo ha inserisce il proprio PIN. Nulla viene cancellato o addebitato.",
+      "setAsideDone": "Messa da parte. La registrazione resta su questa cassa e lo Z la indica come non presente sul server.",
+      "undoDone": "La registrazione è tornata: blocca di nuovo la chiusura della giornata finché il server non la accetta.",
+      "actionFailed": "Non è stato possibile. Non è cambiato nulla.",
+      "stale": "Questo elenco non è stato riletto. Mostra l'ultima lettura valida.",
+      "unavailable": "Non è stato possibile leggere le giornate chiuse su questa cassa. Riprova.",
+      "localTitle": "Giornate chiuse su questa cassa, non ancora sul server: {{count}}",
+      "localDay": "Giornata del {{date}}: chiusa su questa cassa senza connessione",
+      "waits": {
+        "earlier_z": "Attende che la giornata chiusa precedente raggiunga prima il server.",
+        "window_rows": "Attende che {{count}} registrazioni di quella giornata raggiungano il server.",
+        "server_refusal": "Il server l'ha rifiutata. Contatta l'assistenza con i dettagli qui sotto.",
+        "sending": "Viene inviata alla prossima sincronizzazione.",
+        "cleanup": "Il server l'ha confermata. I suoi dati vengono rimossi da questa cassa."
+      },
+      "details": "Dettagli per l'assistenza",
+      "refusedTitle": "Rifiutate dal server: {{count}}",
+      "refusedIntro": "Il server ha rifiutato definitivamente queste registrazioni, quindi bloccano la chiusura della giornata. Un responsabile può metterne una da parte: resta su questa cassa, lo Z la indica come non presente sul server e non viene mai più inviata da sola.",
+      "kind": {
+        "payment": "Pagamento",
+        "refund": "Rimborso o annullamento",
+        "driverEarning": "Compenso autista",
+        "expense": "Spesa",
+        "staffPayment": "Pagamento personale",
+        "cashReturn": "Restituzione contanti",
+        "shift": "Turno",
+        "record": "Registrazione"
+      },
+      "setAsideState": "Messa da parte: conservata su questa cassa, non sul server",
+      "setAside": "Metti da parte",
+      "undo": "Ripristina"
+    },
     "capacity": {
       "badge": "Coda {{percent}}%",
       "title": "La coda di sincronizzazione si sta riempiendo",
@@ -3510,7 +3557,7 @@
     "closeoutBlocked": {
       "single": "Impossibile chiudere la giornata durante {{stage}} perché {{orderReference}} è ancora bloccato: {{reason}}.",
       "multiple": "Impossibile chiudere la giornata durante {{stage}} perché {{count}} elementi di sincronizzazione sono ancora bloccati.",
-      "moneyNotSynced": "La giornata non può ancora essere chiusa: {{count}} registrazioni di pagamenti o rimborsi di questa giornata non hanno raggiunto il server. Verifica che la cassa sia online, premi Sincronizza ora e chiudi di nuovo la giornata."
+      "moneyNotSynced": "La giornata non può ancora essere chiusa: {{count}} registrazioni di pagamenti, rimborsi o turni di questa giornata non hanno raggiunto il server. Verifica che la cassa sia online, premi Sincronizza ora e chiudi di nuovo la giornata."
     },
     "time": {
       "never": "Mai",
@@ -7293,6 +7340,19 @@
     "depositTotal": "Cauzioni",
     "depositLineName": "Cauzione — {{name}}"
   },
+  "appointmentCheckoutClaim": {
+    "claimedElsewhere": "Questo appuntamento è in fase di incasso su un'altra cassa ({{terminal}}) fino alle {{time}}.",
+    "claimedElsewhereNow": "Questo appuntamento è in fase di incasso su un'altra cassa ({{terminal}}).",
+    "claimedElsewhereUnknown": "Questo appuntamento è in fase di incasso su un'altra cassa. Riprova tra qualche minuto.",
+    "settled": "Questo appuntamento è già pagato o chiuso.",
+    "notFound": "Appuntamento non trovato. Aggiorna e riprova.",
+    "needsConnection": "Per incassare un appuntamento serve una connessione. Puoi vendere i servizi senza appuntamento.",
+    "failed": "Impossibile avviare l'incasso. Riprova."
+  },
+  "retailStock": {
+    "onlyAvailable": "Solo {{available}} {{unit}} in magazzino",
+    "unitPiece": "pz"
+  },
   "staffSchedule": {
     "loading": "Caricamento turni personale...",
     "weeklyProgram": "Programma settimanale del personale",
@@ -7855,6 +7915,15 @@
     "redeemSuccess": "Riscattati {{points}} punti per uno sconto di {{discount}}",
     "redeemFailed": "Ordine salvato, ma i punti fedeltà non sono stati riscattati",
     "checkoutRefused": "Impossibile riservare i punti fedeltà. L'ordine non è stato salvato. Rimuovi il riscatto o riprova.",
+    "redeem": {
+      "offlineRefused": "I punti si possono riscattare solo con una connessione internet. La vendita prosegue senza lo sconto; i punti guadagnati restano.",
+      "refusedBody": "Il server ha rifiutato il riscatto. Non è stato applicato alcuno sconto.",
+      "confirmationRequired": "Conferma online il riscatto originale dei punti prima di incassare.",
+      "releasedForCheckout": "I punti di questa vendita sono stati restituiti al cliente. Inizia una nuova vendita per riscattare di nuovo i punti.",
+      "removePoints": "Rimuovi punti",
+      "confirmed": "Punti confermati. Prosegui con il pagamento.",
+      "releaseFailed": "Non è stato possibile restituire i punti al saldo del cliente. Riprova."
+    },
     "redeemPrepared": "{{points}} punti pronti per uno sconto di {{discount}}",
     "noCustomerSelected": "Seleziona un cliente salvato per riscattare punti",
     "moduleUnavailable": "Il modulo fedeltà non è abilitato su questo terminale",
@@ -10163,8 +10232,17 @@
   },
   "zReportOffline": {
     "refusal": "Senza connessione la giornata non si può chiudere. Continua a vendere: la giornata resta aperta e la chiudi appena torna la connessione. Per contare il cassetto adesso, usa la chiusura del cassiere, che si stampa anche senza internet, e l'anteprima in questa schermata.",
-    "status": "Nessuna connessione: la giornata si chiude appena torna",
-    "checklist": "Nessuna connessione al server. Continua a vendere e chiudi la giornata appena torna la connessione."
+    "status": "Nessuna connessione: lo Z chiude la giornata su questa cassa e viene inviato dopo",
+    "checklist": "Nessuna connessione al server. Lo Z chiude la giornata su questa cassa e la invia appena torna la connessione. Un negozio con un servizio fiscale attivo chiude la giornata appena torna la connessione.",
+    "localCloseDone": "La giornata del {{date}} è chiusa su questa cassa senza connessione. Il suo Z viene inviato al server appena torna la connessione; nulla viene cancellato prima che il server l'abbia ricevuto. Puoi iniziare la giornata successiva."
+  },
+  "salonStaff": {
+    "pickerTitle": "Chi esegue questo servizio?",
+    "noStylist": "Nessun dipendente",
+    "tipRecipient": "Dipendente",
+    "tipRecipientHelp": "Va al dipendente che ha eseguito il servizio.",
+    "tipChooseStaff": "A chi va la mancia?",
+    "tipsByStaff": "Mance per dipendente"
   },
   "salonSale": {
     "newSale": "Nuova vendita di servizi",

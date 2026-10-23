@@ -38,7 +38,10 @@ test('Round 250: MenuCart edit-mode save action is green, not amber/orange', () 
     cartSource,
     /isCheckoutBlocked\s*\?\s*'bg-black\/10 dark:bg-white\/10 text-black\/30 dark:text-white\/30 cursor-not-allowed'/,
   );
-  assert.match(cartSource, /onClick=\{onCheckout\}\s*disabled=\{isCheckoutBlocked\}/);
+  // retail.block_overselling (21/10/2026): the button first runs the retail
+  // stock check, then calls the same onCheckout; food carts call it at once.
+  assert.match(cartSource, /onClick=\{handleCheckoutClick\}\s*disabled=\{isCheckoutBlocked\}/);
+  assert.match(cartSource, /if \(retailLineIds\.length === 0\) \{\s*onCheckout\(\);\s*return;\s*\}/);
 });
 
 test('Round 250: MenuCart touch controls drop native title= tooltips, keep/gain aria-labels', () => {

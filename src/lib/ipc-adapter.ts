@@ -119,6 +119,62 @@ import type {
 
 // -- Generic -----------------------------------------------------------------
 
+// -- Z without the server and set-aside rows (offline week, 21/10/2026) ------
+
+/** `recovery_z_gate_set_aside`: list (default), set a row aside, or undo it. */
+export interface ZGateSetAsideRequest {
+  action: "list" | "set_aside" | "undo";
+  queueId?: string;
+}
+
+/** What a Z closed on this till still waits for before its window is cleaned. */
+export type LocalZWaitsFor =
+  | "earlier_z"
+  | "window_rows"
+  | "server_refusal"
+  | "sending"
+  | "cleanup";
+
+/** One Z closed on this till that the server has not confirmed (or swept). */
+export interface LocalZPending {
+  zReportId: string;
+  reportDate: string;
+  periodStartAt?: string | null;
+  cutoffAt?: string | null;
+  confirmed: boolean;
+  waitsFor: LocalZWaitsFor;
+  windowRowsPending: number;
+  queueStatus?: string | null;
+  errorCode?: string | null;
+  serverMessage?: string | null;
+  nextRetryAt?: string | null;
+}
+
+/** One queue row of a Z gate the server refused for good. */
+export interface ZGateRefusedRow {
+  queueId: string;
+  tableName: string;
+  recordId: string;
+  status: string;
+  errorCode?: string | null;
+  serverMessage?: string | null;
+  createdAt: string;
+  amountCents?: number | null;
+  setAside: boolean;
+  setAsideAt?: string | null;
+  setAsideByStaffId?: string | null;
+  setAsideReason?: string | null;
+}
+
+export interface ZGateHealth {
+  success: boolean;
+  localZs: LocalZPending[];
+  unconfirmedLocalZs: number;
+  refused: ZGateRefusedRow[];
+  applied?: "set_aside" | "undo";
+  queueId?: string;
+}
+
 /**
  * The answer of `orders.notifyPlatformReady` (item D8, 01/10/2026). An order
  * already past Ready answers `alreadyClosed` and an order cancelled or
@@ -130,6 +186,18 @@ export interface PlatformReadyResult {
   status?: string;
   alreadyClosed?: boolean;
   cancelled?: boolean;
+  error?: string;
+}
+
+/**
+ * The answer of `orders.getUnsyncedRetailQuantities` (`retail.block_overselling`,
+ * 21/10/2026): retail quantities of this till's local orders that have no
+ * server copy yet and were not cancelled or voided. `variantId` is null for
+ * the base product.
+ */
+export interface UnsyncedRetailQuantitiesResult {
+  success: boolean;
+  quantities?: Array<{ productId: string; variantId: string | null; quantity: number }>;
   error?: string;
 }
 
@@ -472,8 +540,9 @@ export interface TableBridgeListParams {
 }
 
 export interface StaffScheduleListParams {
-  start_date: string;
-  end_date: string;
+  /** Without a range the answer is the branch staff only, without shifts. */
+  start_date?: string;
+  end_date?: string;
   branch_id?: string;
   role?: string;
 }
@@ -1081,8 +1150,8 @@ export interface RecordPaymentParams {
   tipAmount?: number;
   tip_amount?: number;
   tip_amount_cents?: number;
-  tipRecipientRole?: "waiter" | "cashier" | "driver";
-  tip_recipient_role?: "waiter" | "cashier" | "driver";
+  tipRecipientRole?: "waiter" | "cashier" | "driver" | "staff";
+  tip_recipient_role?: "waiter" | "cashier" | "driver" | "staff";
   tipRecipientStaffId?: string;
   tip_recipient_staff_id?: string;
   tipRecipientStaffShiftId?: string;
@@ -1887,6 +1956,8 @@ export interface PlatformBridge {
     ): Promise<IpcResult>;
     forceSyncRetry(orderId: string): Promise<IpcResult>;
     getRetryInfo(orderId: string): Promise<any>;
+    /** This till's retail quantities in orders the server has not received yet. */
+    getUnsyncedRetailQuantities(): Promise<UnsyncedRetailQuantitiesResult>;
     clearAll(): Promise<IpcResult>;
   };
 
@@ -2746,6 +2817,13 @@ export interface PlatformBridge {
     executeAction(request: RecoveryActionRequest): Promise<RecoveryActionResult>;
     recordActionLog(entry: RecoveryActionLogEntry): Promise<RecoveryActionLogEntry>;
     listActionLog(limit?: number): Promise<RecoveryActionLogEntry[]>;
+    /**
+     * Offline week (founder 21/10/2026): the Zs closed on this till still
+     * waiting for the server, and the rows the server refused for good that
+     * hold a Z gate (`list`); `set_aside` / `undo` one row with the
+     * void-payments approval (`recovery_z_gate_set_aside`).
+     */
+    zGateSetAside(request?: ZGateSetAsideRequest): Promise<ZGateHealth>;
   };
 
   tableAttemptRecovery: {
@@ -2867,6 +2945,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "orders:resolve-conflict": "orders.resolveConflict",
   "orders:force-sync-retry": "orders.forceSyncRetry",
   "orders:get-retry-info": "orders.getRetryInfo",
+  "orders:get-unsynced-retail-quantities": "orders.getUnsyncedRetailQuantities",
   "orders:clear-all": "orders.clearAll",
   "orders:preview-edit-settlement": "orders.previewEditSettlement",
   "orders:apply-edit-settlement": "orders.applyEditSettlement",
@@ -3279,6 +3358,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "recovery:execute-action": "recovery.executeAction",
   "recovery:record-action-log": "recovery.recordActionLog",
   "recovery:list-action-log": "recovery.listActionLog",
+  "recovery:z-gate-set-aside": "recovery.zGateSetAside",
 
   // Service dashboard metrics. Invoked directly via `invoke(channel)` from
   // ServiceDashboard.tsx; no matching bridge method exists (the dotted value
@@ -3665,6 +3745,8 @@ export class TauriBridge implements PlatformBridge {
       this.inv("orders:resolve-conflict", cid, s, d),
     forceSyncRetry: (id: string) => this.inv("orders:force-sync-retry", id),
     getRetryInfo: (id: string) => this.inv("orders:get-retry-info", id),
+    getUnsyncedRetailQuantities: () =>
+      this.inv("orders:get-unsynced-retail-quantities"),
     clearAll: () => this.inv("orders:clear-all"),
   };
 
@@ -4537,6 +4619,8 @@ export class TauriBridge implements PlatformBridge {
       this.inv("recovery:record-action-log", entry),
     listActionLog: (limit?: number) =>
       this.inv("recovery:list-action-log", limit ? { limit } : undefined),
+    zGateSetAside: (request?: ZGateSetAsideRequest) =>
+      this.inv("recovery:z-gate-set-aside", request ?? { action: "list" }),
   };
 }
 

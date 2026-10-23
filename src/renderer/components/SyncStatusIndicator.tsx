@@ -118,6 +118,12 @@ import {
   syncNowTargetItems,
 } from './recovery/sync-now-attempt';
 import type { SubscriptionConnectionStatus } from '../services/RealtimeManager';
+import { usePrivilegedActionConfirmation } from '../hooks/usePrivilegedActionConfirmation';
+import type {
+  LocalZWaitsFor,
+  ZGateHealth,
+  ZGateRefusedRow,
+} from '../../lib/ipc-adapter';
 
 /**
  * A system health read whose backlog query failed says so
@@ -664,6 +670,269 @@ const getSyncHealthPresentation = (
         }),
       };
   }
+};
+
+// ---------------------------------------------------------------------------
+// Days closed on this till, and rows the server refused for good
+// (offline week Ω3/Ω4, founder 21/10/2026)
+// ---------------------------------------------------------------------------
+
+/** The kind of a refused Z-gate row, as `sync.zGate.kind.*` names it. */
+const Z_GATE_ROW_KIND: Record<string, string> = {
+  payments: 'payment',
+  order_payments: 'payment',
+  payment_adjustments: 'refund',
+  driver_earnings: 'driverEarning',
+  driver_earning: 'driverEarning',
+  shift_expenses: 'expense',
+  staff_payments: 'staffPayment',
+  staff_order_cash_returns: 'cashReturn',
+  staff_shifts: 'shift',
+  cash_drawer_sessions: 'shift',
+};
+
+const Z_GATE_WAITS_FOR_DEFAULTS: Record<LocalZWaitsFor, string> = {
+  earlier_z: 'It waits for the earlier closed day to reach the server first.',
+  window_rows: 'It waits for {{count}} record(s) of that day to reach the server.',
+  server_refusal: 'The server refused it. Contact support with the details below.',
+  sending: 'It is sent at the next sync.',
+  cleanup: 'The server confirmed it. Its data is cleaned from this till.',
+};
+
+const Z_GATE_KIND_DEFAULTS: Record<string, string> = {
+  payment: 'Payment',
+  refund: 'Refund or void',
+  driverEarning: 'Driver earning',
+  expense: 'Expense',
+  staffPayment: 'Staff payment',
+  cashReturn: 'Cash return',
+  shift: 'Shift',
+  record: 'Record',
+};
+
+/**
+ * Health: the Zs closed on this till still waiting for the server, with what
+ * each waits for, and every row the server refused for good that holds a Z.
+ * "Set aside" asks the void-payments approval (a holder of the right on shift
+ * with a fresh PIN, else that holder's own PIN) and keeps the record on this
+ * till: it is never deleted, never sent again on its own, and every Z of its
+ * day lists it as "not on the server". "Bring back" undoes it. A failed read
+ * keeps the last good list, marked stale.
+ */
+export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className }) => {
+  const bridge = getBridge();
+  const { t } = useTranslation();
+  const { runWithPrivilegedConfirmation, confirmationModal } = usePrivilegedActionConfirmation();
+  const [health, setHealth] = useState<ZGateHealth | null>(null);
+  const [stale, setStale] = useState(false);
+  const [busyQueueId, setBusyQueueId] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  // A bridge without the command (an older native build, a partial test
+  // double) has nothing to list.
+  const supported = typeof bridge.recovery?.zGateSetAside === 'function';
+
+  const load = useCallback(async () => {
+    if (!supported) return;
+    try {
+      const result = await bridge.recovery.zGateSetAside({ action: 'list' });
+      if (result?.success) {
+        setHealth(result);
+        setStale(false);
+      } else {
+        setStale(true);
+      }
+    } catch {
+      setStale(true);
+    }
+  }, [bridge, supported]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleAction = useCallback(
+    async (row: ZGateRefusedRow) => {
+      const action = row.setAside ? 'undo' : 'set_aside';
+      setBusyQueueId(row.queueId);
+      setMessage(null);
+      try {
+        const result = await runWithPrivilegedConfirmation<ZGateHealth>({
+          scope: 'cash_drawer_control',
+          action: () => bridge.recovery.zGateSetAside({ action, queueId: row.queueId }),
+          title: t('sync.zGate.approvalTitle', { defaultValue: 'Approve with your PIN' }),
+          subtitle: t('sync.zGate.approvalSubtitle', {
+            defaultValue:
+              'Setting a record aside needs the right to void payments. A staff member who has it enters their own PIN. Nothing is deleted or charged.',
+          }),
+          approvalSubtitle: t('sync.zGate.approvalSubtitle', {
+            defaultValue:
+              'Setting a record aside needs the right to void payments. A staff member who has it enters their own PIN. Nothing is deleted or charged.',
+          }),
+        });
+        if (result?.success) {
+          setHealth(result);
+          setStale(false);
+        }
+        setMessage(
+          action === 'undo'
+            ? t('sync.zGate.undoDone', {
+              defaultValue: 'The record is back: it holds the day close again until the server takes it.',
+            })
+            : t('sync.zGate.setAsideDone', {
+              defaultValue:
+                'Set aside. The record stays on this till and the Z lists it as not on the server.',
+            }),
+        );
+      } catch (error) {
+        if (!(error instanceof Error && error.message === 'Privileged action confirmation cancelled')) {
+          setMessage(
+            t('sync.zGate.actionFailed', {
+              defaultValue: 'It could not be done. Nothing was changed.',
+            }),
+          );
+        }
+      } finally {
+        setBusyQueueId(null);
+      }
+    },
+    [bridge, runWithPrivilegedConfirmation, t],
+  );
+
+  const localZs = health?.localZs ?? [];
+  const refused = health?.refused ?? [];
+  if (!supported || (!health && !stale)) return null;
+  if (health && localZs.length === 0 && refused.length === 0 && !message) return null;
+
+  return (
+    <section
+      className={cn('rounded-2xl border p-4', liquidGlassModalTone('warning'), className)}
+      data-testid="z-gate-panel"
+      aria-live="polite"
+    >
+      {stale && (
+        <p className="mb-3 text-sm font-semibold" data-testid="z-gate-stale">
+          {health
+            ? t('sync.zGate.stale', {
+              defaultValue: 'This list could not be read again. It shows the last good read.',
+            })
+            : t('sync.zGate.unavailable', {
+              defaultValue: 'The days closed on this till could not be read. Try again.',
+            })}
+        </p>
+      )}
+      {localZs.length > 0 && (
+        <div data-testid="z-gate-local-zs">
+          <h4 className="text-base font-black">
+            {t('sync.zGate.localTitle', {
+              count: localZs.length,
+              defaultValue: 'Days closed on this till, not on the server yet: {{count}}',
+            })}
+          </h4>
+          <ul className="mt-2 space-y-2">
+            {localZs.map((z) => (
+              <li
+                key={z.zReportId}
+                className="rounded-xl border border-current/15 p-3 text-sm"
+                data-testid={`z-gate-local-z-${z.zReportId}`}
+              >
+                <p className="font-bold">
+                  {t('sync.zGate.localDay', {
+                    date: z.reportDate,
+                    defaultValue: 'Day of {{date}}: closed on this till without a connection',
+                  })}
+                </p>
+                <p className="mt-1">
+                  {t(`sync.zGate.waits.${z.waitsFor}`, {
+                    count: z.windowRowsPending,
+                    defaultValue: Z_GATE_WAITS_FOR_DEFAULTS[z.waitsFor] ?? Z_GATE_WAITS_FOR_DEFAULTS.sending,
+                  })}
+                </p>
+                {z.waitsFor === 'server_refusal' && z.serverMessage && (
+                  <p className="mt-1 break-words opacity-80">{z.serverMessage}</p>
+                )}
+                {z.errorCode && (
+                  <details className="mt-1 text-xs opacity-80">
+                    <summary className="min-h-[44px] cursor-pointer py-2">
+                      {t('sync.zGate.details', { defaultValue: 'Details for support' })}
+                    </summary>
+                    <p className="break-all">{z.errorCode}</p>
+                  </details>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {refused.length > 0 && (
+        <div className={cn(localZs.length > 0 && 'mt-4')} data-testid="z-gate-refused">
+          <h4 className="text-base font-black">
+            {t('sync.zGate.refusedTitle', {
+              count: refused.length,
+              defaultValue: 'Refused by the server: {{count}}',
+            })}
+          </h4>
+          <p className="mt-1 text-sm">
+            {t('sync.zGate.refusedIntro', {
+              defaultValue:
+                'The server refused these records for good, so they hold the day close. A manager can set one aside: it stays on this till, the Z lists it as not on the server, and it is never sent again on its own.',
+            })}
+          </p>
+          <ul className="mt-2 space-y-2">
+            {refused.map((row) => {
+              const kind = Z_GATE_ROW_KIND[row.tableName] ?? 'record';
+              const busy = busyQueueId === row.queueId;
+              return (
+                <li
+                  key={row.queueId}
+                  className="flex flex-col gap-2 rounded-xl border border-current/15 p-3 text-sm sm:flex-row sm:items-start sm:justify-between"
+                  data-testid={`z-gate-row-${row.queueId}`}
+                >
+                  <div className="min-w-0">
+                    <p className="font-bold">
+                      {t(`sync.zGate.kind.${kind}`, { defaultValue: Z_GATE_KIND_DEFAULTS[kind] })}
+                      {typeof row.amountCents === 'number' && ` · ${formatCurrency(row.amountCents / 100)}`}
+                    </p>
+                    {row.serverMessage && <p className="mt-1 break-words">{row.serverMessage}</p>}
+                    {row.setAside && (
+                      <p className="mt-1 font-semibold">
+                        {t('sync.zGate.setAsideState', {
+                          defaultValue: 'Set aside: kept on this till, not on the server',
+                        })}
+                      </p>
+                    )}
+                    <details className="mt-1 text-xs opacity-80">
+                      <summary className="min-h-[44px] cursor-pointer py-2">
+                        {t('sync.zGate.details', { defaultValue: 'Details for support' })}
+                      </summary>
+                      <p className="break-all">{row.errorCode || row.status}</p>
+                      <p className="break-all">{row.recordId}</p>
+                    </details>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleAction(row)}
+                    disabled={busyQueueId !== null}
+                    aria-busy={busy}
+                    className="inline-flex min-h-[48px] shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"
+                  >
+                    {row.setAside
+                      ? t('sync.zGate.undo', { defaultValue: 'Bring back' })
+                      : t('sync.zGate.setAside', { defaultValue: 'Set aside' })}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {message && (
+        <p className="mt-3 text-sm font-semibold" role="status" data-testid="z-gate-message">
+          {message}
+        </p>
+      )}
+      {confirmationModal}
+    </section>
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -3226,6 +3495,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </div>
               </section>
               )}
+
+              <ZGateSetAsidePanel className="mt-4" />
 
               <details className={cn('mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}>
                 <summary className="min-h-[44px] cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>

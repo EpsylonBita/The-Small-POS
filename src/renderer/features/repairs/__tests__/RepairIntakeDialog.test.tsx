@@ -176,6 +176,12 @@ describe('RepairIntakeDialog', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/disabled until authoritative or cached settings/i)
   })
 
+  it('caps intake notes at the shared 5,000-character limit', () => {
+    renderDialog({ intent: 'quick_service' })
+
+    expect(screen.getByRole('textbox', { name: 'Intake notes' })).toHaveAttribute('maxLength', '5000')
+  })
+
   it('creates anonymous Quick Service without customer or device references', async () => {
     const { props } = renderDialog({ intent: 'quick_service' })
 

@@ -11,7 +11,9 @@
 //! identically: the charged total and outstanding balance, the shift and
 //! drawer math with the change given, the reports, the customer slip bytes,
 //! the order JSON the screens read, the Z, and the create request body
-//! (where only the server-ignored `tax_amount` fields may differ).
+//! (where only the server-ignored `tax_amount` fields may differ). The one
+//! intended differences (founder, 21/10/2026) are the Z's stored-VAT total
+//! and its v3 rate/channel VAT table, whatever the slip prints.
 //!
 //! The settings are Tomikro's real shape: `tax.default_tax_rate` 0 on the
 //! branch-scoped main-till row, `tax_inclusive` served true (old tills stored
@@ -204,6 +206,28 @@ fn strip_keys(value: &mut Value, keys: &[&str]) {
     }
 }
 
+/// Every value of `key` anywhere in `value`.
+fn collect_key(value: &Value, key: &str) -> Vec<Value> {
+    let mut found = Vec::new();
+    match value {
+        Value::Object(map) => {
+            for (child_key, child) in map {
+                if child_key == key {
+                    found.push(child.clone());
+                }
+                found.extend(collect_key(child, key));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                found.extend(collect_key(item, key));
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
 /// Everything a consumer of the order answers, read the same way twice.
 #[derive(Debug, PartialEq)]
 struct Consumers {
@@ -317,7 +341,59 @@ fn assert_nothing_changes(rate: Value, payload: Value, expected_vat_cents: i64) 
         with_vat.order_json, previous.order_json,
         "(e) order JSON for screens"
     );
-    assert_eq!(with_vat.z_preview, previous.z_preview, "(i) Z");
+    // (i) Z: founder rule 21/10/2026, the Z totals the stored VAT even though
+    // the slip prints none. Its v3 table follows that same stored VAT;
+    // every non-VAT field, including the table's gross and counts, stays put.
+    let mut z_with_vat = with_vat.z_preview.clone();
+    let mut z_previous = previous.z_preview.clone();
+    let with_vat_totals = collect_key(&z_with_vat, "taxTotal_cents");
+    assert!(!with_vat_totals.is_empty(), "the Z carries its VAT");
+    assert!(
+        with_vat_totals
+            .iter()
+            .all(|value| *value == json!(expected_vat_cents)),
+        "(i) Z VAT {with_vat_totals:?}"
+    );
+    assert!(collect_key(&z_previous, "taxTotal_cents")
+        .iter()
+        .all(|value| *value == json!(0)));
+    let tables = collect_key(&z_with_vat, "vatBreakdown");
+    let previous_tables = collect_key(&z_previous, "vatBreakdown");
+    assert!(!tables.is_empty(), "the Z carries its v3 VAT table");
+    assert_eq!(tables.len(), previous_tables.len());
+    for (table, previous_table) in tables.iter().zip(&previous_tables) {
+        assert_eq!(table["vatCents"], json!(expected_vat_cents));
+        assert_eq!(previous_table["vatCents"], json!(0));
+        for key in ["byRate", "byChannel"] {
+            let sum = |value: &Value| {
+                value[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["vatCents"].as_i64().unwrap())
+                    .sum::<i64>()
+            };
+            assert_eq!(sum(table), expected_vat_cents);
+            assert_eq!(sum(previous_table), 0);
+        }
+        let mut stable_table = table.clone();
+        let mut stable_previous = previous_table.clone();
+        strip_keys(&mut stable_table, &["vatCents", "netCents"]);
+        strip_keys(&mut stable_previous, &["vatCents", "netCents"]);
+        assert_eq!(
+            stable_table, stable_previous,
+            "VAT changes no gross, tips, rate identity or channel count"
+        );
+    }
+    strip_keys(
+        &mut z_with_vat,
+        &["taxTotal", "taxTotal_cents", "vatBreakdown"],
+    );
+    strip_keys(
+        &mut z_previous,
+        &["taxTotal", "taxTotal_cents", "vatBreakdown"],
+    );
+    assert_eq!(z_with_vat, z_previous, "(i) Z");
     assert_eq!(
         with_vat.create_body, previous.create_body,
         "(h) create body"

@@ -83,6 +83,7 @@ impl Drop for RepairActorAttestation {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RepairNumberingLease {
     None {},
+    Retained {},
     Sequence {
         offline_terminal_token: String,
         offline_sequence_lease_start: u64,
@@ -93,7 +94,7 @@ pub(crate) enum RepairNumberingLease {
 impl RepairNumberingLease {
     pub(crate) fn as_sequence(&self) -> Option<(&str, u64, u64)> {
         match self {
-            Self::None {} => None,
+            Self::None {} | Self::Retained {} => None,
             Self::Sequence {
                 offline_terminal_token,
                 offline_sequence_lease_start,
@@ -274,6 +275,17 @@ pub(crate) trait RepairQueueHooks: Send + Sync {
     ) -> Result<(), RepairHookError> {
         Err(RepairHookError::unavailable(
             "REPAIR_ATTACHMENT_RECONCILIATION_UNAVAILABLE",
+        ))
+    }
+
+    /// A permanent original-session refusal has no server version or summary.
+    fn park_session_refusal(
+        &self,
+        _connection: &Connection,
+        _context: &RepairQueueContext,
+    ) -> Result<(), RepairHookError> {
+        Err(RepairHookError::unavailable(
+            "REPAIR_CONFLICT_STORE_UNAVAILABLE",
         ))
     }
 
@@ -556,6 +568,7 @@ fn validate_numbering_lease(
     actor: &ValidatedRepairSession,
 ) -> Result<(), RepairHookError> {
     match lease {
+        RepairNumberingLease::Retained {} if actor.has_permission("repairs.create") => Ok(()),
         RepairNumberingLease::None {} if !actor.has_permission("repairs.create") => Ok(()),
         RepairNumberingLease::Sequence {
             offline_terminal_token,
@@ -608,6 +621,7 @@ fn validate_and_persist_repair_actor_bootstrap(
     native_scope: &NativeRepairScope,
     claimed_staff_session_id: &str,
     now: chrono::DateTime<chrono::Utc>,
+    requested_keep: bool,
 ) -> Result<RepairActorBootstrap, RepairHookError> {
     if body.is_empty() || body.len() > MAX_REPAIR_RESPONSE_BYTES {
         return Err(RepairHookError::permanent(
@@ -622,6 +636,11 @@ fn validate_and_persist_repair_actor_bootstrap(
         Some(claimed_staff_session_id),
         now,
     )?;
+    if matches!(raw.numbering_lease, RepairNumberingLease::Retained {}) && !requested_keep {
+        return Err(RepairHookError::permanent(
+            "REPAIR_OFFLINE_BOOTSTRAP_INVALID",
+        ));
+    }
     validate_numbering_lease(&raw.numbering_lease, &actor)?;
     persist_repair_actor_attestation(&raw.actor_attestation)?;
     Ok(RepairActorBootstrap {
@@ -629,18 +648,20 @@ fn validate_and_persist_repair_actor_bootstrap(
     })
 }
 
+pub(crate) fn clear_repair_actor_credential() -> Result<(), String> {
+    crate::storage::delete_repair_actor_attestation()
+        .map_err(|_| "REPAIR_ACTOR_ATTESTATION_CLEAR_FAILED".to_string())?;
+    if crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1)
+        .map_err(|_| "REPAIR_ACTOR_ATTESTATION_CLEAR_FAILED".to_string())?
+        .is_some()
+    {
+        return Err("REPAIR_ACTOR_ATTESTATION_CLEAR_FAILED".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn clear_repair_actor_attestation() -> Result<(), String> {
-    let actor_result = (|| {
-        crate::storage::delete_repair_actor_attestation()
-            .map_err(|_| "REPAIR_ACTOR_ATTESTATION_CLEAR_FAILED".to_string())?;
-        if crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1)
-            .map_err(|_| "REPAIR_ACTOR_ATTESTATION_CLEAR_FAILED".to_string())?
-            .is_some()
-        {
-            return Err("REPAIR_ACTOR_ATTESTATION_CLEAR_FAILED".to_string());
-        }
-        Ok(())
-    })();
+    let actor_result = clear_repair_actor_credential();
     let cache_result = crate::repair_attachment_cache::purge_all();
     if actor_result.is_err() || cache_result.is_err() {
         let _ = crate::repairs::latch_startup_access_pending();
@@ -837,6 +858,7 @@ pub(crate) struct PreparedRepairCommandRequest {
     pub(crate) terminal_id: String,
     pub(crate) staff_session_id: String,
     pub(crate) body: Zeroizing<String>,
+    pub(crate) reattributed: bool,
 }
 
 pub(crate) struct PreparedRepairAttachmentRequest {
@@ -965,8 +987,9 @@ pub(crate) fn prepare_repair_command_request(
     }
     let required_permission =
         required_permission_for_offline_command_name(&envelope.command, &envelope.payload)?;
-    if staff_session_id != validated_session.staff_session_id() {
-        return Err(RepairHookError::sign_in("REPAIR_ACTOR_MISMATCH"));
+    let reattributed = staff_session_id != validated_session.staff_session_id();
+    if reattributed && !validated_session.has_permission(required_permission) {
+        return Err(RepairHookError::sign_in("REPAIR_PERMISSION_DENIED"));
     }
     if !validated_session.has_permission(required_permission) {
         return Err(RepairHookError::permanent("REPAIR_PERMISSION_DENIED"));
@@ -998,6 +1021,7 @@ pub(crate) fn prepare_repair_command_request(
         terminal_id: validated_session.terminal_id().to_string(),
         staff_session_id: validated_session.staff_session_id().to_string(),
         body,
+        reattributed,
     })
 }
 
@@ -1538,7 +1562,6 @@ fn session_error_code(code: &str) -> bool {
         code,
         "STAFF_SESSION_REQUIRED"
             | "STAFF_SESSION_INVALID"
-            | "STAFF_SESSION_MISMATCH"
             | "REPAIR_EXPIRED_SESSION"
             | "POS_TERMINAL_REQUIRED"
             | "POS_TERMINAL_AUTH_REQUIRED"
@@ -5607,6 +5630,8 @@ pub(crate) async fn send_repair_actor_bootstrap_request(
     persisted_session: Option<&str>,
     native_scope: &NativeRepairScope,
     claimed_staff_session_id: &str,
+    keep_numbering_lease: bool,
+    session_generation: u64,
 ) -> Result<RepairActorBootstrap, RepairHookError> {
     let staff_session_id =
         validate_bootstrap_candidate(persisted_session, claimed_staff_session_id, native_scope)?;
@@ -5626,30 +5651,62 @@ pub(crate) async fn send_repair_actor_bootstrap_request(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| RepairHookError::unavailable("REPAIR_HTTP_CLIENT_UNAVAILABLE"))?;
-    let response = client
-        .post(endpoint)
-        .header("content-type", "application/json")
-        .header("x-pos-api-key", api_key)
-        .header("x-terminal-id", &native_scope.terminal_id)
-        .header("x-staff-session-id", &staff_session_id)
-        .header("x-pos-client-version", env!("CARGO_PKG_VERSION"))
-        .body("{}")
-        .send()
-        .await
-        .map_err(|_| RepairHookError::retryable("REPAIR_ONLINE_REQUEST_FAILED"))?;
-    let bounded =
-        read_bounded_repair_response_with_limit(response, MAX_REPAIR_RESPONSE_BYTES).await?;
+    let mut keep = keep_numbering_lease;
+    let bounded = loop {
+        let response = client
+            .post(endpoint.clone())
+            .header("content-type", "application/json")
+            .header("x-pos-api-key", api_key)
+            .header("x-terminal-id", &native_scope.terminal_id)
+            .header("x-staff-session-id", &staff_session_id)
+            .header("x-pos-client-version", env!("CARGO_PKG_VERSION"))
+            .body(if keep {
+                r#"{"numbering_lease":"keep"}"#
+            } else {
+                "{}"
+            })
+            .send()
+            .await
+            .map_err(|_| RepairHookError::retryable("REPAIR_ONLINE_REQUEST_FAILED"))?;
+        let bounded =
+            read_bounded_repair_response_with_limit(response, MAX_REPAIR_RESPONSE_BYTES).await?;
+        if keep
+            && bounded.status == 422
+            && !bounded.exceeded_limit
+            && serde_json::from_slice::<Value>(&bounded.body)
+                .ok()
+                .is_some_and(|body| {
+                    body.get("error").and_then(Value::as_str)
+                        == Some("REPAIR_OFFLINE_BOOTSTRAP_INVALID")
+                        || body.pointer("/error/code").and_then(Value::as_str)
+                            == Some("REPAIR_OFFLINE_BOOTSTRAP_INVALID")
+                        || body.get("code").and_then(Value::as_str)
+                            == Some("REPAIR_OFFLINE_BOOTSTRAP_INVALID")
+                })
+        {
+            keep = false;
+            continue;
+        }
+        break bounded;
+    };
     if bounded.exceeded_limit {
         return Err(RepairHookError::permanent(
             "REPAIR_OFFLINE_BOOTSTRAP_INVALID",
         ));
     }
     match bounded.status {
-        200 => validate_and_persist_repair_actor_bootstrap(
-            &bounded.body,
-            native_scope,
-            &staff_session_id,
-            chrono::Utc::now(),
+        200 => crate::storage::with_current_repair_session(
+            session_generation,
+            persisted_session,
+            || {
+                validate_and_persist_repair_actor_bootstrap(
+                    &bounded.body,
+                    native_scope,
+                    &staff_session_id,
+                    chrono::Utc::now(),
+                    keep,
+                )
+            },
         ),
         403 => Err(RepairHookError::permanent("REPAIR_PERMISSION_DENIED")),
         409 => Err(RepairHookError::sign_in("REPAIR_EXPIRED_SESSION")),
@@ -6087,6 +6144,7 @@ mod actor_attestation_tests {
             &scope(),
             session_id,
             now(),
+            false,
         )
         .expect("strict native bootstrap")
     }
@@ -6184,6 +6242,7 @@ mod actor_attestation_tests {
                 &scope(),
                 SESSION_ID,
                 now(),
+                false,
             )
             .is_err());
             assert!(crate::storage::get_credential(

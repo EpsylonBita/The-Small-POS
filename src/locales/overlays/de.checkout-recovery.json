@@ -40,7 +40,10 @@
       "checkoutParked": "Der Bezahlvorgang wurde beiseitegelegt; neue Bestellungen sind möglich. Prüfen Sie das Bank-Terminal: Wurde der Kunde belastet, nicht erneut belasten; eine Führungskraft klärt es. Der POS-Status zeigt diesen Vorgang.",
       "checkoutParkFailed": "Der Bezahlvorgang konnte nicht beiseitegelegt werden. Er bleibt geschützt; nichts wurde geändert.",
       "checkoutParkApprovalSubtitle": "Einen Bezahlvorgang beiseitezulegen erfordert die Berechtigung, Zahlungen zu stornieren. Eine Person, die sie hat, gibt ihre eigene PIN ein. Es wird nichts belastet.",
-      "freezeNotSaved": "Der Warenkorb konnte nicht für die Zahlung gespeichert werden, daher wurde keine Zahlung gestartet. Drücken Sie erneut auf Bezahlen."
+      "freezeNotSaved": "Der Warenkorb konnte nicht für die Zahlung gespeichert werden, daher wurde keine Zahlung gestartet. Drücken Sie erneut auf Bezahlen.",
+      "orderNotSavedCartKept": "Die Bestellung wurde nicht gespeichert und es wurde keine Zahlung erfasst. Der Warenkorb bleibt erhalten: Drücken Sie erneut auf Bezahlen. Wenn Sie das Geld bereits genommen haben, nehmen Sie es nicht noch einmal.",
+      "freezeReadbackChanged": "Es wurde keine Zahlung gestartet: Die Kasse konnte diesen Warenkorb nicht genau wie eingegeben für die Zahlung speichern. Wählen Sie den Kunden oder die Adresse erneut aus und drücken Sie auf Bezahlen. Wenn es erneut passiert, wenden Sie sich an den Support.",
+      "orderConfirmationRefused": "Die Bestellung wurde nicht gespeichert: Der gespeicherte Bezahlvorgang passte nicht zu dieser Zahlung, daher hilft erneutes Drücken auf Bezahlen ohne Änderung nicht. Es wurde keine Zahlung erfasst, der Warenkorb bleibt erhalten. Wenn Sie das Geld genommen haben, nehmen Sie es nicht noch einmal. Wählen Sie den Kunden oder die Adresse erneut aus und drücken Sie auf Bezahlen. Wenn es erneut passiert, wenden Sie sich an den Support."
     }
   },
   "checkoutRecovery": {

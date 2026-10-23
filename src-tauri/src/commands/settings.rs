@@ -1839,37 +1839,109 @@ pub(crate) fn reconcile_startup_terminal_binding(
     with_settings_durability_owner(|| reconcile_startup_terminal_binding_under_lock(db))
 }
 
-/// Recover only interrupted access verification, through its authoritative
-/// owner. A real terminal intent continues through the original journal path.
-pub(crate) async fn reconcile_startup_terminal_binding_with_access(
+/// Reconcile binding evidence before starting LAN. Only legacy pending scopes
+/// with no known purpose require authoritative access recovery at this stage.
+pub(crate) async fn reconcile_startup_terminal_binding_before_access(
     db: &db::DbState,
 ) -> Result<Option<String>, String> {
-    if crate::repairs::verified_access_pending()? {
-        let decision = crate::repairs::start_authoritative_access_decision()?;
-        with_settings_durability_owner(|| {
+    if let Err(error) = crate::repairs::operational_clear_transition_pending() {
+        // Direct identity writes and standalone operational clears can record
+        // their intent only in the repair scope. Keep the resolver fail-closed
+        // when that scope is unreadable, but do not latch binding maintenance.
+        // Admit startup only with independently complete, unchanged binding
+        // evidence; do not republish credentials or fill missing mirrors here.
+        deny_repairs_after_startup_access_failure(&error);
+        crate::repairs::latch_startup_repair_maintenance_failure();
+        return with_settings_durability_owner(|| {
             ensure_no_terminal_transition_intent(db)?;
             let authority =
                 resolve_strict_terminal_authority(db)?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
-            verify_sqlite_binding_mirror(db, &authority)?;
-            let digest =
-                current_access_binding_digest()?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
-            crate::repairs::restore_verified_access_pending(
-                &authority.binding.organization_id,
-                &authority.binding.branch_id,
-                &authority.binding.terminal_id,
-                &digest,
-                decision,
-            )
-        })?;
-        return reconcile_startup_terminal_binding(db);
+            verify_complete_sqlite_binding_mirror(db, &authority.binding)?;
+            drop(crate::repairs::acquire_terminal_binding_lease()?);
+            Ok(Some(authority.binding.terminal_id))
+        });
     }
-    if !crate::repairs::access_reconciliation_pending()? {
-        match reconcile_startup_terminal_binding(db) {
-            Ok(result) => return Ok(result),
-            Err(error) if error == "TERMINAL_REBIND_CANDIDATE_REQUIRED" => {}
-            Err(error) => return Err(error),
+    match reconcile_startup_terminal_binding(db) {
+        Ok(result) => Ok(result),
+        // Capture rejects actual binding purposes and terminal intents. A
+        // legacy scope stays fail-closed until its authority is established.
+        Err(error) if error == "TERMINAL_REBIND_CANDIDATE_REQUIRED" => {
+            recover_startup_repair_access(db).await?;
+            reconcile_startup_terminal_binding(db)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Recover Repairs after LAN restoration. Every failure here denies Repairs;
+/// it cannot turn a healthy startup binding into binding maintenance.
+pub(crate) async fn reconcile_startup_repair_access(db: &db::DbState) {
+    let verified = match crate::repairs::verified_access_pending() {
+        Ok(verified) => verified,
+        Err(error) => {
+            deny_repairs_after_startup_access_failure(&error);
+            crate::repairs::latch_startup_repair_maintenance_failure();
+            return;
+        }
+    };
+    if verified {
+        let restored = (|| -> Result<(), String> {
+            let decision = crate::repairs::start_authoritative_access_decision()?;
+            with_settings_durability_owner(|| {
+                ensure_no_terminal_transition_intent(db)?;
+                let authority = resolve_strict_terminal_authority(db)?
+                    .ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+                verify_sqlite_binding_mirror(db, &authority)?;
+                let digest =
+                    current_access_binding_digest()?.ok_or("TERMINAL_MANAGED_TUPLE_MISSING")?;
+                crate::repairs::restore_verified_access_pending(
+                    &authority.binding.organization_id,
+                    &authority.binding.branch_id,
+                    &authority.binding.terminal_id,
+                    &digest,
+                    decision,
+                )
+            })
+        })();
+        if let Err(error) = restored {
+            deny_repairs_after_startup_access_failure(&error);
+        }
+        return;
+    }
+    match crate::repairs::access_reconciliation_pending() {
+        Ok(true) => {
+            if let Err(error) = recover_startup_repair_access(db).await {
+                deny_repairs_after_startup_access_failure(&error);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            deny_repairs_after_startup_access_failure(&error);
+            crate::repairs::latch_startup_repair_maintenance_failure();
         }
     }
+}
+
+#[cfg(test)]
+async fn reconcile_startup_terminal_binding_with_access(
+    db: &db::DbState,
+) -> Result<Option<String>, String> {
+    let binding = reconcile_startup_terminal_binding_before_access(db).await?;
+    reconcile_startup_repair_access(db).await;
+    Ok(binding)
+}
+
+/// Repairs only: the durable access marker already denies Repairs; the
+/// in-memory latch keeps it denied until the next authoritative decision.
+fn deny_repairs_after_startup_access_failure(error: &str) {
+    tracing::warn!(
+        error_code = %error,
+        "Repair access recovery failed at startup; Repairs stays unavailable"
+    );
+    let _ = crate::repairs::latch_startup_access_pending();
+}
+
+async fn recover_startup_repair_access(db: &db::DbState) -> Result<(), String> {
     let decision = crate::repairs::start_authoritative_access_decision()?;
     let (authority, snapshot) = with_settings_durability_owner(|| {
         ensure_no_terminal_transition_intent(db)?;
@@ -1942,7 +2014,7 @@ pub(crate) async fn reconcile_startup_terminal_binding_with_access(
             tracing::warn!(error_code = %error, "Repair access remains pending its verified staff bootstrap");
         }
     }
-    reconcile_startup_terminal_binding(db)
+    Ok(())
 }
 
 fn ensure_no_terminal_transition_intent(db: &db::DbState) -> Result<(), String> {
@@ -2794,6 +2866,18 @@ pub async fn settings_get(
             }
 
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            // A local-only, derived read for cart previews. Never persist or sync
+            // this verdict: the receipt uses this same fresh native fiscal gate.
+            if cat == "tax" && k == "vat_receipt_fiscal_active" {
+                let context = crate::fiscal::receipt_vat::PrintedVatContext::load(&conn);
+                drop(conn);
+                // Terminal identity belongs to the credential store; it need not
+                // have a legacy local_settings row after credential cleanup.
+                let branch_id = storage::get_credential("branch_id");
+                return Ok(serde_json::json!(
+                    context.fiscal_active(branch_id.as_deref())
+                ));
+            }
             if let Some(v) = db::get_setting(&conn, &cat, &k) {
                 // A staff PIN hash never reaches the renderer (a row written
                 // before the hashes moved to the OS credential store).

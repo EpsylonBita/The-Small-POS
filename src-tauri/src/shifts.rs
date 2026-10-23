@@ -77,6 +77,7 @@ pub(crate) fn resolve_shift_business_day_context(
                 Some(&day_start_at),
                 &period_start_at,
                 fallback_at,
+                crate::store_time::resolve_store_time_zone(conn),
             )
         });
 
@@ -258,9 +259,12 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
 /// [`open_shift`] for a check-in whose PIN was checked as `admission` says.
 /// A PIN this till checked itself (the server could not be reached) opens a
-/// shift of any role (founder, 15/10/2026), never a gift-card store's cashier
-/// opening, and its queued open carries `offline_check_in: true` for the
-/// server's re-check (founder decision 13/10/2026; Android parity).
+/// shift of any role (founder, 15/10/2026), and its queued open carries
+/// `offline_check_in: true` for the server's re-check (founder decision
+/// 13/10/2026; Android parity). A gift-card store's cashier opens an ordinary
+/// drawer then, whose queued open also carries `ordinary_opening_offline:
+/// true` for the server's review (founder, 21/10/2026, Ω7), as does a
+/// server-checked cashier opening the renderer asks to flag.
 pub(crate) fn open_shift_with_admission(
     db: &DbState,
     payload: &Value,
@@ -335,13 +339,21 @@ pub(crate) fn open_shift_with_admission(
         role @ ("cashier" | "manager" | "driver" | "kitchen" | "server") => role.to_string(),
         _ => return Err("UNSUPPORTED_SHIFT_ROLE".to_string()),
     };
-    if offline {
-        crate::offline_check_in::check_offline_opening(
+    let offline_opening = if offline {
+        Some(crate::offline_check_in::check_offline_opening(
             &role_type,
             gift_cards_store,
             crate::offline_check_in::waiter_terminal(&conn),
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
+    // Ω7: the hosted original opening needs the server, so the drawer opens
+    // as an ordinary one, flagged for the server's review. Gift-card sales
+    // stay online-only (`commands/gift_cards.rs`).
+    let ordinary_opening_offline = offline_opening
+        == Some(crate::offline_check_in::OfflineOpening::OrdinaryFlagged)
+        || crate::offline_check_in::ordinary_opening_flag_requested(payload, &role_type);
     let staff_name = str_field(payload, "staffName").or_else(|| str_field(payload, "staff_name"));
     let requested_opening_cash = num_field(payload, "openingCash")
         .or_else(|| num_field(payload, "opening_cash"))
@@ -450,6 +462,7 @@ pub(crate) fn open_shift_with_admission(
                 Some(&day_start_at),
                 &period_start_at,
                 &now,
+                crate::store_time::resolve_store_time_zone(&conn),
             ),
             period_start_at,
         };
@@ -630,6 +643,11 @@ pub(crate) fn open_shift_with_admission(
             // into the `shift_open` event the server re-checks.
             sync_payload["offline_check_in"] = Value::Bool(true);
         }
+        if ordinary_opening_offline {
+            // The same way: the server flags the shift
+            // `gift_card_ordinary_opening` (`offline-check-in.ts`).
+            sync_payload["ordinary_opening_offline"] = Value::Bool(true);
+        }
 
         sync_queue::enqueue_payload_item(
             &conn,
@@ -672,6 +690,9 @@ pub(crate) fn open_shift_with_admission(
     }
     if offline {
         response["offlineCheckIn"] = Value::Bool(true);
+    }
+    if ordinary_opening_offline {
+        response["ordinaryOpeningOffline"] = Value::Bool(true);
     }
     Ok(response)
 }
@@ -7295,7 +7316,7 @@ mod tests {
         assert_eq!(parsed["dayStartAt"], "2026-03-12T08:00:00Z");
         assert_eq!(
             parsed["reportDate"],
-            crate::business_day::local_report_date_from_timestamp("2026-03-12T08:00:00Z")
+            crate::business_day::local_report_date_from_timestamp("2026-03-12T08:00:00Z", None)
         );
         assert_eq!(parsed["frozen"], false);
         let first_cutoff = parsed["cutoffAt"]
@@ -7531,10 +7552,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let expected = business_day::local_report_date_from_timestamp(&cashier_check_in);
+        let expected = business_day::local_report_date_from_timestamp(&cashier_check_in, None);
         assert_ne!(
             expected,
-            business_day::local_report_date_from_timestamp(&last_z)
+            business_day::local_report_date_from_timestamp(&last_z, None)
         );
         for staff_id in ["cashier-r5", "waiter-r5"] {
             let report_date: String = conn
@@ -7599,11 +7620,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             report_date,
-            business_day::local_report_date_from_timestamp(&check_in)
+            business_day::local_report_date_from_timestamp(&check_in, None)
         );
         assert_ne!(
             report_date,
-            business_day::local_report_date_from_timestamp(&synced_order_at),
+            business_day::local_report_date_from_timestamp(&synced_order_at, None),
             "the synced order does not open the staff's day"
         );
     }
@@ -7739,7 +7760,7 @@ mod tests {
             );
             assert_eq!(
                 report_date,
-                business_day::local_report_date_from_timestamp(&check_in)
+                business_day::local_report_date_from_timestamp(&check_in, None)
             );
 
             // (iii) A refund recorded now, after the cutoff, on a closed-day order.
@@ -8098,11 +8119,16 @@ mod tests {
         let cashier =
             open("cashier-offline", "cashier", &offline).expect("an offline cashier opens the day");
         assert_eq!(cashier["offlineCheckIn"], true);
+        // No gift cards here: no Ω7 review flag.
+        assert!(cashier.get("ordinaryOpeningOffline").is_none());
         let shift_id = cashier["shiftId"].as_str().unwrap();
         assert_eq!(
             load_latest_shift_sync_payload(&db, "insert", shift_id)["offline_check_in"],
             true
         );
+        assert!(load_latest_shift_sync_payload(&db, "insert", shift_id)
+            .get("ordinary_opening_offline")
+            .is_none());
         for (staff, role) in [
             ("driver-offline", "driver"),
             ("kitchen-offline", "kitchen"),
@@ -8133,14 +8159,11 @@ mod tests {
         .is_none());
     }
 
-    /// In a gift-card store the cashier's drawer opening is the hosted
-    /// original opening, which needs the server: a cashier whose PIN this
-    /// till checked offline is refused, as on Android, instead of falling
-    /// back to an ordinary opening.
-    #[test]
-    fn an_offline_check_in_never_opens_a_gift_card_stores_cashier_drawer() {
-        let _fake = crate::tests::fake_keyring::install_empty();
-        let dir = std::env::temp_dir().join(format!("offline-gift-{}", Uuid::new_v4()));
+    /// A test database whose cached module list says the store sells gift
+    /// cards. The module cache is a file next to the database, so the caller
+    /// removes the returned directory.
+    fn gift_card_store_test_db(label: &str) -> (DbState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut db = test_db();
         db.db_path = dir.join("pos.db");
@@ -8150,29 +8173,232 @@ mod tests {
             &serde_json::json!({ "apiModules": [{ "module_id": "gift_cards" }] }),
         )
         .unwrap();
+        (db, dir)
+    }
+
+    /// Ω7 (founder, 21/10/2026). In a gift-card store the cashier's drawer
+    /// opening is the hosted original opening, which needs the server. Before,
+    /// a cashier whose PIN this till checked offline was refused
+    /// (`OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER`), and after a Z nobody could
+    /// open the next day. Now the cashier opens an ordinary drawer, and the
+    /// queued open carries `ordinary_opening_offline` next to
+    /// `offline_check_in`, which the server flags `gift_card_ordinary_opening`.
+    /// Other roles, and an ordinary check-in, carry no flag.
+    #[test]
+    fn an_offline_check_in_opens_a_gift_card_stores_cashier_drawer_flagged_for_review() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, dir) = gift_card_store_test_db("offline-gift");
         let offline = CheckInAdmission::Offline;
-        let payload = |role: &str| {
+        let payload = |staff: &str, role: &str| {
             serde_json::json!({
-                "staffId": "gift-staff", "branchId": "branch-1", "terminalId": "term-1",
+                "staffId": staff, "branchId": "branch-1", "terminalId": "term-1",
                 "roleType": role, "openingCash": 50.0,
             })
         };
 
-        assert_eq!(
-            open_shift_with_admission(&db, &payload("cashier"), &offline).unwrap_err(),
-            crate::offline_check_in::OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER
+        let cashier = open_shift_with_admission(&db, &payload("gift-cashier", "cashier"), &offline);
+        let manager = open_shift_with_admission(&db, &payload("gift-manager", "manager"), &offline);
+        let online = open_shift_with_admission(
+            &db,
+            &payload("gift-online", "cashier"),
+            &CheckInAdmission::Ordinary,
         );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let cashier = cashier.expect("an offline gift-card store cashier opens the day");
+        assert_eq!(cashier["offlineCheckIn"], true);
+        assert_eq!(cashier["ordinaryOpeningOffline"], true);
+        let shift_id = cashier["shiftId"].as_str().unwrap();
+        let queued = load_latest_shift_sync_payload(&db, "insert", shift_id);
+        assert_eq!(queued["offline_check_in"], true);
+        assert_eq!(queued["ordinary_opening_offline"], true);
+        assert_eq!(queued["isDayStart"], true);
+        let drawer_cents: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT opening_amount_cents FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
+                params![shift_id],
+                |row| row.get(0),
+            )
+            .expect("an ordinary drawer");
+        assert_eq!(drawer_cents, 5000);
+
+        // A manager's opening is no hosted original opening.
+        let manager = manager.expect("an offline manager opens after the cashier");
+        assert_eq!(manager["offlineCheckIn"], true);
+        assert!(manager.get("ordinaryOpeningOffline").is_none());
+        assert!(load_latest_shift_sync_payload(
+            &db,
+            "insert",
+            manager["shiftId"].as_str().unwrap()
+        )
+        .get("ordinary_opening_offline")
+        .is_none());
+
+        // A server-checked cashier's opening is decided as before.
+        let online = online.expect("a server-checked cashier opens");
+        assert!(online.get("ordinaryOpeningOffline").is_none());
+        let online_queued =
+            load_latest_shift_sync_payload(&db, "insert", online["shiftId"].as_str().unwrap());
+        assert!(online_queued.get("offline_check_in").is_none());
+        assert!(online_queued.get("ordinary_opening_offline").is_none());
+    }
+
+    /// Ω7: a cashier whose PIN the server checked, but whose store's gift-card
+    /// status the renderer could no longer read, opens the same flagged
+    /// ordinary drawer. The flag only asks for a review, so the renderer may
+    /// ask for it; it never marks the opening as an offline check-in, and it
+    /// does nothing on another role.
+    #[test]
+    fn a_server_checked_cashier_opening_takes_the_renderers_review_flag() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        seed_operating_currency_for_test(&db, "branch-1", "EUR");
+        let payload = |staff: &str, role: &str| {
+            serde_json::json!({
+                "staffId": staff, "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": role, "openingCash": 50.0, "ordinaryOpeningOffline": true,
+            })
+        };
+
+        let cashier = open_shift_with_admission(
+            &db,
+            &payload("status-unread-cashier", "cashier"),
+            &CheckInAdmission::Ordinary,
+        )
+        .expect("the cashier opens an ordinary drawer");
+        assert_eq!(cashier["ordinaryOpeningOffline"], true);
+        assert!(cashier.get("offlineCheckIn").is_none());
+        let queued =
+            load_latest_shift_sync_payload(&db, "insert", cashier["shiftId"].as_str().unwrap());
+        assert_eq!(queued["ordinary_opening_offline"], true);
+        assert!(queued.get("offline_check_in").is_none());
+
+        let manager = open_shift_with_admission(
+            &db,
+            &payload("status-unread-manager", "manager"),
+            &CheckInAdmission::Ordinary,
+        )
+        .expect("the manager opens");
+        assert!(manager.get("ordinaryOpeningOffline").is_none());
+        assert!(load_latest_shift_sync_payload(
+            &db,
+            "insert",
+            manager["shiftId"].as_str().unwrap()
+        )
+        .get("ordinary_opening_offline")
+        .is_none());
+    }
+
+    /// Ω7 keeps gift-card sales online-only: the ordinary drawer a gift-card
+    /// store's cashier opened offline never takes a gift card on this till.
+    /// A gift card is only ever debited by the server's atomic redemption
+    /// (`commands/gift_cards.rs`), and a local payment refuses the method
+    /// before anything is written.
+    #[test]
+    fn a_gift_card_sale_on_the_offline_ordinary_drawer_is_still_refused() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, dir) = gift_card_store_test_db("offline-gift-sale");
+        let opened = open_shift_with_admission(
+            &db,
+            &serde_json::json!({
+                "staffId": "gift-sale-cashier", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": "cashier", "openingCash": 50.0,
+            }),
+            &CheckInAdmission::Offline,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let shift_id = opened.expect("the flagged ordinary drawer opens")["shiftId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let conn = db.conn.lock().unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO orders (currency, id, order_number, items, total_amount, total_amount_cents,
+                    status, payment_status, order_type, staff_shift_id, branch_id, created_at, updated_at)
+                 VALUES ('EUR', 'gift-sale-order', 'GIFT-1', '[]', 20.0, 2000,
+                    'pending', 'pending', 'pickup', ?1, 'branch-1', ?2, ?2)",
+                params![shift_id, now],
+            )
+            .unwrap();
+        }
+
+        let refused = crate::payments::record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "gift-sale-order", "method": "gift_card", "amount": 20.0,
+                "staffShiftId": shift_id,
+            }),
+        )
+        .expect_err("a gift card is never recorded on the till");
+        assert!(
+            refused.starts_with("Invalid method: gift_card"),
+            "{refused}"
+        );
+        let conn = db.conn.lock().unwrap();
+        let payments: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = 'gift-sale-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payment_status: String = conn
+            .query_row(
+                "SELECT payment_status FROM orders WHERE id = 'gift-sale-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payments, 0);
+        assert_eq!(payment_status, "pending");
+    }
+
+    /// A waiter phone never checks staff in without the server, in a
+    /// gift-card store too: the Ω7 ordinary opening does not reach it.
+    #[test]
+    fn an_offline_check_in_on_a_waiter_phone_is_still_refused() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let (db, dir) = gift_card_store_test_db("offline-gift-waiter");
+        db::set_setting(
+            &db.conn.lock().unwrap(),
+            "terminal",
+            "terminal_type",
+            "mobile_waiter",
+        )
+        .unwrap();
+        let payload = |role: &str| {
+            serde_json::json!({
+                "staffId": "waiter-phone-staff", "branchId": "branch-1", "terminalId": "term-1",
+                "roleType": role, "openingCash": 50.0,
+            })
+        };
+
+        let refusals: Vec<String> = ["cashier", "server"]
+            .into_iter()
+            .map(|role| {
+                open_shift_with_admission(&db, &payload(role), &CheckInAdmission::Offline)
+                    .unwrap_err()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        for refusal in refusals {
+            assert_eq!(
+                refusal,
+                crate::offline_check_in::OFFLINE_CHECK_IN_WAITER_TERMINAL
+            );
+        }
         let opened: i64 = db
             .conn
             .lock()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM staff_shifts", [], |row| row.get(0))
             .unwrap();
-        let ordinary =
-            open_shift_with_admission(&db, &payload("cashier"), &CheckInAdmission::Ordinary);
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(opened, 0, "nothing opened");
-        ordinary.expect("a server-checked cashier's opening is decided as before");
     }
 
     #[test]

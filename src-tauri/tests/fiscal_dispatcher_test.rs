@@ -45,15 +45,29 @@ fn fresh_db() -> Connection {
         "CREATE TABLE orders (
              id              TEXT PRIMARY KEY,
              supabase_id     TEXT,
+             client_request_id TEXT,
+             order_type TEXT,
+             plugin TEXT,
+             currency TEXT,
              organization_id TEXT NOT NULL DEFAULT '',
              branch_id       TEXT,
              order_context   TEXT,
+             ghost_metadata TEXT,
              receipt_number  TEXT,
              items           TEXT NOT NULL DEFAULT '[]',
              total_amount    REAL DEFAULT 0,
              total_amount_cents INTEGER,
+             subtotal REAL DEFAULT 0,
+             subtotal_cents INTEGER,
              tax_amount      REAL DEFAULT 0,
              tax_amount_cents INTEGER,
+             tip_amount REAL DEFAULT 0,
+             tip_amount_cents INTEGER,
+             discount_amount REAL DEFAULT 0,
+             discount_amount_cents INTEGER,
+             discount_percentage REAL DEFAULT 0,
+             delivery_fee REAL DEFAULT 0,
+             delivery_fee_cents INTEGER,
              staff_id        TEXT,
              tax_rate        REAL,
              created_at      TEXT
@@ -65,6 +79,9 @@ fn fresh_db() -> Connection {
              method          TEXT NOT NULL,
              amount          REAL NOT NULL,
              amount_cents    INTEGER,
+             currency TEXT DEFAULT 'EUR',
+             tip_amount REAL DEFAULT 0,
+             tip_amount_cents INTEGER,
              status          TEXT NOT NULL DEFAULT 'completed',
              transaction_ref TEXT,
              created_at      TEXT NOT NULL
@@ -117,6 +134,35 @@ fn fresh_db() -> Connection {
     .expect(
         "create orders + order_payments + payment_adjustments + fiscal_sequence_counters test tables",
     );
+    // Queue ownership inspects these journals even for an ordinary receipt.
+    // Read the actual DDL constants rather than inventing parallel gift schemas.
+    for source in [
+        include_str!("../src/gift_financial_opening.rs"),
+        include_str!("../src/gift_financial_closing.rs"),
+    ] {
+        let file = syn::parse_file(source).expect("production gift schema source");
+        let ddl = file
+            .items
+            .into_iter()
+            .find_map(|item| {
+                let syn::Item::Const(item) = item else {
+                    return None;
+                };
+                if item.ident != "SCHEMA_SQL" {
+                    return None;
+                }
+                let syn::Expr::Lit(expr) = *item.expr else {
+                    return None;
+                };
+                let syn::Lit::Str(value) = expr.lit else {
+                    return None;
+                };
+                Some(value.value())
+            })
+            .expect("SCHEMA_SQL string constant");
+        conn.execute_batch(&ddl)
+            .expect("production gift ownership schema");
+    }
     conn
 }
 
@@ -126,14 +172,16 @@ fn seed_order(conn: &Connection, order_id: &str, branch_id: &str) {
     // row so `payments::derive_payment_method` returns Some("cash") for
     // the payment-method-code mapping.
     conn.execute(
-        "INSERT INTO orders (id, organization_id, branch_id, receipt_number, created_at, total_amount)
-         VALUES (?1, 'org-1', ?2, 'R-1', '2026-05-24T10:00:00Z', 12.40)",
+        "INSERT INTO orders (id, organization_id, branch_id, receipt_number, created_at,
+             total_amount,total_amount_cents,subtotal,subtotal_cents,tax_amount,tax_amount_cents,currency,items)
+         VALUES (?1, 'org-1', ?2, 'R-1', '2026-05-24T10:00:00Z',12.40,1240,12.40,1240,2.40,240,'EUR',
+             '[{\"name\":\"Coffee\",\"quantity\":1,\"unit_price\":12.4}]')",
         params![order_id, branch_id],
     )
     .expect("seed order");
     conn.execute(
-        "INSERT INTO order_payments (id, order_id, method, amount, status, created_at)
-         VALUES (?1, ?2, 'cash', 12.40, 'completed', '2026-05-24T10:00:01Z')",
+        "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, created_at)
+         VALUES (?1, ?2, 'cash',12.40,1240,'EUR','completed','2026-05-24T10:00:01Z')",
         params![format!("{order_id}-pay"), order_id],
     )
     .expect("seed order_payments");

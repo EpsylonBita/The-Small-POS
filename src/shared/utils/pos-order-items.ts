@@ -3,8 +3,13 @@ const POS_ORDER_ITEM_UUID_REGEX =
 
 const MANUAL_SENTINEL = 'manual';
 
+/**
+ * A manual line carries no VAT category of its own (founder, 21/10/2026):
+ * the branch default applies in the native VAT mirror and on the server, so
+ * a Swiss, an island or a not VAT-registered branch never gets Greek 24%.
+ */
 const MANUAL_ITEM_DEFAULTS = {
-  vatCategoryCode: 'gr_standard_24',
+  vatCategoryCode: null,
   priceIncludesVat: true,
   fiscalDocumentProfile: 'manual_item',
 } as const;
@@ -162,10 +167,10 @@ export const normalizePosOrderItem = (item: Record<string, any>) => {
     normalizeOptionalString(item.special_instructions) ||
     normalizeOptionalString(item.specialInstructions) ||
     undefined;
-  const vatCategoryCode =
+  const vatCategoryCode: string | null =
     normalizeOptionalString(item.vat_category_code) ||
     normalizeOptionalString(item.vatCategoryCode) ||
-    (isManual ? MANUAL_ITEM_DEFAULTS.vatCategoryCode : null);
+    MANUAL_ITEM_DEFAULTS.vatCategoryCode;
   const priceIncludesVat =
     normalizeOptionalBoolean(item.price_includes_vat) ??
     normalizeOptionalBoolean(item.priceIncludesVat) ??
@@ -223,6 +228,8 @@ export const normalizePosOrderItem = (item: Record<string, any>) => {
     categoryPath,
     is_manual: isManual,
     isManual,
+    vat_class: normalizeOptionalString(item.vat_class) || normalizeOptionalString(item.vatClass) || 'standard',
+    vatClass: normalizeOptionalString(item.vat_class) || normalizeOptionalString(item.vatClass) || 'standard',
     vat_category_code: vatCategoryCode,
     vatCategoryCode,
     price_includes_vat: priceIncludesVat,

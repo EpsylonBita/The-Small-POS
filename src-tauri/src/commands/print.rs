@@ -4585,6 +4585,7 @@ pub async fn label_print_batch(
 fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
     let now = Utc::now().format("%Y-%m-%d %H:%M").to_string();
     receipt_renderer::OrderReceiptDoc {
+        vat_legend: Vec::new(),
         currency: None,
         order_id: "preview-000".to_string(),
         order_number: "ORD-0042".to_string(),

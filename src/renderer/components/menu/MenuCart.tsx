@@ -10,6 +10,8 @@ import { formatCurrency } from '../../utils/format';
 import { canCheckoutWithDeliveryFeeStatus, type DeliveryFeeStatus } from '../../utils/delivery-fee';
 import { parseMoneyInputValue } from '../../utils/moneyInput';
 import { CentsMoneyInput } from '../ui/CentsMoneyInput';
+import { OfflineDeliveryZonePicker } from './OfflineDeliveryZonePicker';
+import type { ManualDeliveryZoneOption } from '../../../../../shared/utils/offline-delivery-zone';
 import {
   applyDiscountToCartLines,
   clearDiscountFromCartLines,
@@ -19,6 +21,15 @@ import {
 } from '../../utils/cart-line-discounts';
 import { getBridge } from '../../../lib';
 import toast from 'react-hot-toast';
+import {
+  desktopRetailStockVerdict,
+  loadBlockOverselling,
+  loadUnsyncedRetailQuantities,
+  orderLineStockLine,
+  orderStockLines,
+  refuseOversell,
+  snapshotRetailStock,
+} from '../../services/retail-stock-guard';
 
 const BATCH_SELECT_HOLD_DURATION_MS = 650;
 const LINE_PRICE_HOLD_DURATION_MS = 5000;
@@ -114,6 +125,18 @@ interface MenuCartProps {
    * tells the cashier what to do.
    */
   onRepickDeliveryAddress?: () => void;
+  /**
+   * Offline week Ω6β: offline, an address that cannot be located gets its
+   * zone from the cashier. While set, the cart shows the zone choice instead
+   * of the "zone not checked" notice; checkout waits for a choice
+   * (deliveryFeeStatus 'requires_zone_choice').
+   */
+  deliveryZoneChoice?: {
+    options: ManualDeliveryZoneOption[];
+    loading: boolean;
+    selectedZoneId: string | null;
+    onChoose: (zoneId: string) => void;
+  } | null;
   allowManualDeliveryFee?: boolean;
   manualDeliveryFeeValue?: number;
   onManualDeliveryFeeChange?: (value: number) => void;
@@ -163,6 +186,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   deliveryFee = 0,
   deliveryFeeStatus = 'resolved',
   onRepickDeliveryAddress,
+  deliveryZoneChoice = null,
   allowManualDeliveryFee = false,
   manualDeliveryFeeValue = 0,
   onManualDeliveryFeeChange,
@@ -189,6 +213,66 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   ghostModeArmed = false,
 }) => {
   const { t } = useTranslation();
+  const cartItemsRef = React.useRef(cartItems);
+  cartItemsRef.current = cartItems;
+  // Existing order quantities have already left stock (or are counted by
+  // the unsynced-sales command). Only additions made during this edit need
+  // more stock. An empty cart marks the parent's next order load.
+  const editStockBaseline = React.useRef<ReturnType<typeof orderStockLines> | null>(null);
+  if (!editMode || cartItems.length === 0) editStockBaseline.current = null;
+  else if (!editStockBaseline.current) editStockBaseline.current = orderStockLines(cartItems);
+
+  /**
+   * `retail.block_overselling` on retail lines (salon tickets, kept retail
+   * lines): true when the shared rule refuses a line at its next quantity
+   * (`increase`) or at its current one (the final check before payment).
+   * These lines carry no stock, so it comes from the product snapshot; an
+   * unknown stock never blocks. Edits check only quantities added beyond
+   * the original order, whose stock is already deducted or held unsynced.
+   */
+  const retailStockRefused = React.useCallback(async (lineIds: Array<string | number>, increase: boolean): Promise<boolean> => {
+    if (!(await loadBlockOverselling())) return false;
+    const unsynced = await loadUnsyncedRetailQuantities({ force: !increase });
+    for (const lineId of lineIds) {
+      const before = cartItemsRef.current.find(line => line.id === lineId);
+      const stockLine = before ? orderLineStockLine(before) : null;
+      if (!stockLine?.retailProductId || stockLine.isDeposit) continue;
+      const stock = await snapshotRetailStock(stockLine.retailProductId, stockLine.retailVariantId);
+      const cart = cartItemsRef.current;
+      const line = cart.find(candidate => candidate.id === lineId);
+      if (!line) continue;
+      const baseline = editMode ? editStockBaseline.current ?? [] : [];
+      const originalQuantity = baseline.find(original => original.id === String(line.id))?.quantity ?? 0;
+      const previousQuantity = Math.max(0, line.quantity - originalQuantity);
+      const verdict = desktopRetailStockVerdict({
+        blockOverselling: true,
+        productId: stockLine.retailProductId,
+        variantId: stockLine.retailVariantId,
+        stock,
+        nextQuantity: Math.max(0, line.quantity + (increase ? 1 : 0) - originalQuantity),
+        editedLineId: String(line.id),
+        previousQuantity: increase ? previousQuantity : undefined,
+        lines: orderStockLines(cart).map(candidate => ({ ...candidate, quantity: Math.max(0,
+          candidate.quantity - (baseline.find(original => original.id === candidate.id)?.quantity ?? 0)) })),
+        unsynced,
+      });
+      const unit = (line as { unit_of_measure?: string; unitOfMeasure?: string }).unit_of_measure
+        ?? (line as { unitOfMeasure?: string }).unitOfMeasure;
+      if (refuseOversell(t, verdict, unit)) return true;
+    }
+    return false;
+  }, [editMode, t]);
+
+  const handleCheckoutClick = React.useCallback(() => {
+    const retailLineIds = cartItems.filter(line => orderLineStockLine(line)).map(line => line.id);
+    if (retailLineIds.length === 0) {
+      onCheckout();
+      return;
+    }
+    void retailStockRefused(retailLineIds, false).then(refused => {
+      if (!refused) onCheckout();
+    });
+  }, [cartItems, editMode, onCheckout, retailStockRefused]);
 
   // Deduplicate cart items by ID to prevent React key warnings
   // This is a safety measure in case duplicates somehow make it into the cart
@@ -912,6 +996,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         ? '—'
         : deliveryFeeStatus === 'not_checked'
           ? t('menu.cart.deliveryFeeZoneNotChecked')
+        : deliveryFeeStatus === 'requires_zone_choice'
+          ? t('menu.cart.deliveryFeeChooseZone')
         : deliveryFeeStatus === 'requires_selection'
           ? t('menu.cart.deliveryFeeNeedsExactAddress')
           : deliveryFeeStatus === 'out_of_zone'
@@ -928,8 +1014,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     // A zone that was not checked never blocks the order (founder rule,
     // 2026-09-29): the notice below says so and offers the re-pick.
     (isDeliveryOrder && !allowManualDeliveryFee && !canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus) && !editMode);
+  const showOfflineZoneChoice =
+    isDeliveryOrder && !allowManualDeliveryFee && !editMode && Boolean(deliveryZoneChoice);
   const showZoneNotCheckedNotice =
-    isDeliveryOrder && !allowManualDeliveryFee && !editMode && deliveryFeeStatus === 'not_checked';
+    isDeliveryOrder && !allowManualDeliveryFee && !editMode && !showOfflineZoneChoice && deliveryFeeStatus === 'not_checked';
 
   return (
     <div
@@ -1272,7 +1360,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         if (isRewardLine) {
                           return;
                         }
-                        const updatedItems = cartItems.map(ci =>
+                        const increase = (source: CartItem[]) => source.map(ci =>
                           ci.id === item.id
                             ? (() => {
                                 const nextQuantity = ci.quantity + 1;
@@ -1302,7 +1390,19 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                               })()
                             : ci
                         );
-                        onUpdateCart(updatedItems);
+                        // A retail line's + goes through the shared stock rule
+                        // (retail.block_overselling); other lines step at once.
+                        if (orderLineStockLine(item)) {
+                          void retailStockRefused([item.id], true).then(refused => {
+                            if (!refused) {
+                              const updated = increase(cartItemsRef.current);
+                              cartItemsRef.current = updated;
+                              onUpdateCart(updated);
+                            }
+                          });
+                          return;
+                        }
+                        onUpdateCart(increase(cartItems));
                       }}
                       disabled={isRewardLine}
                       className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 active:bg-black/15 dark:active:bg-white/20 liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
@@ -1673,6 +1773,16 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           </span>
         </div>
 
+        {/* Offline: the cashier chooses the zone of an address that cannot be located */}
+        {showOfflineZoneChoice && deliveryZoneChoice && (
+          <OfflineDeliveryZonePicker
+            options={deliveryZoneChoice.options}
+            loading={deliveryZoneChoice.loading}
+            selectedZoneId={deliveryZoneChoice.selectedZoneId}
+            onChoose={deliveryZoneChoice.onChoose}
+          />
+        )}
+
         {/* Delivery zone not checked (address without a usable point) */}
         {showZoneNotCheckedNotice && (
           <div
@@ -1715,7 +1825,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         )}
 
         <button
-          onClick={onCheckout}
+          onClick={handleCheckoutClick}
           disabled={isCheckoutBlocked}
           className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
             isCheckoutBlocked

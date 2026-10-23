@@ -2674,7 +2674,18 @@ fn refresh_edited_order_vat(
     order_id: &str,
     financials: Option<&EditSettlementFinancialsPayload>,
 ) {
-    if financials.is_some_and(|financials| financials.quote.is_some()) {
+    if let Some(quote) = financials.and_then(|f| f.quote.as_ref()) {
+        let breakdown = quote
+            .get("tax_breakdown")
+            .or_else(|| quote.get("taxBreakdown"))
+            .filter(|v| v.is_array())
+            .map(serde_json::Value::to_string);
+        if let Err(error) = conn.execute(
+            "UPDATE orders SET tax_breakdown=?2 WHERE id=?1",
+            rusqlite::params![order_id, breakdown],
+        ) {
+            tracing::warn!(order_id, %error, "Quoted order VAT breakdown not stored");
+        }
         return;
     }
     let stored = conn
@@ -2822,6 +2833,9 @@ fn update_order_items_in_connection(
     Ok(())
 }
 
+// Only the suites read it since `capture_proven_payment_coverage` reads label
+// coverage (Ω12).
+#[cfg(test)]
 fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Result<f64, String> {
     payments::load_net_paid_for_order(conn, order_id)
 }
@@ -3023,7 +3037,9 @@ fn capture_proven_payment_coverage(
         "partially_paid" => total_cents.clamp(0, 1),
         _ => 0,
     };
-    let ledger_cents = Cents::round_half_even(load_net_paid_for_order(conn, order_id)?).as_i64();
+    // Ω12: what the label proved is read as the label reads it. A customer
+    // return on a receipt that still stands is not a missing local row.
+    let ledger_cents = payments::load_label_retained_cents(conn, order_id)?;
     Ok(ProvenPaymentCoverage {
         prior_status,
         missing_cents: (proven_cents - ledger_cents).max(0),
@@ -3084,6 +3100,11 @@ fn refresh_order_payment_snapshot_with_coverage(
 
     let ledger_paid = payments::load_principal_paid_for_order(conn, order_id)?;
     let effective_paid = ledger_paid + coverage.missing_amount();
+    // Ω12: the label reads label coverage (a customer return on a receipt that
+    // still stands keeps the order paid); `ledger_paid` and `effective_paid`
+    // stay net for the edit math.
+    let label_paid = Cents::new(payments::load_label_covered_cents(conn, order_id)?).to_f64_dp2()
+        + coverage.missing_amount();
     // A comp (an order whose total is zero) that was settled stays settled.
     // With no money to count the arithmetic reads `pending`, so every edit of
     // a comped order used to turn it `pending` and push that (review of the
@@ -3091,7 +3112,7 @@ fn refresh_order_payment_snapshot_with_coverage(
     let next_payment_status = if order_total <= 0.0 && coverage.prior_status == "paid" {
         "paid".to_string()
     } else {
-        payment_status_for_amounts(effective_paid, order_total).to_string()
+        payment_status_for_amounts(label_paid, order_total).to_string()
     };
     if coverage.missing_cents > 0 {
         tracing::warn!(
@@ -4210,6 +4231,12 @@ pub(crate) fn apply_order_status_locally(
     now: &str,
 ) -> Result<LocalStatusChange, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Offline week Ω9 (22/10/2026): the status, the cancel's drawer reversal
+    // and the estimated time were written before the row was queued, and a
+    // full queue then refused only the row: the till kept a status the server
+    // never heard of. A full queue now refuses before anything changes, under
+    // the same lock as the enqueue below.
+    crate::sync_queue::ensure_enqueue_capacity(&conn, 1)?;
     apply_order_status_in_connection(
         &conn,
         order_id_raw,
@@ -7884,6 +7911,9 @@ pub async fn order_save_from_remote(
             ],
         )
         .map_err(|e| format!("save remote order: {e}"))?;
+        if remote_tax_present {
+            crate::fiscal::greece_vat::adopt_server_order_vat(&conn, &local_id, &order_data);
+        }
         if !remote_tax_present {
             // The server row normally carries its canonical VAT; a remote
             // order without one gets the same computation (07/10/2026).
@@ -13328,6 +13358,84 @@ mod transition_tests {
         capture_room_charge_approval_snapshot(&conn, "room-snapshot").unwrap()
     }
 
+    /// Offline week Ω9 (22/10/2026): at a full queue `order_update_status`
+    /// saved the status (and a cancel's drawer reversal, the estimated time)
+    /// and only then had its row refused, so the server never heard of the
+    /// change the till kept. A full queue now refuses before anything changes.
+    #[test]
+    fn a_status_change_at_a_full_queue_changes_nothing() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        insert_order(&db, "status-at-cap", "pending");
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut fill = conn
+                .prepare(
+                    "INSERT INTO parity_sync_queue
+                        (id, table_name, record_id, operation, data, organization_id,
+                         created_at, attempts, retry_delay_ms, priority, module_type,
+                         conflict_strategy, version, status)
+                     VALUES (?1, 'orders', ?1, 'INSERT', '{}', 'org-1', '2026-10-21T17:00:00Z',
+                             0, 1000, 0, 'orders', 'server-wins', 1, 'pending')",
+                )
+                .unwrap();
+            for index in 0..crate::sync_queue::MAX_QUEUE_SIZE {
+                fill.execute(params![format!("offline-{index}")]).unwrap();
+            }
+        }
+        let read = |db: &db::DbState| -> (String, Option<i64>, i64) {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT status, estimated_time,
+                        (SELECT COUNT(*) FROM parity_sync_queue WHERE record_id = 'status-at-cap')
+                 FROM orders WHERE id = 'status-at-cap'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+
+        for (status, reason) in [("preparing", None), ("cancelled", Some("Customer left"))] {
+            let error = match apply_order_status_locally(
+                &db,
+                "status-at-cap",
+                status,
+                Some(25),
+                reason,
+                "2026-10-22T10:00:00Z",
+            ) {
+                Ok(_) => panic!("a full queue refuses the {status} change"),
+                Err(error) => error,
+            };
+            assert!(
+                error.starts_with(crate::sync_queue::SYNC_QUEUE_FULL),
+                "typed refusal: {error}"
+            );
+            assert_eq!(
+                read(&db),
+                ("pending".to_string(), None, 0),
+                "nothing changed for {status}"
+            );
+        }
+
+        // One slot free: the same change is written and queued together.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM parity_sync_queue WHERE id = 'offline-0'", [])
+            .unwrap();
+        assert!(apply_order_status_locally(
+            &db,
+            "status-at-cap",
+            "preparing",
+            Some(25),
+            None,
+            "2026-10-22T10:00:00Z",
+        )
+        .is_ok());
+        assert_eq!(read(&db), ("preparing".to_string(), Some(25), 1));
+    }
+
     #[test]
     fn room_charge_snapshot_rejects_unsynced_rows_and_both_outstanding_queues() {
         let db = test_db();
@@ -14239,13 +14347,16 @@ mod transition_tests {
     ) {
         // W4e Step 0: dual-populate amount + amount_cents.
         let amount_cents = Cents::round_half_even(amount).as_i64();
+        // An edit settlement refund (Ω12): it lowers the label as well as the
+        // money, unlike a customer return.
         conn.execute(
             "INSERT INTO payment_adjustments (
                  id, payment_id, order_id, adjustment_type, amount, amount_cents,
-                 reason, staff_id, sync_state, created_at, updated_at
+                 reason, staff_id, sync_state, adjustment_context, created_at, updated_at
              ) VALUES (
                  ?1, ?2, ?3, 'refund', ?4, ?5,
-                 'edit settlement test', NULL, 'pending', datetime('now'), datetime('now')
+                 'edit settlement test', NULL, 'pending', 'edit_settlement',
+                 datetime('now'), datetime('now')
              )",
             params![adjustment_id, payment_id, order_id, amount, amount_cents],
         )
@@ -17269,7 +17380,8 @@ mod paid_edit_ledger_tests {
             let snapshot =
                 refresh_order_payment_snapshot_with_coverage(&conn, order, "now", &proof).unwrap();
             assert_eq!(proof.missing_cents, 0);
-            assert_eq!(snapshot.status, "partially_paid");
+            // Ω12: a customer return keeps the sale paid; the money stays net.
+            assert_eq!(snapshot.status, "paid");
             assert_eq!(snapshot.effective_paid, 4.0);
             assert_eq!(
                 payments::load_order_payment_balance_snapshot(&conn, order)

@@ -685,7 +685,7 @@ pub(crate) fn replace_repair_identity_uncoordinated(
     for (key, value) in replacements.iter() {
         if set_credential_uncoordinated(key, value).is_err() {
             if restore_identity_values_uncoordinated(&snapshot.values).is_err() {
-                crate::repairs::latch_startup_maintenance_failure();
+                crate::repairs::latch_startup_binding_maintenance_failure();
                 return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
             }
             return Err("REPAIR_IDENTITY_WRITE_FAILED".to_string());
@@ -696,7 +696,7 @@ pub(crate) fn replace_repair_identity_uncoordinated(
             Ok(value) => value,
             Err(_) => {
                 if restore_identity_values_uncoordinated(&snapshot.values).is_err() {
-                    crate::repairs::latch_startup_maintenance_failure();
+                    crate::repairs::latch_startup_binding_maintenance_failure();
                     return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
                 }
                 return Err("REPAIR_IDENTITY_READBACK_FAILED".to_string());
@@ -704,7 +704,7 @@ pub(crate) fn replace_repair_identity_uncoordinated(
         };
         if actual.as_ref().map(|value| value.as_str()) != Some(expected) {
             if restore_identity_values_uncoordinated(&snapshot.values).is_err() {
-                crate::repairs::latch_startup_maintenance_failure();
+                crate::repairs::latch_startup_binding_maintenance_failure();
                 return Err("REPAIR_IDENTITY_COMPENSATION_FAILED".to_string());
             }
             return Err("REPAIR_IDENTITY_READBACK_FAILED".to_string());
@@ -756,6 +756,112 @@ pub fn get_full_config() -> Value {
 /// which changes independently (e.g. when new fields are added on the JS
 /// side). The renderer revalidates the blob on boot via its normal
 /// session-validation flow, so a malformed blob is merely discarded.
+// Serialize session invalidation with late bootstrap publication. The counter
+// also fences logout followed by signing back in to the same session blob.
+static REPAIR_SESSION_GENERATION: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+// Accessed only while the generation mutex is held. A failed keyring delete
+// must not let the surviving blob become eligible again in this process.
+static REPAIR_SESSION_INELIGIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    // Fake keyrings model separate terminals on each test thread.
+    static TEST_REPAIR_SESSION_INELIGIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_REPAIR_SESSION_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn repair_session_ineligible() -> bool {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        return TEST_REPAIR_SESSION_INELIGIBLE.with(|value| value.get());
+    }
+    REPAIR_SESSION_INELIGIBLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_repair_session_ineligible(ineligible: bool) {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        TEST_REPAIR_SESSION_INELIGIBLE.with(|value| value.set(ineligible));
+        return;
+    }
+    REPAIR_SESSION_INELIGIBLE.store(ineligible, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_repair_session_eligibility() {
+    TEST_REPAIR_SESSION_INELIGIBLE.with(|value| value.set(false));
+}
+
+#[cfg(test)]
+pub(crate) fn repair_session_publication_is_locked() -> bool {
+    REPAIR_SESSION_GENERATION.try_lock().is_err()
+}
+
+fn repair_session_generation(generation: u64) -> u64 {
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        return TEST_REPAIR_SESSION_GENERATION.with(|value| value.get());
+    }
+    generation
+}
+
+fn advance_repair_session_generation(generation: &mut u64) -> Result<(), String> {
+    let next = repair_session_generation(*generation)
+        .checked_add(1)
+        .ok_or_else(|| "REPAIR_SESSION_UNAVAILABLE".to_string())?;
+    #[cfg(test)]
+    if crate::tests::fake_keyring::is_installed() {
+        TEST_REPAIR_SESSION_GENERATION.with(|value| value.set(next));
+        return Ok(());
+    }
+    *generation = next;
+    Ok(())
+}
+
+pub(crate) fn repair_session_snapshot() -> Result<(u64, Option<Zeroizing<String>>), String> {
+    let generation = REPAIR_SESSION_GENERATION
+        .lock()
+        .map_err(|_| "REPAIR_SESSION_UNAVAILABLE".to_string())?;
+    Ok((
+        repair_session_generation(*generation),
+        if repair_session_ineligible() {
+            None
+        } else {
+            session_get_strict()?
+        },
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn invalidate_repair_session_generation() -> Result<(), String> {
+    let mut generation = REPAIR_SESSION_GENERATION
+        .lock()
+        .map_err(|_| "REPAIR_SESSION_UNAVAILABLE".to_string())?;
+    advance_repair_session_generation(&mut generation)?;
+    Ok(())
+}
+
+pub(crate) fn with_current_repair_session<T>(
+    expected_generation: u64,
+    expected_session: Option<&str>,
+    publish: impl FnOnce() -> Result<T, crate::repair_transport::RepairHookError>,
+) -> Result<T, crate::repair_transport::RepairHookError> {
+    use crate::repair_transport::RepairHookError;
+    let generation = REPAIR_SESSION_GENERATION
+        .lock()
+        .map_err(|_| RepairHookError::sign_in("REPAIR_EXPIRED_SESSION"))?;
+    let current =
+        session_get_strict().map_err(|_| RepairHookError::sign_in("REPAIR_EXPIRED_SESSION"))?;
+    if repair_session_ineligible()
+        || repair_session_generation(*generation) != expected_generation
+        || current.as_deref().map(|v| v.as_str()) != expected_session
+    {
+        return Err(RepairHookError::sign_in("REPAIR_EXPIRED_SESSION"));
+    }
+    publish()
+}
+
 pub fn session_get() -> Option<String> {
     get_credential(KEY_POS_SESSION)
 }
@@ -771,29 +877,41 @@ pub(crate) fn session_get_strict() -> Result<Option<Zeroizing<String>>, String> 
 /// Persist the authenticated session blob. `payload` must be pre-serialised
 /// by the caller (the renderer uses `JSON.stringify`).
 pub fn session_set(payload: &str) -> Result<(), String> {
-    set_credential(KEY_POS_SESSION, payload)
+    let mut generation = REPAIR_SESSION_GENERATION
+        .lock()
+        .map_err(|_| "REPAIR_SESSION_UNAVAILABLE".to_string())?;
+    advance_repair_session_generation(&mut generation)?;
+    set_repair_session_ineligible(true);
+    crate::repair_transport::invalidate_repair_actor_for_session_claim(payload)?;
+    set_credential(KEY_POS_SESSION, payload)?;
+    set_repair_session_ineligible(false);
+    Ok(())
 }
 
 /// Clear the persisted session blob. Silently succeeds if no session is
 /// stored (matches `delete_credential`'s no-op-on-missing semantics).
 pub fn session_clear() -> Result<(), String> {
-    delete_credential(KEY_POS_SESSION)
+    let mut generation = REPAIR_SESSION_GENERATION
+        .lock()
+        .map_err(|_| "REPAIR_SESSION_UNAVAILABLE".to_string())?;
+    advance_repair_session_generation(&mut generation)?;
+    set_repair_session_ineligible(true);
+    let session = delete_credential(KEY_POS_SESSION);
+    let actor = crate::repair_transport::clear_repair_actor_credential();
+    // Filesystem cleanup cannot publish authority. Release the session lock
+    // before cleanup; lifecycle callers may already own the transition lock.
+    drop(generation);
+    let cache = crate::repair_attachment_cache::purge_all();
+    actor?;
+    session?;
+    cache
 }
 
 /// Invalidate both legacy renderer session state and native repair authority.
 /// Both deletes are attempted so a retry can converge even after one backend
 /// operation fails; any failure keeps the lifecycle marker fail-closed.
 pub(crate) fn invalidate_terminal_authority() -> Result<(), String> {
-    let actor = delete_repair_actor_attestation();
-    let session = session_clear();
-    match (actor, session) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(actor), Ok(())) => Err(actor),
-        (Ok(()), Err(session)) => Err(session),
-        (Err(actor), Err(session)) => Err(format!(
-            "terminal authority invalidation failed: actor={actor}; session={session}"
-        )),
-    }
+    session_clear()
 }
 
 #[allow(dead_code)]

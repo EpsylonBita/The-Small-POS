@@ -4,6 +4,11 @@
 //! available independently of subscription state.  This policy therefore
 //! gates only Caller ID collection/emission.  An expired or explicitly
 //! revoked lease resolves to `BridgeOnly`; it never requests voice teardown.
+//!
+//! Founder choice α (offline week, 22/10/2026): the lease expiry is enforced
+//! only once the activation server answers. While a check reaches no answer,
+//! `LeaseExpiry::DeferWhileServerUnreachable` keeps an expired, verified and
+//! never-revoked lease listening. A revocation always wins.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -129,6 +134,21 @@ pub struct ActivationDecision {
     pub mode: RuntimeActivation,
     pub config: Value,
     pub expires_at: DateTime<Utc>,
+    /// The source keeps listening although `expires_at` has passed, because
+    /// the activation server gave no answer (`LeaseExpiry::DeferWhileServerUnreachable`).
+    pub running_past_expiry: bool,
+}
+
+/// How a cached snapshot treats an offline lease whose expiry has passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseExpiry {
+    /// The expiry stops Caller ID emission: bridge-only.
+    Enforce,
+    /// The last activation check reached no server answer (transport failure,
+    /// timeout, 502/503/504). An expired lease that the server never refused keeps the
+    /// listeners running; the next server answer decides (a refusal persists
+    /// a revocation, a fresh lease replaces this one).
+    DeferWhileServerUnreachable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,7 +345,14 @@ pub fn encode_online_snapshot(
     expected_terminal_id: &str,
     now: DateTime<Utc>,
 ) -> Result<(String, ActivationDecision), String> {
-    let decision = resolve_snapshot(config, expected_terminal_id, now, false, true)?;
+    let decision = resolve_snapshot(
+        config,
+        expected_terminal_id,
+        now,
+        false,
+        true,
+        LeaseExpiry::Enforce,
+    )?;
     let cached = CachedActivation {
         version: CACHE_VERSION,
         terminal_id: expected_terminal_id.to_string(),
@@ -338,10 +365,21 @@ pub fn encode_online_snapshot(
         .map_err(|_| "Caller ID activation cache could not be encoded".to_string())
 }
 
+/// The enforced policy, for tests. The runtime always names its policy.
+#[cfg(test)]
 pub fn resolve_cached_snapshot(
     encoded: &str,
     expected_terminal_id: &str,
     now: DateTime<Utc>,
+) -> Result<ActivationDecision, String> {
+    resolve_cached_snapshot_with_expiry(encoded, expected_terminal_id, now, LeaseExpiry::Enforce)
+}
+
+pub fn resolve_cached_snapshot_with_expiry(
+    encoded: &str,
+    expected_terminal_id: &str,
+    now: DateTime<Utc>,
+    expiry: LeaseExpiry,
 ) -> Result<ActivationDecision, String> {
     let cached: CachedActivation = serde_json::from_str(encoded)
         .map_err(|_| "Caller ID activation cache is invalid".to_string())?;
@@ -361,6 +399,7 @@ pub fn resolve_cached_snapshot(
         now,
         cached.revoked_at.is_some(),
         false,
+        expiry,
     )
 }
 
@@ -488,15 +527,28 @@ fn resolve_legacy_online_snapshot(
         // is deliberately non-cacheable and is valid only for this online
         // reconciliation cycle.
         expires_at: now,
+        running_past_expiry: false,
     })
 }
 
+/// The enforced policy, for tests. The runtime always names its policy.
+#[cfg(test)]
 pub fn load_cached_snapshot(
     expected_terminal_id: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<ActivationDecision>, String> {
+    load_cached_snapshot_with_expiry(expected_terminal_id, now, LeaseExpiry::Enforce)
+}
+
+pub fn load_cached_snapshot_with_expiry(
+    expected_terminal_id: &str,
+    now: DateTime<Utc>,
+    expiry: LeaseExpiry,
+) -> Result<Option<ActivationDecision>, String> {
     read_encoded_cache()?
-        .map(|encoded| resolve_cached_snapshot(&encoded, expected_terminal_id, now))
+        .map(|encoded| {
+            resolve_cached_snapshot_with_expiry(&encoded, expected_terminal_id, now, expiry)
+        })
         .transpose()
 }
 
@@ -528,7 +580,14 @@ pub fn mark_cached_snapshot_revoked(
     // Never persist a revocation marker around an unverified/tampered lease.
     // The bridge-only transition keeps the signed snapshot intact, so future
     // offline restores can (and do) verify the same JWS again.
-    let _ = resolve_snapshot(&cached.config, expected_terminal_id, now, false, false)?;
+    let _ = resolve_snapshot(
+        &cached.config,
+        expected_terminal_id,
+        now,
+        false,
+        false,
+        LeaseExpiry::Enforce,
+    )?;
     cached.revoked_at = Some(now);
     serde_json::to_string(&cached)
         .map_err(|_| "Caller ID activation cache could not be encoded".to_string())
@@ -540,6 +599,7 @@ fn resolve_snapshot(
     now: DateTime<Utc>,
     revoked: bool,
     require_unexpired: bool,
+    expiry: LeaseExpiry,
 ) -> Result<ActivationDecision, String> {
     let expected_terminal_id = expected_terminal_id.trim();
     if expected_terminal_id.is_empty() || expected_terminal_id.chars().count() > 200 {
@@ -582,9 +642,13 @@ fn resolve_snapshot(
         return Err("Caller ID activation source-terminal claim is inconsistent".into());
     }
 
+    // The signature, terminal binding and lifetime checks above apply to
+    // every policy. Only the expiry itself can be deferred, and never past a
+    // revocation the server sent.
+    let expired = wire.offline_lease.expires_at <= now;
     let mode = if !wire.activation.source_terminal {
         RuntimeActivation::InactiveTerminal
-    } else if revoked || wire.offline_lease.expires_at <= now {
+    } else if revoked || (expired && expiry == LeaseExpiry::Enforce) {
         RuntimeActivation::BridgeOnly
     } else {
         RuntimeActivation::CallerIdSource
@@ -593,6 +657,7 @@ fn resolve_snapshot(
         mode,
         config: config.clone(),
         expires_at: wire.offline_lease.expires_at,
+        running_past_expiry: mode == RuntimeActivation::CallerIdSource && expired,
     })
 }
 
@@ -809,6 +874,119 @@ mod tests {
 
         assert_eq!(expired.mode, RuntimeActivation::BridgeOnly);
         assert!(!expired.config.is_null(), "bridge config must be retained");
+        assert!(!expired.running_past_expiry);
+    }
+
+    /// Founder choice α (offline week, 22/10/2026): a lease that expires while
+    /// the activation server cannot be reached keeps the source listening.
+    #[test]
+    fn expired_lease_keeps_listening_while_the_activation_server_is_unreachable() {
+        let (encoded, _) = encode_online_snapshot(&config(true), TERMINAL_ID, now()).unwrap();
+        let day_four = now() + Duration::hours(80);
+
+        let offline = resolve_cached_snapshot_with_expiry(
+            &encoded,
+            TERMINAL_ID,
+            day_four,
+            LeaseExpiry::DeferWhileServerUnreachable,
+        )
+        .unwrap();
+        assert_eq!(offline.mode, RuntimeActivation::CallerIdSource);
+        assert!(offline.running_past_expiry);
+        assert_eq!(offline.expires_at, now() + Duration::hours(72));
+
+        // The same cache under the enforced policy is bridge-only, as before.
+        let enforced = resolve_cached_snapshot(&encoded, TERMINAL_ID, day_four).unwrap();
+        assert_eq!(enforced.mode, RuntimeActivation::BridgeOnly);
+        assert!(!enforced.running_past_expiry);
+    }
+
+    #[test]
+    fn an_unexpired_lease_is_not_reported_as_running_past_expiry() {
+        let (encoded, _) = encode_online_snapshot(&config(true), TERMINAL_ID, now()).unwrap();
+        let decision = resolve_cached_snapshot_with_expiry(
+            &encoded,
+            TERMINAL_ID,
+            now() + Duration::hours(10),
+            LeaseExpiry::DeferWhileServerUnreachable,
+        )
+        .unwrap();
+        assert_eq!(decision.mode, RuntimeActivation::CallerIdSource);
+        assert!(!decision.running_past_expiry);
+    }
+
+    /// A refusal persists a revocation; an unreachable server never extends it.
+    #[test]
+    fn expired_lease_with_a_server_refusal_stops_even_while_unreachable() {
+        let (encoded, _) = encode_online_snapshot(&config(true), TERMINAL_ID, now()).unwrap();
+        let revoked =
+            mark_cached_snapshot_revoked(&encoded, TERMINAL_ID, now() + Duration::hours(70))
+                .unwrap();
+
+        let decision = resolve_cached_snapshot_with_expiry(
+            &revoked,
+            TERMINAL_ID,
+            now() + Duration::hours(80),
+            LeaseExpiry::DeferWhileServerUnreachable,
+        )
+        .unwrap();
+        assert_eq!(decision.mode, RuntimeActivation::BridgeOnly);
+        assert!(!decision.running_past_expiry);
+    }
+
+    #[test]
+    fn deferred_expiry_still_requires_the_pinned_signature() {
+        let (encoded, _) = encode_online_snapshot(&config(true), TERMINAL_ID, now()).unwrap();
+        let mut cached: Value = serde_json::from_str(&encoded).unwrap();
+        cached["config"]["signedLease"]["signature"] = json!("AAAAAAAA");
+        let tampered = serde_json::to_string(&cached).unwrap();
+
+        assert!(resolve_cached_snapshot_with_expiry(
+            &tampered,
+            TERMINAL_ID,
+            now() + Duration::hours(80),
+            LeaseExpiry::DeferWhileServerUnreachable,
+        )
+        .unwrap_err()
+        .contains("signature"));
+        assert!(resolve_cached_snapshot_with_expiry(
+            &encoded,
+            "POS-OTHER",
+            now() + Duration::hours(80),
+            LeaseExpiry::DeferWhileServerUnreachable,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_fresh_lease_after_running_past_expiry_is_an_ordinary_source_again() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        store_online_snapshot(&config(true), TERMINAL_ID, now()).unwrap();
+        let offline = load_cached_snapshot_with_expiry(
+            TERMINAL_ID,
+            now() + Duration::hours(80),
+            LeaseExpiry::DeferWhileServerUnreachable,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(offline.running_past_expiry);
+
+        // The server answers with a fresh lease (re-issued at hour 80).
+        let renewed_at = now() + Duration::hours(80);
+        let mut fresh = config(true);
+        fresh["offlineLease"]["issuedAt"] = json!(renewed_at.to_rfc3339());
+        fresh["offlineLease"]["expiresAt"] = json!((renewed_at + Duration::hours(72)).to_rfc3339());
+        fresh["signedLease"] = sign_snapshot(&fresh);
+        let online = store_online_snapshot(&fresh, TERMINAL_ID, renewed_at).unwrap();
+        assert_eq!(online.mode, RuntimeActivation::CallerIdSource);
+        assert!(!online.running_past_expiry);
+        assert_eq!(online.expires_at, renewed_at + Duration::hours(72));
+
+        let restored = load_cached_snapshot(TERMINAL_ID, renewed_at + Duration::hours(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.mode, RuntimeActivation::CallerIdSource);
+        assert!(!restored.running_past_expiry);
     }
 
     #[test]

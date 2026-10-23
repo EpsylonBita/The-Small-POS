@@ -45,6 +45,7 @@ thread_local! {
     static WRITE_FAILURES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     static NEXT_WRITE_VALUES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     static WRITE_HOOKS: RefCell<HashMap<String, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
+    static DELETE_HOOKS: RefCell<HashMap<String, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
     static DELETE_FAILURES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
@@ -68,6 +69,7 @@ impl Drop for Guard {
         WRITE_FAILURES.with(|slot| slot.borrow_mut().clear());
         NEXT_WRITE_VALUES.with(|slot| slot.borrow_mut().clear());
         WRITE_HOOKS.with(|slot| slot.borrow_mut().clear());
+        DELETE_HOOKS.with(|slot| slot.borrow_mut().clear());
         DELETE_FAILURES.with(|slot| slot.borrow_mut().clear());
     }
 }
@@ -82,6 +84,8 @@ pub fn install_empty() -> Guard {
     NEXT_WRITE_VALUES.with(|slot| slot.borrow_mut().clear());
     WRITE_HOOKS.with(|slot| slot.borrow_mut().clear());
     DELETE_FAILURES.with(|slot| slot.borrow_mut().clear());
+    DELETE_HOOKS.with(|slot| slot.borrow_mut().clear());
+    crate::storage::reset_test_repair_session_eligibility();
     Guard { _private: () }
 }
 
@@ -103,6 +107,8 @@ where
     NEXT_WRITE_VALUES.with(|slot| slot.borrow_mut().clear());
     WRITE_HOOKS.with(|slot| slot.borrow_mut().clear());
     DELETE_FAILURES.with(|slot| slot.borrow_mut().clear());
+    DELETE_HOOKS.with(|slot| slot.borrow_mut().clear());
+    crate::storage::reset_test_repair_session_eligibility();
     Guard { _private: () }
 }
 
@@ -152,6 +158,12 @@ where
     F: FnMut() + 'static,
 {
     WRITE_HOOKS.with(|slot| {
+        slot.borrow_mut().insert(key.to_string(), Box::new(hook));
+    });
+}
+
+pub(crate) fn after_next_delete(key: &str, hook: impl FnMut() + 'static) {
+    DELETE_HOOKS.with(|slot| {
         slot.borrow_mut().insert(key.to_string(), Box::new(hook));
     });
 }
@@ -252,14 +264,20 @@ pub(crate) fn delete_checked(key: &str) -> Result<bool, String> {
     if let Some(code) = DELETE_FAILURES.with(|slot| slot.borrow().get(key).cloned()) {
         return Err(code);
     }
-    STATE.with(|slot| {
+    let result = STATE.with(|slot| {
         if let Some(map) = slot.borrow_mut().as_mut() {
             map.remove(key);
             Ok(true)
         } else {
             Ok(false)
         }
-    })
+    });
+    if matches!(result, Ok(true)) {
+        if let Some(mut hook) = DELETE_HOOKS.with(|hooks| hooks.borrow_mut().remove(key)) {
+            hook();
+        }
+    }
+    result
 }
 
 // --- Inspection helpers for test assertions ---

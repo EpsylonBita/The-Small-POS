@@ -39,6 +39,7 @@ export interface MenuItem {
   deliveryPrice?: number | null;  // Only available when Delivery module is acquired
   instorePrice?: number | null;   // Only available when Tables module is acquired
   vatCategoryCode?: string | null;
+  vatClass?: string | null;
   priceIncludesVat?: boolean | null;
   taxExemptionReason?: string | null;
   fiscalDocumentProfile?: string | null;
@@ -169,6 +170,7 @@ export interface MenuItemRow {
   delivery_price?: number | null;
   instore_price?: number | null;
   vat_category_code?: string | null;
+  vat_class?: string | null;
   price_includes_vat?: boolean | null;
   tax_exemption_reason?: string | null;
   fiscal_document_profile?: string | null;
@@ -209,6 +211,7 @@ export function menuItemFromRow(row: MenuItemRow): MenuItem {
     pickupPrice: row.pickup_price ?? (row.price ?? row.base_price ?? 0), // Use price as fallback for specific prices
     deliveryPrice: row.delivery_price ?? (row.price ?? row.base_price ?? 0),
     instorePrice: row.instore_price ?? (row.price ?? row.base_price ?? 0),
+    vatClass: row.vat_class ?? 'standard',
     vatCategoryCode: row.vat_category_code ?? null,
     priceIncludesVat: row.price_includes_vat ?? true,
     taxExemptionReason: row.tax_exemption_reason ?? null,

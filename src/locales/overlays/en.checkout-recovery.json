@@ -40,7 +40,10 @@
       "checkoutParked": "The checkout was set aside and new orders can be taken. Check the bank POS: if the customer was charged, do not charge again; a manager settles it. POS status lists this attempt.",
       "checkoutParkFailed": "The checkout could not be set aside. It stays protected; nothing was changed.",
       "checkoutParkApprovalSubtitle": "Setting aside a checkout needs the right to void payments. A staff member who has it enters their own PIN. Nothing is charged.",
-      "freezeNotSaved": "The cart could not be saved for payment, so no payment was started. Press Pay to try again."
+      "freezeNotSaved": "The cart could not be saved for payment, so no payment was started. Press Pay to try again.",
+      "orderNotSavedCartKept": "The order was not saved and no payment was recorded. The cart is kept: press Pay again. If you already took the money, do not take it again.",
+      "freezeReadbackChanged": "No payment was started: the till could not save this cart for payment exactly as entered. Select the customer or address again, then press Pay. If it happens again, contact support.",
+      "orderConfirmationRefused": "The order was not saved: its saved checkout did not match this payment, so pressing Pay again as it is will not help. No payment was recorded and the cart is kept. If you took the money, do not take it again. Select the customer or address again, then press Pay. If it happens again, contact support."
     }
   },
   "checkoutRecovery": {

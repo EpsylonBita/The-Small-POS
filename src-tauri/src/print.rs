@@ -4212,8 +4212,13 @@ pub fn resolve_layout_config(
     let currency_symbol = crate::fiscal::payload_builder::resolve_store_currency_code(&conn)
         .map(|currency| format!(" {currency}"))
         .unwrap_or_default();
-    let vat_number = setting_text(&conn, "organization", "vat_number")
-        .or_else(|| setting_text(&conn, "restaurant", "vat_number"));
+    let vat_number =
+        if crate::fiscal::greece_vat::branch_vat_settings(&conn).vat_registered == Some(false) {
+            None
+        } else {
+            setting_text(&conn, "organization", "vat_number")
+                .or_else(|| setting_text(&conn, "restaurant", "vat_number"))
+        };
     let tax_office = setting_text(&conn, "organization", "tax_office");
     let footer_text = setting_text(&conn, "receipt", "footer_text")
         .or_else(|| setting_text(&conn, "restaurant", "receipt_footer"))
@@ -4574,6 +4579,7 @@ pub fn resolve_layout_config(
         text_scale,
         logo_scale,
         body_font_weight,
+        store_time_zone: crate::store_time::resolve_store_time_zone(&conn),
     })
 }
 
@@ -5343,24 +5349,18 @@ fn kiosk_payment_intent(raw: &str) -> Option<String> {
 
 /// The VAT a customer slip prints for an order, `None` for no VAT line. The
 /// one gate for both the «ΦΠΑ» totals line and the displayed Subtotal
-/// (founder rule 07/10/2026, [`crate::fiscal::receipt_vat`]): with a
-/// connected fiscal plugin or a myDATA fiscal device the order's computed
-/// VAT, otherwise the VAT of the owner's configured rate, none when the owner
-/// set no rate or 0%. A store without either prints exactly what a tax-0
-/// order always printed, whatever VAT the order stores.
+/// (founder rule 21/10/2026, [`crate::fiscal::receipt_vat`]): the order's
+/// computed VAT, the one the Z totals, printed only with a connected fiscal
+/// plugin, a myDATA fiscal device or the owner's «VAT on receipts» switch
+/// on. Without them the slip prints exactly what a tax-0 order always
+/// printed, whatever VAT the order stores.
 fn printed_receipt_vat(
     conn: &rusqlite::Connection,
     branch_id: Option<&str>,
-    total_amount: f64,
-    tip_amount: f64,
     computed_vat_amount: f64,
 ) -> Option<f64> {
-    crate::fiscal::receipt_vat::PrintedVatContext::load(conn).order_vat_amount(
-        branch_id,
-        total_amount,
-        tip_amount,
-        Some(computed_vat_amount),
-    )
+    crate::fiscal::receipt_vat::PrintedVatContext::load(conn)
+        .order_vat_amount(branch_id, Some(computed_vat_amount))
 }
 
 pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
@@ -5502,21 +5502,11 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         .map(|cents| crate::money::Cents::new(cents).to_f64_dp2())
         .unwrap_or(tax_amount);
     let is_folio_settlement = crate::hotel_folio::is_local(&conn, order_id)?;
-    let printed_vat = if is_folio_settlement {
-        (computed_vat_amount > 0.0).then_some(computed_vat_amount)
-    } else {
-        printed_receipt_vat(
-            &conn,
-            order_branch_id.as_deref(),
-            total_amount,
-            tip_amount,
-            computed_vat_amount,
-        )
-    };
+    let printed_vat = printed_receipt_vat(&conn, order_branch_id.as_deref(), computed_vat_amount);
 
     let menu_lookup = build_menu_category_lookup(&conn);
 
-    let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
+    let mut items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
         .ok()
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default()
@@ -5543,6 +5533,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                 category_path: category_fields.category_path,
                 note: build_item_note_text(&item),
                 customizations: parse_item_customizations(&item),
+                vat_letter: None,
             }
         })
         .collect();
@@ -5584,9 +5575,115 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         }
     }
 
+    let mut vat_legend = Vec::new();
+    let vat_settings = crate::fiscal::greece_vat::branch_vat_settings(&conn);
+    let registered = vat_settings.vat_registered != Some(false);
+    let raw_items = serde_json::from_str::<Value>(&items_json).unwrap_or(Value::Null);
+    let calculated = crate::sync_queue::order_json_vat(
+        &serde_json::json!({"items":raw_items,"order_type":order_type,"plugin":plugin}),
+        &vat_settings,
+    )
+    .ok();
+    let stored_buckets: Value = conn
+        .query_row(
+            "SELECT tax_breakdown FROM orders WHERE id=?1",
+            [order_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or(Value::Null);
+    // A legacy line without a recorded category must not acquire a guessed
+    // receipt rate. Class-only lines use their stored order bucket, while
+    // explicit recorded categories keep their own catalogue rate.
+    let legend_lines: Vec<Value> = raw_items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| !is_folio_settlement || item["folio_line_kind"] != "transfer")
+        .enumerate()
+        .map(|(index, item)| {
+            let explicit = item
+                .get("vat_category_code")
+                .or_else(|| item.get("vatCategoryCode"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|c| !c.is_empty());
+            let computed = calculated
+                .as_ref()
+                .and_then(|v| v.breakdown.lines.get(index));
+            let code = explicit.or_else(|| computed.map(|line| line.vat_category_code.as_str()));
+            let stored = stored_buckets
+                .as_array()
+                .and_then(|rows| rows.iter().find(|b| b["vatCategoryCode"].as_str() == code));
+            let recorded_rate = item
+                .get("vat_rate_percent")
+                .or_else(|| item.get("vatRatePercent"))
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite());
+            let rate = stored
+                .and_then(|b| b["vatRate"].as_f64())
+                .or(recorded_rate)
+                .or_else(|| {
+                    explicit
+                        .filter(|c| {
+                            crate::fiscal::greece_vat::vat_category_country(Some(c))
+                                == Some(vat_settings.normalized().country)
+                                || *c == crate::fiscal::greece_vat::POS_RECEIPT_ZERO_VAT_CATEGORY
+                        })
+                        .map(|c| {
+                            crate::fiscal::greece_vat::resolve_vat_category_rate(
+                                Some(c),
+                                vat_settings.normalized().country,
+                                vat_settings.normalized().vat_region_profile,
+                            )
+                            .1
+                        })
+                });
+            serde_json::json!({"vatCategoryCode":code,"vatRatePercent":rate})
+        })
+        .collect();
+    if let Some(legend) = crate::fiscal::receipt_vat::resolve_receipt_vat_legend(
+        vat_settings.country.as_deref(),
+        registered,
+        printed_vat.is_some(),
+        &legend_lines,
+    ) {
+        for (item, line) in items.iter_mut().zip(&legend_lines) {
+            item.vat_letter = legend["letterByCategory"]
+                [line["vatCategoryCode"].as_str().unwrap_or("")]
+            .as_str()
+            .map(str::to_string);
+        }
+        for entry in legend["entries"].as_array().into_iter().flatten() {
+            vat_legend.push(format!(
+                "{} {} %",
+                entry["letter"].as_str().unwrap_or(""),
+                entry["ratePercent"]
+            ));
+        }
+    }
+    if let Some(marker) = crate::fiscal::receipt_vat::resolve_receipt_sale_channel_marker(
+        vat_settings.country.as_deref(),
+        registered,
+        Some(&order_type),
+        Some(&plugin),
+    ) {
+        let label = match marker {
+            "takeaway" => "Take-away marker",
+            "own_delivery" => "Delivery marker",
+            _ => "Delivery platform",
+        };
+        order_notes.push(receipt_renderer::receipt_label(&print_language, label).to_string());
+        if order_type == "delivery" && !delivery_address.trim().is_empty() {
+            push_unique_trimmed_note(&mut order_notes, Some(&delivery_address));
+        }
+    }
+
     let effective_discount = discount_amount.max(0.0);
     // The printed VAT, never the stored one: a slip without a VAT line keeps
-    // the Subtotal it always had (founder rule 07/10/2026).
+    // the Subtotal it always had (founder rules 07/10 and 21/10/2026).
     let computed_subtotal =
         total_amount - printed_vat.unwrap_or(0.0) - delivery_fee - tip_amount + effective_discount;
     let display_subtotal = if computed_subtotal.is_finite() && computed_subtotal > 0.0 {
@@ -5788,6 +5885,7 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         driver_id: non_empty_field(driver_id),
         driver_name: resolved_driver_name,
         delivery_slip_mode: DeliverySlipMode::DeliveryOrder,
+        vat_legend,
         items,
         totals,
         payments,
@@ -6008,6 +6106,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                 category_path: None,
                 note: None,
                 customizations: Vec::new(),
+                vat_letter: None,
             })
             .collect()
     } else {
@@ -6035,6 +6134,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     category_path: category_fields.category_path,
                     note: build_item_note_text(&item),
                     customizations: parse_item_customizations(&item),
+                    vat_letter: None,
                 }
             })
             .collect()
@@ -6112,6 +6212,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
     }
 
     Ok(OrderReceiptDoc {
+        vat_legend: Vec::new(),
         currency: None,
         order_id: order_id.to_string(),
         order_number: if order_number.is_empty() {
@@ -6359,6 +6460,7 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                 category_path: category_fields.category_path,
                 note: build_item_note_text(&item),
                 customizations: parse_item_customizations(&item),
+                vat_letter: None,
             }
         })
         .collect();
@@ -7064,6 +7166,40 @@ fn z_report_staff_payment_entries(
     aggregate_entries
 }
 
+/// The stored Z's tips by staff (`staffTips`, salon 21/10/2026): one row per
+/// stylist with a non-zero tip. Missing on a Z stored before it: nothing prints.
+fn z_report_staff_tip_entries(report: &Value) -> Vec<receipt_renderer::ZReportStaffTipEntry> {
+    report
+        .get("staffTips")
+        .and_then(Value::as_array)
+        .map(|tips| {
+            tips.iter()
+                .filter_map(|tip| {
+                    let amount = tip.get("amount").and_then(Value::as_f64)?;
+                    let staff_id = tip
+                        .get("staffId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .to_string();
+                    let staff_name = tip
+                        .get("staffName")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| staff_id.clone());
+                    (amount.abs() >= 0.005).then_some(receipt_renderer::ZReportStaffTipEntry {
+                        staff_id,
+                        staff_name,
+                        amount,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The stored Z's phone staff section (`phoneShifts`, founder rule
 /// 13/10/2026). A figure the Z did not record stays `None`.
 fn z_report_phone_shift_entries(report: &Value) -> Vec<receipt_renderer::ZReportPhoneShiftEntry> {
@@ -7106,9 +7242,42 @@ fn z_report_phone_shift_entries(report: &Value) -> Vec<receipt_renderer::ZReport
         .unwrap_or_default()
 }
 
+/// The records a manager set aside (`notOnServer`, offline week Ω4), as the
+/// Z prints them: their kind and amount, nothing else.
+fn z_report_not_on_server_entries(
+    report: &Value,
+) -> Vec<receipt_renderer::ZReportNotOnServerEntry> {
+    report
+        .get("notOnServer")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    Some(receipt_renderer::ZReportNotOnServerEntry {
+                        table: entry.get("table").and_then(Value::as_str)?.to_string(),
+                        amount: entry
+                            .get("amountCents")
+                            .and_then(Value::as_i64)
+                            .map(|cents| crate::money::Cents::new(cents).to_f64_dp2()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &str) -> ZReportDoc {
     let report_date = text_from_paths(payload, &["/date", "/reportDate", "/report_date"])
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+        .unwrap_or_else(|| {
+            // The store's today (POS audit Π8); the device's when unresolved.
+            let zone = db
+                .conn
+                .lock()
+                .ok()
+                .and_then(|conn| crate::store_time::resolve_store_time_zone(&conn));
+            crate::store_time::format_now(zone, "%Y-%m-%d")
+        });
     let generated_at = text_from_paths(payload, &["/generatedAt", "/generated_at"])
         .unwrap_or_else(|| Utc::now().to_rfc3339());
     let total_orders = number_from_paths(
@@ -7285,12 +7454,18 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         .unwrap_or_default();
 
     ZReportDoc {
+        vat_breakdown: payload.get("vatBreakdown").cloned().unwrap_or(Value::Null),
         hotel_report: serde_json::json!({"hotel":payload["hotel"],"presentation":payload["presentation"],"sales":payload["sales"]}),
         currency: text_from_paths(payload, &["/currency"])
             .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
         gift_liability_cash_cents: 0,
         gift_ordinary_adjustment_cents: 0,
         gift_close_lines: Vec::new(),
+        pending_upload: payload
+            .get("pendingUpload")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        not_on_server: z_report_not_on_server_entries(payload),
         report_id: entity_id.to_string(),
         report_date,
         generated_at,
@@ -7378,6 +7553,7 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         platform_lines: z_report_platform_entries(payload),
         staff_payment_lines,
         phone_shifts: z_report_phone_shift_entries(payload),
+        staff_tips: z_report_staff_tip_entries(payload),
         staff_reports: payload
             .get("staffReports")
             .and_then(Value::as_array)
@@ -7508,6 +7684,17 @@ fn build_z_report_doc_with_conn(
     ) = report.map_err(|_| format!("Z-report not found: {z_report_id}"))?;
 
     let rj: Value = serde_json::from_str(&report_json_str).unwrap_or_default();
+    // Offline week (founder 21/10/2026): a Z closed on this till that the
+    // server has not confirmed yet prints its pending-upload header.
+    let pending_upload = conn
+        .query_row(
+            "SELECT COALESCE(close_state, '') = 'closed_local'
+                    AND COALESCE(sync_state, '') <> 'applied'
+             FROM z_reports WHERE id = ?1",
+            params![z_report_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
     let shift_count = rj
         .pointer("/shifts/total")
         .and_then(Value::as_i64)
@@ -7555,12 +7742,15 @@ fn build_z_report_doc_with_conn(
         number_from_paths(&rj, &["/tips/total", "/tipsTotal"]).unwrap_or(tips_total);
 
     Ok(ZReportDoc {
+        vat_breakdown: rj.get("vatBreakdown").cloned().unwrap_or(Value::Null),
         hotel_report: serde_json::json!({"hotel":rj["hotel"],"presentation":rj["presentation"],"sales":rj["sales"]}),
         currency: text_from_paths(&rj, &["/currency"])
             .and_then(|value| crate::fiscal::payload_builder::normalize_currency_code(&value)),
         gift_liability_cash_cents: 0,
         gift_ordinary_adjustment_cents: 0,
         gift_close_lines: Vec::new(),
+        pending_upload,
+        not_on_server: z_report_not_on_server_entries(&rj),
         report_id,
         report_date,
         generated_at,
@@ -7678,6 +7868,7 @@ fn build_z_report_doc_with_conn(
         platform_lines: z_report_platform_entries(&rj),
         staff_payment_lines,
         phone_shifts: z_report_phone_shift_entries(&rj),
+        staff_tips: z_report_staff_tip_entries(&rj),
         staff_reports: rj
             .get("staffReports")
             .and_then(Value::as_array)
@@ -11453,6 +11644,76 @@ mod tests {
             "preview",
         );
         assert_eq!(preview.tax_total, with_vat.tax_total);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn swiss_receipt_letters_legend_channel_and_unregistered_suppression() {
+        let _keyring =
+            crate::tests::fake_keyring::install_seeded([("terminal_id", "local-vat-test")]);
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [
+                ("vat_country", "CH"),
+                ("vat_registered", "true"),
+                ("vat_print_on_receipt", "true"),
+            ] {
+                db::set_setting(&conn, "tax", key, value).unwrap();
+            }
+            db::set_setting(&conn, "general", "language", "en").unwrap();
+            db::set_setting(&conn, "organization", "vat_number", "CHE-123-VAT").unwrap();
+            conn.execute("INSERT INTO orders(id,items,total_amount,total_amount_cents,subtotal,tax_amount,tax_amount_cents,order_type,delivery_address,created_at,updated_at) VALUES('swiss-vat',?1,21.62,2162,21.62,1.62,162,'delivery','Main Street 2','2026-10-21T12:00:00Z','now')",[serde_json::json!([
+                {"name":"Meal","quantity":1,"unit_price":10.81,"vat_category_code":"ch_standard_81"},
+                {"name":"Water","quantity":1,"unit_price":10.81,"vat_category_code":"ch_reduced_26"}
+            ]).to_string()]).unwrap();
+        }
+        let doc = build_order_receipt_doc(&db, "swiss-vat").unwrap();
+        assert_eq!(doc.items[0].vat_letter.as_deref(), Some("A"));
+        assert_eq!(doc.items[1].vat_letter.as_deref(), Some("B"));
+        assert_eq!(doc.vat_legend, vec!["A 8.1 %", "B 2.6 %"]);
+        assert!(doc.order_notes.iter().any(|n| n == "Delivery"));
+        assert!(doc.order_notes.iter().any(|n| n == "Main Street 2"));
+        let layout = receipt_renderer::LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            language: "en".into(),
+            ..Default::default()
+        };
+        let html = receipt_renderer::render_html(&ReceiptDocument::OrderReceipt(doc), &layout);
+        assert!(html.contains("A 8.1 %"));
+        assert!(html.find("Water").unwrap() < html.find("A 8.1 %").unwrap());
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE orders SET items=?1 WHERE id='swiss-vat'",
+                [
+                    serde_json::json!([{"name":"Legacy meal","quantity":1,"unit_price":21.62}])
+                        .to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        assert!(
+            build_order_receipt_doc(&db, "swiss-vat")
+                .unwrap()
+                .vat_legend
+                .is_empty(),
+            "An old line without a recorded category gets no invented rate"
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "tax", "vat_registered", "false").unwrap();
+        }
+        let doc = build_order_receipt_doc(&db, "swiss-vat").unwrap();
+        assert!(doc.vat_legend.is_empty());
+        assert!(doc.items.iter().all(|item| item.vat_letter.is_none()));
+        assert!(!doc.totals.iter().any(|t| t.label == "Tax"));
+        assert!(
+            resolve_layout_config(&db, &serde_json::json!({}), "order_receipt")
+                .unwrap()
+                .vat_number
+                .is_none()
+        );
     }
 
     fn test_db() -> DbState {
@@ -16385,6 +16646,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    /// The Tomikro attempt state without the day close (review 21/10/2026):
+    /// the app stops mid-send (crash, power cut) while a raw_tcp attempt is
+    /// still `submitting`, so its job stays `printing` and never reaches
+    /// `unknown`. Unlike the orphan, the job row exists, so the lane sweep
+    /// must keep the printer held: the bytes may already be on paper, and
+    /// nothing may resend them. Health ages the `printing` job into "receipts
+    /// are not printing", and staff cancel it from the print queue, the
+    /// resolution the 19/08 `unknown` tests pin. Nothing pinned it for a
+    /// `submitting` attempt, which goes through the same finalize statement.
+    #[test]
+    fn crashed_submitting_raw_attempt_holds_its_printer_until_the_operator_cancels_it() {
+        let _fake = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let host = "192.168.1.19";
+        let target = PrinterTargetKey::RawTcp {
+            host: host.into(),
+            port: 9100,
+        };
+        let crashed_job = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4().to_string();
+        let crashed_attempt = {
+            let conn = db.conn.lock().unwrap();
+            insert_managed_network_profile(&conn, "profile-crash", host, 9100, true);
+            insert_receipt_order(&conn, "order-in-flight", "41", 9.0);
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'order-in-flight', 'printing',
+                         datetime('now', '-5 minutes'), datetime('now', '-5 minutes'))",
+                [&crashed_job],
+            )
+            .unwrap();
+            let attempt = create_attempt(
+                &conn,
+                NewAttempt {
+                    local_job_id: crashed_job.clone(),
+                    target: target.clone(),
+                    document_kind: "receipt".into(),
+                    bytes_requested: 512,
+                    now: Utc::now() - chrono::Duration::minutes(5),
+                },
+            )
+            .unwrap();
+            transition_attempt(
+                &conn,
+                attempt.attempt_id,
+                DispatchState::Submitting,
+                AttemptObservation::default(),
+            )
+            .unwrap();
+            insert_receipt_order(&conn, "order-after-crash", "42", 12.5);
+            conn.execute(
+                "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+                 VALUES (?1, 'order_receipt', 'order-after-crash', 'pending', datetime('now'), datetime('now'))",
+                [&job_id],
+            )
+            .unwrap();
+            attempt.attempt_id
+        };
+        let data_dir = std::env::temp_dir().join(format!("managed-crashed-{}", Uuid::new_v4()));
+        let raw = CapturingManagedRaw::default();
+        let spooler: Arc<dyn WindowsSpooler> = Arc::new(FakeWindowsSpooler::new(73));
+        // The restarted process: no worker owns the attempt any more.
+        let manager = {
+            let conn = db.conn.lock().unwrap();
+            DispatchManager::hydrate_isolated_for_test(&conn).unwrap()
+        };
+
+        // Fail closed: the stale-job sweep leaves a job whose attempt still
+        // holds the printer, and the worker sends nothing.
+        assert_eq!(recover_stale_printing_jobs(&db).unwrap(), 0);
+        process_pending_jobs_with_adapters(
+            &db,
+            &data_dir,
+            &manager,
+            &raw,
+            Arc::clone(&spooler),
+            Duration::from_secs(10),
+        )
+        .expect("managed worker");
+        assert!(
+            raw.calls.lock().unwrap().is_empty(),
+            "an unconfirmed send is never repeated and nothing jumps it"
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            let held = crate::print_dispatch::read_attempt(&conn, crashed_attempt)
+                .unwrap()
+                .unwrap();
+            assert_eq!(held.state, DispatchState::Submitting);
+            let statuses: Vec<String> = [&crashed_job, &job_id]
+                .iter()
+                .map(|id| {
+                    conn.query_row("SELECT status FROM print_jobs WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .unwrap()
+                })
+                .collect();
+            assert_eq!(statuses, ["printing", "pending"]);
+            let audited: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recovery_action_log WHERE action_id = ?1",
+                    [crate::print_dispatch::ORPHANED_ATTEMPT_ACTION_ID],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(audited, 0, "a job that still exists is not an orphan");
+        }
+
+        // The operator's cancel finalizes the dead attempt and its job.
+        let result = durable_cancel_print_job(&db, &crashed_job).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["affected"], 1);
+        assert_eq!(result["localCancelled"], 1);
+        assert_eq!(result["activeStopsRequested"], 0);
+        {
+            let conn = db.conn.lock().unwrap();
+            let closed = crate::print_dispatch::read_attempt(&conn, crashed_attempt)
+                .unwrap()
+                .unwrap();
+            assert_eq!(closed.state, DispatchState::Cancelled);
+            assert!(closed.cancel_confirmed_at.is_some());
+            let (status, warning): (String, String) = conn
+                .query_row(
+                    "SELECT status, warning_code FROM print_jobs WHERE id = ?1",
+                    [&crashed_job],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (status.as_str(), warning.as_str()),
+                ("cancelled", "operator_cancelled")
+            );
+        }
+
+        // The next tick of the same process releases the printer and prints
+        // the waiting receipt, once.
+        process_pending_jobs_with_adapters(
+            &db,
+            &data_dir,
+            &manager,
+            &raw,
+            spooler,
+            Duration::from_secs(10),
+        )
+        .expect("managed worker");
+        let calls = raw.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the waiting receipt must reach the printer");
+        assert_eq!(
+            calls[0].target,
+            printers::ResolvedPrinterTarget::RawTcp {
+                host: host.into(),
+                port: 9100
+            }
+        );
+        drop(calls);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM print_jobs WHERE id = ?1",
+                [&job_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "dispatched"
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     /// Seed `blocked_jobs` older pending receipts bound to a printer whose lane
     /// is held, plus one newer receipt bound to a healthy printer.
     fn seed_blocked_backlog_and_one_healthy_job(
@@ -19772,14 +20203,21 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn slips_without_a_plugin_or_an_owner_rate_are_unchanged_by_the_stored_vat() {
+    fn slips_without_a_plugin_or_the_switch_are_unchanged_by_the_stored_vat() {
         crate::fiscal::active_cache::reset_for_tests();
-        // Tomikro (owner rate 0) and a store without a rate (Le Petit Paris).
-        for rate in [Some("0"), None] {
+        // Tomikro (switch off; an owner rate no longer matters), a till that
+        // has not received the switch with owner rate 0, and a store without
+        // a rate (Le Petit Paris).
+        for (switch, rate) in [(Some("false"), Some("24")), (None, Some("0")), (None, None)] {
             let db = test_db();
-            if let Some(rate) = rate {
+            {
                 let conn = db.conn.lock().unwrap();
-                db::set_setting(&conn, "tax", "default_tax_rate", rate).unwrap();
+                if let Some(rate) = rate {
+                    db::set_setting(&conn, "tax", "default_tax_rate", rate).unwrap();
+                }
+                if let Some(switch) = switch {
+                    db::set_setting(&conn, "tax", "vat_print_on_receipt", switch).unwrap();
+                }
             }
             // Today: an order-dashboard order stored tax 0 and no cents.
             seed_printed_vat_order(&db, "slip-vat", None);
@@ -19794,8 +20232,11 @@ mod tests {
                 .unwrap();
             }
             let (after_doc, after_bytes) = slip(&db, "slip-vat");
-            assert_eq!(after_doc, before_doc, "rate {rate:?}");
-            assert_eq!(after_bytes, before_bytes, "rate {rate:?}: byte for byte");
+            assert_eq!(after_doc, before_doc, "switch {switch:?} rate {rate:?}");
+            assert_eq!(
+                after_bytes, before_bytes,
+                "switch {switch:?} rate {rate:?}: byte for byte"
+            );
             assert_eq!(slip_line(&after_doc, "Tax"), None, "no ΦΠΑ line");
             // Subtotal = total - delivery - tip + discount, as always.
             assert_eq!(
@@ -19862,22 +20303,41 @@ mod tests {
         assert_eq!(slip_line(&slip(&db, "slip-device").0, "Tax"), Some(4.44));
     }
 
+    /// Founder (21/10/2026): one VAT per order. The «VAT on receipts» switch
+    /// prints the order's computed VAT, the one the Z totals; until the till
+    /// has the switch, an owner rate above 0% reads as on and still prints
+    /// the computed VAT, never a VAT at the owner's rate.
     #[test]
     #[serial_test::serial]
-    fn an_owner_rate_prints_the_vat_included_in_the_total_without_the_tip() {
+    fn the_switch_prints_the_computed_vat_never_the_owner_rate() {
         crate::fiscal::active_cache::reset_for_tests();
-        let db = test_db();
-        {
-            let conn = db.conn.lock().unwrap();
-            db::set_setting(&conn, "tax", "default_tax_rate", "24").unwrap();
+        for (switch, rate) in [
+            (Some("true"), None),
+            (Some("true"), Some("0")),
+            (None, Some("24")),
+        ] {
+            let db = test_db();
+            {
+                let conn = db.conn.lock().unwrap();
+                if let Some(rate) = rate {
+                    db::set_setting(&conn, "tax", "default_tax_rate", rate).unwrap();
+                }
+                if let Some(switch) = switch {
+                    db::set_setting(&conn, "tax", "vat_print_on_receipt", switch).unwrap();
+                }
+            }
+            seed_printed_vat_order(&db, "slip-owner", Some(444));
+            let (doc, _) = slip(&db, "slip-owner");
+            // The stored 4.44, not 24% of (24.65 - 1.00 tip) = 4.58.
+            assert_eq!(
+                slip_line(&doc, "Tax"),
+                Some(4.44),
+                "switch {switch:?} rate {rate:?}"
+            );
+            let subtotal = slip_line(&doc, "Subtotal").unwrap();
+            assert!((subtotal - (24.65 - 4.44 - 1.8 - 1.0 + 0.75)).abs() < 1e-9);
+            assert_eq!(slip_line(&doc, "TOTAL"), Some(24.65));
         }
-        seed_printed_vat_order(&db, "slip-owner", Some(444));
-        let (doc, _) = slip(&db, "slip-owner");
-        // (24.65 - 1.00 tip) = 23.65; 2365 * 24 / 124 = 457.74 -> 4.58.
-        assert_eq!(slip_line(&doc, "Tax"), Some(4.58));
-        let subtotal = slip_line(&doc, "Subtotal").unwrap();
-        assert!((subtotal - (24.65 - 4.58 - 1.8 - 1.0 + 0.75)).abs() < 1e-9);
-        assert_eq!(slip_line(&doc, "TOTAL"), Some(24.65));
     }
 
     #[test]
@@ -20242,6 +20702,44 @@ mod tests {
             resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
 
         assert_eq!(layout.currency_symbol, " CHF");
+    }
+
+    #[test]
+    fn test_layout_prints_in_the_store_zone_only_for_the_terminals_branch() {
+        let db = test_db();
+        let set = |rows: &[(&str, &str, &str)]| {
+            let conn = db.conn.lock().unwrap();
+            for (category, key, value) in rows {
+                db::set_setting(&conn, category, key, value).unwrap();
+            }
+        };
+        let profile = serde_json::json!({"paperWidthMm": 80});
+
+        // No retained zone: the device's zone, as before.
+        set(&[("terminal", "branch_id", "branch-ch")]);
+        let layout = resolve_layout_config(&db, &profile, "kitchen_ticket").unwrap();
+        assert_eq!(layout.store_time_zone, None);
+
+        set(&[
+            ("terminal", "hotel_timezone", "Europe/Zurich"),
+            ("terminal", "hotel_timezone_branch_id", "branch-ch"),
+        ]);
+        let layout = resolve_layout_config(&db, &profile, "kitchen_ticket").unwrap();
+        assert_eq!(layout.store_time_zone, Some(chrono_tz::Europe::Zurich));
+        let ticket = ReceiptDocument::KitchenTicket(receipt_renderer::KitchenTicketDoc {
+            order_number: "42".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-10-20 22:30:00".to_string(),
+            ..Default::default()
+        });
+        let html = receipt_renderer::render_html(&ticket, &layout);
+        assert!(html.contains("21/10/2026 00:30"), "{html}");
+        assert!(!html.contains("2026-10-20 22:30:00"), "{html}");
+
+        // A zone retained for another branch never applies to this one.
+        set(&[("terminal", "branch_id", "branch-de")]);
+        let layout = resolve_layout_config(&db, &profile, "kitchen_ticket").unwrap();
+        assert_eq!(layout.store_time_zone, None);
     }
 
     #[test]

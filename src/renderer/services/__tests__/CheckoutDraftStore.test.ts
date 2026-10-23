@@ -227,6 +227,57 @@ it('writes a freeze that never committed back as the editable cart, so a restart
   expect(await new CheckoutDraftStore(scope, database(file).transport).load()).toEqual(editing);
 });
 
+// Tomikro 22/10/2026: native read 40.658475344543604 back as 40.6584753445436
+// (serde_json without float_roundtrip), so the cash confirmation of a frozen
+// delivery never matched and the order could not be completed for 12 minutes.
+describe('a native readback that differs from the renderer', () => {
+  const coordinate = 40.658475344543604;
+  const lossy = (value: unknown): unknown => JSON.parse(JSON.stringify(value), (_key, item) =>
+    item === coordinate ? 40.6584753445436 : item);
+  const delivery = () => ({ ...cart(), context: { ...cart().context, orderType: 'delivery',
+    deliveryAddress: { street: 'Egnatia 1', latitude: coordinate, longitude: 22.948321234567891 } } });
+  const admitted = () => ({ ...delivery(), phase: 'checkout_pending' as const, state: { ...delivery().state, paymentAdmission: 'admitted' },
+    submission: { total: 10.4, paymentData: { method: 'cash', amount: 10.4 } } });
+  const nativeOver = (file: string, change: (draft: any) => any) => {
+    const { transport } = database(file);
+    return vi.fn(async (command: string, input: any) =>
+      transport(command, command === 'checkout_draft_put' ? { ...input, draft: change(input.draft) } : input));
+  };
+
+  it('a float that native reads back differently neither fails the freeze nor refuses the confirmation', async () => {
+    const native = nativeOver(fixture(), lossy);
+    const owner = new CheckoutDraftStore(scope, native);
+    const frozen = admitted();
+    await owner.save(frozen);
+    const confirmed = confirmPaymentAdmission(frozen, { ...frozen.submission.paymentData, metadata: { tendered: 20 } });
+    await expect(owner.save(confirmed)).resolves.toMatchObject({ state: { paymentAdmission: 'confirmed' } });
+  });
+
+  it('a confirmation that changes the payment of a float-rounded freeze is refused', async () => {
+    const owner = new CheckoutDraftStore(scope, nativeOver(fixture(), lossy));
+    const frozen = admitted();
+    await owner.save(frozen);
+    const otherAmount = { ...frozen, state: { ...frozen.state, paymentAdmission: 'confirmed' },
+      submission: { ...frozen.submission, paymentData: { method: 'cash', amount: 11.4 } } };
+    await expect(owner.save(otherAmount)).rejects.toThrow('AWAITING_RECONCILIATION');
+    const otherCheckout = { ...confirmPaymentAdmission(frozen, frozen.submission.paymentData), checkoutRequestId: 'another-checkout' };
+    await expect(owner.save(otherCheckout)).rejects.toThrow('AWAITING_RECONCILIATION');
+  });
+
+  it('a freeze native keeps differently fails before any money moves, and the cart comes back editable across a restart', async () => {
+    const file = fixture();
+    const native = nativeOver(file, draft => draft.phase === 'checkout_pending'
+      ? { ...draft, context: { ...draft.context, deliveryAddress: { ...draft.context.deliveryAddress, street: 'Egnatia 2' } } } : draft);
+    const owner = new CheckoutDraftStore(scope, native);
+    const frozen = admitted();
+    await expect(owner.save(frozen)).rejects.toThrow('CHECKOUT_DRAFT_READBACK_CHANGED');
+    const editing = await owner.abandonUncommittedFreeze(frozen);
+    expect(editing).toMatchObject({ phase: 'editing', checkoutRequestId: frozen.checkoutRequestId, cartItems: frozen.cartItems,
+      context: { deliveryAddress: { street: 'Egnatia 1' } } });
+    expect(await new CheckoutDraftStore(scope, database(file).transport).load()).toEqual(editing);
+  });
+});
+
 it('only adds confirmation evidence to the durably admitted payment', async () => {
   let saved: any = null; let generation = 0;
   const owner = new CheckoutDraftStore(scope, async (command, input) => {

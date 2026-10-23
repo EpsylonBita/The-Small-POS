@@ -10,8 +10,13 @@
 //! - every role opens a shift this way (founder, 15/10/2026: anyone whose PIN
 //!   this till holds), under the local rules that hold online too: the first
 //!   check-in of the business day is a cashier;
-//! - in a gift-card store a cashier's opening needs the server (the original
-//!   drawer opening is hosted), as on Android;
+//! - in a gift-card store a cashier's hosted original opening needs the
+//!   server, so the cashier opens an ordinary drawer instead, flagged
+//!   `ordinary_opening_offline: true` for the server's review (founder,
+//!   21/10/2026, Ω7; Android parity). Gift-card sales stay online-only. The
+//!   renderer may ask for the same flag on a server-checked cashier opening
+//!   whose gift-card status it could not read: the flag only asks for a
+//!   review;
 //! - a waiter phone never checks staff in this way;
 //! - the queued `shift_open` carries `offline_check_in: true`, which the
 //!   server re-checks when it arrives (`offline-check-in.ts`).
@@ -26,8 +31,6 @@ use crate::api::AdminFetchError;
 /// (role choice and the cash count happen in between).
 const GRANT_TTL_MINUTES: i64 = 15;
 
-pub(crate) const OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER: &str =
-    "OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER";
 pub(crate) const OFFLINE_CHECK_IN_WAITER_TERMINAL: &str = "OFFLINE_CHECK_IN_WAITER_TERMINAL";
 
 /// How a shift opening was admitted.
@@ -37,6 +40,18 @@ pub(crate) enum CheckInAdmission {
     Ordinary,
     /// This till checked the PIN itself.
     Offline,
+}
+
+/// How an opening whose PIN this till checked goes ahead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OfflineOpening {
+    /// The role's opening, as online.
+    Ordinary,
+    /// A gift-card store's cashier: the hosted original opening needs the
+    /// server, so the drawer opens as an ordinary one and the queued open
+    /// carries `ordinary_opening_offline: true`, which the server flags
+    /// `gift_card_ordinary_opening` (founder, 21/10/2026, Ω7).
+    OrdinaryFlagged,
 }
 
 struct Grant {
@@ -92,20 +107,41 @@ pub(crate) fn complete(staff_id: &str) {
 }
 
 /// The rules of an opening whose PIN this till checked: never on a waiter
-/// phone, and a gift-card store's cashier opening goes through the server.
-/// Any role opens otherwise (founder, 15/10/2026).
+/// phone, and a gift-card store's cashier opens an ordinary drawer flagged for
+/// the server's review. Any role opens otherwise (founder, 15/10/2026).
 pub(crate) fn check_offline_opening(
     role_type: &str,
     gift_cards_store: bool,
     waiter_terminal: bool,
-) -> Result<(), String> {
+) -> Result<OfflineOpening, String> {
     if waiter_terminal {
         return Err(OFFLINE_CHECK_IN_WAITER_TERMINAL.to_string());
     }
-    if gift_cards_store && role_type.trim().eq_ignore_ascii_case("cashier") {
-        return Err(OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER.to_string());
+    if gift_cards_store && is_cashier(role_type) {
+        return Ok(OfflineOpening::OrdinaryFlagged);
     }
-    Ok(())
+    Ok(OfflineOpening::Ordinary)
+}
+
+/// The renderer asks for the review flag on a cashier opening whose PIN the
+/// server checked but whose store gift-card status it could not read (the
+/// connection went in between). The flag only asks the server for a review,
+/// so the renderer may ask for it; it never admits an opening.
+pub(crate) fn ordinary_opening_flag_requested(
+    payload: &serde_json::Value,
+    role_type: &str,
+) -> bool {
+    let requested = |key: &str| {
+        payload
+            .get(key)
+            .is_some_and(|value| value.as_bool() == Some(true) || value.as_i64() == Some(1))
+    };
+    is_cashier(role_type)
+        && (requested("ordinaryOpeningOffline") || requested("ordinary_opening_offline"))
+}
+
+fn is_cashier(role_type: &str) -> bool {
+    role_type.trim().eq_ignore_ascii_case("cashier")
 }
 
 /// Whether the store sells gift cards, from the module list this till cached
@@ -184,20 +220,62 @@ mod tests {
         // Founder, 15/10/2026: every role checks in offline, not only a
         // cashier, manager or driver.
         for role in ["cashier", "manager", "driver", "kitchen", "server"] {
-            assert!(check_offline_opening(role, false, false).is_ok(), "{role}");
+            assert_eq!(
+                check_offline_opening(role, false, false),
+                Ok(OfflineOpening::Ordinary),
+                "{role}"
+            );
         }
         for role in ["manager", "driver", "kitchen", "server"] {
-            assert!(check_offline_opening(role, true, false).is_ok(), "{role}");
-        }
-        assert_eq!(
-            check_offline_opening("cashier", true, false).unwrap_err(),
-            OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER
-        );
-        for role in ["cashier", "kitchen"] {
             assert_eq!(
-                check_offline_opening(role, false, true).unwrap_err(),
+                check_offline_opening(role, true, false),
+                Ok(OfflineOpening::Ordinary),
+                "{role}"
+            );
+        }
+        // Ω7 (founder, 21/10/2026): a gift-card store's cashier opens an
+        // ordinary drawer flagged for review. Before, it was refused with
+        // OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER.
+        for role in ["cashier", " Cashier "] {
+            assert_eq!(
+                check_offline_opening(role, true, false),
+                Ok(OfflineOpening::OrdinaryFlagged),
+                "{role}"
+            );
+        }
+        // A waiter phone is refused first, a gift-card store's cashier too.
+        let waiter_phone_openings = [("cashier", false), ("kitchen", false), ("cashier", true)];
+        for (role, gift_cards_store) in waiter_phone_openings {
+            assert_eq!(
+                check_offline_opening(role, gift_cards_store, true).unwrap_err(),
                 OFFLINE_CHECK_IN_WAITER_TERMINAL,
                 "{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_cashier_opening_takes_the_renderers_review_flag() {
+        for payload in [
+            serde_json::json!({ "ordinaryOpeningOffline": true }),
+            serde_json::json!({ "ordinary_opening_offline": true }),
+            serde_json::json!({ "ordinary_opening_offline": 1 }),
+        ] {
+            assert!(
+                ordinary_opening_flag_requested(&payload, "cashier"),
+                "{payload}"
+            );
+            assert!(!ordinary_opening_flag_requested(&payload, "manager"));
+        }
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({ "ordinaryOpeningOffline": false }),
+            serde_json::json!({ "ordinaryOpeningOffline": 0 }),
+            serde_json::json!({ "ordinaryOpeningOffline": "yes" }),
+        ] {
+            assert!(
+                !ordinary_opening_flag_requested(&payload, "cashier"),
+                "{payload}"
             );
         }
     }

@@ -51,7 +51,7 @@
 //! 5. Mark rows as `applied` or schedule retry on failure
 //! 6. Emit `sync_status` event to the frontend
 
-use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -560,6 +560,7 @@ struct ReconcileSkipLogState {
 
 static SYNC_WARN_LOG_DEDUPE_STATE: OnceLock<Mutex<WarnLogDedupeState>> = OnceLock::new();
 static SYNC_BOOTSTRAP_LOG_DEDUPE_STATE: OnceLock<Mutex<WarnLogDedupeState>> = OnceLock::new();
+static SYNC_PULL_LOG_DEDUPE_STATE: OnceLock<Mutex<WarnLogDedupeState>> = OnceLock::new();
 static RECONCILE_SKIP_LOG_STATE: OnceLock<Mutex<HashMap<String, ReconcileSkipLogState>>> =
     OnceLock::new();
 
@@ -896,11 +897,36 @@ enum NativeSyncTickOutcome {
     Failed(String),
 }
 
+/// Bounded code of a tick whose outgoing replay ran while a pull from the
+/// admin failed (POS audit S-D-01). A partial tick never counts as a full
+/// sync, and `force_sync_once_scoped` turns it into an error, so the Z
+/// closeout stays fail-closed while a pull fails (founder, 21/10/2026).
+const REMOTE_PULL_FAILED: &str = "REMOTE_PULL_FAILED";
+
+/// Result of one legacy sync cycle (`run_sync_cycle`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SyncCycleReport {
+    /// Rows pulled, repaired or sent in this cycle.
+    synced: usize,
+    /// The pre-claim pulls that failed on their own while the cycle still
+    /// claimed and sent its queued rows (log text only, never shown).
+    pull_error: Option<String>,
+}
+
+/// What one legacy sync cycle needs from the app: its events and the print
+/// queue signal. `AppHandle` in production; tests pass a recording sink.
+trait SyncCycleHost: TerminalEventSink + print::PrintQueueInvalidator {}
+
+impl<T: TerminalEventSink + print::PrintQueueInvalidator> SyncCycleHost for T {}
+
 /// Completes one existing native background tick. Parity work is allowed only
 /// after the guarded legacy cycle succeeds, so auth pause/reset/rebind failures
-/// remain a fail-closed barrier for repair payloads and credentials.
+/// remain a fail-closed barrier for repair payloads and credentials. A cycle
+/// that succeeded with a failed pull still replays parity rows (POS audit
+/// S-D-01) and ends `Partial` with `REMOTE_PULL_FAILED`; a parity pause, reset
+/// or failure still wins over it.
 async fn complete_native_background_sync_tick<RunParity, ParityFuture>(
-    legacy_outcome: RemoteAuthExecutionOutcome<usize>,
+    legacy_outcome: RemoteAuthExecutionOutcome<SyncCycleReport>,
     run_parity: RunParity,
 ) -> NativeSyncTickOutcome
 where
@@ -908,8 +934,15 @@ where
     ParityFuture: Future<Output = ParitySyncExecutionOutcome>,
 {
     match legacy_outcome {
-        RemoteAuthExecutionOutcome::Success(legacy_synced, auth_attempt) => {
+        RemoteAuthExecutionOutcome::Success(legacy, auth_attempt) => {
+            let legacy_synced = legacy.synced;
             match run_parity(auth_attempt).await {
+                ParitySyncExecutionOutcome::Complete(summary) if legacy.pull_error.is_some() => {
+                    NativeSyncTickOutcome::Partial {
+                        synced: legacy_synced.saturating_add(summary.processed),
+                        error: REMOTE_PULL_FAILED.to_string(),
+                    }
+                }
                 ParitySyncExecutionOutcome::Complete(summary) => {
                     NativeSyncTickOutcome::Success(legacy_synced.saturating_add(summary.processed))
                 }
@@ -1107,12 +1140,12 @@ fn handle_terminal_auth_failure_from_sync(
     crate::handle_invalid_terminal_credentials(Some(db), app, source, error);
 }
 
-async fn run_sync_cycle_with_auth_guard(
+async fn run_sync_cycle_with_auth_guard<H: SyncCycleHost>(
     db: &DbState,
     sync_state: &SyncState,
-    app: &AppHandle,
+    app: &H,
     source: &str,
-) -> RemoteAuthExecutionOutcome<usize> {
+) -> RemoteAuthExecutionOutcome<SyncCycleReport> {
     let mut repair_attempted = false;
 
     loop {
@@ -1327,6 +1360,12 @@ fn local_max_order_sequence(conn: &rusqlite::Connection, terminal_id: &str) -> R
     Ok(highest)
 }
 
+/// The `DDMMYYYY` of an order number: the store's date at `now` (POS audit
+/// Π8; `None` keeps the device's date). The sequence never depends on it.
+fn order_number_date_prefix(now: DateTime<Utc>, zone: Option<chrono_tz::Tz>) -> String {
+    crate::store_time::format_instant(now, zone, "%d%m%Y")
+}
+
 /// Generate a sequential order number in format ORD-DDMMYYYY-NNNNN.
 ///
 /// Uses `local_settings` (category='orders', key='order_counter') as a
@@ -1346,8 +1385,8 @@ pub(crate) fn next_order_number(
     conn: &rusqlite::Connection,
     terminal_id: &str,
 ) -> Result<String, String> {
-    let today = chrono::Local::now();
-    let date_display = today.format("%d%m%Y").to_string();
+    let date_display =
+        order_number_date_prefix(Utc::now(), crate::store_time::resolve_store_time_zone(conn));
 
     let counter = read_order_counter(conn);
     let local_max = local_max_order_sequence(conn, terminal_id);
@@ -2466,17 +2505,19 @@ pub fn create_order(
     // payment changes, and the server recomputes it from the lines anyway.
     let tax_amount = {
         let vat_cents = match crate::sync_queue::order_insert_vat(&conn, &order_id, &sync_data) {
-            Ok(vat) => vat.tax_amount_cents,
+            Ok(vat) => {
+                if let Err(error) =
+                    crate::fiscal::greece_vat::store_local_order_vat_result(&conn, &order_id, &vat)
+                {
+                    warn!(order_id = %order_id, error = %error, "Order VAT breakdown not stored");
+                }
+                vat.tax_amount_cents
+            }
             Err(error) => {
                 warn!(order_id = %order_id, error = %error, "Order VAT not computed; stored as 0");
                 0
             }
         };
-        if let Err(error) =
-            crate::fiscal::greece_vat::store_local_order_vat(&conn, &order_id, vat_cents)
-        {
-            warn!(order_id = %order_id, error = %error, "Order VAT not stored");
-        }
         let vat_amount = Cents::new(vat_cents).to_f64_dp2();
         if let Value::Object(obj) = &mut sync_data {
             obj.insert("taxAmount".to_string(), serde_json::json!(vat_amount));
@@ -4595,6 +4636,14 @@ pub fn start_sync_loop(
                         *guard = Some(Utc::now().to_rfc3339());
                     }
                 }
+                NativeSyncTickOutcome::Partial { synced, error } if error == REMOTE_PULL_FAILED => {
+                    // The failed pull itself is warned (deduped) by run_sync_cycle.
+                    debug!(
+                        synced,
+                        error = %error,
+                        "Sync cycle sent queued rows while a pull failed; full-success timestamp preserved"
+                    );
+                }
                 NativeSyncTickOutcome::Partial { synced, error } => {
                     warn!(
                         synced,
@@ -4755,6 +4804,10 @@ fn unsent_money_entity_type(table_name: &str) -> &'static str {
         "driver_earnings" | "driver_earning" => "driver_earning",
         "shift_expenses" => "shift_expense",
         "staff_payments" => "staff_payment",
+        // Plan §3 #9 (offline week): a queued shift or drawer row of the
+        // window holds the Z too.
+        "staff_shifts" => "shift",
+        "cash_drawer_sessions" => "cash_drawer",
         _ => "financial",
     }
 }
@@ -5293,31 +5346,38 @@ async fn force_sync_once_scoped(
     )
     .await;
 
-    match outcome {
-        NativeSyncTickOutcome::Success(total_synced) => {
-            info!(
-                total_synced,
-                "Force sync complete across legacy and parity queues"
-            );
+    let total_synced = force_sync_pass_result(outcome)?;
+    info!(
+        total_synced,
+        "Force sync complete across legacy and parity queues"
+    );
 
-            // The last-full-sync timestamp keeps its meaning: a closeout pass
-            // that succeeded only because customer-directory rows are exempt
-            // does not count as a full sync while such rows are stuck.
-            let full_success = scope == ParityFailureScope::AllRows
-                || read_parity_queue_status(db).is_ok_and(|status| {
-                    status.failed == 0
-                        && status.conflicts == 0
-                        && status.quarantined == 0
-                        && status.dead_lettered == 0
-                });
-            if full_success {
-                if let Ok(mut guard) = sync_state.last_sync.lock() {
-                    *guard = Some(Utc::now().to_rfc3339());
-                }
-            }
-
-            Ok(total_synced)
+    // The last-full-sync timestamp keeps its meaning: a closeout pass
+    // that succeeded only because customer-directory rows are exempt
+    // does not count as a full sync while such rows are stuck.
+    let full_success = scope == ParityFailureScope::AllRows
+        || read_parity_queue_status(db).is_ok_and(|status| {
+            status.failed == 0
+                && status.conflicts == 0
+                && status.quarantined == 0
+                && status.dead_lettered == 0
+        });
+    if full_success {
+        if let Ok(mut guard) = sync_state.last_sync.lock() {
+            *guard = Some(Utc::now().to_rfc3339());
         }
+    }
+
+    Ok(total_synced)
+}
+
+/// Only a full tick passes a forced sync. A partial tick is an error, so a
+/// failed pull (`REMOTE_PULL_FAILED`) keeps blocking the Z closeout even
+/// though the background tick now sends queued rows past it (POS audit S-D-01,
+/// founder 21/10/2026).
+fn force_sync_pass_result(outcome: NativeSyncTickOutcome) -> Result<usize, String> {
+    match outcome {
+        NativeSyncTickOutcome::Success(total_synced) => Ok(total_synced),
         NativeSyncTickOutcome::Partial { error, .. } => Err(error),
         NativeSyncTickOutcome::Paused(error) => Err(error),
         NativeSyncTickOutcome::Reset(error) => Err(error),
@@ -6333,8 +6393,10 @@ fn requeue_malformed_admin_url_failures(conn: &Connection) -> Result<usize, Stri
              next_retry_at = NULL,
              retry_delay_ms = 1000,
              claim_generation = claim_generation + 1
-         WHERE {}",
-        is_malformed_admin_url_failure_sql()
+         WHERE {}
+           AND {}",
+        is_malformed_admin_url_failure_sql(),
+        crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue malformed admin URL failures: {e}"))
@@ -6473,8 +6535,10 @@ pub(crate) fn requeue_order_update_replay_blockers(db: &DbState) -> Result<usize
              next_retry_at = NULL,
              retry_delay_ms = 1000,
              claim_generation = claim_generation + 1
-         WHERE {}",
-        is_order_update_replay_blocker_sql()
+         WHERE {}
+           AND {}",
+        is_order_update_replay_blocker_sql(),
+        crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue order update replay blockers: {e}"))
@@ -6664,8 +6728,10 @@ fn requeue_failed_order_insert_parent_blockers(conn: &Connection) -> Result<usiz
              next_retry_at = NULL,
              retry_delay_ms = 1000,
              claim_generation = claim_generation + 1
-         WHERE {}",
-        is_failed_order_insert_parent_blocker_sql()
+         WHERE {}
+           AND {}",
+        is_failed_order_insert_parent_blocker_sql(),
+        crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue failed order insert parent blockers: {e}"))
@@ -6954,8 +7020,10 @@ fn requeue_resolved_order_update_parent_wait_rows(conn: &Connection) -> Result<u
              FROM orders
              WHERE orders.id = parity_sync_queue.record_id
                AND NULLIF(TRIM(COALESCE(orders.supabase_id, '')), '') IS NOT NULL
-           )",
-        is_order_update_parent_wait_sql()
+           )
+           AND {}",
+        is_order_update_parent_wait_sql(),
+        crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
     );
     conn.execute(sql.as_str(), [])
         .map_err(|e| format!("requeue resolved order update parent wait rows: {e}"))
@@ -6963,6 +7031,7 @@ fn requeue_resolved_order_update_parent_wait_rows(conn: &Connection) -> Result<u
 
 fn requeue_resolved_table_session_parent_wait_rows(conn: &Connection) -> Result<usize, String> {
     conn.execute(
+        &format!(
         "UPDATE parity_sync_queue
          SET status = 'pending',
              attempts = 0,
@@ -6994,7 +7063,10 @@ fn requeue_resolved_table_session_parent_wait_rows(conn: &Connection) -> Result<
                NULLIF(TRIM(COALESCE(json_extract(parity_sync_queue.data, '$.active_order_id'), '')), '')
              )
              AND NULLIF(TRIM(COALESCE(orders.supabase_id, '')), '') IS NOT NULL
-           )",
+           )
+           AND {}",
+            crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
+        ),
         [],
     )
     .map_err(|e| format!("requeue resolved table session parent wait rows: {e}"))
@@ -7750,6 +7822,14 @@ fn is_permanent_order_sync_error(error: &str) -> bool {
     if error.contains("ROOM_CHARGE_IN_SETTLEMENT") || error.contains("FOLIO_SETTLEMENT_IMMUTABLE") {
         return true;
     }
+    // An appointment another order already settles, or another till holds for
+    // its checkout: a retry can never succeed. The order stays failed for
+    // reconciliation instead of being resent until retries run out.
+    if error.contains("APPOINTMENT_ALREADY_SETTLED")
+        || error.contains("APPOINTMENT_CHECKOUT_CLAIMED")
+    {
+        return true;
+    }
     let lower = error.to_lowercase();
     lower.contains("invalid menu items")
         || lower.contains("customer not found in organization")
@@ -8065,8 +8145,15 @@ fn extract_last_queue_failure_snapshot(
 }
 
 fn should_emit_deduped_warn(fingerprint: &str, now: DateTime<Utc>) -> bool {
-    let state =
-        SYNC_WARN_LOG_DEDUPE_STATE.get_or_init(|| Mutex::new(WarnLogDedupeState::default()));
+    should_emit_deduped_warn_in(&SYNC_WARN_LOG_DEDUPE_STATE, fingerprint, now)
+}
+
+fn should_emit_deduped_warn_in(
+    state: &OnceLock<Mutex<WarnLogDedupeState>>,
+    fingerprint: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    let state = state.get_or_init(|| Mutex::new(WarnLogDedupeState::default()));
     let mut guard = match state.lock() {
         Ok(guard) => guard,
         Err(_) => return true,
@@ -9738,6 +9825,7 @@ fn materialize_remote_order(
     )
     .map_err(|e| format!("materialize remote order: {e}"))?;
 
+    crate::fiscal::greece_vat::adopt_server_order_vat(conn, &local_id, remote_order);
     stamp_remote_order_currency(conn, &local_id, remote_order)?;
     project_canonical_order_table_binding(conn, &local_id, remote_order)?;
     Ok(Some(local_id))
@@ -14033,11 +14121,11 @@ fn enqueue_materialized_remote_order_prints(
     }
 }
 
-async fn reconcile_remote_orders(
+async fn reconcile_remote_orders<H: SyncCycleHost>(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
-    app: &AppHandle,
+    app: &H,
 ) -> Result<RemoteOrderReconcileOutcome, String> {
     let mut since_cursor =
         sanitize_orders_since_cursor(local_setting_get(db, "sync", "orders_since"));
@@ -14154,7 +14242,7 @@ async fn reconcile_remote_orders(
                         }
                     };
                     reconciled += 1;
-                    let _ = app.emit("order_deleted", serde_json::json!({ "orderId": local_id }));
+                    app.emit_json("order_deleted", serde_json::json!({ "orderId": local_id }));
                     match outcome {
                         crate::commands::orders::ServerDeletionOutcome::Deleted => info!(
                             remote_id = %remote_id,
@@ -14192,16 +14280,16 @@ async fn reconcile_remote_orders(
 
         for (local_id, status_event) in reconciled_order_events {
             if let Ok(order_json) = get_order_by_id(db, &local_id) {
-                let _ = app.emit("order_realtime_update", order_json);
+                app.emit_json("order_realtime_update", order_json);
             } else {
-                let _ = app.emit(
+                app.emit_json(
                     "order_realtime_update",
                     serde_json::json!({ "orderId": local_id.clone() }),
                 );
             }
 
             if let Some(ref new_status) = status_event {
-                let _ = app.emit(
+                app.emit_json(
                     "order_status_updated",
                     serde_json::json!({
                         "orderId": local_id.clone(),
@@ -14292,10 +14380,10 @@ async fn reconcile_remote_orders(
                 if is_ghost || payment_method == "pending" {
                     skip_auto_print = true;
                 }
-                let _ = app.emit("order_created", order_json.clone());
-                let _ = app.emit("order_realtime_update", order_json);
+                app.emit_json("order_created", order_json.clone());
+                app.emit_json("order_realtime_update", order_json);
             } else {
-                let _ = app.emit(
+                app.emit_json(
                     "order_created",
                     serde_json::json!({ "orderId": local_id.clone() }),
                 );
@@ -15566,6 +15654,7 @@ fn sync_remote_order_snapshot_into_local(
         ],
     )
     .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))?;
+    crate::fiscal::greece_vat::adopt_server_order_vat(conn, local_order_id, remote_order);
     project_canonical_order_table_binding(conn, local_order_id, remote_order)?;
 
     if remote_redacted || local_redacted {
@@ -16755,16 +16844,12 @@ pub(crate) fn raise_local_payment_status_to_ledger(
         // `refunded` and other terminal labels are neither raised nor lowered.
         None => prior_status.clone(),
         Some(prior_rank) => {
+            // Label coverage (Ω12): a customer return on a receipt that still
+            // stands keeps the order paid.
             let snapshot = payments::load_order_payment_balance_snapshot(conn, order_id)?;
-            let paid_cents = Cents::round_half_even(snapshot.net_paid).as_i64();
+            let paid_cents = payments::load_label_covered_cents(conn, order_id)?;
             let total_cents = Cents::round_half_even(snapshot.order_total).as_i64();
-            let ledger_status = if paid_cents <= 0 {
-                "pending"
-            } else if paid_cents >= total_cents {
-                "paid"
-            } else {
-                "partially_paid"
-            };
+            let ledger_status = payments::ledger_proven_payment_status(total_cents, paid_cents);
             let ledger_rank = rank(ledger_status).unwrap_or(0);
             if ledger_rank > prior_rank {
                 ledger_status.to_string()
@@ -16941,18 +17026,133 @@ async fn recover_payment_total_conflicts(
         + tax_inflated_total_repaired)
 }
 
+/// A read from the admin that runs before a cycle claims its queued rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreClaimPull {
+    ReceiptStatus,
+    Orders,
+    Payments,
+    PaymentTotalConflicts,
+    AdjustmentAutoHeal,
+}
+
+impl PreClaimPull {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReceiptStatus => "receipt_status",
+            Self::Orders => "orders",
+            Self::Payments => "payments",
+            Self::PaymentTotalConflicts => "payment_total_conflicts",
+            Self::AdjustmentAutoHeal => "adjustment_auto_heal",
+        }
+    }
+}
+
+/// The HTTP status of an admin reply, from the `"... (HTTP 500)"` text that
+/// `api::fetch_from_admin` gives every non-2xx answer.
+fn admin_reply_http_status(error: &str) -> Option<u16> {
+    let (_, rest) = error.split_once("(HTTP ")?;
+    let digits = rest.get(..3)?;
+    if !rest[3..].starts_with(')') {
+        return None;
+    }
+    digits.parse::<u16>().ok()
+}
+
+/// POS audit S-D-01: whether a failed pre-claim pull may leave the cycle
+/// going on to claim and send its queued rows. Only a non-auth HTTP answer
+/// from the admin does: the server was reached and one read failed (a 500 on
+/// `/api/pos/orders/sync` used to hold every queued sale back). Everything
+/// else still ends the cycle before the claim, as before:
+/// - terminal auth, so the pause/reset/repair barrier stays first;
+/// - the order pull while the till still bootstraps its history;
+/// - the local database or its lock, credential and rebind refusals, and
+///   unreachable networks: the sends would fail the same way, and each
+///   failed send spends a row's retry budget (`mark_batch_failed`).
+fn pre_claim_pull_failure_is_independent(
+    pull: PreClaimPull,
+    error: &str,
+    bootstrap_mode: impl FnOnce() -> String,
+) -> bool {
+    if is_terminal_auth_failure(error) {
+        return false;
+    }
+    let answered_by_admin = match admin_reply_http_status(error) {
+        // 407/511: a proxy or captive portal answered, not the admin.
+        None | Some(401 | 403 | 407 | 511) => false,
+        Some(_) => true,
+    };
+    answered_by_admin
+        && (pull != PreClaimPull::Orders || bootstrap_mode() == SYNC_BOOTSTRAP_MODE_LIVE)
+}
+
+/// The pre-claim pulls of one cycle that failed on their own.
+#[derive(Debug, Default)]
+struct PreClaimPullFailures {
+    failures: Vec<String>,
+}
+
+impl PreClaimPullFailures {
+    /// `Ok(Some)` on success, `Ok(None)` when the pull failed on its own (the
+    /// cycle goes on), `Err` when the failure must end the cycle.
+    fn absorb<T>(
+        &mut self,
+        db: &DbState,
+        pull: PreClaimPull,
+        result: Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => {
+                if !pre_claim_pull_failure_is_independent(pull, &error, || {
+                    get_sync_bootstrap_mode(db)
+                }) {
+                    return Err(error);
+                }
+                self.failures.push(format!("{}: {error}", pull.label()));
+                Ok(None)
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    /// Log once per distinct failure set (deduped like the cycle failure
+    /// log) and return it for the cycle report.
+    fn into_report_error(self) -> Option<String> {
+        if self.failures.is_empty() {
+            return None;
+        }
+        let summary = self.failures.join("; ");
+        if should_emit_deduped_warn_in(&SYNC_PULL_LOG_DEDUPE_STATE, &summary, Utc::now()) {
+            warn!(
+                error = %summary,
+                "Pull from admin failed; queued rows are still sent this cycle"
+            );
+        } else {
+            debug!(error = %summary, "Pull from admin failed (deduped)");
+        }
+        Some(summary)
+    }
+}
+
 /// Execute one sync cycle: read pending queue items and POST to admin.
 ///
 /// Orders and shifts are synced to separate endpoints so a failure in one
 /// category does not block the other.
-async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> {
+async fn run_sync_cycle<H: SyncCycleHost>(
+    db: &DbState,
+    app: &H,
+) -> Result<SyncCycleReport, String> {
     let admin_url = match storage::get_credential("admin_dashboard_url") {
         Some(url) => url,
-        None => return Ok(0),
+        None => return Ok(SyncCycleReport::default()),
     };
     let api_key = match load_zeroized_pos_api_key_optional() {
         Some(k) => k,
-        None => return Ok(0),
+        None => return Ok(SyncCycleReport::default()),
     };
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
     let branch_id = storage::get_credential("branch_id").unwrap_or_default();
@@ -17119,22 +17319,46 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     }
 
     // Poll queued remote receipts first and reconcile remote-assigned IDs
-    // before sending new batches.
+    // before sending new batches. A pull the admin answered with an error is
+    // recorded and the cycle still claims and sends (POS audit S-D-01, see
+    // `pre_claim_pull_failure_is_independent`).
     let mut total_progress: usize = 0;
-    let receipt_updates = poll_order_receipt_statuses(db, &admin_url, &api_key, &branch_id).await?;
-    total_progress += receipt_updates;
+    let mut pull_failures = PreClaimPullFailures::default();
+    if let Some(receipt_updates) = pull_failures.absorb(
+        db,
+        PreClaimPull::ReceiptStatus,
+        poll_order_receipt_statuses(db, &admin_url, &api_key, &branch_id).await,
+    )? {
+        total_progress += receipt_updates;
+    }
 
-    let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
-    total_progress += reconciled_orders.reconciled;
+    let reconciled_orders = pull_failures.absorb(
+        db,
+        PreClaimPull::Orders,
+        reconcile_remote_orders(db, &admin_url, &api_key, app).await,
+    )?;
+    if let Some(reconciled_orders) = &reconciled_orders {
+        total_progress += reconciled_orders.reconciled;
+    }
     match hydrate_pending_food_print_items(db).await {
         Ok(recovered) => total_progress += recovered,
         Err(error) => warn!(error = %error, "Pending food-print item hydration deferred"),
     }
-    if let Err(error) = finalize_sync_bootstrap_mode_after_remote_catchup(db, &reconciled_orders) {
-        warn!(error = %error, "Failed to clear sync bootstrap mode after remote catch-up");
+    // The till leaves bootstrap only after a clean catch-up.
+    if let Some(reconciled_orders) = reconciled_orders.filter(|_| pull_failures.is_empty()) {
+        if let Err(error) =
+            finalize_sync_bootstrap_mode_after_remote_catchup(db, &reconciled_orders)
+        {
+            warn!(error = %error, "Failed to clear sync bootstrap mode after remote catch-up");
+        }
     }
-    let reconciled_payments = reconcile_remote_payments(db, &admin_url, &api_key).await?;
-    total_progress += reconciled_payments;
+    if let Some(reconciled_payments) = pull_failures.absorb(
+        db,
+        PreClaimPull::Payments,
+        reconcile_remote_payments(db, &admin_url, &api_key).await,
+    )? {
+        total_progress += reconciled_payments;
+    }
     match sweep_paid_orders_missing_payment_mirrors(db, &admin_url, &api_key).await {
         Ok(repaired) => total_progress += repaired,
         Err(error) => {
@@ -17153,18 +17377,27 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
             warn!(error = %error, "Placeholder ledger restore failed; will retry next pass");
         }
     }
-    let recovered_payment_conflicts =
-        recover_payment_total_conflicts(db, &admin_url, &api_key).await?;
-    total_progress += recovered_payment_conflicts;
+    if let Some(recovered_payment_conflicts) = pull_failures.absorb(
+        db,
+        PreClaimPull::PaymentTotalConflicts,
+        recover_payment_total_conflicts(db, &admin_url, &api_key).await,
+    )? {
+        total_progress += recovered_payment_conflicts;
+    }
     let reconciled_applied_payments = reconcile_applied_payment_queue_rows(db)?;
     total_progress += reconciled_applied_payments;
-    let auto_healed_adjustments =
+    if let Some(auto_healed_adjustments) = pull_failures.absorb(
+        db,
+        PreClaimPull::AdjustmentAutoHeal,
         auto_heal_waiting_adjustments_missing_canonical_remote_payment_ids(
             db, &admin_url, &api_key,
         )
-        .await?;
-    total_progress += auto_healed_adjustments.repaired_payment_mirrors;
-    total_progress += auto_healed_adjustments.promoted_adjustments;
+        .await,
+    )? {
+        total_progress += auto_healed_adjustments.repaired_payment_mirrors;
+        total_progress += auto_healed_adjustments.promoted_adjustments;
+    }
+    let pull_error = pull_failures.into_report_error();
 
     cleanup_order_update_queue_rows_for_order(db, None)?;
 
@@ -17174,7 +17407,10 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     };
 
     if pending_items.is_empty() {
-        return Ok(total_progress);
+        return Ok(SyncCycleReport {
+            synced: total_progress,
+            pull_error,
+        });
     }
 
     // Partition by entity_type
@@ -17277,14 +17513,14 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
 
                 for (shift_id, err_msg) in &shift_outcome.failed_shift_ids {
                     if is_shift_conflict_error(err_msg) {
-                        let _ = app.emit(
-                            SHIFT_CONFLICT_EVENT,
-                            sync_queue::ShiftConflictNotice {
-                                shift_id: shift_id.clone(),
-                                code: sync_queue::SHIFT_CONFLICT.to_string(),
-                                reason: None,
-                            },
-                        );
+                        let notice = sync_queue::ShiftConflictNotice {
+                            shift_id: shift_id.clone(),
+                            code: sync_queue::SHIFT_CONFLICT.to_string(),
+                            reason: None,
+                        };
+                        if let Ok(payload) = serde_json::to_value(notice) {
+                            app.emit_json(SHIFT_CONFLICT_EVENT, payload);
+                        }
                     }
                 }
             }
@@ -17370,7 +17606,10 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         return Err("All sync batches failed".into());
     }
 
-    Ok(total_progress)
+    Ok(SyncCycleReport {
+        synced: total_progress,
+        pull_error,
+    })
 }
 
 fn mark_synced_shift_items(
@@ -18236,6 +18475,7 @@ fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
             "retail_variant_id": item.get("retail_variant_id").or_else(|| item.get("retailVariantId")),
             "service_id": item.get("service_id").or_else(|| item.get("serviceId")),
             "appointment_id": item.get("appointment_id").or_else(|| item.get("appointmentId")),
+            "vat_class": item.get("vat_class").or_else(|| item.get("vatClass")),
             "vat_category_code": item.get("vat_category_code").or_else(|| item.get("vatCategoryCode")),
             "price_includes_vat": item.get("price_includes_vat").or_else(|| item.get("priceIncludesVat")),
             "tax_exemption_reason": item.get("tax_exemption_reason").or_else(|| item.get("taxExemptionReason")),
@@ -18901,6 +19141,7 @@ async fn sync_order_batch_via_direct_api(
             "retail_variant_id": raw_item.get("retail_variant_id").or_else(|| raw_item.get("retailVariantId")),
             "service_id": raw_item.get("service_id").or_else(|| raw_item.get("serviceId")),
             "appointment_id": raw_item.get("appointment_id").or_else(|| raw_item.get("appointmentId")),
+            "vat_class": raw_item.get("vat_class").or_else(|| raw_item.get("vatClass")),
             "vat_category_code": raw_item.get("vat_category_code").or_else(|| raw_item.get("vatCategoryCode")),
             "price_includes_vat": raw_item.get("price_includes_vat").or_else(|| raw_item.get("priceIncludesVat")),
             "tax_exemption_reason": raw_item.get("tax_exemption_reason").or_else(|| raw_item.get("taxExemptionReason")),
@@ -19992,6 +20233,7 @@ fn backfill_active_shift_business_day_context(db: &DbState) -> Result<usize, Str
     let shifts: Vec<(String, String, Option<String>)> = rows.filter_map(Result::ok).collect();
     drop(stmt);
 
+    let store_zone = crate::store_time::resolve_store_time_zone(&conn);
     let mut repaired = 0usize;
     for (shift_id, branch_id, check_in_time) in shifts {
         // Dated like a fresh check-in (founder rule R5, 13/10/2026): the open
@@ -20009,8 +20251,12 @@ fn backfill_active_shift_business_day_context(db: &DbState) -> Result<usize, Str
             Some(&at),
         )
         .unwrap_or_else(|| at.clone());
-        let report_date =
-            business_day::report_date_for_pos_day(Some(&day_start_at), &period_start_at, &at);
+        let report_date = business_day::report_date_for_pos_day(
+            Some(&day_start_at),
+            &period_start_at,
+            &at,
+            store_zone,
+        );
 
         conn.execute(
             "UPDATE staff_shifts
@@ -23070,25 +23316,29 @@ pub(crate) fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String>
 
         let parity_promoted = conn
             .execute(
-                "UPDATE parity_sync_queue
-                 SET status = 'pending',
-                     attempts = 0,
-                     last_attempt = NULL,
-                     error_message = NULL,
-                     next_retry_at = NULL,
-                     retry_delay_ms = 1000,
-                     claim_generation = claim_generation + 1
-                 WHERE table_name = 'payments'
-                   AND record_id = ?1
-                   AND COALESCE(module_type, '') <> 'repairs'
-                   AND table_name NOT IN ('repairs', 'repair_attachments')
-                   AND status IN ('pending', 'failed', 'conflict')
-                   AND (
-                     error_message IS NULL
-                     OR lower(error_message) LIKE '%waiting for parent order update sync%'
-                     OR lower(error_message) LIKE '%order update not yet synced%'
-                     OR lower(error_message) LIKE '%waiting for parent order sync%'
-                   )",
+                &format!(
+                    "UPDATE parity_sync_queue
+                     SET status = 'pending',
+                         attempts = 0,
+                         last_attempt = NULL,
+                         error_message = NULL,
+                         next_retry_at = NULL,
+                         retry_delay_ms = 1000,
+                         claim_generation = claim_generation + 1
+                     WHERE table_name = 'payments'
+                       AND record_id = ?1
+                       AND COALESCE(module_type, '') <> 'repairs'
+                       AND table_name NOT IN ('repairs', 'repair_attachments')
+                       AND status IN ('pending', 'failed', 'conflict')
+                       AND (
+                         error_message IS NULL
+                         OR lower(error_message) LIKE '%waiting for parent order update sync%'
+                         OR lower(error_message) LIKE '%order update not yet synced%'
+                         OR lower(error_message) LIKE '%waiting for parent order sync%'
+                       )
+                       AND {}",
+                    crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
+                ),
                 params![payment_id],
             )
             .unwrap_or(0);
@@ -23416,7 +23666,9 @@ fn local_z_report_period_bounds(
 fn load_historical_local_z_report_rows(
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<String, Vec<LocalHistoricalZReportRow>>, String> {
-    let today = Local::now().format("%Y-%m-%d").to_string();
+    // Report dates are store-zone labels (POS audit Π8), so "today" is too.
+    let today =
+        crate::store_time::format_now(crate::store_time::resolve_store_time_zone(conn), "%Y-%m-%d");
     let mut stmt = conn
         .prepare(
             "SELECT id,
@@ -24694,7 +24946,40 @@ mod tests {
     use super::*;
 
     use crate::db;
+    use chrono::Local;
     use rusqlite::{params, types::ValueRef, Connection};
+
+    /// POS audit Π8: the order-number date is the store's date; `None`
+    /// keeps the device's. The sequence does not depend on it.
+    #[test]
+    fn order_number_date_prefix_follows_the_store_zone() {
+        let now = DateTime::parse_from_rfc3339("2026-10-13T12:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let auckland: chrono_tz::Tz = "Pacific/Auckland".parse().unwrap();
+        let los_angeles: chrono_tz::Tz = "America/Los_Angeles".parse().unwrap();
+        assert_eq!(order_number_date_prefix(now, Some(auckland)), "14102026");
+        assert_eq!(order_number_date_prefix(now, Some(los_angeles)), "13102026");
+        assert_eq!(
+            order_number_date_prefix(now, None),
+            now.with_timezone(&Local).format("%d%m%Y").to_string()
+        );
+
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", "branch_id", "branch-zone").unwrap();
+        db::set_setting(&conn, "terminal", "hotel_timezone", "Pacific/Auckland").unwrap();
+        db::set_setting(&conn, "terminal", "hotel_timezone_branch_id", "branch-zone").unwrap();
+        let before = order_number_date_prefix(Utc::now(), Some(auckland));
+        let minted = next_order_number(&conn, "terminal-zone").unwrap();
+        let after = order_number_date_prefix(Utc::now(), Some(auckland));
+        assert!(
+            [before, after]
+                .iter()
+                .any(|prefix| minted == format!("ORD-{prefix}-00001")),
+            "{minted}"
+        );
+    }
 
     #[test]
     fn legacy_loyalty_ended_refusal_requires_the_typed_server_code() {
@@ -25165,6 +25450,7 @@ mod tests {
         retire_verified_closed_payment_parents(&db, &unknown.url, "fixture-key")
             .await
             .unwrap();
+        assert_eq!(unknown.count(), 2);
         {
             let conn = db.conn.lock().unwrap();
             assert_eq!(
@@ -25188,6 +25474,7 @@ mod tests {
         retire_verified_closed_payment_parents(&db, &closed.url, "fixture-key")
             .await
             .unwrap();
+        assert_eq!(closed.count(), 1);
         let conn = db.conn.lock().unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
@@ -25257,6 +25544,7 @@ mod tests {
         retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
             .await
             .unwrap();
+        assert_eq!(server.count(), 1);
         assert_eq!(
             db.conn
                 .lock()
@@ -25290,6 +25578,7 @@ mod tests {
         retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
             .await
             .unwrap();
+        assert_eq!(server.count(), 2);
         assert_eq!(
             db.conn
                 .lock()
@@ -25323,6 +25612,7 @@ mod tests {
         retire_verified_closed_payment_parents(&db, &server.url, "fixture-key")
             .await
             .unwrap();
+        assert_eq!(server.count(), 2);
         let conn = db.conn.lock().unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM unresolved_remote_payments", [], |r| r
@@ -26347,6 +26637,61 @@ mod tests {
         );
     }
 
+    /// Π1 (21/10/2026), P8: a Repairs access decision during a parity cycle
+    /// neither refuses the per-item gate nor moves the binding generation the
+    /// cycle captured; a pending access decision is not a rebind.
+    #[test]
+    #[serial_test::serial]
+    fn a_repairs_access_decision_never_moves_the_parity_binding_generation() {
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+        let scope = serde_json::json!({
+            "version": 1,
+            "organization_id": "11111111-1111-4111-8111-111111111111",
+            "branch_id": "22222222-2222-4222-8222-222222222222",
+            "terminal_id": "terminal-alpha",
+            "scope_token": "33333333-3333-4333-8333-333333333333",
+            "scope_epoch": 7,
+            "transition_pending": true,
+            "reset_pending": false,
+            "pending_purpose": {
+                "kind": "access_reconciliation",
+                "binding_digest": null,
+                "verified": false,
+            },
+            "offline_terminal_token": null,
+            "offline_sequence_lease_start": null,
+            "offline_sequence_lease_end": null,
+        });
+        let _keys = crate::tests::fake_keyring::install_seeded([(
+            crate::storage::KEY_REPAIR_SCOPE_V1,
+            scope.to_string(),
+        )]);
+        let db = test_db();
+        let sync_state = SyncState::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let auth_attempt = sync_state
+            .begin_remote_auth_attempt()
+            .expect("the cycle captures its auth revision");
+        let initial = initial_parity_binding_lease(&db, &sync_state, Some(&cancel), auth_attempt)
+            .expect("a pending Repairs decision is not a terminal rebind");
+        let generation = initial.generation();
+        drop(initial);
+
+        let decision = crate::repairs::start_authoritative_access_decision().unwrap();
+        crate::repairs::latch_authoritative_access_pending(decision).unwrap();
+        crate::repairs::latch_startup_access_pending().unwrap();
+
+        let per_item = acquire_live_parity_claim_gate(
+            &db,
+            &sync_state,
+            Some(&cancel),
+            generation,
+            auth_attempt.revision,
+        )
+        .expect("the per-item gate admits the same binding generation");
+        assert_eq!(per_item.generation(), generation);
+    }
+
     #[test]
     fn bounded_parity_auth_projection_contains_no_response_text_or_terminal_id() {
         let error = bounded_parity_terminal_auth_error(ParityTerminalAuthFailure {
@@ -26379,7 +26724,13 @@ mod tests {
         summary.failed = 1;
         summary.queue_status.failed = 1;
         let outcome = complete_native_background_sync_tick(
-            RemoteAuthExecutionOutcome::Success(2, auth_attempt),
+            RemoteAuthExecutionOutcome::Success(
+                SyncCycleReport {
+                    synced: 2,
+                    pull_error: None,
+                },
+                auth_attempt,
+            ),
             |_auth_attempt| async {
                 ParitySyncExecutionOutcome::Partial(summary, "PARITY_SYNC_PARTIAL")
             },
@@ -33848,7 +34199,7 @@ mod tests {
         assert_eq!(shown(&db), Value::Null);
         set_rate(&db, Some("0"));
         assert_eq!(shown(&db), Value::Null);
-        // An owner rate of 24%: the VAT inside the total without its tip.
+        // A positive legacy owner rate enables printing the stored VAT.
         set_rate(&db, Some("24"));
         assert_eq!(shown(&db), serde_json::json!(2.52));
         // A connected fiscal plugin: the order's own computed VAT.
@@ -33861,8 +34212,24 @@ mod tests {
         );
         assert_eq!(shown(&db), serde_json::json!(2.52));
         crate::fiscal::active_cache::reset_for_tests();
-        // 13% of 13.00 included, the tip excluded: 1.50.
-        assert_eq!(shown(&db), serde_json::json!(1.5));
+        // Without a plugin, the legacy 13% setting still prints the same
+        // stored VAT, never 13% of the total (the retired 1.50 quote).
+        assert_eq!(shown(&db), serde_json::json!(2.52));
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "tax", "vat_print_on_receipt", "false").unwrap();
+        }
+        assert_eq!(shown(&db), Value::Null, "the switch overrides the old rate");
+        set_rate(&db, Some("0"));
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "tax", "vat_print_on_receipt", "true").unwrap();
+        }
+        assert_eq!(
+            shown(&db),
+            serde_json::json!(2.52),
+            "the switch prints the stored VAT"
+        );
     }
 
     #[test]
@@ -36991,6 +37358,7 @@ mod tests {
         let expected_report_date = crate::business_day::report_date_for_business_window(
             "2026-04-01T22:44:47.248Z",
             "2026-04-01T23:38:24.403Z",
+            None,
         );
         let conn = db.conn.lock().unwrap();
 
@@ -37979,7 +38347,7 @@ mod tests {
         let replay_db = &db;
 
         let outcome = complete_native_background_sync_tick(
-            RemoteAuthExecutionOutcome::Success(0, auth_attempt),
+            RemoteAuthExecutionOutcome::Success(SyncCycleReport::default(), auth_attempt),
             |auth_attempt| async move {
                 let initial_binding = match initial_parity_binding_lease(
                     replay_db,
@@ -38089,6 +38457,11 @@ mod tests {
     #[tokio::test]
     async fn background_parity_drain_is_blocked_by_auth_pause_reset_and_failure() {
         let calls = std::sync::atomic::AtomicUsize::new(0);
+        // POS audit S-D-01: a failed legacy cycle is now one that must stop
+        // before the claim (local database or lock, unreachable admin, order
+        // pull while bootstrapping). A pull the admin answered with an error
+        // no longer fails the cycle; see
+        // `background_parity_drain_runs_after_independent_pull_failure`.
         let guarded = [
             (
                 RemoteAuthExecutionOutcome::Paused("paused".to_string()),
@@ -38099,8 +38472,8 @@ mod tests {
                 NativeSyncTickOutcome::Reset("reset".to_string()),
             ),
             (
-                RemoteAuthExecutionOutcome::Failed("failed".to_string()),
-                NativeSyncTickOutcome::Failed("failed".to_string()),
+                RemoteAuthExecutionOutcome::Failed("database is locked".to_string()),
+                NativeSyncTickOutcome::Failed("database is locked".to_string()),
             ),
         ];
         for (legacy_outcome, expected) in guarded {
@@ -38113,6 +38486,449 @@ mod tests {
             assert_eq!(outcome, expected);
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn cycle_with_failed_pull(synced: usize) -> SyncCycleReport {
+        SyncCycleReport {
+            synced,
+            pull_error: Some("orders: Admin dashboard server error (HTTP 500)".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn background_parity_drain_runs_after_independent_pull_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+        let sync_state = SyncState::new();
+        let calls = AtomicUsize::new(0);
+        let auth_attempt = sync_state
+            .begin_remote_auth_attempt()
+            .expect("capture tick auth revision");
+        let outcome = complete_native_background_sync_tick(
+            RemoteAuthExecutionOutcome::Success(cycle_with_failed_pull(2), auth_attempt),
+            |_auth_attempt| async {
+                calls.fetch_add(1, SeqCst);
+                let mut summary = empty_parity_summary();
+                summary.processed = 1;
+                ParitySyncExecutionOutcome::Complete(summary)
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            NativeSyncTickOutcome::Partial {
+                synced: 3,
+                error: REMOTE_PULL_FAILED.to_string(),
+            }
+        );
+        assert_eq!(calls.load(SeqCst), 1, "parity rows replay past the pull");
+
+        // A parity pause, reset or failure still wins over the failed pull.
+        for (parity_result, expected) in [
+            (
+                "paused",
+                NativeSyncTickOutcome::Paused("REMOTE_AUTH_PAUSED".into()),
+            ),
+            (
+                "reset",
+                NativeSyncTickOutcome::Reset("TERMINAL_AUTH_RESET".into()),
+            ),
+            (
+                "failed",
+                NativeSyncTickOutcome::Failed("PARITY_FAILED".into()),
+            ),
+        ] {
+            let auth_attempt = sync_state
+                .begin_remote_auth_attempt()
+                .expect("capture tick auth revision");
+            let outcome = complete_native_background_sync_tick(
+                RemoteAuthExecutionOutcome::Success(cycle_with_failed_pull(0), auth_attempt),
+                |_auth_attempt| async move {
+                    match parity_result {
+                        "paused" => ParitySyncExecutionOutcome::Paused(empty_parity_summary()),
+                        "reset" => ParitySyncExecutionOutcome::Reset(empty_parity_summary()),
+                        _ => ParitySyncExecutionOutcome::Failed("PARITY_FAILED"),
+                    }
+                },
+            )
+            .await;
+            assert_eq!(outcome, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn z_closeout_force_sync_pass_fails_while_a_pull_fails() {
+        // Founder, 21/10/2026: the background tick sends past a failed pull,
+        // the Z closeout does not.
+        let sync_state = SyncState::new();
+        let passes = std::sync::atomic::AtomicUsize::new(0);
+        let result = drain_z_closeout(
+            |scope| {
+                assert_eq!(scope, Z_CLOSEOUT_PARITY_SCOPE);
+                passes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let auth_attempt = sync_state
+                    .begin_remote_auth_attempt()
+                    .expect("capture closeout auth revision");
+                async move {
+                    force_sync_pass_result(
+                        complete_native_background_sync_tick(
+                            RemoteAuthExecutionOutcome::Success(
+                                cycle_with_failed_pull(1),
+                                auth_attempt,
+                            ),
+                            |_auth_attempt| async {
+                                ParitySyncExecutionOutcome::Complete(empty_parity_summary())
+                            },
+                        )
+                        .await,
+                    )
+                }
+            },
+            || -> Result<UnsyncedSyncQueueSnapshot, String> {
+                panic!("the closeout drain must stop at the failed pass")
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), REMOTE_PULL_FAILED);
+        assert_eq!(passes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The forced pass maps its tick through that same rule.
+        let source = include_str!("sync.rs");
+        let forced = top_level_fn_body(source, "async fn force_sync_once_scoped(");
+        assert!(
+            forced.contains("force_sync_pass_result(outcome)?"),
+            "{forced}"
+        );
+        assert_eq!(
+            force_sync_pass_result(NativeSyncTickOutcome::Success(4)),
+            Ok(4)
+        );
+    }
+
+    #[test]
+    fn pre_claim_pull_failures_stop_the_cycle_unless_the_admin_answered() {
+        let live = || SYNC_BOOTSTRAP_MODE_LIVE.to_string();
+        let bootstrapping = || SYNC_BOOTSTRAP_MODE_EMPTY_DB.to_string();
+        let server_error = "reconcile remote orders: Admin dashboard server error (HTTP 500)";
+
+        // The admin answered a read with an error: the cycle goes on.
+        for pull in [
+            PreClaimPull::ReceiptStatus,
+            PreClaimPull::Orders,
+            PreClaimPull::Payments,
+            PreClaimPull::PaymentTotalConflicts,
+            PreClaimPull::AdjustmentAutoHeal,
+        ] {
+            assert!(pre_claim_pull_failure_is_independent(
+                pull,
+                server_error,
+                live
+            ));
+        }
+        assert!(pre_claim_pull_failure_is_independent(
+            PreClaimPull::Payments,
+            r#"reconcile remote payments: Not found (HTTP 404): {"success":false,"error":"Not found"}"#,
+            live,
+        ));
+        assert!(pre_claim_pull_failure_is_independent(
+            PreClaimPull::Payments,
+            "Internal error (HTTP 503)",
+            bootstrapping,
+        ));
+
+        // Everything else still ends the cycle before the claim.
+        for error in [
+            // Terminal auth: the pause/reset/repair barrier comes first.
+            r#"reconcile remote orders: Invalid terminal API key (HTTP 401): {"success":false,"code":"invalid_terminal_api_key","error":"invalid"}"#,
+            "reconcile remote orders: API key is invalid or expired (HTTP 401)",
+            r#"Forbidden (HTTP 403): {"success":false,"error":"Forbidden"}"#,
+            // A proxy or captive portal, not the admin.
+            "Unexpected response from admin dashboard (HTTP 407)",
+            "Unexpected response from admin dashboard (HTTP 511)",
+            // Unreachable admin: the sends would fail and spend retries.
+            "reconcile remote orders: Cannot reach admin dashboard at http://127.0.0.1:9",
+            "reconcile remote payments: Connection to https://admin.example timed out",
+            "Invalid JSON from admin dashboard: expected value at line 1 column 1",
+            // The local database or its lock.
+            "database is locked",
+            "poisoned lock: another task failed inside",
+            "Failed to apply remote order page: UNIQUE constraint failed: orders.id",
+            // Credential and rebind refusals.
+            "TERMINAL_REBIND_PENDING",
+            "TERMINAL_CREDENTIAL_READ_FAILED",
+            // Malformed status markers.
+            "(HTTP 5)",
+            "(HTTP 500",
+        ] {
+            assert!(
+                !pre_claim_pull_failure_is_independent(PreClaimPull::Payments, error, live),
+                "{error}"
+            );
+        }
+
+        // The order pull while the till still bootstraps its history.
+        assert!(!pre_claim_pull_failure_is_independent(
+            PreClaimPull::Orders,
+            server_error,
+            bootstrapping,
+        ));
+        assert!(!pre_claim_pull_failure_is_independent(
+            PreClaimPull::Orders,
+            server_error,
+            || SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD.to_string(),
+        ));
+    }
+
+    impl crate::print::PrintQueueInvalidator for NoopTerminalEventSink {
+        fn invalidate_print_queue(&self) {}
+    }
+
+    /// Answers every request by its request line and records the lines seen.
+    fn spawn_routed_json_server(
+        route: fn(&str) -> (u16, &'static str),
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind routed mock server");
+        let addr = listener.local_addr().expect("routed mock server address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                // Read the head and any declared body so the reply never
+                // races an unread request.
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8 * 1024];
+                loop {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let declared = text[..head_end]
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.trim()
+                                    .eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= head_end + 4 + declared {
+                            break;
+                        }
+                    }
+                }
+                let request_line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let (status, body) = route(&request_line);
+                seen_for_thread
+                    .lock()
+                    .expect("record mock request")
+                    .push(request_line);
+                let response = format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// A paid order whose queued update has never reached the admin, so the
+    /// cycle sends it as a create (`POST /api/pos/orders`).
+    fn seed_queued_order_for_cycle(db: &DbState) -> i64 {
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                     id, items, total_amount, total_amount_cents, subtotal, subtotal_cents,
+                     status, payment_status, order_type, sync_status, created_at, updated_at
+                 ) VALUES (
+                     'ord-cycle', ?1, 12.0, 1200, 12.0, 1200,
+                     'completed', 'paid', 'pickup', 'pending', datetime('now'), datetime('now')
+                 )",
+                params![r#"[{"name":"Coffee","quantity":1,"price":12.0}]"#],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO order_payments (
+                     id, order_id, method, amount, amount_cents, status, sync_status, sync_state,
+                     created_at, updated_at
+                 ) VALUES (
+                     'pay-cycle', 'ord-cycle', 'cash', 12.0, 1200, 'completed', 'pending',
+                     'waiting_parent', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (
+                     entity_type, entity_id, operation, payload, idempotency_key, status
+                 ) VALUES (
+                     'payment', 'pay-cycle', 'insert', '{}', 'payment:ord-cycle', 'deferred'
+                 )",
+                [],
+            )
+            .unwrap();
+            // A till past its first catch-up: the order pull runs live.
+            db::set_setting(&conn, "sync", "orders_since", "2026-10-21T08:00:00.000Z").unwrap();
+        }
+        insert_order_update_queue_row(db, "ord-cycle", "pending", Some("completed"), None, None)
+    }
+
+    fn cycle_test_keyring(admin_url: &str) -> crate::tests::fake_keyring::Guard {
+        crate::tests::fake_keyring::install_seeded([
+            ("pos_api_key", "cycle-test-api-key"),
+            ("terminal_id", "terminal-cycle-test"),
+            ("admin_dashboard_url", admin_url),
+            ("organization_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ("branch_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        ])
+    }
+
+    fn queue_row_status(db: &DbState, queue_id: i64) -> String {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn sync_cycle_sends_queued_rows_when_the_order_pull_answers_500() {
+        let (admin_url, seen) = spawn_routed_json_server(|request_line| {
+            if request_line.starts_with("GET /api/pos/orders/sync") {
+                (500, r#"{"success":false,"error":"Internal server error"}"#)
+            } else if request_line.starts_with("POST /api/pos/orders ") {
+                (200, r#"{"data":{"id":"remote-ord-cycle"}}"#)
+            } else if request_line.starts_with("GET /api/pos/payments") {
+                (200, r#"{"success":true,"payments":[],"has_more":false}"#)
+            } else {
+                (404, r#"{"success":false,"error":"Not found"}"#)
+            }
+        });
+        let _keyring = cycle_test_keyring(&admin_url);
+        let db = test_db();
+        let queue_id = seed_queued_order_for_cycle(&db);
+
+        let report = run_sync_cycle(&db, &NoopTerminalEventSink)
+            .await
+            .expect("a failed order pull no longer fails the cycle");
+
+        let pull_error = report
+            .pull_error
+            .as_deref()
+            .expect("the failed pull is reported");
+        assert!(pull_error.starts_with("orders: "), "{pull_error}");
+        assert!(pull_error.contains("(HTTP 500)"), "{pull_error}");
+        assert!(report.synced >= 1, "{report:?}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST /api/pos/orders ")),
+            "the queued order was sent"
+        );
+        assert_eq!(queue_row_status(&db, queue_id), "synced");
+        // A failed catch-up never leaves the bootstrap mode it is in.
+        assert_eq!(get_sync_bootstrap_mode(&db), SYNC_BOOTSTRAP_MODE_LIVE);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn sync_cycle_order_pull_failure_while_bootstrapping_still_holds_the_queue() {
+        let (admin_url, seen) = spawn_routed_json_server(|request_line| {
+            if request_line.starts_with("GET /api/pos/orders/sync") {
+                (500, r#"{"success":false,"error":"Internal server error"}"#)
+            } else {
+                (404, r#"{"success":false,"error":"Not found"}"#)
+            }
+        });
+        let _keyring = cycle_test_keyring(&admin_url);
+        let db = test_db();
+        let queue_id = seed_queued_order_for_cycle(&db);
+        set_sync_bootstrap_mode(&db, SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD).unwrap();
+
+        let error = run_sync_cycle(&db, &NoopTerminalEventSink)
+            .await
+            .expect_err("the order pull still gates a bootstrapping till");
+        assert!(error.contains("(HTTP 500)"), "{error}");
+        assert!(!seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("POST /api/pos/orders ")));
+        assert_eq!(queue_row_status(&db, queue_id), "pending");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn pull_auth_failure_still_resets_the_terminal_without_replay() {
+        let (admin_url, seen) = spawn_routed_json_server(|request_line| {
+            if request_line.starts_with("GET /api/pos/orders/sync") {
+                (
+                    401,
+                    r#"{"success":false,"code":"invalid_terminal_api_key","error":"Invalid terminal API key"}"#,
+                )
+            } else if request_line.starts_with("GET /api/pos/payments") {
+                (200, r#"{"success":true,"payments":[],"has_more":false}"#)
+            } else {
+                (404, r#"{"success":false,"error":"Not found"}"#)
+            }
+        });
+        let _keyring = cycle_test_keyring(&admin_url);
+        let db = test_db();
+        let queue_id = seed_queued_order_for_cycle(&db);
+
+        // The pull's auth failure still ends the cycle before the claim, as
+        // the reset class `run_sync_cycle_with_auth_guard` turns into Reset.
+        // (The guard's reset itself clears the terminal and writes a recovery
+        // snapshot, so it is not run here.)
+        let error = run_sync_cycle(&db, &NoopTerminalEventSink)
+            .await
+            .expect_err("terminal auth still fails the cycle");
+        assert!(is_terminal_auth_failure(&error), "{error}");
+        assert!(terminal_auth_failure_requires_reset(&error), "{error}");
+        assert!(!seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("POST /api/pos/orders ")));
+        assert_eq!(queue_row_status(&db, queue_id), "pending");
+
+        let parity_calls = std::sync::atomic::AtomicUsize::new(0);
+        let outcome = complete_native_background_sync_tick(
+            RemoteAuthExecutionOutcome::Reset(error),
+            |_auth_attempt| async {
+                parity_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ParitySyncExecutionOutcome::Complete(empty_parity_summary())
+            },
+        )
+        .await;
+        assert!(
+            matches!(outcome, NativeSyncTickOutcome::Reset(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(parity_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -42231,5 +43047,25 @@ mod hotel_sync_tests {
         ));
         assert!(is_permanent_order_sync_error("FOLIO_SETTLEMENT_IMMUTABLE"));
         assert!(!is_permanent_order_sync_error("network timeout"));
+    }
+}
+
+#[cfg(test)]
+mod appointment_checkout_sync_tests {
+    use super::*;
+
+    #[test]
+    fn appointment_settlement_refusals_are_permanent_and_never_retried() {
+        for refusal in [
+            r#"Appointment is already settled (HTTP 409): {"success":false,"code":"APPOINTMENT_ALREADY_SETTLED","retryable":false}"#,
+            r#"Appointment is being checked out at another terminal (HTTP 409): {"success":false,"code":"APPOINTMENT_CHECKOUT_CLAIMED","retryable":false}"#,
+            "APPOINTMENT_CHECKOUT_CLAIMED: terminal-2 until 2026-10-21T10:15:00Z",
+        ] {
+            assert!(is_permanent_order_sync_error(refusal), "{refusal}");
+            assert!(!is_transient_order_sync_error(refusal), "{refusal}");
+        }
+        assert!(!is_permanent_order_sync_error(
+            "Admin dashboard server error (HTTP 503)"
+        ));
     }
 }

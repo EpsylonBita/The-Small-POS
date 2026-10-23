@@ -4,7 +4,7 @@
       "offlineCheckIn": {
         "checkedInTitle": "Ohne Verbindung eingestempelt",
         "checkedInMessage": "Der Server prüft dieses Einstempeln, sobald die Verbindung zurück ist.",
-        "giftCardsNeedServer": "Mit Geschenkkarten braucht das Öffnen der Kasse den Server. Stempeln Sie ein, sobald die Verbindung zurück ist.",
+        "giftCardOrdinaryOpening": "Die Kasse wurde normal geöffnet. Geschenkkarten warten auf die Verbindung, und der Server prüft diese Öffnung.",
         "noPinOnTill": "Diese Kasse hat die PIN dieser Person nicht gespeichert, deshalb kann sie ohne Verbindung nicht einstempeln.",
         "locked": "Zu viele falsche PINs. Versuchen Sie es in 15 Minuten erneut oder sobald die Verbindung zurück ist.",
         "waiterPhone": "Auf einem Kellner-Handy läuft das Einstempeln über den Server. Versuchen Sie es erneut, sobald die Verbindung zurück ist."

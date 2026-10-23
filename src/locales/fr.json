@@ -1,4 +1,10 @@
 {
+  "missedPlatformOrders": {
+    "title_one": "{{count}} commande de plateforme refusée pendant que la caisse était hors ligne",
+    "title_other": "{{count}} commandes de plateforme refusées pendant que la caisse était hors ligne",
+    "body": "≈{{total}} de commandes refusées automatiquement (caisse hors ligne). Gardez la caisse connectée pour recevoir les commandes des plateformes.",
+    "dismiss": "OK"
+  },
   "twintPayment": {
     "receiptNotSaved": "Confirmé, non enregistré",
     "receiptConfirmedAt": "Confirmation du caissier à",
@@ -953,6 +959,13 @@
       "deliveryFeeZoneNotChecked": "Zone non vérifiée",
       "deliveryZoneNotCheckedNotice": "La zone de livraison n'a pas été vérifiée. Sélectionnez à nouveau l'adresse.",
       "repickDeliveryAddress": "Sélectionner à nouveau l'adresse",
+      "deliveryFeeChooseZone": "Choisir la zone",
+      "offlineZoneChoiceTitle": "Choisissez la zone de livraison",
+      "offlineZoneChoiceHint": "Pas de connexion : cette adresse ne peut pas être localisée. Choisissez sa zone ; les frais de livraison de cette zone s'appliquent.",
+      "offlineZoneChoiceLoading": "Chargement des zones du magasin…",
+      "offlineZoneChoiceNoZones": "Aucune zone de livraison n'est enregistrée sur cette caisse. Connectez-vous une fois pour les télécharger, ou changez le type de commande.",
+      "offlineZoneChoiceRequired": "Choisissez d'abord la zone de livraison.",
+      "zoneChosenManually": "Zone choisie manuellement",
       "deliveryFeeOutOfZone": "Hors zone de livraison",
       "deliveryFeeUnavailable": "Frais de livraison indisponibles",
       "total": "Total :",
@@ -3447,6 +3460,40 @@
     }
   },
   "sync": {
+    "zGate": {
+      "approvalTitle": "Approuver avec votre PIN",
+      "approvalSubtitle": "Mettre un enregistrement de côté demande le droit d'annuler des paiements. Un membre du personnel qui l'a saisit son propre PIN. Rien n'est supprimé ni débité.",
+      "setAsideDone": "Mis de côté. L'enregistrement reste sur cette caisse et le Z l'indique comme absent du serveur.",
+      "undoDone": "L'enregistrement est revenu : il bloque de nouveau la clôture de la journée jusqu'à ce que le serveur l'accepte.",
+      "actionFailed": "Cela n'a pas pu être fait. Rien n'a été modifié.",
+      "stale": "Cette liste n'a pas pu être relue. Elle affiche la dernière lecture valide.",
+      "unavailable": "Les journées clôturées sur cette caisse n'ont pas pu être lues. Réessayez.",
+      "localTitle": "Journées clôturées sur cette caisse, pas encore sur le serveur : {{count}}",
+      "localDay": "Journée du {{date}} : clôturée sur cette caisse sans connexion",
+      "waits": {
+        "earlier_z": "Elle attend que la journée clôturée précédente atteigne d'abord le serveur.",
+        "window_rows": "Elle attend que {{count}} enregistrement(s) de cette journée atteignent le serveur.",
+        "server_refusal": "Le serveur l'a refusée. Contactez le support avec les détails ci-dessous.",
+        "sending": "Elle est envoyée à la prochaine synchronisation.",
+        "cleanup": "Le serveur l'a confirmée. Ses données sont nettoyées de cette caisse."
+      },
+      "details": "Détails pour le support",
+      "refusedTitle": "Refusés par le serveur : {{count}}",
+      "refusedIntro": "Le serveur a refusé ces enregistrements définitivement, ils bloquent donc la clôture de la journée. Un responsable peut en mettre un de côté : il reste sur cette caisse, le Z l'indique comme absent du serveur et il n'est plus jamais renvoyé de lui-même.",
+      "kind": {
+        "payment": "Paiement",
+        "refund": "Remboursement ou annulation",
+        "driverEarning": "Gain du livreur",
+        "expense": "Dépense",
+        "staffPayment": "Paiement du personnel",
+        "cashReturn": "Retour d'espèces",
+        "shift": "Service",
+        "record": "Enregistrement"
+      },
+      "setAsideState": "Mis de côté : conservé sur cette caisse, absent du serveur",
+      "setAside": "Mettre de côté",
+      "undo": "Rétablir"
+    },
     "capacity": {
       "badge": "File {{percent}}%",
       "title": "La file de synchronisation se remplit",
@@ -3510,7 +3557,7 @@
     "closeoutBlocked": {
       "single": "Impossible de clôturer la journée pendant {{stage}} car {{orderReference}} est encore bloqué : {{reason}}.",
       "multiple": "Impossible de clôturer la journée pendant {{stage}} car {{count}} éléments de synchronisation sont encore bloqués.",
-      "moneyNotSynced": "La journée ne peut pas encore être clôturée : {{count}} enregistrement(s) de paiement ou de remboursement de cette journée n'ont pas atteint le serveur. Vérifiez que la caisse est en ligne, appuyez sur Synchroniser maintenant, puis clôturez à nouveau la journée."
+      "moneyNotSynced": "La journée ne peut pas encore être clôturée : {{count}} enregistrement(s) de paiement, de remboursement ou de service de cette journée n'ont pas atteint le serveur. Vérifiez que la caisse est en ligne, appuyez sur Synchroniser maintenant, puis clôturez à nouveau la journée."
     },
     "time": {
       "never": "Jamais",
@@ -7293,6 +7340,19 @@
     "depositTotal": "Consignes",
     "depositLineName": "Consigne — {{name}}"
   },
+  "appointmentCheckoutClaim": {
+    "claimedElsewhere": "Ce rendez-vous est en cours d’encaissement sur une autre caisse ({{terminal}}) jusqu’à {{time}}.",
+    "claimedElsewhereNow": "Ce rendez-vous est en cours d’encaissement sur une autre caisse ({{terminal}}).",
+    "claimedElsewhereUnknown": "Ce rendez-vous est en cours d’encaissement sur une autre caisse. Réessaie dans quelques minutes.",
+    "settled": "Ce rendez-vous est déjà payé ou clôturé.",
+    "notFound": "Ce rendez-vous est introuvable. Actualise et réessaie.",
+    "needsConnection": "L’encaissement d’un rendez-vous nécessite une connexion. Tu peux vendre les prestations sans rendez-vous.",
+    "failed": "L’encaissement n’a pas pu démarrer. Réessaie."
+  },
+  "retailStock": {
+    "onlyAvailable": "Seulement {{available}} {{unit}} en stock",
+    "unitPiece": "pcs"
+  },
   "staffSchedule": {
     "loading": "Chargement du planning du personnel...",
     "weeklyProgram": "Planning hebdomadaire du personnel",
@@ -7855,6 +7915,15 @@
     "redeemSuccess": "{{points}} points utilisés pour {{discount}} de remise",
     "redeemFailed": "Commande enregistrée, mais les points fidélité n'ont pas été utilisés",
     "checkoutRefused": "Les points fidélité n'ont pas pu être réservés. La commande n'a pas été enregistrée. Retirez l'utilisation des points ou réessayez.",
+    "redeem": {
+      "offlineRefused": "Les points ne peuvent être utilisés qu'avec une connexion internet. La vente continue sans la remise ; les points gagnés sont conservés.",
+      "refusedBody": "Le serveur a refusé l'utilisation des points. Aucune remise n'a été appliquée.",
+      "confirmationRequired": "Confirmez en ligne l'utilisation initiale des points avant d'encaisser.",
+      "releasedForCheckout": "Les points de cette vente ont été rendus au client. Commencez une nouvelle vente pour utiliser à nouveau des points.",
+      "removePoints": "Retirer les points",
+      "confirmed": "Points confirmés. Poursuivez le paiement.",
+      "releaseFailed": "Les points n'ont pas pu être rendus au solde du client. Réessayez."
+    },
     "redeemPrepared": "{{points}} points prêts pour {{discount}} de remise",
     "noCustomerSelected": "Sélectionnez un client enregistré pour utiliser des points",
     "moduleUnavailable": "Le module fidélité n'est pas activé sur ce terminal",
@@ -10163,8 +10232,17 @@
   },
   "zReportOffline": {
     "refusal": "La journée ne peut pas être clôturée sans connexion. Continuez à vendre : la journée reste ouverte et vous la clôturez dès que la connexion revient. Pour compter la caisse maintenant, faites la clôture du caissier, qui s'imprime aussi sans internet, et consultez l'aperçu sur cet écran.",
-    "status": "Pas de connexion : la journée se clôture dès son retour",
-    "checklist": "Pas de connexion au serveur. Continuez à vendre et clôturez la journée dès que la connexion revient."
+    "status": "Pas de connexion : le Z clôture la journée sur cette caisse et sera envoyé plus tard",
+    "checklist": "Pas de connexion au serveur. Le Z clôture la journée sur cette caisse et l'envoie dès que la connexion revient. Un magasin avec un service fiscal actif clôture la journée dès que la connexion revient.",
+    "localCloseDone": "La journée du {{date}} est clôturée sur cette caisse sans connexion. Son Z est envoyé au serveur dès que la connexion revient ; rien n'est supprimé avant que le serveur l'ait reçu. Vous pouvez commencer la journée suivante."
+  },
+  "salonStaff": {
+    "pickerTitle": "Qui réalise cette prestation ?",
+    "noStylist": "Sans employé",
+    "tipRecipient": "Employé",
+    "tipRecipientHelp": "Crédite l'employé qui a réalisé la prestation.",
+    "tipChooseStaff": "Qui reçoit le pourboire ?",
+    "tipsByStaff": "Pourboires par employé"
   },
   "salonSale": {
     "newSale": "Nouvelle vente de prestation",

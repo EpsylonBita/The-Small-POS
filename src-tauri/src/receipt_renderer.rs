@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use chrono::{DateTime, Local};
+use chrono::DateTime;
 use font8x8::UnicodeFonts;
 use image::{GrayImage, Luma};
 use rusttype::{point, Font as RustFont, Scale};
@@ -157,6 +157,8 @@ pub struct ReceiptCustomizationLine {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReceiptItem {
+    #[serde(default)]
+    pub vat_letter: Option<String>,
     pub name: String,
     pub quantity: f64,
     pub total: f64,
@@ -190,6 +192,14 @@ pub struct PaymentLine {
     pub detail: Option<String>,
 }
 
+fn receipt_item_amount(item: &ReceiptItem, amount: String) -> String {
+    item.vat_letter
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|letter| format!("{amount} {letter}"))
+        .unwrap_or(amount)
+}
+
 pub const PAYMENT_DETAIL_AMOUNT_UNKNOWN: &str = "__amount_unknown__";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -210,6 +220,8 @@ pub enum DeliverySlipMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrderReceiptDoc {
+    #[serde(default)]
+    pub vat_legend: Vec<String>,
     #[serde(default)]
     pub currency: Option<String>,
     pub order_id: String,
@@ -392,30 +404,9 @@ fn sanitize_repair_print_text(value: &str, max_len: usize) -> Result<String, Str
         return Err("repair print field length is invalid".to_string());
     }
     let lowered = cleaned.to_lowercase();
-    for prohibited in [
-        "diagnosis",
-        "diagnostic",
-        "private note",
-        "address",
-        "street",
-        "amount",
-        "subtotal",
-        "total",
-        "price",
-        "payment",
-        "receipt",
-        "fiscal",
-        "authority",
-        "password",
-        "cvv",
-    ] {
-        if lowered.contains(prohibited) {
-            return Err("prohibited repair print content".to_string());
-        }
-    }
     if lowered
         .split(|ch: char| !ch.is_alphanumeric())
-        .any(|token| matches!(token, "tax" | "vat" | "pin" | "pan"))
+        .any(|token| matches!(token, "pin" | "password" | "cvv" | "pan"))
     {
         return Err("prohibited repair print content".to_string());
     }
@@ -805,6 +796,16 @@ pub struct ZReportPhoneShiftEntry {
     pub handover: String,
 }
 
+/// One stylist's tips in the Z (`staffTips`, salon 21/10/2026), printed
+/// under "Tips by staff" only when the amount is not zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ZReportStaffTipEntry {
+    #[serde(default)]
+    pub staff_id: String,
+    pub staff_name: String,
+    pub amount: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ZReportExpenseEntry {
     pub reason: String,
@@ -848,6 +849,8 @@ pub struct ZReportPlatformEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ZReportDoc {
     #[serde(default)]
+    pub vat_breakdown: serde_json::Value,
+    #[serde(default)]
     pub hotel_report: serde_json::Value,
     #[serde(default)]
     pub currency: Option<String>,
@@ -860,9 +863,10 @@ pub struct ZReportDoc {
     pub terminal_name: String,
     pub total_orders: i64,
     pub gross_sales: f64,
-    /// The VAT the day's slips printed (`sales.taxTotal`). Zero on a store
-    /// whose slips print no VAT and on reports stored before 14/10/2026: the
-    /// Z then prints no VAT line.
+    /// The VAT of the day's orders (`sales.taxTotal`): since 21/10/2026 the
+    /// sum of each order's stored VAT, whatever its slip printed. Zero on a
+    /// store whose orders carry no VAT and on reports stored before
+    /// 14/10/2026: the Z then prints no VAT line.
     #[serde(default)]
     pub tax_total: f64,
     pub net_sales: f64,
@@ -954,13 +958,62 @@ pub struct ZReportDoc {
     /// the local staff. Empty on a Z stored before 1.4.131.
     #[serde(default)]
     pub phone_shifts: Vec<ZReportPhoneShiftEntry>,
+    /// Tips that went to a stylist of the order, per staff member. Empty on
+    /// a Z stored before 21/10/2026 and on a day without one.
+    #[serde(default)]
+    pub staff_tips: Vec<ZReportStaffTipEntry>,
     #[serde(default)]
     pub gift_liability_cash_cents: i64,
     #[serde(default)]
     pub gift_ordinary_adjustment_cents: i64,
     #[serde(default)]
     pub gift_close_lines: Vec<GiftCloseDrawerLine>,
+    /// A Z closed on this till without a connection that the server has not
+    /// confirmed yet (offline week, founder 21/10/2026): the slip says so
+    /// under its title.
+    #[serde(default)]
+    pub pending_upload: bool,
+    /// The records of the window a manager set aside (Ω4), printed as "Not on
+    /// the server". Empty on every other Z.
+    #[serde(default)]
+    pub not_on_server: Vec<ZReportNotOnServerEntry>,
 }
+
+/// One record a manager set aside, as the Z prints it (`notOnServer`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ZReportNotOnServerEntry {
+    /// The queue table (`payments`, `payment_adjustments`, `staff_shifts`, ...).
+    pub table: String,
+    #[serde(default)]
+    pub amount: Option<f64>,
+}
+
+/// The printed name of a set-aside record's kind.
+fn z_report_not_on_server_label(table: &str) -> &'static str {
+    match table {
+        "payments" | "order_payments" => "Payment",
+        "payment_adjustments" => "Refund",
+        "driver_earnings" | "driver_earning" => "Driver earning",
+        "shift_expenses" => "Expense",
+        "staff_payments" => "Staff Payment",
+        "staff_order_cash_returns" => "Cash return",
+        "staff_shifts" | "cash_drawer_sessions" => "Shift",
+        _ => "Record",
+    }
+}
+
+/// The "Not on the server" rows of a Z: `(label key, amount)`.
+fn z_report_not_on_server_rows(doc: &ZReportDoc) -> Vec<(&'static str, Option<f64>)> {
+    doc.not_on_server
+        .iter()
+        .map(|entry| (z_report_not_on_server_label(&entry.table), entry.amount))
+        .collect()
+}
+
+/// The pending-upload header of a Z closed on this till (6 languages).
+const Z_PENDING_UPLOAD_LABEL: &str = "Pending upload: closed on this till without a connection";
+/// The section title of the set-aside records.
+const Z_NOT_ON_SERVER_LABEL: &str = "NOT ON THE SERVER";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "doc", rename_all = "snake_case")]
@@ -1014,6 +1067,9 @@ pub struct LayoutConfig {
     pub logo_scale: f32,
     /// CSS font-weight for body text (400–800). Controlled by local_settings receipt/body_boldness.
     pub body_font_weight: u32,
+    /// The store's IANA zone for printed times (`store_time`); `None` prints
+    /// in the device's zone.
+    pub store_time_zone: Option<chrono_tz::Tz>,
 }
 
 impl Default for LayoutConfig {
@@ -1053,6 +1109,7 @@ impl Default for LayoutConfig {
             text_scale: 1.25,
             logo_scale: 1.0,
             body_font_weight: 400,
+            store_time_zone: None,
         }
     }
 }
@@ -1065,6 +1122,42 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
         ("en", "Drive-through") => Some("Drive-through"),
         ("en", "Charged to room") => Some("Charged to room"),
         ("en", "Room charges collected") => Some("Room charges collected"),
+        ("en", "VAT section") => Some("VAT"),
+        ("en", "Take-away marker") => Some("Take-away"),
+        ("en", "Delivery marker") => Some("Delivery"),
+        ("en", "Delivery platform") => Some("Delivery platform"),
+        ("en", "Rate not recorded") => Some("Rate not recorded"),
+        ("en", "Tips outside VAT") => Some("Tips outside VAT"),
+        ("el", "VAT section") => Some("ΦΠΑ"),
+        ("el", "Take-away marker") => Some("Παραλαβή"),
+        ("el", "Delivery marker") => Some("Διανομή"),
+        ("el", "Delivery platform") => Some("Πλατφόρμα διανομής"),
+        ("el", "Rate not recorded") => Some("Μη καταγεγραμμένος συντελεστής"),
+        ("el", "Tips outside VAT") => Some("Φιλοδωρήματα εκτός ΦΠΑ"),
+        ("de", "VAT section") => Some("MwSt"),
+        ("de", "Take-away marker") => Some("Zum Mitnehmen"),
+        ("de", "Delivery marker") => Some("Lieferung"),
+        ("de", "Delivery platform") => Some("Lieferplattform"),
+        ("de", "Rate not recorded") => Some("Steuersatz nicht erfasst"),
+        ("de", "Tips outside VAT") => Some("Trinkgeld außerhalb MwSt"),
+        ("fr", "VAT section") => Some("TVA"),
+        ("fr", "Take-away marker") => Some("À emporter"),
+        ("fr", "Delivery marker") => Some("Livraison"),
+        ("fr", "Delivery platform") => Some("Plateforme de livraison"),
+        ("fr", "Rate not recorded") => Some("Taux non enregistré"),
+        ("fr", "Tips outside VAT") => Some("Pourboires hors TVA"),
+        ("it", "VAT section") => Some("IVA"),
+        ("it", "Take-away marker") => Some("Da asporto"),
+        ("it", "Delivery marker") => Some("Consegna"),
+        ("it", "Delivery platform") => Some("Piattaforma di consegna"),
+        ("it", "Rate not recorded") => Some("Aliquota non registrata"),
+        ("it", "Tips outside VAT") => Some("Mance fuori IVA"),
+        ("sq", "VAT section") => Some("TVSH"),
+        ("sq", "Take-away marker") => Some("Për ta marrë me vete"),
+        ("sq", "Delivery marker") => Some("Dërgesë"),
+        ("sq", "Delivery platform") => Some("Platformë dërgesash"),
+        ("sq", "Rate not recorded") => Some("Norma nuk është regjistruar"),
+        ("sq", "Tips outside VAT") => Some("Bakshishe jashtë TVSH"),
         ("en", "Accommodation tax") => Some("Accommodation tax"),
         ("el", "Room service") => Some("Υπηρεσία δωματίου"),
         ("el", "Drive-through") => Some("Εξυπηρέτηση αυτοκινήτου"),
@@ -1266,12 +1359,21 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CANCELED" => "ΑΚΥΡΩΘΗΚΕ",
             "TEST ORDER" => "ΔΟΚΙΜΗ TEST",
             "PHONE SHIFTS" => "ΒΑΡΔΙΕΣ ΚΙΝΗΤΩΝ",
+            "TIPS BY STAFF" => "ΦΙΛΟΔΩΡΗΜΑΤΑ ΑΝΑ ΥΠΑΛΛΗΛΟ",
             "Mobile" => "Κινητό",
             "Handover" => "Παράδοση",
             "Handed over" => "Παραδόθηκε",
             "To receive" => "Προς παραλαβή",
             "Nothing to hand over" => "Τίποτα για παράδοση",
             "Not counted" => "Χωρίς καταμέτρηση",
+            "Pending upload: closed on this till without a connection" => {
+                "Αναμένει αποστολή: έκλεισε σε αυτό το ταμείο χωρίς σύνδεση"
+            }
+            "NOT ON THE SERVER" => "ΔΕΝ ΕΦΤΑΣΑΝ ΣΤΟΝ ΔΙΑΚΟΜΙΣΤΗ",
+            "Payment" => "Πληρωμή",
+            "Driver earning" => "Αμοιβή οδηγού",
+            "Cash return" => "Επιστροφή μετρητών",
+            "Record" => "Εγγραφή",
             _ => key,
         },
         "de" => match key {
@@ -1441,12 +1543,21 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CANCELED" => "STORNIERT",
             "TEST ORDER" => "TESTBESTELLUNG",
             "PHONE SHIFTS" => "HANDY-SCHICHTEN",
+            "TIPS BY STAFF" => "TRINKGELD PRO MITARBEITER",
             "Mobile" => "Handy",
             "Handover" => "Übergabe",
             "Handed over" => "Übergeben",
             "To receive" => "Noch zu übernehmen",
             "Nothing to hand over" => "Nichts zu übergeben",
             "Not counted" => "Nicht gezählt",
+            "Pending upload: closed on this till without a connection" => {
+                "Übertragung ausstehend: an dieser Kasse ohne Verbindung abgeschlossen"
+            }
+            "NOT ON THE SERVER" => "NICHT AUF DEM SERVER",
+            "Payment" => "Zahlung",
+            "Driver earning" => "Fahrerverdienst",
+            "Cash return" => "Bargeldrückgabe",
+            "Record" => "Eintrag",
             _ => key,
         },
         "fr" => match key {
@@ -1617,12 +1728,21 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CANCELED" => "ANNULÉE",
             "TEST ORDER" => "COMMANDE TEST",
             "PHONE SHIFTS" => "SERVICES TELEPHONE",
+            "TIPS BY STAFF" => "POURBOIRES PAR EMPLOYÉ",
             "Mobile" => "Telephone",
             "Handover" => "Remise",
             "Handed over" => "Remis",
             "To receive" => "A recevoir",
             "Nothing to hand over" => "Rien a remettre",
             "Not counted" => "Non compte",
+            "Pending upload: closed on this till without a connection" => {
+                "Envoi en attente : clôturé sur cette caisse sans connexion"
+            }
+            "NOT ON THE SERVER" => "PAS SUR LE SERVEUR",
+            "Payment" => "Paiement",
+            "Driver earning" => "Gain du livreur",
+            "Cash return" => "Retour d'espèces",
+            "Record" => "Enregistrement",
             _ => key,
         },
         "it" => match key {
@@ -1790,12 +1910,21 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CANCELED" => "ANNULLATO",
             "TEST ORDER" => "ORDINE DI PROVA",
             "PHONE SHIFTS" => "TURNI TELEFONI",
+            "TIPS BY STAFF" => "MANCE PER DIPENDENTE",
             "Mobile" => "Telefono",
             "Handover" => "Consegna",
             "Handed over" => "Consegnato",
             "To receive" => "Da ricevere",
             "Nothing to hand over" => "Niente da consegnare",
             "Not counted" => "Non contato",
+            "Pending upload: closed on this till without a connection" => {
+                "Invio in sospeso: chiuso su questa cassa senza connessione"
+            }
+            "NOT ON THE SERVER" => "NON SUL SERVER",
+            "Payment" => "Pagamento",
+            "Driver earning" => "Compenso autista",
+            "Cash return" => "Restituzione contanti",
+            "Record" => "Registrazione",
             _ => key,
         },
         // Albanian. Written with real `ë`/`ç`: raster receipts draw them as-is,
@@ -1969,12 +2098,21 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "CANCELED" => "U ANULUA",
             "TEST ORDER" => "POROSI PROVË",
             "PHONE SHIFTS" => "TURNET NË TELEFON",
+            "TIPS BY STAFF" => "BAKSHISHE SIPAS STAFIT",
             "Mobile" => "Telefoni",
             "Handover" => "Dorëzimi",
             "Handed over" => "U dorëzua",
             "To receive" => "Për t'u marrë",
             "Nothing to hand over" => "S'ka gjë për dorëzim",
             "Not counted" => "Pa u numëruar",
+            "Pending upload: closed on this till without a connection" => {
+                "Në pritje të dërgimit: u mbyll në këtë arkë pa lidhje"
+            }
+            "NOT ON THE SERVER" => "JO NË SERVER",
+            "Payment" => "Pagesë",
+            "Driver earning" => "Fitim i shoferit",
+            "Cash return" => "Kthim parash",
+            "Record" => "Regjistrim",
             _ => key,
         },
         _ => key,
@@ -2072,12 +2210,15 @@ fn z_report_phone_shift_rows(
     (title, rows)
 }
 
-/// `HH:MM - HH:MM` of a phone shift, as the local staff print it.
-fn z_report_phone_shift_time_range(shift: &ZReportPhoneShiftEntry) -> String {
+/// `HH:MM - HH:MM` of a phone shift on the store's clock.
+fn z_report_phone_shift_time_range(
+    shift: &ZReportPhoneShiftEntry,
+    zone: Option<chrono_tz::Tz>,
+) -> String {
     let at = |value: &Option<String>| {
         value
             .as_deref()
-            .and_then(format_time_hm_local)
+            .and_then(|value| format_time_hm(value, zone))
             .unwrap_or_else(|| "--:--".to_string())
     };
     format!("{} - {}", at(&shift.check_in), at(&shift.check_out))
@@ -2098,6 +2239,14 @@ fn z_report_staff_payment_detail_label(lang: &str, payment: &ZReportStaffPayment
     } else {
         format!("{} ({})", staff_name, role)
     }
+}
+
+/// The "Tips by staff" rows: stylists with a non-zero tip, as the Z stored them.
+fn z_report_staff_tip_rows(doc: &ZReportDoc) -> Vec<&ZReportStaffTipEntry> {
+    doc.staff_tips
+        .iter()
+        .filter(|tip| has_print_money(tip.amount))
+        .collect()
 }
 
 fn z_report_total_expenses_including_staff(doc: &ZReportDoc) -> f64 {
@@ -2609,6 +2758,60 @@ enum ZSalesSign {
 /// both apps (founder, 14/10/2026), as Android: Gross (before discounts), each deduction that
 /// happened, Net sales (VAT included), then the VAT the slips printed as "Of which VAT" and the
 /// tips, each only when it is not zero.
+/// Frozen VAT table; the same rows feed HTML, raster and raw ESC/POS.
+fn z_report_vat_lines(
+    doc: &ZReportDoc,
+    lang: &str,
+    money: impl Fn(f64) -> String,
+) -> Vec<(String, String)> {
+    if doc.tax_total <= 0.0 || !doc.vat_breakdown.is_object() {
+        return vec![];
+    }
+    let mut out = vec![(receipt_label(lang, "VAT section").into(), String::new())];
+    for (key, channel) in [("byRate", false), ("byChannel", true)] {
+        for row in doc.vat_breakdown[key].as_array().into_iter().flatten() {
+            let heading = if channel {
+                let label = match row["channel"].as_str().unwrap_or("") {
+                    "dine_in" => "Dine-in",
+                    "takeaway" => "Take-away marker",
+                    "own_delivery" => "Delivery marker",
+                    "platform" => "Delivery platform",
+                    _ => "Other",
+                };
+                format!(
+                    "{} ({})",
+                    receipt_label(lang, label),
+                    row["orders"].as_i64().unwrap_or(0)
+                )
+            } else {
+                row["vatRatePercent"]
+                    .as_f64()
+                    .map(|rate| format!("{rate} %"))
+                    .unwrap_or_else(|| receipt_label(lang, "Rate not recorded").into())
+            };
+            out.push((heading, String::new()));
+            for (field, label) in [
+                ("netCents", "Net"),
+                ("vatCents", "Tax"),
+                ("grossCents", "Gross"),
+            ] {
+                out.push((
+                    receipt_label(lang, label).into(),
+                    money(row[field].as_f64().unwrap_or(0.0) / 100.0),
+                ));
+            }
+        }
+    }
+    let tips = doc.vat_breakdown["tipsCents"].as_f64().unwrap_or(0.0);
+    if tips != 0.0 {
+        out.push((
+            receipt_label(lang, "Tips outside VAT").into(),
+            money(tips / 100.0),
+        ));
+    }
+    out
+}
+
 fn z_report_sales_lines(doc: &ZReportDoc) -> Vec<(&'static str, f64, ZSalesSign)> {
     let mut lines = vec![("Gross", doc.gross_sales, ZSalesSign::Plain)];
     for (label_key, amount) in [
@@ -2845,7 +3048,11 @@ impl GiftCloseRow {
 /// On a gift-bound checkout they replace the generic expected/counted/variance
 /// lines. The gift liability cash is a separately labelled drawer movement
 /// (liability funding): it is never folded into sales, tenders or tax.
-fn gift_close_rows(line: &GiftCloseDrawerLine, comma: bool) -> Vec<GiftCloseRow> {
+fn gift_close_rows(
+    line: &GiftCloseDrawerLine,
+    comma: bool,
+    zone: Option<chrono_tz::Tz>,
+) -> Vec<GiftCloseRow> {
     let currency = line.currency.as_str();
     let mut rows = vec![
         GiftCloseRow::plain(
@@ -2879,7 +3086,7 @@ fn gift_close_rows(line: &GiftCloseDrawerLine, comma: bool) -> Vec<GiftCloseRow>
     if let Some(closed_at) = non_empty_receipt_value(&line.canonical_closed_at) {
         rows.push(GiftCloseRow::plain(
             "Close confirmed",
-            format_datetime_human(closed_at),
+            format_datetime_human(closed_at, zone),
         ));
     }
     rows
@@ -2951,7 +3158,11 @@ fn gift_close_rows_html(rows: Vec<GiftCloseRow>, lang: &str) -> String {
 
 /// "Gift card drawer closes (confirmed)" section of a Z report: one block per
 /// confirmed original. Empty for an ordinary Z report.
-fn z_report_gift_close_section_html(doc: &ZReportDoc, lang: &str) -> String {
+fn z_report_gift_close_section_html(
+    doc: &ZReportDoc,
+    lang: &str,
+    zone: Option<chrono_tz::Tz>,
+) -> String {
     if doc.gift_close_lines.is_empty() {
         return String::new();
     }
@@ -2970,7 +3181,10 @@ fn z_report_gift_close_section_html(doc: &ZReportDoc, lang: &str) -> String {
                 esc(staff_name),
             ));
         }
-        html.push_str(&gift_close_rows_html(gift_close_rows(line, false), lang));
+        html.push_str(&gift_close_rows_html(
+            gift_close_rows(line, false, zone),
+            lang,
+        ));
     }
     html.push_str("</div>");
     html
@@ -3217,47 +3431,21 @@ fn append_html_header_block(
     body.push_str("</div>"); // close branch-info
 }
 
-/// Format an ISO-8601 timestamp to `DD/MM/YYYY HH:MM`.
-fn format_datetime_human(iso: &str) -> String {
-    DateTime::parse_from_rfc3339(iso)
-        .map(|dt| {
-            dt.with_timezone(&Local)
-                .format("%d/%m/%Y %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|_| {
-            let trimmed = &iso[..iso.len().min(26)];
-            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f")
-                .map(|dt| dt.format("%d/%m/%Y %H:%M").to_string())
-                .unwrap_or_else(|_| iso.to_string())
-        })
+/// Format a stored timestamp as `DD/MM/YYYY HH:MM` on the store's clock
+/// (`LayoutConfig::store_time_zone`; `None`: the device's). Text without an
+/// offset is SQLite's `datetime('now')`, which is UTC. Unparseable text prints
+/// as given.
+fn format_datetime_human(iso: &str, zone: Option<chrono_tz::Tz>) -> String {
+    crate::store_time::format_stored(iso, zone, "%d/%m/%Y %H:%M").unwrap_or_else(|| iso.to_string())
 }
 
-/// Format a stored timestamp as `HH:MM` in the store's own time: the time
-/// zone of this device (Windows), as `format_datetime_human` does. A value
-/// without an offset is SQLite's `datetime('now')`, which is UTC.
+/// Format a stored timestamp as `HH:MM` on the store's clock, as
+/// `format_datetime_human` does.
 ///
 /// The Z slip printed each staff member's shift times by slicing the stored
 /// UTC text, so a Greek store saw them three hours early (Tomikro, 07/10/2026).
-fn format_time_hm_local(iso: &str) -> Option<String> {
-    let value = iso.trim();
-    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
-        return Some(parsed.with_timezone(&Local).format("%H:%M").to_string());
-    }
-    [
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%d %H:%M",
-    ]
-    .iter()
-    .find_map(|format| chrono::NaiveDateTime::parse_from_str(value, format).ok())
-    .map(|naive| {
-        naive
-            .and_utc()
-            .with_timezone(&Local)
-            .format("%H:%M")
-            .to_string()
-    })
+fn format_time_hm(iso: &str, zone: Option<chrono_tz::Tz>) -> Option<String> {
+    crate::store_time::format_stored(iso, zone, "%H:%M")
 }
 
 fn should_render_shift_checkout_driver_summary(doc: &ShiftCheckoutDoc) -> bool {
@@ -4598,7 +4786,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
             let render_delivery_block = should_render_delivery_block(doc);
-            let display_date = format_datetime_human(&doc.created_at);
+            let display_date = format_datetime_human(&doc.created_at, cfg.store_time_zone);
             let order_type_display = translate_order_type(lang, &doc.order_type);
             let delivery_method_only_payment = method_only_payment_label(doc, lang);
             let mut body = String::new();
@@ -4720,7 +4908,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         ));
                         body.push_str(&format!(
                             "<span class=\"item-price\">{}</span>",
-                            money_with_currency(item.total, cur)
+                            receipt_item_amount(item, money_with_currency(item.total, cur))
                         ));
                         body.push_str("</div>");
                         append_customizations_html_v2(&mut body, item, lang, !doc.kiosk_slip);
@@ -4743,6 +4931,9 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 // Totals
                 body.push_str("<hr>");
                 body.push_str("<table>");
+                for legend in &doc.vat_legend {
+                    body.push_str(&format!("<div>{}</div>", esc(legend)));
+                }
                 for total in &doc.totals {
                     let label = total_label_text(lang, total);
                     if total.emphasize {
@@ -4939,7 +5130,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         ));
                         body.push_str(&format!(
                             "<span class=\"item-price\">{}</span>",
-                            money(item.total)
+                            receipt_item_amount(item, money(item.total))
                         ));
                         body.push_str("</div>");
                         append_customizations_html_v2(&mut body, item, lang, !doc.kiosk_slip);
@@ -4965,6 +5156,9 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     esc(receipt_label(lang, "TOTALS"))
                 ));
                 body.push_str("<table>");
+                for legend in &doc.vat_legend {
+                    body.push_str(&format!("<div>{}</div>", esc(legend)));
+                }
                 for total in &doc.totals {
                     let label = total_label_text(lang, total);
                     if total.emphasize {
@@ -5089,8 +5283,11 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 "<div class=\"sec-head\">{}</div><div class=\"meta-grid\">",
                 esc(receipt_label(lang, "REPAIR INTAKE"))
             ));
-            let received_at = format_datetime_human(&doc.received_at);
-            let due_at = doc.due_at.as_deref().map(format_datetime_human);
+            let received_at = format_datetime_human(&doc.received_at, cfg.store_time_zone);
+            let due_at = doc
+                .due_at
+                .as_deref()
+                .map(|value| format_datetime_human(value, cfg.store_time_zone));
             for (label, value) in [
                 ("Repair", Some(doc.repair_number.as_str())),
                 ("Customer", doc.customer_display_name.as_deref()),
@@ -5171,7 +5368,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Type")),
                 esc(&doc.order_type),
                 esc(receipt_label(lang, "Date")),
-                esc(&doc.created_at),
+                esc(&format_datetime_human(&doc.created_at, cfg.store_time_zone)),
             ));
             // Table number
             if let Some(table) = doc
@@ -5367,7 +5564,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                  </div>",
                 esc(receipt_label(lang, "Order")),
                 esc(&doc.order_number),
-                esc(&format_datetime_human(&doc.created_at)),
+                esc(&format_datetime_human(&doc.created_at, cfg.store_time_zone)),
                 esc(&doc.order_type),
             ));
             // Delivery/customer info block
@@ -5419,7 +5616,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         body.push_str(&format!(
                             "<div class=\"line\"><span>{}</span><span>{}</span></div>",
                             esc(&item.name),
-                            money_with_currency(item.total, cur)
+                            receipt_item_amount(item, money_with_currency(item.total, cur))
                         ));
                         append_customizations_html(&mut body, item, lang, !doc.kiosk_slip);
                     } else {
@@ -5427,7 +5624,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         body.push_str(&format!(
                             "<div class=\"line\"><span>{}</span><span>{}</span></div>",
                             esc(&item.name),
-                            money_with_currency(item.total, cur)
+                            receipt_item_amount(item, money_with_currency(item.total, cur))
                         ));
                     }
                     if let Some(note) = item
@@ -5443,6 +5640,9 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             body.push_str("</div>");
             // Totals section
             body.push_str("<div class=\"section\">");
+            for legend in &doc.vat_legend {
+                body.push_str(&format!("<div>{}</div>", esc(legend)));
+            }
             for line in &doc.totals {
                 let label = total_label_text(lang, line);
                 if line.emphasize {
@@ -5527,9 +5727,9 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Staff")),
                 esc(&doc.staff_name),
                 esc(receipt_label(lang, "Check-in")),
-                esc(&format_datetime_human(&doc.check_in)),
+                esc(&format_datetime_human(&doc.check_in, cfg.store_time_zone)),
                 esc(receipt_label(lang, "Check-out")),
-                esc(&format_datetime_human(&doc.check_out)),
+                esc(&format_datetime_human(&doc.check_out, cfg.store_time_zone)),
             );
             if !should_render_minimal_shift_checkout(doc) {
                 body.push_str(&format!(
@@ -5586,7 +5786,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     }
                     if let Some(gift_close) = doc.gift_close.as_ref() {
                         body.push_str(&gift_close_rows_html(
-                            gift_close_rows(gift_close, false),
+                            gift_close_rows(gift_close, false, cfg.store_time_zone),
                             lang,
                         ));
                     } else {
@@ -5673,18 +5873,33 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     )
                 })
                 .unwrap_or_default();
+            // Offline week (founder 21/10/2026): a Z closed on this till
+            // without a connection says so under its title until the server
+            // confirms it.
+            let pending_upload_line = if doc.pending_upload {
+                format!(
+                    "<div class=\"center\"><strong>{}</strong></div>",
+                    esc(receipt_label(lang, Z_PENDING_UPLOAD_LABEL))
+                )
+            } else {
+                String::new()
+            };
             let mut body = format!(
-                "<div class=\"center\"><strong>{}</strong></div>\
+                "<div class=\"center\"><strong>{}</strong></div>{}\
                  <div class=\"section\">\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  {}{}\
                  </div>",
                 esc(receipt_label(lang, "Z REPORT")),
+                pending_upload_line,
                 esc(receipt_label(lang, "Date")),
                 esc(&doc.report_date),
                 esc(receipt_label(lang, "Generated")),
-                esc(&doc.generated_at),
+                esc(&format_datetime_human(
+                    &doc.generated_at,
+                    cfg.store_time_zone
+                )),
                 shift_line,
                 terminal_line,
             );
@@ -5712,6 +5927,14 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 ));
             }
             body.push_str("</div>");
+
+            for (label, amount) in z_report_vat_lines(doc, lang, money) {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(&label),
+                    esc(&amount)
+                ));
+            }
 
             // Payments: only the methods that took money.
             let mut payments_html = String::new();
@@ -5829,7 +6052,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     body.push_str(&format!(
                         "<div><strong>{}</strong></div><div>{}</div>",
                         esc(&title),
-                        esc(&z_report_phone_shift_time_range(shift)),
+                        esc(&z_report_phone_shift_time_range(shift, cfg.store_time_zone)),
                     ));
                     for (label, value) in rows {
                         body.push_str(&format!(
@@ -5880,6 +6103,23 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     esc(receipt_label(lang, "Total Expenses")),
                     money(z_report_total_expenses_including_staff(doc)),
                 ));
+            }
+
+            // Tips by staff, after the staff payments (salon, 21/10/2026).
+            let staff_tip_rows = z_report_staff_tip_rows(doc);
+            if !staff_tip_rows.is_empty() {
+                body.push_str(&format!(
+                    "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                    esc(receipt_label(lang, "TIPS BY STAFF"))
+                ));
+                for tip in staff_tip_rows {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(&tip.staff_name),
+                        money(tip.amount),
+                    ));
+                }
+                body.push_str("</div>");
             }
 
             // Platforms (efood/wolt/...): platform-fleet count+amount, own-driver
@@ -5936,7 +6176,28 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Variance")),
                 signed_money(doc.cash_variance, money),
             ));
-            body.push_str(&z_report_gift_close_section_html(doc, lang));
+            body.push_str(&z_report_gift_close_section_html(
+                doc,
+                lang,
+                cfg.store_time_zone,
+            ));
+
+            // Ω4: the records a manager set aside, kept on this till.
+            let not_on_server = z_report_not_on_server_rows(doc);
+            if !not_on_server.is_empty() {
+                body.push_str(&format!(
+                    "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                    esc(receipt_label(lang, Z_NOT_ON_SERVER_LABEL)),
+                ));
+                for (label_key, amount) in not_on_server {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, label_key)),
+                        amount.map(money).unwrap_or_default(),
+                    ));
+                }
+                body.push_str("</div>");
+            }
 
             body.push_str(&format!(
                 "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
@@ -6135,6 +6396,7 @@ fn emit_z_report_gift_close_section(
     lang: &str,
     width: usize,
     comma: bool,
+    zone: Option<chrono_tz::Tz>,
 ) {
     if doc.gift_close_lines.is_empty() {
         return;
@@ -6152,7 +6414,7 @@ fn emit_z_report_gift_close_section(
         if let Some(staff_name) = gift_close_staff_name(line) {
             emit_pair(builder, receipt_label(lang, "Staff"), staff_name, width);
         }
-        emit_gift_close_rows(builder, gift_close_rows(line, comma), lang, width);
+        emit_gift_close_rows(builder, gift_close_rows(line, comma, zone), lang, width);
     }
 }
 
@@ -8403,7 +8665,7 @@ fn render_classic_customer_raster_exact_ttf(
     }
     let meta_line = format!(
         "{} | {}: {}",
-        format_datetime_human(&doc.created_at).replace(' ', " | "),
+        format_datetime_human(&doc.created_at, cfg.store_time_zone).replace(' ', " | "),
         type_label,
         order_type_display,
     );
@@ -8470,7 +8732,7 @@ fn render_classic_customer_raster_exact_ttf(
         }
         canvas.draw_pair(
             &format!("{} x {}", qty(item.quantity), item.name),
-            &money_locale(item.total, comma),
+            &receipt_item_amount(item, money_locale(item.total, comma)),
             preset.item_style,
         );
         let (with_items, without_items) = split_customizations(item);
@@ -8538,6 +8800,9 @@ fn render_classic_customer_raster_exact_ttf(
     }
 
     let mut emphasized_total: Option<&TotalsLine> = None;
+    for legend in &doc.vat_legend {
+        canvas.draw_wrapped(legend, BitmapAlign::Left, preset.customization_style);
+    }
     for total in &doc.totals {
         let raw_label = total_label_text(lang, total);
         let label = format!("{raw_label}:");
@@ -8744,7 +9009,7 @@ fn render_classic_customer_raster_exact_bitmap(
     }
     let meta_line = format!(
         "{} | {}: {}",
-        format_datetime_human(&doc.created_at).replace(' ', " | "),
+        format_datetime_human(&doc.created_at, cfg.store_time_zone).replace(' ', " | "),
         type_label,
         order_type_display,
     );
@@ -8814,7 +9079,7 @@ fn render_classic_customer_raster_exact_bitmap(
         }
         canvas.draw_pair_body(
             &format!("{} x {}", qty(item.quantity), item.name),
-            &money_locale(item.total, comma),
+            &receipt_item_amount(item, money_locale(item.total, comma)),
             false,
             canvas.normal_scale,
         );
@@ -8883,6 +9148,9 @@ fn render_classic_customer_raster_exact_bitmap(
         canvas.draw_rule();
     }
 
+    for legend in &doc.vat_legend {
+        canvas.draw_left_wrapped(legend, false, canvas.normal_scale);
+    }
     for total in &doc.totals {
         let raw_label = total_label_text(lang, total);
         let label = format!("{raw_label}:");
@@ -9148,6 +9416,7 @@ fn draw_z_report_gift_close_section(
     doc: &ZReportDoc,
     lang: &str,
     comma: bool,
+    zone: Option<chrono_tz::Tz>,
 ) {
     if doc.gift_close_lines.is_empty() {
         return;
@@ -9169,7 +9438,7 @@ fn draw_z_report_gift_close_section(
                 preset.item_style,
             );
         }
-        draw_gift_close_rows(canvas, preset, gift_close_rows(line, comma), lang);
+        draw_gift_close_rows(canvas, preset, gift_close_rows(line, comma, zone), lang);
     }
 }
 
@@ -9219,7 +9488,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             }
             canvas.draw_pair(
                 &label("Received on"),
-                &format_datetime_human(&doc.received_at),
+                &format_datetime_human(&doc.received_at, cfg.store_time_zone),
                 preset.meta_style,
             );
             if let Some(value) = doc
@@ -9230,7 +9499,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             {
                 canvas.draw_pair(
                     &label("Due"),
-                    &format_datetime_human(value),
+                    &format_datetime_human(value, cfg.store_time_zone),
                     preset.meta_style,
                 );
             }
@@ -9294,7 +9563,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             );
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Date")),
-                &format_datetime_human(&doc.created_at),
+                &format_datetime_human(&doc.created_at, cfg.store_time_zone),
                 preset.meta_style,
             );
             if let Some(table) = doc
@@ -9357,7 +9626,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                     }
                     canvas.draw_pair(
                         &format!("{} x {}", qty(item.quantity), item.name),
-                        &money_locale(item.total, comma),
+                        &receipt_item_amount(item, money_locale(item.total, comma)),
                         preset.item_style,
                     );
                     let (with_items, without_items) = split_customizations(item);
@@ -9428,12 +9697,12 @@ fn render_classic_non_customer_raster_exact_ttf(
             }
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Check-in")),
-                &format_datetime_human(&doc.check_in),
+                &format_datetime_human(&doc.check_in, cfg.store_time_zone),
                 preset.meta_style,
             );
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Check-out")),
-                &format_datetime_human(&doc.check_out),
+                &format_datetime_human(&doc.check_out, cfg.store_time_zone),
                 preset.meta_style,
             );
             if !should_render_minimal_shift_checkout(doc) {
@@ -9483,7 +9752,7 @@ fn render_classic_non_customer_raster_exact_ttf(
                         draw_gift_close_rows(
                             &mut canvas,
                             preset,
-                            gift_close_rows(gift_close, comma),
+                            gift_close_rows(gift_close, comma, cfg.store_time_zone),
                             lang,
                         );
                     } else {
@@ -9569,6 +9838,13 @@ fn render_classic_non_customer_raster_exact_ttf(
             let sections = z_report_sections(doc);
             let visible_staff = z_report_visible_staff(doc);
             canvas.draw_reverse_banner(receipt_label(lang, "Z REPORT"));
+            if doc.pending_upload {
+                canvas.draw_wrapped(
+                    receipt_label(lang, Z_PENDING_UPLOAD_LABEL),
+                    BitmapAlign::Center,
+                    preset.section_style,
+                );
+            }
             canvas.draw_pair(
                 receipt_label(lang, "Currency"),
                 cfg.currency_symbol.trim(),
@@ -9581,7 +9857,7 @@ fn render_classic_non_customer_raster_exact_ttf(
             );
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Generated")),
-                &format_datetime_human(&doc.generated_at),
+                &format_datetime_human(&doc.generated_at, cfg.store_time_zone),
                 preset.meta_style,
             );
             if let Some((label, value)) = z_report_shift_line(doc, lang) {
@@ -9610,6 +9886,11 @@ fn render_classic_non_customer_raster_exact_ttf(
                     }),
                     preset.item_style,
                 );
+            }
+            for (label, amount) in
+                z_report_vat_lines(doc, lang, |v| money_with_currency_locale(v, &cur, comma))
+            {
+                canvas.draw_pair(&label, &amount, preset.item_style);
             }
             // Founder rule (13/10/2026): only the payment methods that took
             // money.
@@ -9664,12 +9945,12 @@ fn render_classic_non_customer_raster_exact_ttf(
                     let ci_display = staff
                         .check_in
                         .as_deref()
-                        .and_then(format_time_hm_local)
+                        .and_then(|value| format_time_hm(value, cfg.store_time_zone))
                         .unwrap_or_else(|| "--:--".to_string());
                     let co_display = staff
                         .check_out
                         .as_deref()
-                        .and_then(format_time_hm_local)
+                        .and_then(|value| format_time_hm(value, cfg.store_time_zone))
                         .unwrap_or_else(|| "--:--".to_string());
                     let time_range = format!("  {} - {}", ci_display, co_display);
                     canvas.draw_text_line(&time_range, BitmapAlign::Left, preset.item_style);
@@ -9741,7 +10022,10 @@ fn render_classic_non_customer_raster_exact_ttf(
                     let (title, rows) = z_report_phone_shift_rows(lang, shift, &phone_money);
                     canvas.draw_text_line(&title, BitmapAlign::Left, preset.section_style);
                     canvas.draw_text_line(
-                        &format!("  {}", z_report_phone_shift_time_range(shift)),
+                        &format!(
+                            "  {}",
+                            z_report_phone_shift_time_range(shift, cfg.store_time_zone)
+                        ),
                         BitmapAlign::Left,
                         preset.item_style,
                     );
@@ -9806,6 +10090,24 @@ fn render_classic_non_customer_raster_exact_ttf(
                     ),
                     z_report_expense_total_style(&preset),
                 );
+            }
+
+            // --- Tips by staff, after the staff payments (salon, 21/10/2026) ---
+            let staff_tip_rows = z_report_staff_tip_rows(doc);
+            if !staff_tip_rows.is_empty() {
+                canvas.draw_rule();
+                canvas.draw_text_line(
+                    receipt_label(lang, "TIPS BY STAFF"),
+                    BitmapAlign::Center,
+                    preset.section_style,
+                );
+                for tip in staff_tip_rows {
+                    canvas.draw_pair(
+                        &format!("{}:", tip.staff_name),
+                        &money_with_currency_locale(tip.amount, &cur, comma),
+                        preset.item_style,
+                    );
+                }
             }
 
             // Platforms (efood/wolt/...): platform-fleet count+amount,
@@ -9876,7 +10178,34 @@ fn render_classic_non_customer_raster_exact_ttf(
                 }),
                 preset.total_style,
             );
-            draw_z_report_gift_close_section(&mut canvas, preset, doc, lang, comma);
+            draw_z_report_gift_close_section(
+                &mut canvas,
+                preset,
+                doc,
+                lang,
+                comma,
+                cfg.store_time_zone,
+            );
+
+            // Ω4: the records a manager set aside, kept on this till.
+            let not_on_server = z_report_not_on_server_rows(doc);
+            if !not_on_server.is_empty() {
+                canvas.draw_rule();
+                canvas.draw_text_line(
+                    receipt_label(lang, Z_NOT_ON_SERVER_LABEL),
+                    BitmapAlign::Center,
+                    preset.section_style,
+                );
+                for (label_key, amount) in not_on_server {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, label_key)),
+                        &amount
+                            .map(|value| money_with_currency_locale(value, &cur, comma))
+                            .unwrap_or_default(),
+                        preset.item_style,
+                    );
+                }
+            }
 
             // --- Daily totals ---
             canvas.draw_rule();
@@ -10011,13 +10340,26 @@ fn platform_icon(bytes: &'static [u8], slot: usize) -> Option<&'static GrayImage
 
 /// The slip's long-form date in the receipt language: «27 Αυγούστου 2026» as
 /// efood's own Greek slip writes it, «27 août 2026» in French, and so on
-/// (founder, 13/10/2026: every printout follows the app language).
-fn platform_long_date(lang: &str, created_at: &str) -> Option<String> {
-    let date_part = created_at.split(['T', ' ']).next()?;
-    let mut parts = date_part.split('-');
-    let year = parts.next()?;
-    let month: usize = parts.next()?.parse().ok()?;
-    let day: usize = parts.next()?.trim_start_matches('0').parse().ok()?;
+/// (founder, 13/10/2026: every printout follows the app language). The day is
+/// the store's: an order at 00:30 in Athens is 21:30 UTC the day before.
+fn platform_long_date(lang: &str, created_at: &str, zone: Option<chrono_tz::Tz>) -> Option<String> {
+    use chrono::Datelike;
+    let (year, month, day) = match crate::store_time::stored_local_date(created_at, zone) {
+        Some(date) => (
+            date.year().to_string(),
+            date.month() as usize,
+            date.day() as usize,
+        ),
+        // A bare calendar date has no instant to convert.
+        None => {
+            let date_part = created_at.split(['T', ' ']).next()?;
+            let mut parts = date_part.split('-');
+            let year = parts.next()?.to_string();
+            let month: usize = parts.next()?.parse().ok()?;
+            let day: usize = parts.next()?.trim_start_matches('0').parse().ok()?;
+            (year, month, day)
+        }
+    };
     if !(1..=12).contains(&month) {
         return None;
     }
@@ -10390,7 +10732,7 @@ fn draw_platform_slip_ttf(
     let center_x = left_block_x + left_block_w + center_pad;
     let center_w = (right_block_x - center_pad - center_x).max(60);
     let time_source = info.ready_at.as_deref().unwrap_or(&doc.created_at);
-    let time = format_datetime_human(time_source)
+    let time = format_datetime_human(time_source, cfg.store_time_zone)
         .split(' ')
         .nth(1)
         .map(|t| t.chars().take(5).collect::<String>())
@@ -10508,7 +10850,7 @@ fn draw_platform_slip_ttf(
                 canvas.draw_wrapped_at(&text, materials_x, materials_w, materials_style, canvas.y);
         }
         canvas.draw_text_line(
-            &money_with_currency_locale(item.total, cur, comma),
+            &receipt_item_amount(item, money_with_currency_locale(item.total, cur, comma)),
             BitmapAlign::Right,
             bold_of(body),
         );
@@ -10516,6 +10858,9 @@ fn draw_platform_slip_ttf(
 
     // ── Totals with the slip's heavy rules ──
     canvas.draw_thick_rule();
+    for legend in &doc.vat_legend {
+        canvas.draw_wrapped(legend, BitmapAlign::Left, preset.customization_style);
+    }
     for total in &doc.totals {
         let style = if total.emphasize {
             bold_of(scaled(body, 1.2))
@@ -10534,7 +10879,7 @@ fn draw_platform_slip_ttf(
 
     // ── Right-aligned date + long order code ──
     canvas.add_gap(preset.medium_gap);
-    if let Some(date) = platform_long_date(lang, &doc.created_at) {
+    if let Some(date) = platform_long_date(lang, &doc.created_at, cfg.store_time_zone) {
         canvas.draw_text_line(&date, BitmapAlign::Right, body);
     }
     if let Some(code) = info
@@ -10607,6 +10952,7 @@ fn emit_platform_slip_escpos(
     width: usize,
     comma: bool,
     use_star_commands: bool,
+    zone: Option<chrono_tz::Tz>,
 ) {
     fn set_reverse(builder: &mut EscPosBuilder, use_star: bool, on: bool) {
         if use_star {
@@ -10666,7 +11012,7 @@ fn emit_platform_slip_escpos(
         .text(&format!(
             "{} {}",
             order_type_display,
-            format_datetime_human(&doc.created_at)
+            format_datetime_human(&doc.created_at, zone)
         ))
         .lf();
     let payment = platform_payment_line(info, doc, lang);
@@ -10727,11 +11073,14 @@ fn emit_platform_slip_escpos(
                 ))
                 .lf();
         }
-        let price = money_with_currency_locale(item.total, cur, comma);
+        let price = receipt_item_amount(item, money_with_currency_locale(item.total, cur, comma));
         let pad = width.saturating_sub(price.chars().count());
         builder.text(&format!("{}{}", " ".repeat(pad), price)).lf();
     }
     emit_rule(builder, width, '-');
+    for legend in &doc.vat_legend {
+        emit_wrapped(builder, legend, width);
+    }
     for total in &doc.totals {
         if total.emphasize {
             builder.bold(true);
@@ -10748,7 +11097,9 @@ fn emit_platform_slip_escpos(
     }
     emit_rule(builder, width, '-');
     builder.center();
-    builder.text(&format_datetime_human(&doc.created_at)).lf();
+    builder
+        .text(&format_datetime_human(&doc.created_at, zone))
+        .lf();
     if let Some(code) = info
         .external_order_id
         .as_deref()
@@ -10855,6 +11206,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 width,
                 comma,
                 use_star_commands,
+                cfg.store_time_zone,
             );
             if use_star_commands {
                 builder.lf().lf().lf().lf().star_cut();
@@ -10908,7 +11260,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     emit_pair(
                         &mut builder,
                         receipt_label(lang, "Date"),
-                        &format_datetime_human(&doc.created_at),
+                        &format_datetime_human(&doc.created_at, cfg.store_time_zone),
                         width,
                     );
                     if let Some(table) = doc
@@ -10987,7 +11339,8 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     // Date with full year + single-space pipes
                     let meta_line = format!(
                         "{} | {}: {}",
-                        format_datetime_human(&doc.created_at).replace(' ', " | "),
+                        format_datetime_human(&doc.created_at, cfg.store_time_zone)
+                            .replace(' ', " | "),
                         type_label,
                         order_type_display,
                     );
@@ -11201,9 +11554,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         builder.bold(false);
                     }
                     let item_price = if style.profile.currency_on_all {
-                        money_with_currency_locale(item.total, cur, comma)
+                        receipt_item_amount(
+                            item,
+                            money_with_currency_locale(item.total, cur, comma),
+                        )
                     } else {
-                        money_locale(item.total, comma)
+                        receipt_item_amount(item, money_locale(item.total, comma))
                     };
                     let qty_sep = if style.modern { "\u{00D7} " } else { " x " };
                     emit_item_line(
@@ -11246,6 +11602,9 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             } else {
                 // Classic: rule before totals
                 emit_rule(&mut builder, width, style.profile.block_rule);
+            }
+            for legend in &doc.vat_legend {
+                emit_wrapped(&mut builder, legend, width);
             }
             for (idx, total) in doc.totals.iter().enumerate() {
                 let raw_label = total_label_text(lang, total);
@@ -11442,7 +11801,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             emit_pair(
                 &mut builder,
                 label("Received on"),
-                &format_datetime_human(&doc.received_at),
+                &format_datetime_human(&doc.received_at, cfg.store_time_zone),
                 width,
             );
             if let Some(value) = doc
@@ -11454,7 +11813,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 emit_pair(
                     &mut builder,
                     label("Due"),
-                    &format_datetime_human(value),
+                    &format_datetime_human(value, cfg.store_time_zone),
                     width,
                 );
             }
@@ -11501,7 +11860,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let title = receipt_label(lang, "KITCHEN TICKET");
-            let display_date = format_datetime_human(&doc.created_at);
+            let display_date = format_datetime_human(&doc.created_at, cfg.store_time_zone);
             let order_type_display = translate_order_type(lang, &doc.order_type);
             if style.modern {
                 builder.center();
@@ -11712,7 +12071,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 cfg.currency_symbol.clone()
             };
             let cur = resolved_currency.as_str();
-            let display_date = format_datetime_human(&doc.created_at);
+            let display_date = format_datetime_human(&doc.created_at, cfg.store_time_zone);
             let slip_title = receipt_label(lang, "DELIVERY SLIP");
             let order_type_display = translate_order_type(lang, &doc.order_type);
             if style.modern {
@@ -11805,7 +12164,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         emit_wrapped(&mut builder, &cat_line, width);
                         builder.bold(false);
                     }
-                    let price = money_with_currency_locale(item.total, cur, comma);
+                    let price = receipt_item_amount(
+                        item,
+                        money_with_currency_locale(item.total, cur, comma),
+                    );
                     emit_item_line(&mut builder, &item.name, &price, width, style);
                     emit_item_customizations_escpos(
                         &mut builder,
@@ -11834,6 +12196,9 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             emit_section_header(&mut builder, receipt_label(lang, "TOTALS"), style, width);
             if style.profile.framed_totals {
                 emit_rule(&mut builder, width, style.profile.block_rule);
+            }
+            for legend in &doc.vat_legend {
+                emit_wrapped(&mut builder, legend, width);
             }
             for total in &doc.totals {
                 let label_text = total_label_text(lang, total);
@@ -11944,13 +12309,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Check-in"),
-                &format_datetime_human(&doc.check_in),
+                &format_datetime_human(&doc.check_in, cfg.store_time_zone),
                 width,
             );
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Check-out"),
-                &format_datetime_human(&doc.check_out),
+                &format_datetime_human(&doc.check_out, cfg.store_time_zone),
                 width,
             );
             if !should_render_minimal_shift_checkout(doc) {
@@ -12007,7 +12372,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     if let Some(gift_close) = doc.gift_close.as_ref() {
                         emit_gift_close_rows(
                             &mut builder,
-                            gift_close_rows(gift_close, comma),
+                            gift_close_rows(gift_close, comma, cfg.store_time_zone),
                             lang,
                             width,
                         );
@@ -12093,6 +12458,15 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .lf()
                 .bold(false)
                 .left();
+            if doc.pending_upload {
+                builder.center().bold(true);
+                emit_wrapped(
+                    &mut builder,
+                    receipt_label(lang, Z_PENDING_UPLOAD_LABEL),
+                    width,
+                );
+                builder.bold(false).left();
+            }
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Currency"),
@@ -12108,7 +12482,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Generated"),
-                &doc.generated_at,
+                &format_datetime_human(&doc.generated_at, cfg.store_time_zone),
                 width,
             );
             if let Some((label, value)) = z_report_shift_line(doc, lang) {
@@ -12145,6 +12519,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     &format_z_sales_amount(amount, sign, |value| money_locale(value, comma)),
                     width,
                 );
+            }
+            emit_rule(&mut builder, width, '-');
+
+            for (label, amount) in z_report_vat_lines(doc, lang, |v| money_locale(v, comma)) {
+                emit_pair(&mut builder, &label, &amount, width);
             }
             emit_rule(&mut builder, width, '-');
 
@@ -12187,12 +12566,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     let ci_display = staff
                         .check_in
                         .as_deref()
-                        .and_then(format_time_hm_local)
+                        .and_then(|value| format_time_hm(value, cfg.store_time_zone))
                         .unwrap_or_else(|| "--:--".to_string());
                     let co_display = staff
                         .check_out
                         .as_deref()
-                        .and_then(format_time_hm_local)
+                        .and_then(|value| format_time_hm(value, cfg.store_time_zone))
                         .unwrap_or_else(|| "--:--".to_string());
                     let time_range = format!("{} - {}", ci_display, co_display);
                     builder.text(&format!("  {}", time_range)).lf();
@@ -12270,7 +12649,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     let (title, rows) = z_report_phone_shift_rows(lang, shift, &phone_money);
                     builder.bold(true).text(&title).lf().bold(false);
                     builder
-                        .text(&format!("  {}", z_report_phone_shift_time_range(shift)))
+                        .text(&format!(
+                            "  {}",
+                            z_report_phone_shift_time_range(shift, cfg.store_time_zone)
+                        ))
                         .lf();
                     for (label, value) in rows {
                         emit_pair(&mut builder, &label, &value, width);
@@ -12331,6 +12713,27 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     ),
                     width,
                 );
+            }
+
+            // --- Tips by staff, after the staff payments (salon, 21/10/2026) ---
+            let staff_tip_rows = z_report_staff_tip_rows(doc);
+            if !staff_tip_rows.is_empty() {
+                emit_rule(&mut builder, width, '-');
+                builder
+                    .center()
+                    .bold(true)
+                    .text(receipt_label(lang, "TIPS BY STAFF"))
+                    .lf()
+                    .bold(false)
+                    .left();
+                for tip in staff_tip_rows {
+                    emit_pair(
+                        &mut builder,
+                        &tip.staff_name,
+                        &money_locale(tip.amount, comma),
+                        width,
+                    );
+                }
             }
 
             // --- Platforms (efood/wolt/...) ---
@@ -12407,7 +12810,35 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &signed_money(doc.cash_variance, |amount| money_locale(amount, comma)),
                 width,
             );
-            emit_z_report_gift_close_section(&mut builder, doc, lang, width, comma);
+            emit_z_report_gift_close_section(
+                &mut builder,
+                doc,
+                lang,
+                width,
+                comma,
+                cfg.store_time_zone,
+            );
+
+            // Ω4: the records a manager set aside, kept on this till.
+            let not_on_server = z_report_not_on_server_rows(doc);
+            if !not_on_server.is_empty() {
+                emit_rule(&mut builder, width, '-');
+                builder
+                    .bold(true)
+                    .text(receipt_label(lang, Z_NOT_ON_SERVER_LABEL))
+                    .lf()
+                    .bold(false);
+                for (label_key, amount) in not_on_server {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, label_key),
+                        &amount
+                            .map(|value| money_locale(value, comma))
+                            .unwrap_or_default(),
+                        width,
+                    );
+                }
+            }
 
             // --- Daily totals ---
             emit_rule(&mut builder, width, '=');
@@ -12953,9 +13384,9 @@ mod tests {
             ("repair_id", "not-a-uuid"),
             ("received_at", "not-a-time"),
             ("masked_identifier", "356938035643809"),
-            ("safe_device_label", "Diagnosis: board fault"),
-            ("branch_contact", "Address: 1 Main Street"),
-            ("safe_device_label", "Amount due EUR 99.00"),
+            ("safe_device_label", "PIN 1234"),
+            ("branch_contact", "password"),
+            ("safe_device_label", "CVV"),
             ("projection_source", "client_supplied"),
         ] {
             let mut value = serde_json::to_value(safe_repair_intake_doc()).unwrap();
@@ -13073,20 +13504,33 @@ mod tests {
     }
 
     #[test]
-    fn format_datetime_human_converts_rfc3339_timestamps_to_local_time() {
-        let iso = "2026-03-05T16:00:00Z";
-        let actual = format_datetime_human(iso);
-        let parsed = chrono::DateTime::parse_from_rfc3339(iso).expect("parse rfc3339");
-        let expected_local = parsed
+    fn format_datetime_human_converts_stored_timestamps_to_the_store_time() {
+        let iso = "2026-03-05T23:30:00Z";
+        assert_eq!(
+            format_datetime_human(iso, Some(chrono_tz::Europe::Athens)),
+            "06/03/2026 01:30"
+        );
+        assert_eq!(
+            format_datetime_human(iso, Some(chrono_tz::America::New_York)),
+            "05/03/2026 18:30"
+        );
+        // SQLite's offset-less `datetime('now')` text is UTC, not wall time.
+        assert_eq!(
+            format_datetime_human("2026-03-05 23:30:00", Some(chrono_tz::Europe::Zurich)),
+            "06/03/2026 00:30"
+        );
+        assert_eq!(
+            format_datetime_human("not a time", Some(chrono_tz::Europe::Zurich)),
+            "not a time"
+        );
+
+        // Without a store zone the device's clock is used, as before.
+        let expected_device = chrono::DateTime::parse_from_rfc3339(iso)
+            .expect("parse rfc3339")
             .with_timezone(&chrono::Local)
             .format("%d/%m/%Y %H:%M")
             .to_string();
-        let raw_utc = parsed.format("%d/%m/%Y %H:%M").to_string();
-
-        assert_eq!(actual, expected_local);
-        if expected_local != raw_utc {
-            assert_ne!(actual, raw_utc);
-        }
+        assert_eq!(format_datetime_human(iso, None), expected_device);
     }
 
     #[test]
@@ -14838,26 +15282,34 @@ mod tests {
     }
 
     #[test]
-    fn shift_times_are_the_devices_local_time_never_the_stored_utc_text() {
+    fn shift_times_are_the_stores_local_time_never_the_stored_utc_text() {
         // Tomikro, 07/10/2026: the Z slip showed 16:07 for a 19:07 Greek check-in.
+        let athens = Some(chrono_tz::Europe::Athens);
         let stored = "2026-10-06T16:07:12.689Z";
-        assert_eq!(format_time_hm_local(stored), Some(local_hm(stored)));
+        assert_eq!(format_time_hm(stored, athens).as_deref(), Some("19:07"));
         // The same instant written with an offset prints the same local time.
         assert_eq!(
-            format_time_hm_local("2026-10-06T19:07:12.689+03:00"),
-            Some(local_hm(stored))
+            format_time_hm("2026-10-06T19:07:12.689+03:00", athens).as_deref(),
+            Some("19:07")
         );
         // SQLite's datetime('now') carries no offset and is UTC.
         assert_eq!(
-            format_time_hm_local("2026-10-06 16:07:12"),
-            Some(local_hm("2026-10-06T16:07:12Z"))
+            format_time_hm("2026-10-06 16:07:12", athens).as_deref(),
+            Some("19:07")
         );
         assert_eq!(
-            format_time_hm_local(" 2026-10-06T16:07:12Z "),
-            Some(local_hm(stored))
+            format_time_hm(" 2026-10-06T16:07:12Z ", athens).as_deref(),
+            Some("19:07")
         );
-        assert_eq!(format_time_hm_local("not a time"), None);
-        assert_eq!(format_time_hm_local(""), None);
+        // A Swiss store reads the same instant an hour earlier.
+        assert_eq!(
+            format_time_hm(stored, Some(chrono_tz::Europe::Zurich)).as_deref(),
+            Some("18:07")
+        );
+        assert_eq!(format_time_hm("not a time", athens), None);
+        assert_eq!(format_time_hm("", athens), None);
+        // Without a store zone the device's clock is used, as before.
+        assert_eq!(format_time_hm(stored, None), Some(local_hm(stored)));
     }
 
     #[test]
@@ -14867,6 +15319,7 @@ mod tests {
             language: "en".to_string(),
             classic_customer_render_mode: ClassicCustomerRenderMode::Text,
             footer_text: None,
+            store_time_zone: Some(chrono_tz::Europe::Athens),
             ..LayoutConfig::default()
         };
         let check_in = "2026-10-06T16:07:12.689Z";
@@ -14893,15 +15346,15 @@ mod tests {
 
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
 
-        let expected = format!("{} - {}", local_hm(check_in), local_hm(check_out));
-        assert!(text.contains(&expected), "missing {expected} in {text}");
-        assert!(text.contains(&format!("{} - --:--", local_hm(check_in))));
-        if local_hm(check_in) != "16:07" {
-            assert!(
-                !text.contains("16:07 - 00:05"),
-                "printed the stored UTC text"
-            );
-        }
+        assert!(
+            text.contains("19:07 - 03:05"),
+            "missing store times in {text}"
+        );
+        assert!(text.contains("19:07 - --:--"), "{text}");
+        assert!(
+            !text.contains("16:07 - 00:05"),
+            "printed the stored UTC text"
+        );
     }
 
     #[test]
@@ -15133,18 +15586,16 @@ mod tests {
             template: ReceiptTemplate::Classic,
             language: "en".to_string(),
             classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            store_time_zone: Some(chrono_tz::America::New_York),
             ..LayoutConfig::default()
         };
         let doc = ReceiptDocument::ShiftCheckout(sample_driver_shift_checkout_doc());
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
-        let expected_checkout = chrono::DateTime::parse_from_rfc3339("2026-03-05T16:00:00Z")
-            .expect("parse check-out")
-            .with_timezone(&chrono::Local)
-            .format("%d/%m/%Y %H:%M")
-            .to_string();
 
         assert!(text.contains("Check-out"));
-        assert!(text.contains(&expected_checkout));
+        // 16:00 UTC on 05/03/2026 is 11:00 in New York (EST, before DST).
+        assert!(text.contains("05/03/2026 11:00"), "{text}");
+        assert!(!text.contains("05/03/2026 16:00"), "{text}");
         assert!(text.contains("Starting Amount"));
         assert!(text.contains("Total Sells"));
         assert!(text.contains("Tips Received"));
@@ -15367,25 +15818,17 @@ mod tests {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
             language: "en".to_string(),
+            store_time_zone: Some(chrono_tz::Europe::Zurich),
             ..LayoutConfig::default()
         };
         let doc = ReceiptDocument::ShiftCheckout(sample_driver_shift_checkout_doc());
         let html = render_html(&doc, &cfg);
-        let expected_check_in = chrono::DateTime::parse_from_rfc3339("2026-03-05T08:00:00Z")
-            .expect("parse check-in")
-            .with_timezone(&chrono::Local)
-            .format("%d/%m/%Y %H:%M")
-            .to_string();
-        let expected_check_out = chrono::DateTime::parse_from_rfc3339("2026-03-05T16:00:00Z")
-            .expect("parse check-out")
-            .with_timezone(&chrono::Local)
-            .format("%d/%m/%Y %H:%M")
-            .to_string();
 
         assert!(html.contains("Check-in"));
         assert!(html.contains("Check-out"));
-        assert!(html.contains(&expected_check_in));
-        assert!(html.contains(&expected_check_out));
+        // 08:00 and 16:00 UTC are 09:00 and 17:00 in Zurich (CET).
+        assert!(html.contains("05/03/2026 09:00"), "{html}");
+        assert!(html.contains("05/03/2026 17:00"), "{html}");
         assert!(html.contains("Starting Amount"));
         assert!(html.contains("Total Sells"));
         assert!(html.contains(">Return<"));
@@ -16697,6 +17140,8 @@ mod tests {
     ];
 
     const GIFT_CLOSED_AT: &str = "2026-09-30T18:05:00Z";
+    /// `GIFT_CLOSED_AT` on an Athens store's clock (`gift_close_text_cfg`).
+    const GIFT_CLOSED_AT_ATHENS: &str = "30/09/2026 21:05";
 
     fn sample_gift_close_line() -> GiftCloseDrawerLine {
         GiftCloseDrawerLine {
@@ -16789,6 +17234,7 @@ mod tests {
             classic_customer_render_mode: ClassicCustomerRenderMode::Text,
             currency_symbol: "$".to_string(),
             footer_text: None,
+            store_time_zone: Some(chrono_tz::Europe::Athens),
             ..LayoutConfig::default()
         }
     }
@@ -16859,7 +17305,7 @@ mod tests {
     #[test]
     fn gift_close_checkout_text_prints_the_canonical_drawer_in_the_close_currency() {
         let cfg = gift_close_text_cfg();
-        let closed_at = format_datetime_human(GIFT_CLOSED_AT);
+        let closed_at = GIFT_CLOSED_AT_ATHENS;
         let ordinary = escpos_text(&sample_gift_checkout("cashier", None), &cfg);
         let text = escpos_text(
             &sample_gift_checkout("cashier", Some(sample_gift_close_line())),
@@ -16880,7 +17326,7 @@ mod tests {
             "-3.45 EUR",
             "Currency",
             "Close confirmed",
-            closed_at.as_str(),
+            closed_at,
         ] {
             assert!(
                 drawer.contains(expected),
@@ -16924,7 +17370,7 @@ mod tests {
         let cfg = gift_close_text_cfg();
         let close_row = format!(
             "<span>Close confirmed</span><span>{}</span>",
-            format_datetime_human(GIFT_CLOSED_AT)
+            GIFT_CLOSED_AT_ATHENS
         );
         let ordinary = render_html(&sample_gift_checkout("cashier", None), &cfg);
         let html = render_html(
@@ -16993,7 +17439,7 @@ mod tests {
     #[test]
     fn gift_close_z_report_text_adds_gift_rows_without_touching_sales() {
         let cfg = gift_close_text_cfg();
-        let closed_at = format_datetime_human(GIFT_CLOSED_AT);
+        let closed_at = GIFT_CLOSED_AT_ATHENS;
         let ordinary = escpos_text(&ReceiptDocument::ZReport(sample_gift_z_report(false)), &cfg);
         let text = escpos_text(&ReceiptDocument::ZReport(sample_gift_z_report(true)), &cfg);
 
@@ -17041,7 +17487,7 @@ mod tests {
             "-3.45 EUR",
             "Currency",
             "Close confirmed",
-            closed_at.as_str(),
+            closed_at,
         ] {
             assert!(
                 section.contains(expected),
@@ -17064,7 +17510,7 @@ mod tests {
         let cfg = gift_close_text_cfg();
         let close_row = format!(
             "<span>Close confirmed</span><span>{}</span>",
-            format_datetime_human(GIFT_CLOSED_AT)
+            GIFT_CLOSED_AT_ATHENS
         );
         let ordinary = render_html(&ReceiptDocument::ZReport(sample_gift_z_report(false)), &cfg);
         let html = render_html(&ReceiptDocument::ZReport(sample_gift_z_report(true)), &cfg);
@@ -17938,6 +18384,52 @@ mod tests {
         z
     }
 
+    #[test]
+    fn z_staff_tips_print_in_each_app_language_and_only_with_money() {
+        for (lang, label) in [
+            ("en", "TIPS BY STAFF"),
+            ("el", "ΦΙΛΟΔΩΡΗΜΑΤΑ ΑΝΑ ΥΠΑΛΛΗΛΟ"),
+            ("de", "TRINKGELD PRO MITARBEITER"),
+            ("fr", "POURBOIRES PAR EMPLOYÉ"),
+            ("it", "MANCE PER DIPENDENTE"),
+            ("sq", "BAKSHISHE SIPAS STAFIT"),
+        ] {
+            let cfg = slip_cfg(lang, "CHF");
+            let mut z = tomikro_z_report();
+            z.currency = Some("CHF".into());
+            z.staff_tips = vec![
+                ZReportStaffTipEntry {
+                    staff_id: "stylist".into(),
+                    staff_name: "Maria".into(),
+                    amount: 12.34,
+                },
+                ZReportStaffTipEntry {
+                    staff_id: "zero".into(),
+                    staff_name: "Zero stylist".into(),
+                    amount: 0.0,
+                },
+            ];
+            assert_eq!(receipt_label(lang, "TIPS BY STAFF"), label);
+            assert!(render_html(&ReceiptDocument::ZReport(z.clone()), &cfg).contains(label));
+            // Text printer bytes use their configured code page, not UTF-8.
+            // Names and amounts here are ASCII on both HTML and ESC/POS.
+            for output in html_and_text(&ReceiptDocument::ZReport(z.clone()), &cfg) {
+                if lang == "en" {
+                    assert!(output.contains(label));
+                }
+                assert!(output.contains("Maria"));
+                assert!(output.contains("12.34") || output.contains("12,34"));
+                assert!(!output.contains("Zero stylist"));
+                assert!(!output.contains('€'));
+            }
+            z.staff_tips[0].amount = 0.0;
+            for output in html_and_text(&ReceiptDocument::ZReport(z), &cfg) {
+                assert!(!output.contains(label));
+                assert!(!output.contains("Maria"));
+            }
+        }
+    }
+
     /// Founder rule 13/10/2026 (phones hand over to the Main): the Z staff
     /// section prints the unit's phone shifts after the local staff, each
     /// with its phone, orders, the money it took, its count and its handover
@@ -18504,31 +18996,51 @@ mod tests {
     #[test]
     fn platform_slip_date_follows_the_app_language() {
         let created = "2026-08-27T10:00:00Z";
+        let athens = Some(chrono_tz::Europe::Athens);
         assert_eq!(
-            platform_long_date("el", created).as_deref(),
+            platform_long_date("el", created, athens).as_deref(),
             Some("27 Αυγούστου 2026")
         );
         assert_eq!(
-            platform_long_date("fr", created).as_deref(),
+            platform_long_date("fr", created, athens).as_deref(),
             Some("27 août 2026")
         );
         assert_eq!(
-            platform_long_date("de", created).as_deref(),
+            platform_long_date("de", created, athens).as_deref(),
             Some("27. August 2026")
         );
         assert_eq!(
-            platform_long_date("it", created).as_deref(),
+            platform_long_date("it", created, athens).as_deref(),
             Some("27 agosto 2026")
         );
         assert_eq!(
-            platform_long_date("sq", created).as_deref(),
+            platform_long_date("sq", created, athens).as_deref(),
             Some("27 gusht 2026")
         );
         assert_eq!(
-            platform_long_date("en", created).as_deref(),
+            platform_long_date("en", created, athens).as_deref(),
             Some("27 August 2026")
         );
-        assert_eq!(platform_long_date("fr", "2026-13-01"), None);
+        assert_eq!(platform_long_date("fr", "2026-13-01", athens), None);
+        // A bare calendar date prints as given.
+        assert_eq!(
+            platform_long_date("en", "2026-08-27", athens).as_deref(),
+            Some("27 August 2026")
+        );
+    }
+
+    #[test]
+    fn platform_slip_date_is_the_stores_day_not_the_utc_day() {
+        // 00:30 on 27/08 in Athens is still 26/08 in UTC.
+        let created = "2026-08-26T21:30:00Z";
+        assert_eq!(
+            platform_long_date("el", created, Some(chrono_tz::Europe::Athens)).as_deref(),
+            Some("27 Αυγούστου 2026")
+        );
+        assert_eq!(
+            platform_long_date("en", created, Some(chrono_tz::America::New_York)).as_deref(),
+            Some("26 August 2026")
+        );
     }
 
     #[test]
@@ -18607,6 +19119,100 @@ mod tests {
                     assert_eq!(amounts, 0, "double sign {bad:?} in:\n{output}");
                 }
             }
+        }
+    }
+
+    /// Offline week (founder 21/10/2026): a Z closed on this till without a
+    /// connection prints a pending-upload header under its title, and the
+    /// records a manager set aside print in a "Not on the server" section,
+    /// in the store's language; any other Z prints neither.
+    #[test]
+    fn a_local_z_prints_its_pending_upload_header_and_the_set_aside_records() {
+        let local = ReceiptDocument::ZReport(ZReportDoc {
+            report_date: "2026-10-21".to_string(),
+            generated_at: "2026-10-21T22:00:00Z".to_string(),
+            pending_upload: true,
+            not_on_server: vec![
+                ZReportNotOnServerEntry {
+                    table: "payments".to_string(),
+                    amount: Some(12.5),
+                },
+                ZReportNotOnServerEntry {
+                    table: "staff_shifts".to_string(),
+                    amount: None,
+                },
+            ],
+            ..ZReportDoc::default()
+        });
+        let online = ReceiptDocument::ZReport(ZReportDoc {
+            report_date: "2026-10-21".to_string(),
+            generated_at: "2026-10-21T22:00:00Z".to_string(),
+            ..ZReportDoc::default()
+        });
+
+        let greek = LayoutConfig {
+            language: "el".to_string(),
+            ..LayoutConfig::default()
+        };
+        let html = render_html(&local, &greek);
+        assert!(html.contains("Αναμένει αποστολή: έκλεισε σε αυτό το ταμείο χωρίς σύνδεση"));
+        assert!(html.contains("ΔΕΝ ΕΦΤΑΣΑΝ ΣΤΟΝ ΔΙΑΚΟΜΙΣΤΗ"));
+        assert!(html.contains("Πληρωμή"));
+        assert!(html.contains("Βάρδια"));
+        let header = html.find("Αναμένει αποστολή").unwrap();
+        let title = html.find(receipt_label("el", "Z REPORT")).unwrap();
+        assert!(title < header, "the header sits under the title");
+        let plain = render_html(&online, &greek);
+        assert!(!plain.contains("Αναμένει αποστολή"));
+        assert!(!plain.contains("ΔΕΝ ΕΦΤΑΣΑΝ ΣΤΟΝ ΔΙΑΚΟΜΙΣΤΗ"));
+
+        for lang in ["el", "de", "fr", "it", "sq"] {
+            for key in [
+                Z_PENDING_UPLOAD_LABEL,
+                Z_NOT_ON_SERVER_LABEL,
+                "Payment",
+                "Driver earning",
+                "Cash return",
+                "Record",
+            ] {
+                assert_ne!(receipt_label(lang, key), key, "{lang}: {key}");
+            }
+        }
+
+        let english = LayoutConfig::default();
+        let text = escpos_text(&local, &english);
+        assert!(text.contains("Pending upload"));
+        assert!(text.contains(Z_NOT_ON_SERVER_LABEL));
+        assert!(text.contains("12.50") || text.contains("12,50"));
+        let plain_text = escpos_text(&online, &english);
+        assert!(!plain_text.contains("Pending upload"));
+        assert!(!plain_text.contains(Z_NOT_ON_SERVER_LABEL));
+    }
+
+    #[test]
+    fn repairs_p5_print_filter_matches_only_secret_tokens() {
+        for value in [
+            "Main Street",
+            "Triumph Street Triple",
+            "Priceman",
+            "Total Repair",
+            "pinwheel",
+            "passwordless",
+            "\u{03b1}pin\u{03b2}",
+            "Payment receipt",
+            "VAT",
+        ] {
+            assert_eq!(sanitize_repair_print_text(value, 160).unwrap(), value);
+        }
+        for value in [
+            "PIN 1234",
+            "password",
+            "cvv",
+            "pan",
+            "(PaN)",
+            "safe/PASSWORD",
+        ] {
+            assert!(sanitize_repair_print_text(value, 160).is_err(), "{value}");
         }
     }
 }

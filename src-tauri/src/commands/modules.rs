@@ -378,7 +378,8 @@ pub(crate) async fn finalize_repair_access_if_signed_in(
     access: &AuthoritativeRepairAccess,
     pending: &crate::repairs::RepairAccessReconciliation,
 ) -> Result<&'static str, String> {
-    let Some(persisted_session) = storage::session_get_strict()? else {
+    let (session_generation, persisted_session) = storage::repair_session_snapshot()?;
+    let Some(persisted_session) = persisted_session else {
         return Ok("pending_staff_session");
     };
     let staff_session_id = persisted_staff_session_id(&persisted_session)?;
@@ -390,12 +391,21 @@ pub(crate) async fn finalize_repair_access_if_signed_in(
         branch_id: access.branch_id.clone(),
         terminal_id: access.terminal_id.clone(),
     };
+    let keep_numbering_lease = {
+        let connection = db
+            .conn
+            .lock()
+            .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE".to_string())?;
+        crate::repairs::keep_offline_numbering_lease(&connection)?
+    };
     let bootstrap = crate::repair_transport::send_repair_actor_bootstrap_request(
         &base_url,
         &api_key,
         Some(&persisted_session),
         &native_scope,
         &staff_session_id,
+        keep_numbering_lease,
+        session_generation,
     )
     .await
     .map_err(|error| error.code().to_string())?;
@@ -470,15 +480,32 @@ pub async fn modules_fetch_from_admin(
                     return Err("REPAIR_AUTHORITATIVE_IDENTITY_MISMATCH".to_string());
                 }
             }
-            let pending = crate::repairs::begin_bound_authoritative_access_reconciliation(
-                &db,
-                &repair_access.organization_id,
-                &repair_access.branch_id,
-                &repair_access.terminal_id,
-                repair_access.repairs_enabled,
-                access_decision,
-                binding_digest.as_deref(),
-            )?;
+            // The decision waits for active repair readers to drain; it runs on
+            // the blocking pool so that wait never parks a runtime worker.
+            let pending = {
+                let app = app.clone();
+                let organization_id = repair_access.organization_id.clone();
+                let branch_id = repair_access.branch_id.clone();
+                let decision_terminal_id = repair_access.terminal_id.clone();
+                let repairs_enabled = repair_access.repairs_enabled;
+                let binding_digest = binding_digest.clone();
+                crate::database_lock::run_blocking_command(
+                    "modules_access_reconciliation",
+                    move || {
+                        let db = app.state::<db::DbState>();
+                        crate::repairs::begin_bound_authoritative_access_reconciliation(
+                            &db,
+                            &organization_id,
+                            &branch_id,
+                            &decision_terminal_id,
+                            repairs_enabled,
+                            access_decision,
+                            binding_digest.as_deref(),
+                        )
+                    },
+                )
+                .await?
+            };
             let repair_access_state = if pending.is_disabled() {
                 "module_required"
             } else {
@@ -609,8 +636,19 @@ pub async fn modules_fetch_from_admin(
         }
         Err(fetch_err) => {
             let repair_access_retained = if is_network_or_server_failure(&fetch_err) {
-                crate::repairs::retain_verified_access_after_network_failure(&db, access_decision)
-                    .is_ok()
+                let app = app.clone();
+                crate::database_lock::run_blocking_command(
+                    "modules_access_network_fallback",
+                    move || {
+                        let db = app.state::<db::DbState>();
+                        crate::repairs::retain_verified_access_after_network_failure(
+                            &db,
+                            access_decision,
+                        )
+                    },
+                )
+                .await
+                .is_ok()
             } else {
                 let _ = crate::repairs::latch_authoritative_access_pending(access_decision);
                 false

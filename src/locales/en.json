@@ -1,4 +1,10 @@
 {
+  "missedPlatformOrders": {
+    "title_one": "{{count}} platform order was declined while the till was offline",
+    "title_other": "{{count}} platform orders were declined while the till was offline",
+    "body": "≈{{total}} in orders declined automatically (till offline). Keep the till connected to receive platform orders.",
+    "dismiss": "OK"
+  },
   "twintPayment": {
     "receiptNotSaved": "Confirmed, not saved",
     "receiptConfirmedAt": "Cashier confirmed at",
@@ -953,6 +959,13 @@
       "deliveryFeeZoneNotChecked": "Zone not checked",
       "deliveryZoneNotCheckedNotice": "The delivery zone was not checked. Pick the address again.",
       "repickDeliveryAddress": "Pick the address again",
+      "deliveryFeeChooseZone": "Choose the zone",
+      "offlineZoneChoiceTitle": "Choose the delivery zone",
+      "offlineZoneChoiceHint": "No connection: this address cannot be located. Choose its zone; that zone's delivery fee applies.",
+      "offlineZoneChoiceLoading": "Loading the store's zones…",
+      "offlineZoneChoiceNoZones": "No delivery zones are saved on this till. Connect once to download them, or change the order type.",
+      "offlineZoneChoiceRequired": "Choose the delivery zone first.",
+      "zoneChosenManually": "Zone chosen manually",
       "deliveryFeeOutOfZone": "Out of delivery zone",
       "deliveryFeeUnavailable": "Delivery fee unavailable",
       "total": "Total:",
@@ -3447,6 +3460,40 @@
     }
   },
   "sync": {
+    "zGate": {
+      "approvalTitle": "Approve with your PIN",
+      "approvalSubtitle": "Setting a record aside needs the right to void payments. A staff member who has it enters their own PIN. Nothing is deleted or charged.",
+      "setAsideDone": "Set aside. The record stays on this till and the Z lists it as not on the server.",
+      "undoDone": "The record is back: it holds the day close again until the server takes it.",
+      "actionFailed": "It could not be done. Nothing was changed.",
+      "stale": "This list could not be read again. It shows the last good read.",
+      "unavailable": "The days closed on this till could not be read. Try again.",
+      "localTitle": "Days closed on this till, not on the server yet: {{count}}",
+      "localDay": "Day of {{date}}: closed on this till without a connection",
+      "waits": {
+        "earlier_z": "It waits for the earlier closed day to reach the server first.",
+        "window_rows": "It waits for {{count}} record(s) of that day to reach the server.",
+        "server_refusal": "The server refused it. Contact support with the details below.",
+        "sending": "It is sent at the next sync.",
+        "cleanup": "The server confirmed it. Its data is cleaned from this till."
+      },
+      "details": "Details for support",
+      "refusedTitle": "Refused by the server: {{count}}",
+      "refusedIntro": "The server refused these records for good, so they hold the day close. A manager can set one aside: it stays on this till, the Z lists it as not on the server, and it is never sent again on its own.",
+      "kind": {
+        "payment": "Payment",
+        "refund": "Refund or void",
+        "driverEarning": "Driver earning",
+        "expense": "Expense",
+        "staffPayment": "Staff payment",
+        "cashReturn": "Cash return",
+        "shift": "Shift",
+        "record": "Record"
+      },
+      "setAsideState": "Set aside: kept on this till, not on the server",
+      "setAside": "Set aside",
+      "undo": "Bring back"
+    },
     "capacity": {
       "badge": "Backlog {{percent}}%",
       "title": "Sync backlog growing",
@@ -3510,7 +3557,7 @@
     "closeoutBlocked": {
       "single": "Cannot close the day during {{stage}} because {{orderReference}} is still blocked: {{reason}}.",
       "multiple": "Cannot close the day during {{stage}} because {{count}} sync items are still blocked.",
-      "moneyNotSynced": "The day cannot be closed yet: {{count}} payment or refund record(s) of this day have not reached the server. Make sure the till is online, press Sync Now and close the day again."
+      "moneyNotSynced": "The day cannot be closed yet: {{count}} payment, refund or shift record(s) of this day have not reached the server. Make sure the till is online, press Sync Now and close the day again."
     },
     "time": {
       "never": "Never",
@@ -7293,6 +7340,19 @@
     "depositTotal": "Deposits",
     "depositLineName": "Deposit — {{name}}"
   },
+  "appointmentCheckoutClaim": {
+    "claimedElsewhere": "This appointment is being checked out at another till ({{terminal}}) until {{time}}.",
+    "claimedElsewhereNow": "This appointment is being checked out at another till ({{terminal}}).",
+    "claimedElsewhereUnknown": "This appointment is being checked out at another till. Try again in a few minutes.",
+    "settled": "This appointment is already paid or closed.",
+    "notFound": "This appointment was not found. Refresh and try again.",
+    "needsConnection": "Checking out an appointment needs a connection. You can sell the services as a walk-in.",
+    "failed": "The checkout could not start. Try again."
+  },
+  "retailStock": {
+    "onlyAvailable": "Only {{available}} {{unit}} in stock",
+    "unitPiece": "pcs"
+  },
   "staffSchedule": {
     "loading": "Loading staff schedule...",
     "weeklyProgram": "Weekly Staff Schedule",
@@ -7855,6 +7915,15 @@
     "redeemSuccess": "Redeemed {{points}} points for {{discount}} discount",
     "redeemFailed": "Order saved, but loyalty points were not redeemed",
     "checkoutRefused": "Loyalty points could not be secured. The order was not saved. Remove the redemption or try again.",
+    "redeem": {
+      "offlineRefused": "Points can only be redeemed with an internet connection. The sale continues without the discount; points earned are kept.",
+      "refusedBody": "The server refused the redemption. No discount was applied.",
+      "confirmationRequired": "Confirm the original points redemption online before taking payment.",
+      "releasedForCheckout": "The points for this sale were returned to the customer. Start a new sale to redeem points again.",
+      "removePoints": "Remove points",
+      "confirmed": "Points confirmed. Continue with the payment.",
+      "releaseFailed": "The points could not be returned to the customer's balance. Try again."
+    },
     "redeemPrepared": "{{points}} points ready for {{discount}} discount",
     "noCustomerSelected": "Select a saved customer to redeem points",
     "moduleUnavailable": "Loyalty module is not enabled for this terminal",
@@ -10163,8 +10232,17 @@
   },
   "zReportOffline": {
     "refusal": "The day can't be closed without a connection. Keep selling: the day stays open and you close it once the connection is back. To count the drawer now, use the cashier checkout, which prints without internet, and the preview on this screen.",
-    "status": "No connection: the day closes once it is back",
-    "checklist": "No connection to the server. Keep selling; close the day once the connection is back."
+    "status": "No connection: the Z closes the day on this till and sends it later",
+    "checklist": "No connection to the server. The Z closes the day on this till and sends it once the connection is back. A store with an active fiscal service closes the day once the connection is back.",
+    "localCloseDone": "The day of {{date}} is closed on this till without a connection. Its Z is sent to the server once the connection is back; nothing is deleted before the server has it. You can start the next day."
+  },
+  "salonStaff": {
+    "pickerTitle": "Who does this service?",
+    "noStylist": "No stylist",
+    "tipRecipient": "Staff member",
+    "tipRecipientHelp": "Credits the staff member who did the service.",
+    "tipChooseStaff": "Who gets the tip?",
+    "tipsByStaff": "Tips by staff"
   },
   "salonSale": {
     "newSale": "New service sale",

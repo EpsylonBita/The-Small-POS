@@ -114,6 +114,10 @@ pub fn build_fiscal_data(
         own_discount: Option<i64>,
         menu_item_id: Option<String>,
         line_role: Option<String>,
+        /// The line's own VAT category, as the server reads it from the
+        /// order body (the branch default applies when it has none).
+        vat_category_code: Option<String>,
+        vat_class: Option<String>,
     }
     let mut register_items = Vec::with_capacity(items_arr.len());
     for (index, item) in items_arr.iter().enumerate() {
@@ -140,6 +144,9 @@ pub fn build_fiscal_data(
             own_discount,
             menu_item_id: str_field(item, &["menu_item_id", "menuItemId"]).map(str::to_string),
             line_role: str_field(item, &["line_role", "lineRole"]).map(str::to_string),
+            vat_class: str_field(item, &["vat_class", "vatClass"]).map(str::to_string),
+            vat_category_code: str_field(item, &["vat_category_code", "vatCategoryCode"])
+                .map(str::to_string),
         });
     }
 
@@ -161,9 +168,12 @@ pub fn build_fiscal_data(
                 .sum()
         })
         .unwrap_or(0);
-    // The computed rate and discount share of each register line.
+    // The computed rate and discount share of each register line: each line
+    // at its own category, exactly as the server computes the order's VAT.
     let register_vat = calculate_greece_order_vat(&GreeceOrderVatInput {
         settings: context.vat_settings.clone(),
+        order_type: str_field(order, &["order_type", "orderType"]).map(str::to_string),
+        platform: str_field(order, &["platform", "plugin"]).map(str::to_string),
         items: register_items
             .iter()
             .map(|item| GreeceOrderVatItem {
@@ -172,6 +182,8 @@ pub fn build_fiscal_data(
                 name: Some(item.name.clone()),
                 quantity: item.quantity,
                 unit_price: item.unit_price as f64 / 100.0,
+                vat_class: item.vat_class.clone(),
+                vat_category_code: item.vat_category_code.clone(),
                 ..Default::default()
             })
             .collect(),
@@ -580,6 +592,7 @@ pub fn format_fiscal_receipt_escpos(
     data: &FiscalReceiptData,
     paper_width: PaperWidth,
     greek: bool,
+    store_time_zone: Option<chrono_tz::Tz>,
 ) -> Vec<u8> {
     let mut b = EscPosBuilder::new().with_paper(paper_width);
     if greek {
@@ -652,8 +665,8 @@ pub fn format_fiscal_receipt_escpos(
         b.text(&format!("Operator: {op}"));
     }
 
-    // Timestamp
-    let now = chrono::Local::now().format("%d/%m/%Y %H:%M").to_string();
+    // Timestamp, on the store's clock
+    let now = crate::store_time::format_now(store_time_zone, "%d/%m/%Y %H:%M");
     b.text(&now);
 
     b.feed(3);
@@ -1180,6 +1193,7 @@ mod tests {
             vat_settings: GreeceVatSettings {
                 default_vat_category_code: Some("gr_island_reduced_17".into()),
                 vat_region_profile: Some("islands_reduced".into()),
+                ..Default::default()
             },
             language: "el".into(),
         };
@@ -1218,6 +1232,92 @@ mod tests {
     }
 
     #[test]
+    fn every_register_line_carries_its_own_category_like_the_server() {
+        // Founder (21/10/2026): one VAT per line. A 13% item, a 24% item, an
+        // item without a code (the branch default) and a deposit.
+        let order = json!({
+            "items": [
+                {"name": "Coffee", "quantity": 1, "price": 3.00, "vat_category_code": "gr_reduced_13"},
+                {"name": "Beer", "quantity": 1, "price": 5.00, "vatCategoryCode": "gr_standard_24"},
+                {"name": "Water", "quantity": 1, "price": 1.00},
+                {"name": "Exempt", "quantity": 1, "price": 2.00, "vat_category_code": "gr_exempt"}
+            ],
+            "discount_amount": 1.00,
+            "total_amount": 10.00
+        });
+        let context = FiscalLineContext {
+            vat_settings: GreeceVatSettings {
+                default_vat_category_code: Some("gr_super_reduced_6".into()),
+                ..Default::default()
+            },
+            language: "el".into(),
+        };
+        let mut rates = sample_tax_rates();
+        rates.push(TaxRateConfig {
+            code: "E".into(),
+            rate: 0.0,
+            label: "Exempt".into(),
+            department: Some(5),
+        });
+        let data = build_fiscal_data(&order, &[], &rates, None, &context).unwrap();
+        let lines: Vec<(&str, f64)> = data
+            .items
+            .iter()
+            .map(|item| (item.tax_code.as_str(), item.tax_rate))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![("B", 13.0), ("A", 24.0), ("C", 6.0), ("E", 0.0)]
+        );
+        // The server's computation of the same body: same rates, same
+        // discount shares (the exempt line shares none).
+        let server = crate::sync_queue::order_json_vat(&order, &context.vat_settings).unwrap();
+        let server_rates: Vec<f64> = server
+            .breakdown
+            .lines
+            .iter()
+            .map(|line| line.vat_rate)
+            .collect();
+        assert_eq!(server_rates, vec![13.0, 24.0, 6.0, 0.0]);
+        let shares: Vec<i64> = data
+            .items
+            .iter()
+            .map(|item| item.discount.unwrap_or(0))
+            .collect();
+        let server_shares: Vec<i64> = server
+            .breakdown
+            .lines
+            .iter()
+            .map(|line| line.discount_cents)
+            .collect();
+        assert_eq!(shares, server_shares);
+        assert_eq!(shares[3], 0);
+
+        // A Swiss branch: a Greek code takes the branch default; a branch
+        // that is not VAT-registered books every line at 0%.
+        let swiss = FiscalLineContext {
+            vat_settings: GreeceVatSettings {
+                country: Some("CH".into()),
+                default_vat_category_code: Some("ch_reduced_26".into()),
+                ..Default::default()
+            },
+            language: "fr".into(),
+        };
+        let data = build_fiscal_data(&order, &[], &rates, None, &swiss).unwrap();
+        let swiss_rates: Vec<f64> = data.items.iter().map(|item| item.tax_rate).collect();
+        assert_eq!(swiss_rates, vec![2.6, 2.6, 2.6, 2.6]);
+        let unregistered = FiscalLineContext {
+            vat_settings: GreeceVatSettings {
+                vat_registered: Some(false),
+                ..Default::default()
+            },
+            language: "el".into(),
+        };
+        let data = build_fiscal_data(&order, &[], &rates, None, &unregistered).unwrap();
+        assert!(data.items.iter().all(|item| item.tax_rate == 0.0));
+    }
+
+    #[test]
     fn test_format_price() {
         assert_eq!(format_price(1250), "12.50");
         assert_eq!(format_price(0), "0.00");
@@ -1245,7 +1345,7 @@ mod tests {
             receipt_comment: None,
         };
 
-        let bytes = format_fiscal_receipt_escpos(&data, PaperWidth::Mm80, false);
+        let bytes = format_fiscal_receipt_escpos(&data, PaperWidth::Mm80, false, None);
         assert!(!bytes.is_empty());
         // Should contain ESC/POS init command (ESC @)
         assert!(bytes.windows(2).any(|w| w == [0x1B, 0x40]));

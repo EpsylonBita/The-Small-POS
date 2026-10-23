@@ -48,7 +48,7 @@ test('order details show the printed VAT and never split it as a line', () => {
 
 test('no renderer total ever gains VAT on top', () => {
   const menu = rendererSource('pages', 'MenuPage.tsx');
-  assert.match(menu, /const finalTotal = Number\(\(subtotal \+ deliveryFee\)\.toFixed\(2\)\);/);
+  assert.match(menu, /const finalTotal = Number\(\(subtotal - discountAmount \+ deliveryFee\)\.toFixed\(2\)\);/);
   assert.doesNotMatch(menu, /tax_amount\s*:|tax_rate\s*:|tax_rate_percentage/);
   const cart = rendererSource('components', 'menu', 'CartSummary.tsx');
   assert.match(cart, /const total = subtotalAfterDiscount \+ deliveryFee;/);

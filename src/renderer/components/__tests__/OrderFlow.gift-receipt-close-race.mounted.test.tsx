@@ -500,6 +500,43 @@ describe('OrderFlow gift receipt kept across an early Close (mounted host)', () 
     expect(h.state.menuProps.roomChargeContext).toBeNull();
   });
 
+  it('routes a stylist tip of a walk-in service sale to the payment with the stylist id', async () => {
+    const maria = { id: '5a1f0000-0000-4000-8000-000000000001', name: 'Maria' };
+    const item = serviceSaleLine({ id: '10000000-0000-4000-8000-000000000001', name: 'Haircut', price: 50,
+      vatCategoryCode: 'gr_standard_24', priceIncludesVat: true, fiscalDocumentProfile: 'service' } as any,
+      undefined, undefined, undefined, maria);
+    render(<OrderFlow restoreDraftOnMount={false} salonSale={{ items: [item], customer: { id: '', name: 'Guest', phone: '' } }} />);
+    await screen.findByTestId('menu-complete');
+    const cash = (staffId: string) => ({ method: 'cash', amount: 55, cashReceived: 55, change: 0,
+      transactionId: `CASH-${staffId}`, idempotencyKey: `idem-${staffId}`,
+      tipAmount: 5, tipRecipientRole: 'staff', tipRecipientStaffId: staffId });
+    await act(async () => {
+      await h.state.menuProps.onOrderComplete({ items: [item], total: 50, paymentData: cash(maria.id) });
+    });
+    expect(h.store.createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      tip_amount: 5,
+      items: expect.arrayContaining([expect.objectContaining({ service_id: item.service_id, staff_id: maria.id })]),
+      initialPayment: expect.objectContaining({ method: 'cash', amount: 55, tipAmount: 5,
+        tipRecipientRole: 'staff', tipRecipientStaffId: maria.id, tipRecipientStaffShiftId: undefined }),
+    }));
+  });
+
+  it('never names a tip staff member the lines do not carry', async () => {
+    const item = serviceSaleLine({ id: '10000000-0000-4000-8000-000000000001', name: 'Haircut', price: 50,
+      vatCategoryCode: 'gr_standard_24', priceIncludesVat: true, fiscalDocumentProfile: 'service' } as any);
+    render(<OrderFlow restoreDraftOnMount={false} salonSale={{ items: [item], customer: { id: '', name: 'Guest', phone: '' } }} />);
+    await screen.findByTestId('menu-complete');
+    await act(async () => {
+      await h.state.menuProps.onOrderComplete({ items: [item], total: 50, paymentData: { method: 'cash', amount: 55,
+        cashReceived: 55, change: 0, transactionId: 'CASH-x', idempotencyKey: 'idem-x',
+        tipAmount: 5, tipRecipientRole: 'staff', tipRecipientStaffId: 'not-on-the-ticket' } });
+    });
+    const created = h.store.createOrder.mock.calls.at(-1)?.[0] as any;
+    expect(created.initialPayment).toMatchObject({ tipAmount: 5 });
+    expect(created.initialPayment.tipRecipientRole).toBe('staff');
+    expect(created.initialPayment.tipRecipientStaffId).toBeUndefined();
+  });
+
   it('restores the service draft original folio without selecting the room next guest', async () => {
     h.state.hotelEnabled = true;
     const roomChargeContext = {roomId:'room-spa',activeFolioId:'original-folio',currency:'EUR'};

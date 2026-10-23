@@ -262,7 +262,7 @@ export function RepairWorkspaceActions({
         <div>
           <label htmlFor="repair-internal-note" className="text-sm font-semibold">{t('repairs.actions.addNote')}</label>
           <div className="mt-1 flex gap-2">
-            <textarea id="repair-internal-note" value={note} onChange={(event) => setNote(event.target.value)} rows={2} className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-transparent p-3 dark:border-white/15" />
+            <textarea id="repair-internal-note" value={note} onChange={(event) => setNote(event.target.value)} rows={2} maxLength={5000} className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-transparent p-3 dark:border-white/15" />
             <button type="button" disabled={isBusy || !canAddNote} onClick={() => void run(noteCommand).then(() => setNote(''))} className="inline-flex min-h-11 items-center gap-2 self-end rounded-xl bg-blue-600 px-4 font-semibold text-white disabled:opacity-45">
               <StickyNote aria-hidden className="h-4 w-4" />
               {t('repairs.actions.addNote')}
@@ -282,7 +282,7 @@ export function RepairWorkspaceActions({
     return (
       <section className="space-y-3 border-t border-slate-200 pt-4 dark:border-white/10">
         <label htmlFor="repair-diagnosis" className="text-sm font-semibold">{t('repairs.fields.diagnosis')}</label>
-        <textarea id="repair-diagnosis" value={diagnosis} onChange={(event) => setDiagnosis(event.target.value)} rows={5} className="w-full rounded-xl border border-slate-300 bg-transparent p-3 dark:border-white/15" />
+        <textarea id="repair-diagnosis" value={diagnosis} onChange={(event) => setDiagnosis(event.target.value)} rows={5} maxLength={10000} className="w-full rounded-xl border border-slate-300 bg-transparent p-3 dark:border-white/15" />
         <div className="flex flex-wrap gap-2">
           <button type="button" disabled={isBusy || !canDraft} onClick={() => void run(draftCommand)} className="min-h-11 rounded-xl border border-blue-500 px-4 font-semibold text-blue-700 disabled:opacity-45 dark:text-blue-200">{t('repairs.actions.updateDiagnosis')}</button>
           <button type="button" disabled={isBusy || !canFinalize} onClick={() => void run(finalCommand)} className="min-h-11 rounded-xl bg-blue-600 px-4 font-semibold text-white disabled:opacity-45">{t('repairs.actions.finalizeDiagnosis')}</button>

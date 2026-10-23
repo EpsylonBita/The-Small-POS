@@ -4,7 +4,7 @@
       "offlineCheckIn": {
         "checkedInTitle": "Pointage sans connexion",
         "checkedInMessage": "Le serveur vérifiera ce pointage dès que la connexion reviendra.",
-        "giftCardsNeedServer": "Avec les cartes cadeaux, l'ouverture du tiroir a besoin du serveur. Pointez dès que la connexion revient.",
+        "giftCardOrdinaryOpening": "Un tiroir ordinaire a été ouvert. Les cartes cadeaux attendent la connexion, et le serveur vérifiera cette ouverture.",
         "noPinOnTill": "Cette caisse n'a pas le PIN de cette personne : elle ne peut pas pointer sans connexion.",
         "locked": "Trop de PIN erronés. Réessayez dans 15 minutes ou dès que la connexion revient.",
         "waiterPhone": "Sur le téléphone d'un serveur, le pointage passe par le serveur central. Réessayez dès que la connexion revient."

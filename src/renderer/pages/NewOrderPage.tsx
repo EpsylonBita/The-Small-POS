@@ -35,7 +35,7 @@ import {
   loadPersistedSplitDismissal,
   reconcileOutstandingPaymentAttempt,
 } from '../utils/splitCheckoutRecovery';
-import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { deliveryZoneSelectionMetadata, resolveDeliveryFee } from '../utils/delivery-fee';
 import { toValidLatLng } from '../utils/coordinates';
 import {
   planDeliveryAddressRepick,
@@ -51,6 +51,7 @@ import { resolvePersistedCustomerId } from '../utils/persisted-customer-id';
 import { resolveActiveCashierShift } from '../utils/active-cashier';
 import { parseSpecialAddressInput } from '../utils/specialAddress';
 import { buildTableOrderCreateFields } from '../utils/tableOrderFlow';
+import { resolveOrderTipRecipient, type TipRecipientRole } from '../utils/tip-recipient';
 import { formatTableDisplayNumber } from '../utils/table-display';
 import {
   hasValidSyncedPosMenuItemId,
@@ -210,7 +211,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     orderType: 'pickup' | 'delivery' | 'dine-in';
     existingPayments?: any[];
     tipAmount?: number;
-    tipRecipientRole?: 'waiter' | 'cashier' | 'driver';
+    tipRecipientRole?: TipRecipientRole;
     tipRecipientStaffId?: string;
     tipRecipientStaffShiftId?: string;
     recoverySession?: number;
@@ -226,7 +227,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     orderType: 'pickup' | 'delivery' | 'dine-in';
     existingPayments: any[];
     tipAmount?: number;
-    tipRecipientRole?: 'waiter' | 'cashier' | 'driver';
+    tipRecipientRole?: TipRecipientRole;
     tipRecipientStaffId?: string;
     tipRecipientStaffShiftId?: string;
     recoverySession?: number;
@@ -528,7 +529,13 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     const ghostSource = isGhostOrder
       ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_code_x_1')
       : null;
-    const ghostMetadata = isGhostOrder ? (orderData.ghost_metadata ?? null) : null;
+    // Offline week Ω6β: a zone the cashier chose offline travels in the
+    // order's metadata as the "zone chosen manually" marker.
+    const ghostMetadata = deliveryZoneSelectionMetadata(
+      isGhostOrder ? (orderData.ghost_metadata ?? null) : null,
+      orderData.orderType || selectedOrderType,
+      orderData.deliveryZoneInfo,
+    );
 
     try {
       const currentOrderType = (orderData.orderType || selectedOrderType || 'pickup') as 'pickup' | 'delivery' | 'dine-in';
@@ -589,18 +596,20 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         0,
         Number(orderData.paymentData?.tipAmount ?? orderData.paymentData?.tip_amount ?? 0) || 0,
       );
-      const requestedTipRecipientRole = String(
-        orderData.paymentData?.tipRecipientRole || '',
-      );
-      const tipRecipientRole: 'waiter' | 'cashier' | 'driver' | undefined =
-        tipAmount > 0 &&
-        ['waiter', 'cashier', 'driver'].includes(requestedTipRecipientRole)
-          ? (requestedTipRecipientRole as 'waiter' | 'cashier' | 'driver')
-          : undefined;
-      const tipRecipientStaffId =
-        tipRecipientRole === 'waiter' ? staff?.staffId : undefined;
-      const tipRecipientStaffShiftId =
-        tipRecipientRole === 'waiter' ? activeShift?.id : undefined;
+      // Same routing as OrderFlow: a `staff` tip goes to a stylist of the
+      // order's lines (salon, 21/10/2026).
+      const {
+        tipRecipientRole,
+        tipRecipientStaffId,
+        tipRecipientStaffShiftId,
+      } = resolveOrderTipRecipient({
+        tipAmount,
+        requestedRole: orderData.paymentData?.tipRecipientRole,
+        requestedStaffId: orderData.paymentData?.tipRecipientStaffId,
+        items: orderData.items,
+        waiterId: staff?.staffId,
+        waiterShiftId: activeShift?.id,
+      });
       const totalAmount = subtotalAfterDiscount + deliveryFee + tipAmount;
       const paymentMethod = typeof orderData.paymentData?.method === 'string'
         ? orderData.paymentData.method
@@ -752,7 +761,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         discount_percentage: discountPercentage,
         discount_amount: discountAmount,
         tip_amount: tipAmount,
-        country_code: 'GR',
+        // No country here: the native create body names the branch's VAT country (tax.vat_country).
         pricing_mode: 'tax_inclusive',
         status: 'pending' as const,
         payment_method: isGhostOrder || paymentMethod === 'table' ? null : (paymentMethod || null),

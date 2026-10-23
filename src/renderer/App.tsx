@@ -69,6 +69,7 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
+import { clearStoredAppointmentClaims } from "./services/appointment-checkout-claims";
 import { DesktopRealtimeManager } from "./services/RealtimeManager";
 import { RealtimeAuthService } from "./services/RealtimeAuthService";
 import { DesktopRealtimeLifecycleCoordinator } from "./services/DesktopRealtimeLifecycleCoordinator";
@@ -83,7 +84,10 @@ import {
   REALTIME_STATUS_EVENT,
   type ParitySyncSnapshot,
   runParitySyncCycle,
+  startScheduledParityRetry,
 } from "./services/ParitySyncCoordinator";
+import { getServerReachable, subscribeServerReachability } from "./services/server-reachability";
+import { MissedPlatformOrdersNoticeManager } from "./components/notices/MissedPlatformOrdersNoticeManager";
 import { useOrderStore } from "./hooks/useOrderStore";
 import {
   resolveTerminalAuthPausePresentation,
@@ -115,7 +119,6 @@ const STARTUP_CONFIG_SYNC_TIMEOUT_MS = 2500;
 const AUTH_LOGIN_TIMEOUT_MS = 30_000;
 const CONFIGURED_TERMINAL_HINT_KEY = 'pos-terminal-configured';
 const PARITY_QUEUE_REFRESH_INTERVAL_MS = 15_000;
-const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
 const TOAST_CONTAINER_STYLE: React.CSSProperties = { zIndex: 2147483647 };
 
 type ConnectionSettingsSection = 'recovery' | 'printing' | null;
@@ -346,6 +349,7 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
           invalidateFinancialOpening();
           void clearSecureSession();
           clearTerminalCredentialCache();
+          clearStoredAppointmentClaims();
         } else {
           // If configured, sync terminal identity from the main process to the
           // in-memory cache. Native admin fetches handle POS authentication.
@@ -434,6 +438,8 @@ export function ConfigGuard({ children }: { children: React.ReactNode }) {
       localStorage.removeItem("organization_id");
       localStorage.removeItem("admin_dashboard_url");
       clearTerminalCredentialCache();
+      // A stored appointment claim belongs to the identity just reset.
+      clearStoredAppointmentClaims();
       setConfiguredTerminalHint(false);
 
       updateConfiguredState(false);
@@ -1109,25 +1115,11 @@ function AppContent() {
       paritySyncSnapshotRef.current = snapshot;
     };
 
-    const shouldRetryParitySync = () => {
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        return false;
-      }
-
-      const queueStatus = parityQueueStatusRef.current;
-      if (queueStatus.pending > 0 || queueStatus.failed > 0) {
-        return true;
-      }
-
-      const lastSnapshot = paritySyncSnapshotRef.current;
-      return (
-        lastSnapshot?.status === 'failed' ||
-        lastSnapshot?.status === 'skipped_missing_credentials'
-      );
-    };
-
     onEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
     onEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
+    // Start hearing the till's own connectivity check now, so its verdict is
+    // known by the first retry tick.
+    const stopServerReachability = subscribeServerReachability(() => {});
     void refreshParityQueueStatus();
     void syncNow('startup');
 
@@ -1135,11 +1127,17 @@ function AppContent() {
       void refreshParityQueueStatus();
     }, PARITY_QUEUE_REFRESH_INTERVAL_MS);
 
-    const retryIntervalId = window.setInterval(() => {
-      if (shouldRetryParitySync()) {
+    // Offline week Ω2 (22/10/2026): the 30 s retry runs only while the till's
+    // own connectivity check reaches the admin server, not on navigator.onLine
+    // alone (still true during an ISP outage while the router is up).
+    const stopScheduledRetry = startScheduledParityRetry({
+      readQueueStatus: () => parityQueueStatusRef.current,
+      readLastSnapshot: () => paritySyncSnapshotRef.current,
+      readServerReachable: getServerReachable,
+      run: () => {
         void syncNow('scheduled_retry');
-      }
-    }, PARITY_SYNC_RETRY_INTERVAL_MS);
+      },
+    });
 
     const handleOnline = () => {
       void syncNow('online');
@@ -1150,7 +1148,8 @@ function AppContent() {
     return () => {
       disposed = true;
       window.clearInterval(intervalId);
-      window.clearInterval(retryIntervalId);
+      stopScheduledRetry();
+      stopServerReachability();
       window.removeEventListener('online', handleOnline);
       offEvent(PARITY_QUEUE_STATUS_EVENT, handleParityQueueStatus);
       offEvent(PARITY_SYNC_STATUS_EVENT, handleParitySyncStatus);
@@ -1708,6 +1707,9 @@ function AppContent() {
             {/* A phone shift that closes shows on the Main (founder rule
                 13/10/2026: phones hand over to the Main). Main only. */}
             <PhoneShiftNoticeManager enabled={Boolean(user)} />
+            {/* efood/Wolt orders the server declined while this till was
+                offline (Android parity, offline week 22/10/2026). */}
+            <MissedPlatformOrdersNoticeManager enabled={Boolean(user)} />
 
             {/* Incoming platform / customer orders waiting for accept /
                 decline. Mounted here, beside the routes and never inside

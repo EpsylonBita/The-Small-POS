@@ -39,6 +39,7 @@ export interface Product {
   // Fiscal fields — per-product Greek VAT category; lines without one fall
   // back to the org default at order time.
   vatCategoryCode: string | null;
+  vatClass?: string | null;
   priceIncludesVat: boolean | null;
   taxExemptionReason: string | null;
   // Retail domain fields — generic for any kind of retail store.
@@ -189,6 +190,7 @@ function transformProductFromAPI(data: any): Product {
     memberPrice: data.member_price ? parseFloat(data.member_price) : null,
     minWholesaleQuantity: data.min_wholesale_quantity ?? null,
     // Fiscal fields
+    vatClass: data.vat_class ?? 'standard',
     vatCategoryCode: data.vat_category_code ?? null,
     priceIncludesVat: data.price_includes_vat ?? null,
     taxExemptionReason: data.tax_exemption_reason ?? null,

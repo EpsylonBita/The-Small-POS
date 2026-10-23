@@ -414,7 +414,8 @@ test('normalizePosOrderItems canonicalizes manual open-price lines', () => {
   assert.equal(manualItem.unit_price, 3.5);
   assert.equal(manualItem.total_price, 7);
   assert.equal(manualItem.notes, 'No sugar');
-  assert.equal(manualItem.vat_category_code, 'gr_standard_24');
+  // No hard-coded Greek 24%: the branch default applies natively and on the server.
+  assert.equal(manualItem.vat_category_code, null);
   assert.equal(manualItem.price_includes_vat, true);
   assert.equal(manualItem.fiscal_document_profile, 'manual_item');
   assert.equal(hasValidSyncedPosMenuItemId(manualItem), true);

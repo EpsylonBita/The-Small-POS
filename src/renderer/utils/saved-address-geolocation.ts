@@ -8,6 +8,8 @@ import {
 } from '../services/address-workflow';
 import { readSavedAddressPoint, toValidLatLng, type LatLng } from './coordinates';
 import { parseSpecialAddressInput } from './specialAddress';
+import { isTillKnownOffline } from '../services/server-reachability';
+import { isSavedGooglePointExpired } from '../../../../shared/utils/offline-delivery-zone';
 
 export interface SavedAddressLike {
   id?: unknown;
@@ -282,13 +284,11 @@ export function extractSavedAddressCoordinates(
   if (isZoneSkippedAddress(address)) {
     return null;
   }
-  if ((address.coordinate_source === 'google' || address.google_place_id || address.place_id)
-    && address.coordinate_source !== 'manual' && address.coordinate_source !== 'provider') {
-    const fetchedAt = Date.parse(address.geocoded_at || '');
-    if (!Number.isFinite(fetchedAt) || fetchedAt > Date.now()
-      || Date.now() - fetchedAt >= 28 * 86_400_000) {
-      return null;
-    }
+  // FIX-03: a Google point older than 28 days (or without a valid fetch
+  // time) is never used, online or offline. Online the address is located
+  // again; offline the cashier picks the zone (useOfflineDeliveryZoneChoice).
+  if (isSavedGooglePointExpired(address)) {
+    return null;
   }
   return readSavedAddressPoint(address);
 }
@@ -375,8 +375,12 @@ function scoreSuggestion(address: SavedAddressLike, suggestion: AddressSuggestio
   return score;
 }
 
+/**
+ * The browser has no network, or the till's own check cannot reach the admin
+ * server (during an ISP outage `navigator.onLine` stays true).
+ */
 function isKnownOffline(): boolean {
-  return typeof navigator !== 'undefined' && navigator.onLine === false;
+  return isTillKnownOffline();
 }
 
 function readMemo(key: string): ResolvedSavedAddress | null | undefined {
@@ -460,6 +464,14 @@ export async function resolveSavedAddressCoordinates(
       return memoized;
     }
   }
+
+  // Offline the address cannot be located: Google cannot be reached, and the
+  // offline cache only holds copies of saved points without their fetch time,
+  // so it could hand back the very point that expired (FIX-03). The zone is
+  // chosen by the cashier instead (offline week Ω6β).
+  if (isKnownOffline()) {
+    return null;
+  }
   const inFlightKey = memoKey ?? `|${normalizeAreaText(query)}`;
   let lookup = geolocationInFlight.get(inFlightKey);
   if (!lookup) {
@@ -514,6 +526,14 @@ async function geolocateSavedAddress(
         sessionToken,
       });
     } catch {
+      lookupFailed = true;
+      continue;
+    }
+
+    // An offline-cache answer is a stored copy whose Google fetch time is
+    // unknown, possibly this address's own expired point: never accepted.
+    // Nothing was learned about the address, so no miss is remembered.
+    if (resolved.validationSource === 'offline_cache') {
       lookupFailed = true;
       continue;
     }

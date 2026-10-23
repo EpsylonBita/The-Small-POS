@@ -31,6 +31,15 @@ import {
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
 import { posApiGet } from '../../../utils/api-helpers';
+import { appointmentClaimRefusalMessage } from './appointment-claim-message';
+import {
+  APPOINTMENT_CLAIM_RENEW_MS,
+  claimAllowsCheckout,
+  claimAppointmentCheckout,
+  forgetClaim,
+  releaseAppointmentCheckout,
+  type AppointmentClaimOutcome,
+} from '../../../services/appointment-checkout-claims';
 import { pageMotionContainer, pageMotionItem } from '../../../components/ui/page-motion';
 
 type ViewMode = 'timeline' | 'list';
@@ -490,6 +499,62 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
     }
   };
 
+  // Claim before money (contract §1): an appointment's cart opens only while
+  // this till holds the office's checkout claim, renewed every 5 minutes.
+  const claimedCheckout = useRef<{ appointment: Appointment; timer: ReturnType<typeof setInterval> } | null>(null);
+  const claimRefusal = (outcome: AppointmentClaimOutcome): string => appointmentClaimRefusalMessage(outcome, t, timeZone);
+  const claimRefusalRef = useRef(claimRefusal);
+  claimRefusalRef.current = claimRefusal;
+
+  // The renewal only warns early: the cart's payment renews the claim again
+  // right before money moves and refuses there (MenuModal, as on Android).
+  const holdClaim = (appointment: Appointment) => {
+    if (claimedCheckout.current) clearInterval(claimedCheckout.current.timer);
+    const timer = setInterval(() => {
+      void claimAppointmentCheckout(appointment.id, { renew: true }).then(outcome => {
+        if (claimedCheckout.current?.appointment.id !== appointment.id) return;
+        if (!claimAllowsCheckout(outcome)) toast.error(claimRefusalRef.current(outcome));
+      });
+    }, APPOINTMENT_CLAIM_RENEW_MS);
+    claimedCheckout.current = { appointment, timer };
+  };
+
+  // The cart closed: an order for the appointment means the office consumes
+  // the claim, so it is only forgotten here; no order releases it. When the
+  // local orders cannot be read the claim is kept and its lease runs out.
+  const finishClaimedCheckout = useCallback(async () => {
+    const held = claimedCheckout.current;
+    claimedCheckout.current = null;
+    if (!held) return;
+    clearInterval(held.timer);
+    let ordered: boolean;
+    try {
+      ordered = hasAppointmentTicket(await bridge.orders.getAll(), held.appointment);
+    } catch {
+      return;
+    }
+    if (ordered) await forgetClaim(held.appointment.id);
+    else await releaseAppointmentCheckout(held.appointment.id);
+  }, [bridge]);
+  const finishClaimedCheckoutRef = useRef(finishClaimedCheckout);
+  finishClaimedCheckoutRef.current = finishClaimedCheckout;
+  // Leaving the page mid-checkout closes the cart too.
+  useEffect(() => () => { void finishClaimedCheckoutRef.current(); }, []);
+
+  const startAppointmentCheckout = async (appointment: Appointment) => {
+    try {
+      if (hasAppointmentTicket(await bridge.orders.getAll(), appointment)) { toast.error(t('salonSale.existingTicket')); return; }
+      servicesService.setContext(branchId || '', effectiveOrgId);
+      const nextSale = appointmentSale(appointment, await servicesService.fetchServices(), serviceVatDefaults(getSetting));
+      const outcome = await claimAppointmentCheckout(appointment.id);
+      if (!claimAllowsCheckout(outcome)) { toast.error(claimRefusal(outcome)); return; }
+      if (outcome.kind !== 'legacy') holdClaim(appointment);
+      setSale(nextSale);
+    } catch (error) {
+      toast.error(t(error instanceof Error && error.message === 'SALON_APPOINTMENT_PENDING' ? 'salonSale.pendingSync' : 'salonSale.unavailable'));
+    }
+  };
+
   const navigateDate = (direction: 'prev' | 'next') => {
     const newDate = new Date(selectedDate);
     newDate.setDate(newDate.getDate() + (direction === 'next' ? 1 : -1));
@@ -511,15 +576,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
     if (['scheduled', 'confirmed', 'in_progress'].includes(appointment.status)) {
       actions.push({
         label: t('salonSale.checkout'),
-        action: async () => {
-          try {
-            if (hasAppointmentTicket(await bridge.orders.getAll(), appointment)) { toast.error(t('salonSale.existingTicket')); return; }
-            servicesService.setContext(branchId || '', effectiveOrgId);
-            setSale(appointmentSale(appointment, await servicesService.fetchServices(), serviceVatDefaults(getSetting)));
-          } catch (error) {
-            toast.error(t(error instanceof Error && error.message === 'SALON_APPOINTMENT_PENDING' ? 'salonSale.pendingSync' : 'salonSale.unavailable'));
-          }
-        },
+        action: () => { void startAppointmentCheckout(appointment); },
         variant: 'success',
         icon: CheckCircle,
       });
@@ -687,7 +744,9 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         </div>
       </motion.div>
 
-      <div className="px-4 py-2"><button type="button" className="rounded-xl bg-amber-400 px-4 py-2 font-semibold text-black"
+      {/* Start an empty walk-in ticket. Its SalonCatalogPicker asks for the
+          stylist separately for each service added; no appointment staff is inherited. */}
+      <div className="px-4 py-2"><button type="button" data-testid="salon-new-walk-in-sale" className="rounded-xl bg-amber-400 px-4 py-2 font-semibold text-black"
         onClick={() => setSale({ items: [], customer: { id: '', name: '', phone: '' } })}>{t('salonSale.newSale')}</button></div>
 
       {/* Loading State */}
@@ -839,7 +898,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         />
       )}
 
-      {sale && <OrderFlow salonSale={sale} showFab={false} restoreDraftOnMount={false} onSalonClose={() => { setSale(null); void refetch(); }} />}
+      {sale && <OrderFlow salonSale={sale} showFab={false} restoreDraftOnMount={false} onSalonClose={() => { setSale(null); void finishClaimedCheckout(); void refetch(); }} />}
 
       {/* Create Appointment Modal */}
       {showCreateModal && (

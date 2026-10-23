@@ -527,4 +527,9 @@ export interface ZReportData {
    * live preview, which reads them from the server instead.
    */
   phoneShifts?: ZReportPhoneShift[];
+  /**
+   * Tips that went to a stylist of the order (salon, 21/10/2026), per staff
+   * member; same shape on Android. Absent on a Z stored before it.
+   */
+  staffTips?: Array<{ staffId: string; staffName: string; amount: number }>;
 }

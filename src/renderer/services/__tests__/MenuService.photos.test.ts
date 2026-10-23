@@ -16,6 +16,12 @@ beforeEach(() => {
 });
 
 describe('Windows POS photo contract through actual MenuService', () => {
+  it('preserves each menu item VAT category and inclusive flag through normalization', async () => {
+    mocks.invoke.mockResolvedValue([{ ...row, vat_class: 'food', vat_category_code: 'ch_reduced_26', price_includes_vat: true }]);
+    expect((await menuService.getMenuItems())[0]).toMatchObject({
+      vat_class: 'food', vat_category_code: 'ch_reduced_26', price_includes_vat: true,
+    });
+  });
   it.each([[true, true], [true, false], [false, true], [false, false]])(
     'POS=%s kiosk=%s preserves orderable products and prices', async (pos, kiosk) => {
       mocks.invoke.mockResolvedValue([{ ...row, show_image_in_pos: pos, show_image_in_kiosk: kiosk }]);

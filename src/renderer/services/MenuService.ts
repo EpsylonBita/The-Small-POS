@@ -12,7 +12,8 @@ const DEFAULT_ADMIN_DASHBOARD_SETTINGS = {
   service_fee: 0,
   delivery_fee: 0,
   currency: null,
-  timezone: 'Europe/Athens'
+  // Never a hard-coded zone: each store uses its own location's zone.
+  timezone: null
 };
 
 const DEFAULT_MENU_CONFIGURATION = {
@@ -64,12 +65,13 @@ function normalizeAdminDashboardSettings(payload: unknown) {
       DEFAULT_ADMIN_DASHBOARD_SETTINGS.delivery_fee
     ),
     currency: configuredStoreCurrency(terminalSettings || {}),
-    timezone: readString(
-      generalSettings?.timezone ??
-        terminalCategory?.timezone ??
-        terminalSettings?.timezone,
-      DEFAULT_ADMIN_DASHBOARD_SETTINGS.timezone
-    ),
+    timezone:
+      readString(
+        generalSettings?.timezone ??
+          terminalCategory?.timezone ??
+          terminalSettings?.timezone,
+        ''
+      ) || DEFAULT_ADMIN_DASHBOARD_SETTINGS.timezone,
   };
 }
 
@@ -192,6 +194,9 @@ export interface MenuItem {
   description?: string | null; // DB field (nullable)
   description_en?: string | null; // Not in DB - for future bilingual support
   description_el?: string | null; // Not in DB - for future bilingual support
+  vat_category_code?: string | null;
+  vat_class?: string | null;
+  price_includes_vat?: boolean | null;
   price: number; // DB field (NOT NULL) - primary price
   base_price?: number; // DB field (nullable) - fallback price
   pickup_price?: number; // DB field (NOT NULL) - pickup-specific price
@@ -751,6 +756,9 @@ class MenuService {
       name: raw.name, // Single field in subcategories table
       description: raw.description || '',
       price: raw.price || raw.base_price || 0,
+      vat_class: raw.vat_class ?? raw.vatClass ?? 'standard',
+      vat_category_code: raw.vat_category_code ?? raw.vatCategoryCode ?? null,
+      price_includes_vat: raw.price_includes_vat ?? raw.priceIncludesVat ?? true,
       base_price: raw.base_price,
       pickup_price: raw.pickup_price || 0,
       delivery_price: raw.delivery_price || 0,

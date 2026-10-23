@@ -1203,8 +1203,11 @@ pub(crate) fn requeue_legacy_edits(conn: &Connection) -> Result<usize, String> {
                 audit_json=json_insert(legacy_edit_replays_v1.audit_json,'$[#]',json(?7)),updated_at=excluded.updated_at",
                 params![id,scope.organization,scope.branch,scope.terminal,order,next,audit.to_string(),now.to_rfc3339()]).map_err(|error|error.to_string())?;
             conn.execute(
-                "UPDATE parity_sync_queue SET status='pending',attempts=0,error_message=NULL,next_retry_at=NULL,last_attempt=NULL
-                 WHERE id=?1 AND data=?2 AND status IN ('conflict','failed')",
+                &format!(
+                    "UPDATE parity_sync_queue SET status='pending',attempts=0,error_message=NULL,next_retry_at=NULL,last_attempt=NULL
+                     WHERE id=?1 AND data=?2 AND status IN ('conflict','failed') AND {}",
+                    crate::sync_queue::set_aside_exclusion_sql("parity_sync_queue")
+                ),
                 params![id, data],
             )
             .map_err(|error| error.to_string())
@@ -1301,11 +1304,12 @@ pub(crate) fn release_legacy_edit_dependents(
          OR lower(COALESCE(q.error_message,'')) LIKE '%deferred too many times%')))";
     let untagged =
         "(NOT json_valid(q.data) OR COALESCE(json_extract(q.data,'$.parentEditEventId'),'')='')";
+    let not_set_aside = crate::sync_queue::set_aside_exclusion_sql("q");
     let mut released = conn
         .execute(
             &format!(
                 "UPDATE parity_sync_queue AS q SET status='pending',attempts=0,error_message=NULL,next_retry_at=NULL,last_attempt=NULL
-                 WHERE q.table_name='payments' AND {parent_wait} AND {untagged}
+                 WHERE q.table_name='payments' AND {parent_wait} AND {untagged} AND {not_set_aside}
                    AND q.record_id IN (SELECT p.id FROM order_payments p WHERE p.order_id=?1 AND p.status='completed'
                      AND NULLIF(TRIM(COALESCE(p.remote_payment_id,'')),'') IS NULL)"
             ),
@@ -1316,7 +1320,7 @@ pub(crate) fn release_legacy_edit_dependents(
         .execute(
             &format!(
                 "UPDATE parity_sync_queue AS q SET status='pending',attempts=0,error_message=NULL,next_retry_at=NULL,last_attempt=NULL
-                 WHERE q.table_name='payment_adjustments' AND {parent_wait} AND {untagged}
+                 WHERE q.table_name='payment_adjustments' AND {parent_wait} AND {untagged} AND {not_set_aside}
                    AND q.record_id IN (SELECT a.id FROM payment_adjustments a WHERE a.order_id=?1
                      AND COALESCE(a.sync_state,'')<>'applied')"
             ),

@@ -306,6 +306,10 @@ pub struct AdminFetchError {
     app_error_body: Option<Value>,
     retry_after_seconds: Option<i64>,
     kind: AdminFetchErrorKind,
+    /// A transport failure while opening the connection (refused, DNS, TLS or
+    /// connect timeout): the request never left this till, so the server
+    /// cannot have acted on it.
+    connect_failed: bool,
 }
 
 impl AdminFetchError {
@@ -317,6 +321,7 @@ impl AdminFetchError {
             app_error_body: None,
             retry_after_seconds: None,
             kind: AdminFetchErrorKind::Local,
+            connect_failed: false,
         }
     }
 
@@ -328,6 +333,7 @@ impl AdminFetchError {
             app_error_body: None,
             retry_after_seconds: None,
             kind: AdminFetchErrorKind::Transport,
+            connect_failed: false,
         }
     }
 
@@ -340,6 +346,7 @@ impl AdminFetchError {
             app_error_body: None,
             retry_after_seconds: None,
             kind: AdminFetchErrorKind::Http,
+            connect_failed: false,
         }
     }
 
@@ -367,6 +374,7 @@ impl AdminFetchError {
             app_error_body,
             retry_after_seconds: None,
             kind: AdminFetchErrorKind::Http,
+            connect_failed: false,
         }
     }
 
@@ -381,6 +389,28 @@ impl AdminFetchError {
 
     pub fn status(&self) -> Option<u16> {
         self.status
+    }
+
+    /// The transport error of a failed `send()`, flagged when the connection
+    /// itself could not be opened.
+    fn from_send_error(base: &str, error: &reqwest::Error) -> Self {
+        let mut failure = Self::transport(friendly_error(base, error));
+        failure.connect_failed = error.is_connect();
+        failure
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connect_failed_for_test(message: impl Into<String>) -> Self {
+        let mut failure = Self::transport(message);
+        failure.connect_failed = true;
+        failure
+    }
+
+    /// The request never left this till: its connection could not be opened.
+    /// A timeout or a lost reply after sending is a transport failure that
+    /// is NOT this; the server may have acted on it (Ω11 loyalty redemption).
+    pub fn is_connect_failure(&self) -> bool {
+        self.kind == AdminFetchErrorKind::Transport && self.connect_failed
     }
 
     pub fn is_transport_failure(&self) -> bool {
@@ -922,7 +952,7 @@ async fn fetch_from_admin_with_retry_after(
     let mut resp = req
         .send()
         .await
-        .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
+        .map_err(|e| AdminFetchError::from_send_error(&base, &e))?;
     let status = resp.status();
     note_server_reply(status);
 
@@ -976,7 +1006,7 @@ pub(crate) async fn post_admin_json_with_staff_session_reply(
         .json(body)
         .send()
         .await
-        .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
+        .map_err(|e| AdminFetchError::from_send_error(&base, &e))?;
     let status = resp.status();
     note_server_reply(status);
 
@@ -1111,7 +1141,7 @@ pub async fn fetch_raw_from_admin_detailed(
         .body(body)
         .send()
         .await
-        .map_err(|e| AdminFetchError::transport(friendly_error(&base, &e)))?;
+        .map_err(|e| AdminFetchError::from_send_error(&base, &e))?;
     let status = resp.status();
     note_server_reply(status);
 

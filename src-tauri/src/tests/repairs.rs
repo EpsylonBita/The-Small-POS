@@ -946,18 +946,36 @@ fn startup_repair_staging_janitor_runs_after_identity_reconcile_before_sync_loop
         .expect("startup must use the checked asynchronous reconciliation helper")
         .1;
     let identity = helper
-        .find("commands::settings::reconcile_startup_terminal_binding_with_access(db).await?;")
-        .expect("startup must await authoritative identity/access recovery and propagate failure");
+        .find("commands::settings::reconcile_startup_terminal_binding_before_access(db).await?;")
+        .expect("startup must await binding reconciliation and propagate failure");
     let checked_lock = helper
         .find(".map_err(|_| \"REPAIR_NATIVE_STATE_UNAVAILABLE\")?;")
         .expect("startup DB lock failure must propagate to the startup failure latch");
     let janitor = helper
-        .find("repairs::run_startup_staging_janitor(&connection)?")
+        .find("repairs::run_startup_staging_janitor(&connection)")
         .expect("startup must run checked native maintenance after identity recovery");
+    // A janitor failure is Repairs maintenance: it latches its own class and
+    // the LAN receiver still comes up on a healthy binding (Π1, 21/10/2026).
+    let repair_latch = helper
+        .find("repairs::latch_startup_repair_maintenance_failure();")
+        .expect("a janitor failure must latch Repairs maintenance only");
     let transport = helper
         .find("restore_transport();")
-        .expect("transport must restore only after successful reconciliation and maintenance");
-    assert!(identity < checked_lock && checked_lock < janitor && janitor < transport);
+        .expect("transport must restore only after successful binding reconciliation");
+    let access = helper
+        .find("commands::settings::reconcile_startup_repair_access(db).await;")
+        .expect("Repairs access recovery must follow transport restoration");
+    assert!(
+        identity < checked_lock
+            && checked_lock < janitor
+            && janitor < repair_latch
+            && repair_latch < transport
+            && transport < access
+    );
+    assert!(
+        !helper[..transport].contains("run_startup_staging_janitor(&connection)?"),
+        "a Repairs janitor failure must not skip the transport restore"
+    );
 
     let reconcile = startup
         .find("tauri::async_runtime::block_on(reconcile_native_startup(&db_state, || {")
@@ -967,18 +985,26 @@ fn startup_repair_staging_janitor_runs_after_identity_reconcile_before_sync_loop
         .expect("startup must launch the background sync loop");
     assert!(reconcile < sync);
     let completion = &startup[reconcile..sync];
+    let repair_failure = completion
+        .find("Ok(Err(error)) => {")
+        .expect("the app must observe a Repairs maintenance failure");
     let failure = completion
-        .find("Err(error) => {")
-        .expect("the app must handle a failed reconciliation");
+        .find("                    Err(error) => {")
+        .expect("the app must handle a failed binding reconciliation");
+    assert!(repair_failure < failure);
     let failure_log = completion[failure..]
         .find("Terminal identity or staging reconciliation failed; startup remains blocked")
-        .expect("identity and maintenance failures must both be observable");
+        .expect("binding failures must be observable");
     let failure_latch = completion[failure..]
-        .find("repairs::latch_startup_maintenance_failure();")
-        .expect("identity and maintenance failures must latch repair replay closed");
+        .find("repairs::latch_startup_binding_maintenance_failure();")
+        .expect("binding failures must latch the binding gate closed");
     assert!(
         failure_log < failure_latch,
-        "the unified failure path must log and latch before queue replay starts"
+        "the binding failure path must log and latch before queue replay starts"
+    );
+    assert!(
+        !completion[repair_failure..failure].contains("latch_startup_binding_maintenance_failure"),
+        "a Repairs maintenance failure must never close the binding gate"
     );
 }
 

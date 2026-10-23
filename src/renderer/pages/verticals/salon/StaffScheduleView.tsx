@@ -808,6 +808,9 @@ export const StaffScheduleView: React.FC = memo(() => {
               { names: result.unmatchedStaffLabels.join(', ') },
             ),
           );
+        } else if (result.invalidRows) {
+          // Rows were found, but none had a time this till could read.
+          toast.error(t('staffSchedule.import.nothingImported', 'No valid shifts were imported.'));
         } else {
           toast.error(t('staffSchedule.import.invalidFile', 'File does not look like a staff schedule.'));
         }
@@ -837,7 +840,8 @@ export const StaffScheduleView: React.FC = memo(() => {
 
       let imported = 0;
       let overlapped = 0;
-      let failed = 0;
+      // Rows whose times could not be read were never sent: they count as failed.
+      let failed = result.invalidRows ?? 0;
 
       for (const row of uniqueRows) {
         if (importOverlaps(row, running)) {

@@ -1,4 +1,10 @@
 {
+  "missedPlatformOrders": {
+    "title_one": "{{count}} porosi nga platformat u refuzua kur POS-i ishte offline",
+    "title_other": "{{count}} porosi nga platformat u refuzuan kur POS-i ishte offline",
+    "body": "Porosi me vlerë ≈{{total}} u refuzuan automatikisht (POS-i ishte offline). Mbaje POS-in të lidhur që të marrësh porosi nga platformat.",
+    "dismiss": "OK"
+  },
   "twintPayment": {
     "receiptNotSaved": "Konfirmuar, pa u ruajtur",
     "receiptConfirmedAt": "Konfirmuar nga arkëtari më",
@@ -953,6 +959,13 @@
       "deliveryFeeZoneNotChecked": "Zona nuk u kontrollua",
       "deliveryZoneNotCheckedNotice": "Zona e dërgesës nuk u kontrollua. Zgjidhe përsëri adresën.",
       "repickDeliveryAddress": "Zgjidhe përsëri adresën",
+      "deliveryFeeChooseZone": "Zgjidh zonën",
+      "offlineZoneChoiceTitle": "Zgjidh zonën e dërgesës",
+      "offlineZoneChoiceHint": "Pa lidhje: kjo adresë nuk mund të lokalizohet. Zgjidh zonën e saj; zbatohet tarifa e dërgesës e asaj zone.",
+      "offlineZoneChoiceLoading": "Po ngarkohen zonat e dyqanit…",
+      "offlineZoneChoiceNoZones": "Në këtë arkë nuk ka zona dërgese të ruajtura. Lidhu një herë për t'i shkarkuar, ose ndrysho llojin e porosisë.",
+      "offlineZoneChoiceRequired": "Zgjidh fillimisht zonën e dërgesës.",
+      "zoneChosenManually": "Zona u zgjodh manualisht",
       "deliveryFeeOutOfZone": "Jashtë zonës së dërgesës",
       "deliveryFeeUnavailable": "Tarifa e dërgesës nuk u llogarit",
       "total": "Totali:",
@@ -3447,6 +3460,40 @@
     }
   },
   "sync": {
+    "zGate": {
+      "approvalTitle": "Mirato me PIN-in tënd",
+      "approvalSubtitle": "Lënia mënjanë e një regjistrimi kërkon të drejtën për të anuluar pagesa. Një anëtar i stafit që e ka fut PIN-in e vet. Asgjë nuk fshihet dhe nuk tarifohet.",
+      "setAsideDone": "U la mënjanë. Regjistrimi mbetet në këtë arkë dhe Z-ja e shënon si jo në server.",
+      "undoDone": "Regjistrimi u kthye: e mban sërish mbylljen e ditës derisa ta pranojë serveri.",
+      "actionFailed": "Nuk u bë dot. Nuk ndryshoi asgjë.",
+      "stale": "Kjo listë nuk u lexua dot sërish. Tregon leximin e fundit të saktë.",
+      "unavailable": "Ditët e mbyllura në këtë arkë nuk u lexuan dot. Provo sërish.",
+      "localTitle": "Ditë të mbyllura në këtë arkë, ende jo në server: {{count}}",
+      "localDay": "Dita e {{date}}: u mbyll në këtë arkë pa lidhje",
+      "waits": {
+        "earlier_z": "Pret që dita e mëparshme e mbyllur të arrijë fillimisht në server.",
+        "window_rows": "Pret që {{count}} regjistrime të asaj dite të arrijnë në server.",
+        "server_refusal": "Serveri e refuzoi. Kontakto mbështetjen me detajet më poshtë.",
+        "sending": "Dërgohet në sinkronizimin e ardhshëm.",
+        "cleanup": "Serveri e konfirmoi. Të dhënat e saj pastrohen nga kjo arkë."
+      },
+      "details": "Detaje për mbështetjen",
+      "refusedTitle": "Të refuzuara nga serveri: {{count}}",
+      "refusedIntro": "Serveri i refuzoi përfundimisht këto regjistrime, ndaj ato e mbajnë mbylljen e ditës. Një përgjegjës mund ta lërë mënjanë njërin: mbetet në këtë arkë, Z-ja e shënon si jo në server dhe nuk dërgohet më kurrë vetë.",
+      "kind": {
+        "payment": "Pagesë",
+        "refund": "Rimbursim ose anulim",
+        "driverEarning": "Fitim i shoferit",
+        "expense": "Shpenzim",
+        "staffPayment": "Pagesë stafi",
+        "cashReturn": "Kthim parash",
+        "shift": "Turn",
+        "record": "Regjistrim"
+      },
+      "setAsideState": "U la mënjanë: mbahet në këtë arkë, jo në server",
+      "setAside": "Lëre mënjanë",
+      "undo": "Ktheje"
+    },
     "capacity": {
       "badge": "Radha {{percent}}%",
       "title": "Radha e sinkronizimit po mbushet",
@@ -3510,7 +3557,7 @@
     "closeoutBlocked": {
       "single": "Mbyllja e ditës ngeci te {{stage}}, sepse {{orderReference}} ka mbetur bllokuar: {{reason}}.",
       "multiple": "Mbyllja e ditës ngeci te {{stage}}, sepse {{count}} elemente sinkronizimi kanë mbetur bllokuar.",
-      "moneyNotSynced": "Dita nuk mund të mbyllet ende: {{count}} regjistrime pagesash ose rimbursimesh të kësaj dite nuk kanë arritur në server. Sigurohu që arka është online, shtyp Sinkronizo tani dhe mbyll sërish ditën."
+      "moneyNotSynced": "Dita nuk mund të mbyllet ende: {{count}} regjistrime pagesash, rimbursimesh ose turnesh të kësaj dite nuk kanë arritur në server. Sigurohu që arka është online, shtyp Sinkronizo tani dhe mbyll sërish ditën."
     },
     "time": {
       "never": "Asnjëherë",
@@ -7293,6 +7340,19 @@
     "depositTotal": "Depozita",
     "depositLineName": "Depozitë — {{name}}"
   },
+  "appointmentCheckoutClaim": {
+    "claimedElsewhere": "Ky takim po paguhet në një arkë tjetër ({{terminal}}) deri në {{time}}.",
+    "claimedElsewhereNow": "Ky takim po paguhet në një arkë tjetër ({{terminal}}).",
+    "claimedElsewhereUnknown": "Ky takim po paguhet në një arkë tjetër. Provo sërish pas pak minutash.",
+    "settled": "Ky takim është paguar ose mbyllur tashmë.",
+    "notFound": "Takimi nuk u gjet. Rifresko dhe provo sërish.",
+    "needsConnection": "Pagesa e një takimi kërkon lidhje. Mund t'i shesësh shërbimet pa takim.",
+    "failed": "Pagesa nuk nisi. Provo sërish."
+  },
+  "retailStock": {
+    "onlyAvailable": "Vetëm {{available}} {{unit}} në stok",
+    "unitPiece": "copë"
+  },
   "staffSchedule": {
     "loading": "Duke ngarkuar orarin e stafit...",
     "weeklyProgram": "Orari javor i stafit",
@@ -7855,6 +7915,15 @@
     "redeemSuccess": "U përdorën {{points}} pikë për ulje {{discount}}",
     "redeemFailed": "Porosia u ruajt, por pikët e besnikërisë nuk u përdorën",
     "checkoutRefused": "Pikët e besnikërisë nuk mund të rezervoheshin. Porosia nuk u ruajt. Hiqni përdorimin e pikëve ose provoni përsëri.",
+    "redeem": {
+      "offlineRefused": "Pikët mund të shlyhen vetëm me lidhje interneti. Shitja vazhdon pa zbritjen; pikët e fituara ruhen.",
+      "refusedBody": "Serveri e refuzoi shlyerjen. Nuk u aplikua asnjë zbritje.",
+      "confirmationRequired": "Konfirmo në internet shlyerjen fillestare të pikëve para se të marrësh pagesën.",
+      "releasedForCheckout": "Pikët e kësaj shitjeje iu kthyen klientit. Fillo një shitje të re për të shlyer përsëri pikë.",
+      "removePoints": "Hiq pikët",
+      "confirmed": "Pikët u konfirmuan. Vazhdo me pagesën.",
+      "releaseFailed": "Pikët nuk mund t'i ktheheshin bilancit të klientit. Provo përsëri."
+    },
     "redeemPrepared": "{{points}} pikë gati për ulje {{discount}}",
     "noCustomerSelected": "Zgjidh një klient të ruajtur për të përdorur pikët",
     "moduleUnavailable": "Moduli i besnikërisë s'është aktivizuar për këtë terminal",
@@ -10163,8 +10232,17 @@
   },
   "zReportOffline": {
     "refusal": "Pa lidhje dita nuk mbyllet dot. Vazhdo të shesësh: dita mbetet e hapur dhe e mbyll sapo të kthehet lidhja. Për ta numëruar arkën tani, bëj mbylljen e turnit të arkëtarit, që printohet edhe pa internet, dhe shiko paraparjen në këtë ekran.",
-    "status": "Pa lidhje: dita mbyllet sapo të kthehet",
-    "checklist": "Nuk ka lidhje me serverin. Vazhdo të shesësh dhe mbyll ditën sapo të kthehet lidhja."
+    "status": "Pa lidhje: Z-ja e mbyll ditën në këtë arkë dhe dërgohet më vonë",
+    "checklist": "Nuk ka lidhje me serverin. Z-ja e mbyll ditën në këtë arkë dhe e dërgon sapo të kthehet lidhja. Një dyqan me shërbim fiskal aktiv e mbyll ditën sapo të kthehet lidhja.",
+    "localCloseDone": "Dita e {{date}} u mbyll në këtë arkë pa lidhje. Z-ja e saj dërgohet në server sapo të kthehet lidhja; asgjë nuk fshihet para se ta marrë serveri. Mund ta nisësh ditën tjetër."
+  },
+  "salonStaff": {
+    "pickerTitle": "Kush e bën këtë shërbim?",
+    "noStylist": "Pa punonjës",
+    "tipRecipient": "Punonjësi",
+    "tipRecipientHelp": "I shkon punonjësit që e bëri shërbimin.",
+    "tipChooseStaff": "Kujt i shkon bakshishi?",
+    "tipsByStaff": "Bakshishe sipas stafit"
   },
   "salonSale": {
     "newSale": "Shitje e re shërbimi",

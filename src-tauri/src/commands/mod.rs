@@ -28,6 +28,7 @@ pub mod payments;
 pub mod print;
 pub mod recovery;
 pub mod repairs;
+pub mod retail_stock;
 pub mod runtime;
 pub mod settings;
 pub mod shifts;

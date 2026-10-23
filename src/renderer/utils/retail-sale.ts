@@ -1,5 +1,6 @@
 import type { BarcodeScanResult, Product, ProductVariant } from '../services/ProductCatalogService';
 import type { ScaleReading } from '../hooks/useScale';
+import { desktopRetailStockVerdict, type RetailStockLine, type UnsyncedRetailQuantities } from '../services/retail-stock-guard';
 
 export class RetailSaleError extends Error {
   constructor(public readonly code: 'variantUnavailable' | 'invalidScaleLabel' | 'scaleNotReady') {
@@ -41,8 +42,19 @@ export function scannedRetailLine(scan: BarcodeScanResult) {
   throw new RetailSaleError('invalidScaleLabel');
 }
 
-export function variantBlocked(variant: ProductVariant, blockOverselling: boolean): boolean {
-  return !variant.isActive || (blockOverselling && variant.quantity <= 0);
+/**
+ * An inactive variant is never sold. Whether one more unit fits its stock is
+ * the shared rule's decision (`retail.block_overselling`): the cart's lines of
+ * the same variant and this till's unsynced sales count against it.
+ */
+export function variantBlocked(variant: ProductVariant, blockOverselling: boolean, stock: {
+  productId?: string; lines?: readonly RetailStockLine[]; unsynced?: UnsyncedRetailQuantities;
+} = {}): boolean {
+  if (!variant.isActive) return true;
+  return desktopRetailStockVerdict({
+    blockOverselling, productId: stock.productId ?? variant.productId, variantId: variant.id,
+    stock: variant.quantity, nextQuantity: 1, lines: stock.lines ?? [], unsynced: stock.unsynced,
+  }).blocked;
 }
 
 export function scaleQuantity(reading: ScaleReading | null, unit: string, now = Date.now()): number {

@@ -1287,6 +1287,7 @@ export class OrderService {
               (typeof item.instructions === 'string' && item.instructions.trim()) ||
               null,
             is_manual: item.is_manual === true,
+            vat_class: item.vat_class || item.vatClass || 'standard',
             vat_category_code: item.vat_category_code || item.vatCategoryCode || null,
             price_includes_vat: item.price_includes_vat ?? item.priceIncludesVat ?? true,
             tax_exemption_reason:

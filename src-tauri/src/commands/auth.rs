@@ -86,13 +86,24 @@ pub async fn auth_login(arg0: Option<Value>, app: tauri::AppHandle) -> Result<Va
     .await
 }
 
+fn clear_persisted_staff_session() -> Result<(), String> {
+    storage::session_clear().inspect_err(|_| {
+        let _ = crate::repairs::latch_startup_access_pending();
+    })
+}
+
+pub(crate) fn logout_staff_session(auth_state: &auth::AuthState) -> Result<(), String> {
+    let cleared = clear_persisted_staff_session();
+    auth::logout(auth_state);
+    cleared
+}
+
 #[tauri::command]
 pub async fn auth_logout(
     auth_state: tauri::State<'_, auth::AuthState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    auth::logout(&auth_state);
-    let actor_clear = crate::repair_transport::clear_repair_actor_attestation();
+    let actor_clear = logout_staff_session(&auth_state);
     let _ = app.emit("session_timeout", serde_json::json!({ "reason": "logout" }));
     actor_clear
 }
@@ -127,16 +138,12 @@ pub async fn auth_secure_session_set(arg0: Option<Value>) -> Result<(), String> 
         other => serde_json::to_string(&other)
             .map_err(|e| format!("session payload serialisation failed: {e}"))?,
     };
-    crate::repair_transport::invalidate_repair_actor_for_session_claim(&raw)?;
     storage::session_set(&raw)
 }
 
 #[tauri::command]
 pub async fn auth_secure_session_clear() -> Result<(), String> {
-    let actor_clear = crate::repair_transport::clear_repair_actor_attestation();
-    let session_clear = storage::session_clear();
-    actor_clear?;
-    session_clear
+    clear_persisted_staff_session()
 }
 
 #[tauri::command]
@@ -351,8 +358,7 @@ pub async fn staff_auth_has_any_permission(
 pub async fn staff_auth_logout(
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<(), String> {
-    auth::logout(&auth_state);
-    crate::repair_transport::clear_repair_actor_attestation()
+    logout_staff_session(&auth_state)
 }
 
 #[tauri::command]
@@ -409,6 +415,7 @@ mod dto_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn secure_session_clear_removes_native_repair_actor() {
         let _keyring = crate::tests::fake_keyring::install_seeded([
             (

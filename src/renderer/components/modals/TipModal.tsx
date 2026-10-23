@@ -1,18 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Banknote, Bike, HandCoins, UserRound, WalletCards } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Banknote, Bike, HandCoins, Scissors, UserRound, WalletCards } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
 import { roundMoney } from '@shared/utils/money';
 import { parseMoneyInputValue } from '../../utils/moneyInput';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { CentsMoneyInput } from '../ui/CentsMoneyInput';
+import type { TipSelection, TipStaffOption, TipRecipientRole } from '../../utils/tip-recipient';
 
-export type TipRecipientRole = 'waiter' | 'cashier' | 'driver';
-
-export interface TipSelection {
-  amount: number;
-  recipientRole: TipRecipientRole;
-}
+export type { TipRecipientRole, TipSelection, TipStaffOption } from '../../utils/tip-recipient';
+export { tipPaymentFields, tipStaffOptionsFromItems } from '../../utils/tip-recipient';
 
 interface TipModalProps {
   isOpen: boolean;
@@ -21,21 +18,27 @@ interface TipModalProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   selection: TipSelection | null;
   onApply: (selection: TipSelection | null) => void;
+  /** The order's stylists; the `staff` recipient is offered only when there is one. */
+  staffOptions?: TipStaffOption[];
 }
 
 const TIP_PERCENTAGES = [5, 10, 15, 20];
+const EMPTY_STAFF_OPTIONS: TipStaffOption[] = [];
 const tipChoiceButtonBaseClass =
   'rounded-xl border border-slate-200/90 bg-white/90 shadow-[0_8px_20px_rgba(15,23,42,0.10)] transition-all dark:border-white/10 dark:bg-white/5 dark:shadow-[0_10px_24px_rgba(0,0,0,0.28)] active:translate-y-px active:shadow-inner';
 const TIP_RECIPIENT_ICON_CLASSES: Record<TipRecipientRole, string> = {
   waiter: 'tip-recipient-icon-waiter',
   cashier: 'tip-recipient-icon-cashier',
   driver: 'tip-recipient-icon-driver',
+  staff: 'text-amber-500 dark:text-amber-300',
 };
 // Module audit closure (2026-09-16): one rounding rule for the renderer.
 
 const defaultRecipientForOrder = (
   orderType?: 'pickup' | 'delivery' | 'dine-in',
+  hasStaff = false,
 ): TipRecipientRole => {
+  if (hasStaff) return 'staff';
   if (orderType === 'delivery') return 'driver';
   if (orderType === 'dine-in') return 'waiter';
   return 'cashier';
@@ -48,26 +51,41 @@ export const TipModal: React.FC<TipModalProps> = ({
   orderType,
   selection,
   onApply,
+  staffOptions = EMPTY_STAFF_OPTIONS,
 }) => {
   const { t } = useTranslation();
+  const hasStaff = staffOptions.length > 0;
+  const onlyStaffId = staffOptions.length === 1 ? staffOptions[0].staffId : null;
+  // A host may rebuild the same options on every render: reset only on a real change.
+  const staffKey = staffOptions.map(option => option.staffId).join('|');
+  const staffOptionsRef = useRef(staffOptions);
+  staffOptionsRef.current = staffOptions;
   const [manualAmount, setManualAmount] = useState('');
   const [selectedPercentage, setSelectedPercentage] = useState<number | null>(null);
   const [recipientRole, setRecipientRole] = useState<TipRecipientRole>(
-    defaultRecipientForOrder(orderType),
+    defaultRecipientForOrder(orderType, hasStaff),
   );
+  const [recipientStaffId, setRecipientStaffId] = useState<string | null>(onlyStaffId);
+
+  const allowedRecipients = useMemo<TipRecipientRole[]>(() => {
+    const base: TipRecipientRole[] = orderType === 'delivery'
+      ? ['driver']
+      : orderType === 'dine-in' ? ['waiter', 'cashier'] : ['cashier'];
+    return hasStaff ? ['staff', ...base] : base;
+  }, [hasStaff, orderType]);
 
   useEffect(() => {
     if (!isOpen) return;
     setManualAmount(selection?.amount ? selection.amount.toFixed(2) : '');
     setSelectedPercentage(null);
-    setRecipientRole(selection?.recipientRole || defaultRecipientForOrder(orderType));
-  }, [isOpen, orderType, selection]);
-
-  const allowedRecipients = useMemo<TipRecipientRole[]>(() => {
-    if (orderType === 'delivery') return ['driver'];
-    if (orderType === 'dine-in') return ['waiter', 'cashier'];
-    return ['cashier'];
-  }, [orderType]);
+    const restored = selection?.recipientRole && allowedRecipients.includes(selection.recipientRole)
+      ? selection.recipientRole : null;
+    setRecipientRole(restored || defaultRecipientForOrder(orderType, hasStaff));
+    const restoredStaffId = restored === 'staff' &&
+      staffOptionsRef.current.some(option => option.staffId === selection?.recipientStaffId)
+      ? selection!.recipientStaffId! : null;
+    setRecipientStaffId(restoredStaffId ?? onlyStaffId);
+  }, [allowedRecipients, hasStaff, isOpen, onlyStaffId, orderType, selection, staffKey]);
 
   const tipAmount = roundMoney(parseMoneyInputValue(manualAmount));
   const totalWithTip = roundMoney(baseAmount + tipAmount);
@@ -77,13 +95,22 @@ export const TipModal: React.FC<TipModalProps> = ({
     setManualAmount(roundMoney(baseAmount * percentage / 100).toFixed(2));
   };
 
+  const chosenStaff = recipientRole === 'staff'
+    ? staffOptions.find(option => option.staffId === recipientStaffId) ?? null
+    : null;
+  // A staff tip names one of the order's stylists; the cashier picks when there are several.
+  const staffChoiceMissing = tipAmount > 0 && recipientRole === 'staff' && !chosenStaff;
+
   const handleApply = () => {
     if (tipAmount <= 0) {
       onApply(null);
       onClose();
       return;
     }
-    onApply({ amount: tipAmount, recipientRole });
+    if (staffChoiceMissing) return;
+    onApply(chosenStaff
+      ? { amount: tipAmount, recipientRole, recipientStaffId: chosenStaff.staffId, recipientStaffName: chosenStaff.staffName }
+      : { amount: tipAmount, recipientRole });
     onClose();
   };
 
@@ -108,6 +135,11 @@ export const TipModal: React.FC<TipModalProps> = ({
         'modals.tip.recipients.driverHelp',
         'The tip is held for the driver and assigned automatically when a driver takes the delivery.',
       ),
+    },
+    staff: {
+      icon: Scissors,
+      label: t('salonStaff.tipRecipient', 'Staff member'),
+      help: t('salonStaff.tipRecipientHelp', 'Credits the staff member who did the service.'),
     },
   };
 
@@ -197,6 +229,32 @@ export const TipModal: React.FC<TipModalProps> = ({
               );
             })}
           </div>
+          {recipientRole === 'staff' && (
+            <div className="mt-2" data-testid="tip-staff-choices">
+              {staffOptions.length > 1 && (
+                <p className="mb-1.5 text-sm font-semibold liquid-glass-modal-text">
+                  {t('salonStaff.tipChooseStaff', 'Who gets the tip?')}
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                {staffOptions.map(option => (
+                  <button
+                    key={option.staffId}
+                    type="button"
+                    onClick={() => setRecipientStaffId(option.staffId)}
+                    aria-pressed={recipientStaffId === option.staffId}
+                    className={`min-h-10 truncate px-2 text-sm font-semibold ${tipChoiceButtonBaseClass} ${
+                      recipientStaffId === option.staffId
+                        ? '!border-yellow-400/80 !bg-yellow-50/90 dark:!bg-yellow-400/10 liquid-glass-modal-text'
+                        : 'liquid-glass-modal-text'
+                    }`}
+                  >
+                    {option.staffName}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="rounded-2xl border border-slate-200/90 bg-white/80 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] dark:border-white/10 dark:bg-white/5 dark:shadow-none">
@@ -224,7 +282,8 @@ export const TipModal: React.FC<TipModalProps> = ({
           <button
             type="button"
             onClick={handleApply}
-            className="liquid-glass-modal-button flex-1 border-emerald-400/50 bg-emerald-50/90 font-medium text-emerald-700 shadow-[0_10px_24px_rgba(15,23,42,0.12)] transition-all active:translate-y-px active:shadow-inner dark:border-emerald-500/30 dark:bg-emerald-600/20 dark:text-emerald-300"
+            disabled={staffChoiceMissing}
+            className="liquid-glass-modal-button flex-1 disabled:cursor-not-allowed disabled:opacity-50 border-emerald-400/50 bg-emerald-50/90 font-medium text-emerald-700 shadow-[0_10px_24px_rgba(15,23,42,0.12)] transition-all active:translate-y-px active:shadow-inner dark:border-emerald-500/30 dark:bg-emerald-600/20 dark:text-emerald-300"
           >
             <HandCoins className="mr-2 inline h-4 w-4" />
             {t('modals.tip.apply', 'Apply Tip')}

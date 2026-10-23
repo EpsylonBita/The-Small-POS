@@ -857,6 +857,143 @@ pub async fn diagnostics_open_export_dir(
     .await
 }
 
+/// The request of [`recovery_z_gate_set_aside`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ZGateSetAsideRequest {
+    action: String,
+    queue_id: Option<String>,
+}
+
+fn parse_z_gate_set_aside_payload(arg0: Option<Value>) -> Result<ZGateSetAsideRequest, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("list")
+        .to_string();
+    if !matches!(action.as_str(), "list" | "set_aside" | "undo") {
+        return Err(format!("Unknown set-aside action: {action}"));
+    }
+    let queue_id = ["queueId", "queue_id"].iter().find_map(|key| {
+        payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(ToString::to_string)
+    });
+    if action != "list" && queue_id.is_none() {
+        return Err("A queue row id is required to set a row aside".to_string());
+    }
+    Ok(ZGateSetAsideRequest { action, queue_id })
+}
+
+/// Health (offline week Ω3/Ω4, founder 21/10/2026). `list` (the default):
+/// the Zs closed on this till still waiting for the server and what each
+/// waits for, and every row the server refused for good that holds a Z gate,
+/// with its code and the server's sentence (`zreport::local_z_health`).
+/// `set_aside` / `undo` `{queueId}`: the row is checked first, so a refusal
+/// never consumes an approval; then a holder of the void-payments right
+/// approves (the 1.4.135 checkout set-aside primitive,
+/// `auth::authorize_permitted_money_action`: the staff member on shift whose
+/// role grants it with a fresh PIN, else that right holder's own PIN), and
+/// the queue sets the row aside (`sync_queue::set_aside_queue_row`) or brings
+/// it back (`sync_queue::undo_set_aside`), each in one transaction with its
+/// `recovery_action_log` entry. The record and its queue row are never
+/// deleted; the "not on the server" list of every waiting Z is refreshed.
+#[tauri::command]
+pub async fn recovery_z_gate_set_aside(
+    arg0: Option<Value>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    run_blocking_command("recovery_z_gate_set_aside", move || {
+        let db = app.state::<db::DbState>();
+        let auth = app.state::<crate::auth::AuthState>();
+        let request = parse_z_gate_set_aside_payload(arg0)?;
+        if request.action == "list" {
+            let conn = db
+                .lock_traced("z_gate_set_aside")
+                .map_err(|e| e.to_string())?;
+            return crate::zreport::local_z_health(&conn);
+        }
+        let queue_id = request.queue_id.unwrap_or_default();
+        let undo = request.action == "undo";
+        {
+            let conn = db
+                .lock_traced("z_gate_set_aside")
+                .map_err(|e| e.to_string())?;
+            crate::zreport::set_aside_candidate(&conn, &queue_id, undo)?;
+        }
+        let approver = crate::auth::authorize_permitted_money_action(
+            crate::auth::MoneyApproval::VoidPayments,
+            &db,
+            &auth,
+        )
+        .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
+        let session = crate::auth::get_session_json(&auth);
+        let staff_id = approver
+            .manager_staff_id
+            .clone()
+            .or_else(|| {
+                ["databaseStaffId", "staffId"].iter().find_map(|key| {
+                    session
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                })
+            })
+            .ok_or_else(|| "The approving staff member is unknown".to_string())?;
+        let conn = db
+            .lock_traced("z_gate_set_aside")
+            .map_err(|e| e.to_string())?;
+        let health = apply_z_gate_set_aside(&conn, &queue_id, &staff_id, undo)?;
+        info!(
+            queue_id = %queue_id,
+            action = %request.action,
+            via = approver.via,
+            "Z-gate row set-aside action applied"
+        );
+        Ok(health)
+    })
+    .await
+}
+
+/// The set-aside (or its undo) once the approval is given: the core of
+/// [`recovery_z_gate_set_aside`], with no `AppHandle` (the offline-week tests
+/// drive it). The row is checked again on `conn`, since the queue may have
+/// moved while the approval was asked; the reason is the row's own leading
+/// error code. Then the queue writes the listing (or removes it) with its
+/// `recovery_action_log` entry, the "not on the server" list of every
+/// waiting Z is refreshed, and the fresh Health list is answered with
+/// `applied` and `queueId`.
+pub(crate) fn apply_z_gate_set_aside(
+    conn: &rusqlite::Connection,
+    queue_id: &str,
+    staff_id: &str,
+    undo: bool,
+) -> Result<Value, String> {
+    let (_table_name, reason) = crate::zreport::set_aside_candidate(conn, queue_id, undo)?;
+    if undo {
+        crate::sync_queue::undo_set_aside(conn, queue_id, staff_id)?;
+    } else {
+        crate::sync_queue::set_aside_queue_row(conn, queue_id, staff_id, &reason)?;
+    }
+    if let Err(error) = crate::zreport::refresh_not_on_server_for_unconfirmed_zs(conn) {
+        warn!(error = %error, "Could not refresh the set-aside list of the waiting Zs");
+    }
+    let mut health = crate::zreport::local_z_health(conn)?;
+    if let Some(object) = health.as_object_mut() {
+        let applied = if undo { "undo" } else { "set_aside" };
+        object.insert("applied".to_string(), Value::String(applied.to_string()));
+        object.insert("queueId".to_string(), Value::String(queue_id.to_string()));
+    }
+    Ok(health)
+}
+
 /// Gap review 2026-07-10 P0: static audit that every renderer-callable
 /// full-wipe command carries the SystemControl privileged-action gate. These
 /// commands DELETE the entire sync_queue / parity_sync_queue / orders from the

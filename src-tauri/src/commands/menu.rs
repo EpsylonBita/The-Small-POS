@@ -59,6 +59,9 @@ struct MenuComboUpdatePayload {
 }
 
 const MENU_VERSION_MONITOR_MIN_INTERVAL_SECS: u64 = 10;
+/// Upper bound on an admin `Retry-After` the monitor honours, so a bad header
+/// cannot stall menu updates for long.
+const MENU_MONITOR_MAX_RETRY_AFTER_SECS: u64 = 300;
 const MENU_MONITOR_WARN_THROTTLE_SECS: u64 = 300;
 const MENU_MONITOR_OFFLINE_LOG_THROTTLE_SECS: u64 = 120;
 static MENU_PAYLOAD_WARN_STATE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
@@ -104,7 +107,17 @@ fn should_emit_menu_offline_info() -> bool {
 
 fn is_menu_payload_shape_error(error: &str) -> bool {
     error.contains("Menu sync response missing menu payload")
-        || error.contains("Menu sync payload is missing all menu sections")
+        || error.contains(menu::MENU_PAYLOAD_INCOMPLETE)
+}
+
+/// The wait before the monitor's next check: its cadence, or the admin's
+/// `Retry-After` after a failed sync when that is longer (capped).
+fn menu_monitor_wait(cadence: Duration, retry_after_secs: Option<i64>) -> Duration {
+    let retry_after = retry_after_secs
+        .and_then(|secs| u64::try_from(secs).ok())
+        .map(|secs| Duration::from_secs(secs.min(MENU_MONITOR_MAX_RETRY_AFTER_SECS)))
+        .unwrap_or_default();
+    cadence.max(retry_after)
 }
 
 fn is_menu_connectivity_error(error: &str) -> bool {
@@ -300,9 +313,11 @@ fn handle_menu_monitor_sync_error(
     app: &tauri::AppHandle,
     db: &db::DbState,
     sync_state: &crate::sync::SyncState,
-    error: String,
+    failure: menu::MenuSyncFailure,
     source: &str,
 ) {
+    let menu_unavailable = failure.is_menu_unavailable();
+    let error = failure.message;
     let mut success = false;
     let mut event_error: Option<&str> = Some(error.as_str());
 
@@ -311,6 +326,22 @@ fn handle_menu_monitor_sync_error(
             handle_invalid_terminal_credentials(Some(db), app, source, &error);
         } else {
             crate::sync::handle_soft_terminal_auth_failure(db, sync_state, app, source, &error);
+        }
+    } else if menu_unavailable || is_menu_payload_shape_error(&error) {
+        // POS audit S-D-05: the admin could not send the whole menu. The
+        // cached menu stays, the digest token is not stored, and the next
+        // tick retries.
+        if should_emit_menu_payload_warn() {
+            warn!(
+                error = %error,
+                throttle_secs = MENU_MONITOR_WARN_THROTTLE_SECS,
+                "Menu version monitor sync payload missing expected sections; keeping cached menu"
+            );
+        } else {
+            debug!(
+                error = %error,
+                "Menu version monitor payload warning suppressed by throttle"
+            );
         }
     } else if is_menu_connectivity_error(&error) {
         if should_emit_menu_offline_info() {
@@ -327,19 +358,6 @@ fn handle_menu_monitor_sync_error(
         }
         success = true;
         event_error = None;
-    } else if is_menu_payload_shape_error(&error) {
-        if should_emit_menu_payload_warn() {
-            warn!(
-                error = %error,
-                throttle_secs = MENU_MONITOR_WARN_THROTTLE_SECS,
-                "Menu version monitor sync payload missing expected sections"
-            );
-        } else {
-            debug!(
-                error = %error,
-                "Menu version monitor payload warning suppressed by throttle"
-            );
-        }
     } else {
         warn!(error = %error, "Menu version monitor sync iteration failed");
     }
@@ -364,6 +382,8 @@ pub fn start_menu_version_monitor(
         );
 
         loop {
+            // The admin's Retry-After from this tick's failed sync, if any.
+            let mut retry_after_secs: Option<i64> = None;
             if storage::is_configured() {
                 if sync_state.is_remote_auth_paused() {
                     tokio::select! {
@@ -399,7 +419,7 @@ pub fn start_menu_version_monitor(
                                 None,
                             );
                         } else {
-                            match menu::sync_menu(db.as_ref()).await {
+                            match menu::sync_menu_detailed(db.as_ref()).await {
                                 Ok(result) => {
                                     let (updated, version, counts, timestamp) =
                                         menu_sync_snapshot(&result);
@@ -427,6 +447,7 @@ pub fn start_menu_version_monitor(
                                     last_digest_token = Some(digest.token);
                                 }
                                 Err(error) => {
+                                    retry_after_secs = error.retry_after_secs;
                                     handle_menu_monitor_sync_error(
                                         &app,
                                         db.as_ref(),
@@ -446,7 +467,7 @@ pub fn start_menu_version_monitor(
                             );
                         }
 
-                        match menu::sync_menu(db.as_ref()).await {
+                        match menu::sync_menu_detailed(db.as_ref()).await {
                             Ok(result) => {
                                 let (updated, version, counts, timestamp) =
                                     menu_sync_snapshot(&result);
@@ -472,6 +493,7 @@ pub fn start_menu_version_monitor(
                                 }
                             }
                             Err(error) => {
+                                retry_after_secs = error.retry_after_secs;
                                 handle_menu_monitor_sync_error(
                                     &app,
                                     db.as_ref(),
@@ -486,7 +508,7 @@ pub fn start_menu_version_monitor(
             }
 
             tokio::select! {
-                _ = tokio::time::sleep(cadence) => {}
+                _ = tokio::time::sleep(menu_monitor_wait(cadence, retry_after_secs)) => {}
                 _ = cancel.cancelled() => {
                     info!("Menu version monitor cancelled");
                     break;
@@ -522,10 +544,11 @@ pub async fn menu_get_subcategories(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut subcategories = menu::get_subcategories(&db);
+    // Rows as this branch sells them: its overrides applied (POS audit K4).
+    let mut subcategories = menu::get_effective_subcategories(&db);
     let source = if subcategories.is_empty() {
         maybe_lazy_warm_menu_cache(&db, &app, "menu_get_subcategories").await;
-        subcategories = menu::get_subcategories(&db);
+        subcategories = menu::get_effective_subcategories(&db);
         if subcategories.is_empty() {
             "empty_after_warmup"
         } else {
@@ -547,10 +570,11 @@ pub async fn menu_get_ingredients(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut ingredients = menu::get_ingredients(&db);
+    // Rows as this branch sells them: its overrides applied (POS audit K4).
+    let mut ingredients = menu::get_effective_ingredients(&db);
     let source = if ingredients.is_empty() {
         maybe_lazy_warm_menu_cache(&db, &app, "menu_get_ingredients").await;
-        ingredients = menu::get_ingredients(&db);
+        ingredients = menu::get_effective_ingredients(&db);
         if ingredients.is_empty() {
             "empty_after_warmup"
         } else {
@@ -570,10 +594,10 @@ pub async fn menu_get_subcategory_ingredients(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let subcategory_id = parse_menu_subcategory_payload(arg0)?;
-    let mut ingredients = menu::get_ingredients(&db);
+    let mut ingredients = menu::get_effective_ingredients(&db);
     if ingredients.is_empty() {
         maybe_lazy_warm_menu_cache(&db, &app, "menu_get_subcategory_ingredients").await;
-        ingredients = menu::get_ingredients(&db);
+        ingredients = menu::get_effective_ingredients(&db);
     }
     let mut filtered: Vec<serde_json::Value> = ingredients
         .into_iter()
@@ -596,7 +620,7 @@ pub async fn menu_get_subcategory_ingredients(
                 continue;
             }
             if let Some(arr) = entry.get("ingredients").and_then(|v| v.as_array()) {
-                filtered = arr.clone();
+                filtered = menu::apply_ingredient_overrides(&db, arr.clone());
                 break;
             }
         }
@@ -1106,5 +1130,36 @@ mod dto_tests {
         assert!(should_run_menu_sync_for_digest(None, "token-a"));
         assert!(should_run_menu_sync_for_digest(Some("token-a"), "token-b"));
         assert!(!should_run_menu_sync_for_digest(Some("token-a"), "token-a"));
+    }
+
+    #[test]
+    fn menu_monitor_waits_for_a_longer_retry_after_within_its_cap() {
+        let cadence = Duration::from_secs(30);
+        assert_eq!(menu_monitor_wait(cadence, None), cadence);
+        // The admin's 5 s for a partial menu is inside the cadence already.
+        assert_eq!(menu_monitor_wait(cadence, Some(5)), cadence);
+        assert_eq!(
+            menu_monitor_wait(cadence, Some(120)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            menu_monitor_wait(cadence, Some(86_400)),
+            Duration::from_secs(MENU_MONITOR_MAX_RETRY_AFTER_SECS)
+        );
+        assert_eq!(menu_monitor_wait(cadence, Some(-1)), cadence);
+    }
+
+    #[test]
+    fn incomplete_menu_payloads_are_classified_as_payload_shape_errors() {
+        assert!(is_menu_payload_shape_error(&format!(
+            "{}: combos",
+            menu::MENU_PAYLOAD_INCOMPLETE
+        )));
+        assert!(is_menu_payload_shape_error(
+            "Menu sync response missing menu payload"
+        ));
+        assert!(!is_menu_payload_shape_error(
+            "Admin dashboard server error (HTTP 500)"
+        ));
     }
 }

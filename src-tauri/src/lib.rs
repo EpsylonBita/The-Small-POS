@@ -95,6 +95,7 @@ mod staff_cash_returns;
 mod staff_pin_vault;
 mod startup_recovery;
 mod storage;
+mod store_time;
 mod sync;
 pub mod sync_queue; // pub so integration tests can call create_tables / enqueue_payload_item
 mod table_attempt_recovery;
@@ -107,6 +108,8 @@ mod unsaved_payments;
 mod windows_spooler;
 mod zreport;
 
+#[cfg(test)]
+mod offline_week_tests;
 #[cfg(test)]
 mod tests;
 
@@ -762,21 +765,34 @@ pub(crate) fn write_system_clipboard_text(text: &str) -> Result<(), String> {
 // ============================================================================
 
 /// Transport restoration follows identity recovery and checked maintenance.
-/// The callback schedules the existing LAN owner exactly once; it cannot run
-/// while startup is still waiting on authoritative access reads.
+/// The callback schedules the existing LAN owner exactly once, before Repairs
+/// access recovery can wait on HTTP. Legacy unknown-purpose binding recovery
+/// still completes before transport restoration.
+///
+/// The outer error is the terminal binding: it stays fail-closed and the
+/// transport stays down. The inner result is the Repairs staging janitor: a
+/// failure there latches Repairs maintenance only, so the waiters' LAN
+/// receiver still comes up on a healthy binding.
 pub(crate) async fn reconcile_native_startup(
     db: &db::DbState,
     restore_transport: impl FnOnce(),
-) -> Result<repairs::RepairStagingJanitorReport, String> {
-    commands::settings::reconcile_startup_terminal_binding_with_access(db).await?;
-    let report = {
+) -> Result<Result<repairs::RepairStagingJanitorReport, String>, String> {
+    commands::settings::reconcile_startup_terminal_binding_before_access(db).await?;
+    let janitor = {
         let connection = db
             .lock_traced("repairs_startup_janitor")
             .map_err(|_| "REPAIR_NATIVE_STATE_UNAVAILABLE")?;
-        repairs::run_startup_staging_janitor(&connection)?
+        repairs::run_startup_staging_janitor(&connection)
     };
+    if janitor.is_err() {
+        repairs::latch_startup_repair_maintenance_failure();
+    }
+    // The LAN receiver needs a healthy binding: a binding latch set earlier in
+    // startup (the protected-settings scrub) keeps it down, as before.
+    drop(repairs::acquire_terminal_binding_lease()?);
     restore_transport();
-    Ok(report)
+    commands::settings::reconcile_startup_repair_access(db).await;
+    Ok(janitor)
 }
 
 pub fn run() {
@@ -964,12 +980,12 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 Ok(app_cache_dir) => {
                     if let Err(error) = repair_attachment_cache::initialize(&app_cache_dir) {
                         error!(error = %error, "Repair attachment cache startup purge failed closed");
-                        repairs::latch_startup_maintenance_failure();
+                        repairs::latch_startup_repair_maintenance_failure();
                     }
                 }
                 Err(error) => {
                     error!(error = %error, "Repair attachment cache path is unavailable");
-                    repairs::latch_startup_maintenance_failure();
+                    repairs::latch_startup_repair_maintenance_failure();
                 }
             }
 
@@ -997,8 +1013,10 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 warn!(error = %error, "Failed to purge saved customer API answers");
             }
             if let Err(error) = scrub_sensitive_local_settings_checked(&db_state) {
+                // Binding class: the scrub removes terminal credentials and LAN
+                // pairing secrets from SQLite, not anything of Repairs.
                 error!(error = %error, "Failed to scrub protected local settings");
-                repairs::latch_startup_maintenance_failure();
+                repairs::latch_startup_binding_maintenance_failure();
             }
             // Staff PIN hashes move from SQLite to the OS credential store; the
             // SQLite copies are wiped (desktop offline check-in, 14/10/2026).
@@ -1067,7 +1085,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                         }
                     });
                 })) {
-                    Ok(report) => {
+                    Ok(Ok(report)) => {
                         if report.cleanup_failures > 0 {
                             warn!(
                                 cleaned_terminal_rows = report.cleaned_terminal_rows,
@@ -1088,11 +1106,49 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                             );
                         }
                     }
+                    Ok(Err(error)) => {
+                        error!("Repairs staging maintenance failed at startup; Repairs stays unavailable: {error}");
+                    }
                     Err(error) => {
                         error!("Terminal identity or staging reconciliation failed; startup remains blocked: {error}");
-                        repairs::latch_startup_maintenance_failure();
+                        repairs::latch_startup_binding_maintenance_failure();
                     }
                 }
+            }
+
+            // Offline week Ω6 (22/10/2026): the saved LAN receiver started
+            // only at startup, and an offline boot cannot pass its cloud main
+            // authority check. Retry the same restore when the till's own
+            // connectivity check turns reachable. Transitions only: the sync
+            // loop emits `network_status` every cycle, and a till the server
+            // does not accept as a main must not call `pos/lan/validate`
+            // every 15 s.
+            {
+                use tauri::Listener as _;
+                let lan_reconnect_app = app.handle().clone();
+                let last_online = std::sync::Mutex::new(None::<bool>);
+                app.listen("network_status", move |event| {
+                    let Some(online) = serde_json::from_str::<serde_json::Value>(event.payload())
+                        .ok()
+                        .and_then(|payload| {
+                            payload.get("isOnline").and_then(serde_json::Value::as_bool)
+                        })
+                    else {
+                        return;
+                    };
+                    let came_online = match last_online.lock() {
+                        Ok(mut last) => online && last.replace(online) != Some(true),
+                        Err(_) => false,
+                    };
+                    if came_online {
+                        let app = lan_reconnect_app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) = lan_transport::restore_startup(app).await {
+                                warn!(error = %error, "Saved LAN receiver could not restart after reconnection; cloud sync remains available");
+                            }
+                        });
+                    }
+                });
             }
 
             // Start background sync loop (15s interval)
@@ -1459,6 +1515,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::orders::orders_resolve_conflict,
             commands::orders::orders_force_sync_retry,
             commands::orders::orders_get_retry_info,
+            commands::retail_stock::orders_get_unsynced_retail_quantities,
             // Sync
             commands::sync::sync_get_status,
             commands::sync::sync_get_network_status,
@@ -1859,6 +1916,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::diagnostics::diagnostics_export,
             commands::diagnostics::diagnostics_open_export_dir,
             commands::diagnostics::diagnostics_send_remote_incident,
+            commands::diagnostics::recovery_z_gate_set_aside,
             // Recovery
             commands::recovery::recovery_list_points,
             commands::recovery::recovery_create_snapshot,

@@ -184,7 +184,11 @@ async fn main_startup_access_actual_same_identity_failure_then_restart_never_req
         decision
     )
     .is_err());
-    assert!(terminal_connection_rebind_pending(&database.state).unwrap());
+    // Π1: the half-finished decision leaves Repairs pending and denied, never
+    // a terminal rebind that refuses every admin call and ordinary sale.
+    assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+    drop(crate::repairs::acquire_terminal_binding_lease().expect("ordinary sales stay admitted"));
+    assert!(crate::repairs::access_reconciliation_pending().unwrap());
     assert_eq!(binding(), keys);
     assert_eq!(protected(&database), original);
     {
@@ -236,6 +240,7 @@ async fn main_startup_access_enabled_without_staff_admits_pos_but_defers_repairs
         assert!(crate::repairs::acquire_terminal_binding_lease().is_ok());
     })
     .await
+    .unwrap()
     .unwrap();
     assert_eq!(restores.get(), 1);
     assert!(scope_json()["transition_pending"].as_bool().unwrap());
@@ -275,7 +280,7 @@ async fn main_startup_access_enabled_without_staff_admits_pos_but_defers_repairs
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
-async fn main_startup_access_startup_failure_never_restores_transport() {
+async fn main_startup_access_legacy_startup_failure_never_restores_transport() {
     let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
     let mut response = wire(false);
     response["organization_id"] = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -284,6 +289,7 @@ async fn main_startup_access_startup_failure_never_restores_transport() {
     let (_keys, database) = fixture(&server.url, true, false);
     let original = protected(&database);
     let keys = binding();
+    let before_scope = scope_json();
     let restores = std::cell::Cell::new(0);
     assert!(
         crate::reconcile_native_startup(&database.state, || restores.set(restores.get() + 1))
@@ -295,17 +301,112 @@ async fn main_startup_access_startup_failure_never_restores_transport() {
     assert!(terminal_connection_rebind_pending(&database.state).unwrap());
     assert_eq!(protected(&database), original);
     assert_eq!(binding(), keys);
-    assert_eq!(
+    // A legacy pending scope has no purpose, so it stays a fail-closed
+    // binding marker exactly as stored until a full answer replaces it.
+    assert_eq!(scope_json(), before_scope);
+    assert!(
         reconcile_startup_terminal_binding_with_access(&database.state)
             .await
-            .unwrap_err(),
-        "REPAIR_ACCESS_RECOVERY_COOLDOWN"
+            .is_err()
+    );
+    assert!(terminal_connection_rebind_pending(&database.state).unwrap());
+    assert_eq!(scope_json(), before_scope);
+}
+
+fn pending_access_purpose(verified: bool) {
+    let mut scope = scope_json();
+    scope["pending_purpose"] = json!({
+        "kind": "access_reconciliation",
+        "binding_digest": current_access_binding_digest().unwrap().unwrap(),
+        "verified": verified,
+    });
+    replace_scope(&scope);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn main_startup_access_failed_access_recovery_still_restores_transport_and_respects_its_gate()
+{
+    let lifecycle = crate::repairs::isolate_lifecycle_for_test();
+    let mut response = wire(false);
+    response["organization_id"] = json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    response["terminal"]["organization_id"] = response["organization_id"].clone();
+    let server = MockServer::new(response.to_string());
+    let (_keys, database) = fixture(&server.url, true, true);
+    pending_access_purpose(false);
+    let original = protected(&database);
+    let keys = binding();
+    let restores = std::cell::Cell::new(0);
+    let janitor = crate::reconcile_native_startup(&database.state, || {
+        restores.set(restores.get() + 1);
+        assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+        assert!(crate::repairs::acquire_terminal_binding_lease().is_ok());
+    })
+    .await
+    .expect("a Repairs access failure never fails the binding");
+    assert!(
+        janitor.is_ok(),
+        "a pending access decision defers the janitor"
+    );
+    assert_eq!(restores.get(), 1, "the waiters' LAN receiver must come up");
+    assert_eq!(server.count(), 1);
+    assert!(crate::repairs::lifecycle_snapshot_for_test().access_blocked);
+    {
+        let connection = database.state.conn.lock().unwrap();
+        assert!(crate::repairs::acquire_renderer_access(&connection).is_err());
+    }
+    assert_eq!(protected(&database), original);
+    assert_eq!(binding(), keys);
+    // The durable retry gate still holds the next attempt off the server.
+    lifecycle.reset();
+    assert_eq!(
+        reconcile_startup_terminal_binding_with_access(&database.state).await,
+        Ok(Some(TERMINAL.to_string()))
     );
     assert_eq!(
         server.count(),
         1,
         "failed recovery must respect its durable retry gate"
     );
+    assert!(crate::repairs::acquire_terminal_binding_lease().is_ok());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn main_startup_access_unverified_access_offline_restart_admits_sales_and_denies_repairs() {
+    let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+    // Every request answers 500: the store is offline or the server is down.
+    let server = ScriptedReplies::new(vec![]);
+    let (_keys, database) = fixture(&server.url, true, true);
+    pending_access_purpose(false);
+    let original = protected(&database);
+    let keys = binding();
+    let database = database.restart();
+    let restores = std::cell::Cell::new(0);
+    let janitor =
+        crate::reconcile_native_startup(&database.state, || restores.set(restores.get() + 1))
+            .await
+            .expect("the binding is healthy");
+    assert!(janitor.is_ok());
+    assert_eq!(restores.get(), 1, "the transport restore callback must run");
+    assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+    let lease = crate::repairs::acquire_terminal_binding_lease().expect("sales are admitted");
+    assert_eq!(
+        lease.generation(),
+        0,
+        "nothing moved the binding generation"
+    );
+    drop(lease);
+    {
+        let connection = database.state.conn.lock().unwrap();
+        assert!(
+            crate::repairs::acquire_renderer_access(&connection).is_err(),
+            "Repairs is denied"
+        );
+    }
+    assert!(crate::repairs::access_reconciliation_pending().unwrap());
+    assert_eq!(protected(&database), original);
+    assert_eq!(binding(), keys);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -377,7 +478,7 @@ async fn main_startup_access_real_intents_corruption_missing_credentials_and_mix
                     "not-valid-journal"
                 ));
             }
-            "maintenance" => crate::repairs::latch_startup_maintenance_failure(),
+            "maintenance" => crate::repairs::latch_startup_binding_maintenance_failure(),
             _ => unreachable!(),
         }
         replace_scope(&scope);
@@ -401,12 +502,12 @@ async fn main_startup_access_real_intents_corruption_missing_credentials_and_mix
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
-async fn main_startup_access_typed_binding_key_or_origin_change_requires_real_recovery() {
+async fn main_startup_access_api_key_change_denies_repairs_but_origin_change_stays_closed() {
     let lifecycle = crate::repairs::isolate_lifecycle_for_test();
     for key in ["pos_api_key", "admin_dashboard_url"] {
         lifecycle.reset();
         let server = MockServer::new(wire(false).to_string());
-        let (_keys, database) = fixture(&server.url, false, false);
+        let (_keys, database) = fixture(&server.url, false, true);
         let decision = crate::repairs::start_authoritative_access_decision().unwrap();
         crate::repairs::begin_authoritative_access_reconciliation(
             &database.state,
@@ -427,11 +528,19 @@ async fn main_startup_access_typed_binding_key_or_origin_change_requires_real_re
         ));
         let original = protected(&database);
         let before_scope = scope_json();
-        assert!(
-            reconcile_startup_terminal_binding_with_access(&database.state)
-                .await
-                .is_err()
-        );
+        let result = reconcile_startup_terminal_binding_with_access(&database.state).await;
+        if key == "pos_api_key" {
+            // Π1: an API-key-only rotation is not a binding change, and the
+            // pending Repairs decision's digest no longer gates the binding.
+            assert_eq!(result, Ok(Some(TERMINAL.to_string())));
+            assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+            assert!(crate::repairs::acquire_terminal_binding_lease().is_ok());
+            assert!(crate::repairs::lifecycle_snapshot_for_test().access_blocked);
+        } else {
+            // A changed origin contradicts the SQLite mirror: the binding
+            // owner keeps failing closed.
+            assert!(result.is_err(), "case {key}");
+        }
         assert_eq!(server.count(), 0);
         assert_eq!(protected(&database), original);
         assert_eq!(scope_json(), before_scope);
@@ -681,7 +790,7 @@ fn main_startup_access_module_publication_rejects_key_changed_after_caller_check
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
-async fn main_startup_access_later_module_denial_is_durable_and_cannot_reopen_offline() {
+async fn main_startup_access_later_module_denial_is_durable_for_repairs_only() {
     let lifecycle = crate::repairs::isolate_lifecycle_for_test();
     let server = ScriptedReplies::new(vec![
         (200, wire(true)),
@@ -703,12 +812,20 @@ async fn main_startup_access_later_module_denial_is_durable_and_cannot_reopen_of
     );
     let database = database.restart();
     lifecycle.reset();
-    assert!(
-        reconcile_startup_terminal_binding_with_access(&database.state)
-            .await
-            .is_err()
+    // Π1: the restart's recovery meets the denial (403) and Repairs stays
+    // closed; the binding itself is healthy and admits ordinary sales.
+    assert_eq!(
+        reconcile_startup_terminal_binding_with_access(&database.state).await,
+        Ok(Some(TERMINAL.to_string()))
     );
-    assert!(terminal_connection_rebind_pending(&database.state).unwrap());
+    assert_eq!(server.calls.lock().unwrap().len(), 3);
+    assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+    assert!(crate::repairs::acquire_terminal_binding_lease().is_ok());
+    assert_eq!(scope_json()["pending_purpose"]["verified"], false);
+    {
+        let connection = database.state.conn.lock().unwrap();
+        assert!(crate::repairs::acquire_renderer_access(&connection).is_err());
+    }
     assert_eq!(protected(&database), original);
     assert_eq!(binding(), keys);
 }
@@ -754,4 +871,255 @@ async fn main_startup_access_module_denial_wrong_scope_malformed_or_redirect_can
         assert_eq!(calls.len(), 2, "case {case}: {result:?}");
         assert!(calls.iter().all(|line| line.starts_with("GET ")));
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn main_startup_access_janitor_failure_denies_repairs_but_restores_transport() {
+    let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+    let server = MockServer::new(wire(false).to_string());
+    let (_keys, database) = fixture(&server.url, false, true);
+    // The staging root is unusable: the Repairs janitor cannot run.
+    std::fs::write(database.dir().join("repair-staging-v1"), b"not a directory").unwrap();
+    let restores = std::cell::Cell::new(0);
+    let janitor =
+        crate::reconcile_native_startup(&database.state, || restores.set(restores.get() + 1))
+            .await
+            .expect("a Repairs janitor failure never fails the binding");
+    assert_eq!(janitor.unwrap_err(), "REPAIR_STAGING_PATH_UNSAFE");
+    assert_eq!(restores.get(), 1, "the waiters' LAN receiver must come up");
+    let lifecycle = crate::repairs::lifecycle_snapshot_for_test();
+    assert!(lifecycle.repair_maintenance_failed);
+    assert!(!lifecycle.binding_blocked && !lifecycle.binding_maintenance_failed);
+    assert!(crate::repairs::acquire_terminal_binding_lease().is_ok());
+    assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
+    assert_eq!(server.count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn main_startup_access_unreadable_scope_denies_repairs_without_latching_binding() {
+    let lifecycle = crate::repairs::isolate_lifecycle_for_test();
+    for case in ["read_failure", "corrupt_json"] {
+        lifecycle.reset();
+        let server = MockServer::new(wire(false).to_string());
+        let (_keys, database) = fixture(&server.url, true, true);
+        pending_access_purpose(false);
+        let original = protected(&database);
+        let keys = binding();
+        let generation = crate::repairs::acquire_terminal_binding_lease()
+            .unwrap()
+            .generation();
+        if case == "read_failure" {
+            fake_keyring::fail_reads_for(
+                crate::storage::KEY_REPAIR_SCOPE_V1,
+                "fixture scope locked",
+            );
+        } else {
+            assert!(fake_keyring::set(
+                crate::storage::KEY_REPAIR_SCOPE_V1,
+                "not-json"
+            ));
+        }
+        // Keep the failure active across both admission checks and startup.
+        assert!(
+            terminal_connection_rebind_pending(&database.state).is_err(),
+            "{case}"
+        );
+        assert!(matches!(
+            crate::resolve_admin_endpoint(Some(&database.state)).await,
+            Err(error) if error.renderer_endpoint_error_code() == Some("TERMINAL_REBIND_PENDING")
+        ));
+        let restores = std::cell::Cell::new(0);
+        let janitor = crate::reconcile_native_startup(&database.state, || {
+            restores.set(restores.get() + 1);
+            assert_eq!(
+                crate::repairs::acquire_terminal_binding_lease()
+                    .unwrap()
+                    .generation(),
+                generation,
+                "{case}"
+            );
+            assert!(crate::repairs::acquire_transport_lease().is_err());
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{case}: Repairs scope failed the binding: {error}"));
+        assert!(
+            janitor.is_err(),
+            "the unreadable scope must fail Repairs maintenance"
+        );
+        assert_eq!(restores.get(), 1, "{case}");
+        assert_eq!(
+            crate::repairs::acquire_terminal_binding_lease()
+                .unwrap()
+                .generation(),
+            generation,
+            "{case}"
+        );
+        assert!(crate::repairs::acquire_transport_lease().is_err());
+        assert!(
+            terminal_connection_rebind_pending(&database.state).is_err(),
+            "{case}"
+        );
+        assert!(matches!(
+            crate::resolve_admin_endpoint(Some(&database.state)).await,
+            Err(error) if error.renderer_endpoint_error_code() == Some("TERMINAL_REBIND_PENDING")
+        ));
+        let state = crate::repairs::lifecycle_snapshot_for_test();
+        assert!(state.repair_maintenance_failed);
+        assert!(!state.binding_blocked && !state.binding_maintenance_failed);
+        if case == "read_failure" {
+            assert!(
+                crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_SCOPE_V1).is_err()
+            );
+        } else {
+            assert_eq!(
+                fake_keyring::get(crate::storage::KEY_REPAIR_SCOPE_V1).as_deref(),
+                Some("not-json")
+            );
+        }
+        assert_eq!(
+            server.count(),
+            0,
+            "{case}: scope failure must not trigger recovery HTTP"
+        );
+        assert_eq!(protected(&database), original);
+        assert_eq!(binding(), keys);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn main_startup_access_unreadable_scope_preserves_independent_binding_guards() {
+    let lifecycle = crate::repairs::isolate_lifecycle_for_test();
+    for case in [
+        "terminal_marker",
+        "terminal_candidate",
+        "mixed_mirror",
+        "missing_mirror",
+        "missing_key",
+        "binding_latch",
+        "reset",
+    ] {
+        lifecycle.reset();
+        let server = MockServer::new(wire(false).to_string());
+        let (_keys, database) = fixture(&server.url, false, true);
+        match case {
+            "terminal_marker" | "terminal_candidate" => {
+                let conn = database.state.conn.lock().unwrap();
+                crate::db::set_setting(
+                    &conn,
+                    "sync",
+                    if case == "terminal_marker" {
+                        TERMINAL_CONNECTION_REBIND_PENDING_KEY
+                    } else {
+                        TERMINAL_CONNECTION_REBIND_CANDIDATE_KEY
+                    },
+                    "fixture-pending",
+                )
+                .unwrap();
+            }
+            "mixed_mirror" => {
+                let conn = database.state.conn.lock().unwrap();
+                crate::db::set_setting(&conn, "terminal", "branch_id", "other-branch").unwrap();
+            }
+            "missing_mirror" => {
+                let conn = database.state.conn.lock().unwrap();
+                crate::db::delete_setting(&conn, "terminal", "branch_id").unwrap();
+            }
+            "missing_key" => {
+                assert!(fake_keyring::delete("pos_api_key"));
+            }
+            "binding_latch" => crate::repairs::latch_startup_binding_maintenance_failure(),
+            "reset" => {
+                drop(crate::repairs::arm_process_reset().unwrap());
+            }
+            _ => unreachable!(),
+        }
+        fake_keyring::fail_reads_for(crate::storage::KEY_REPAIR_SCOPE_V1, "fixture scope locked");
+        let restores = std::cell::Cell::new(0);
+        assert!(
+            crate::reconcile_native_startup(&database.state, || restores.set(restores.get() + 1))
+                .await
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(restores.get(), 0, "{case}");
+        assert_eq!(server.count(), 0, "{case}");
+        assert!(
+            crate::storage::get_credential_strict(crate::storage::KEY_REPAIR_SCOPE_V1).is_err()
+        );
+        assert!(crate::repairs::acquire_transport_lease().is_err());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn main_startup_access_restores_lan_before_waiting_for_recovery_http() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let server = MockServer::new_with_request_hook(wire(false).to_string(), {
+        let entered = entered.clone();
+        let release = release.clone();
+        move || {
+            entered.store(true, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !release.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    });
+    let (_keys, database) = fixture(&server.url, true, true);
+    pending_access_purpose(false);
+    let generation = crate::repairs::acquire_terminal_binding_lease()
+        .unwrap()
+        .generation();
+    let restores = std::cell::Cell::new(0);
+    let (result, ()) = tokio::join!(
+        crate::reconcile_native_startup(&database.state, || {
+            assert_eq!(
+                server.count(),
+                0,
+                "LAN must restore before the first recovery request"
+            );
+            restores.set(restores.get() + 1);
+        }),
+        async {
+            let arrived = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !entered.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            let restored_while_response_held = restores.get();
+            // Release even when the assertion fails so the server can shut down.
+            release.store(true, Ordering::SeqCst);
+            arrived.expect("startup must attempt Repairs recovery");
+            assert_eq!(
+                restored_while_response_held, 1,
+                "LAN waited for a Repairs HTTP response"
+            );
+        }
+    );
+    result
+        .expect("healthy binding")
+        .expect("pending access defers the janitor");
+    assert_eq!(restores.get(), 1);
+    assert_eq!(
+        server.count(),
+        2,
+        "settings validation and modules recovery must finish"
+    );
+    assert_eq!(
+        crate::repairs::acquire_terminal_binding_lease()
+            .unwrap()
+            .generation(),
+        generation
+    );
+    assert!(!terminal_connection_rebind_pending(&database.state).unwrap());
 }

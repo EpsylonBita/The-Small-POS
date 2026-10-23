@@ -3,8 +3,9 @@
  * 13/10/2026, Android parity with PR #356). The native verify asks the server
  * first; only when it cannot be reached does the till check the PIN itself
  * and answer `source: 'offline'`. Then every role opens (founder, 15/10/2026),
- * a gift-card store's cashier opening is refused (never an ordinary one), and
- * the renderer never handles a PIN hash or writes the staff directory cache.
+ * a gift-card store's cashier opens an ordinary drawer flagged for the
+ * server's review (founder, 21/10/2026, Ω7), and the renderer never handles a
+ * PIN hash or writes the staff directory cache.
  */
 import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -136,21 +137,29 @@ describe('StaffShiftModal check-in without a connection', () => {
     await waitFor(() => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ roleType: 'kitchen' })));
   });
 
+  const GIFT_ORDINARY = 'An ordinary drawer was opened. Gift cards wait for the connection, and the server reviews this opening.';
+
   it.each([
-    ['checked on this till', ON_TILL],
-    ['checked by the server, which then went away', { success: true, staffId: fixture.staffId, source: 'server' }],
-  ])('refuses a gift-card store cashier opening without the server (%s), never an ordinary one', async (_case, answer) => {
+    ['checked on this till', ON_TILL, { offlineCheckIn: true }, `Checked in without a connection. ${GIFT_ORDINARY}`],
+    ['checked by the server, which then went away', { success: true, staffId: fixture.staffId, source: 'server' }, {}, GIFT_ORDINARY],
+  ])('opens a gift-card store cashier an ordinary drawer for review without the server (%s)', async (_case, answer, marker, told) => {
+    // Ω7 (founder, 21/10/2026): before, this opening was refused, and after a
+    // Z nobody could open the next day without the connection.
     staff(['cashier']);
     bridge.modules.getCached.mockResolvedValue(giftCardsStore);
     bridge.staffAuth.verifyCheckInPin.mockResolvedValue(answer);
+    bridge.shifts.open.mockResolvedValue({ success: true, shiftId: 'gift-ordinary', ordinaryOpeningOffline: true, ...marker });
     render(<StaffShiftModal {...props} />);
     await enterPin();
     await chooseRole('cashierRoleHelper');
-    await screen.findByText('With gift cards, opening the drawer needs the server. Check in once the connection is back.');
+    await waitFor(() => expect(screen.queryByText('modals.staffShift.financialOpeningChecking')).toBeNull());
+    expect(screen.queryByText(/opening the drawer needs the server/)).toBeNull();
     await cash();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(bridge.shifts.open).not.toHaveBeenCalled();
+    await waitFor(() => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({
+      roleType: 'cashier', openingCash: 50, ordinaryOpeningOffline: true,
+    })));
     expect(bridge.shiftFinancialOpening.begin).not.toHaveBeenCalled();
+    await waitFor(() => expect(fixture.toast).toHaveBeenCalledWith(told, expect.anything()));
   });
 
   it('opens an ordinary drawer offline outside a gift-card store and tells the cashier', async () => {
@@ -162,6 +171,7 @@ describe('StaffShiftModal check-in without a connection', () => {
     await waitFor(() => expect(screen.queryByText('modals.staffShift.financialOpeningChecking')).toBeNull());
     await cash();
     await waitFor(() => expect(bridge.shifts.open).toHaveBeenCalledWith(expect.objectContaining({ roleType: 'cashier', openingCash: 50 })));
+    expect(bridge.shifts.open.mock.calls[0][0]).not.toHaveProperty('ordinaryOpeningOffline');
     await waitFor(() => expect(fixture.toast).toHaveBeenCalledWith(
       'Checked in without a connection. The server checks this check-in once the connection is back.',
       expect.anything(),
@@ -170,13 +180,13 @@ describe('StaffShiftModal check-in without a connection', () => {
 
   it("words the native offline opening refusals in the store's language", async () => {
     staff(['cashier']);
-    bridge.shifts.open.mockRejectedValue('OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER');
+    bridge.shifts.open.mockRejectedValue('OFFLINE_CHECK_IN_WAITER_TERMINAL');
     render(<StaffShiftModal {...props} />);
     await enterPin();
     await chooseRole('cashierRoleHelper');
     await waitFor(() => expect(screen.queryByText('modals.staffShift.financialOpeningChecking')).toBeNull());
     await cash();
-    await screen.findByText('With gift cards, opening the drawer needs the server. Check in once the connection is back.');
+    await screen.findByText('A waiter phone checks staff in through the server. Try again once the connection is back.');
   });
 
   it.each([

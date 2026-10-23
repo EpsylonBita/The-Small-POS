@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Item H, fix review 30/09/2026 (the same decision as Android). While the
@@ -25,10 +25,12 @@ const mocks = vi.hoisted(() => ({
   confirmationFreezeError: false,
   readError: false,
   freezeAckLost: false,
+  readbackChange: null as null | ((draft: any) => any),
   editOrder: null as any,
   inspect: null as any,
   applyEditSettlement: vi.fn(),
   recoverySnapshot: vi.fn(),
+  appointmentClaims: vi.fn(async (): Promise<any> => null),
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -119,6 +121,10 @@ vi.mock('../../../services/terminal-credentials', () => ({
   refreshTerminalCredentialCache: vi.fn(async () => ({ branchId: 'branch-1', organizationId: 'org-1', terminalId: 'terminal-1' })),
 }));
 
+vi.mock('../../../services/appointment-checkout-claims', () => ({
+  confirmAppointmentClaimsBeforePayment: mocks.appointmentClaims,
+}));
+
 vi.mock('../../../utils/api-helpers', () => ({
   posApiGet: vi.fn(async () => ({ success: false })),
   posApiPost: vi.fn(async () => ({ success: true, data: { valid: true, coupon: mocks.coupon } })),
@@ -156,7 +162,7 @@ vi.mock('../../../../lib', async (importOriginal) => {
       if (command === 'checkout_draft_put') {
         if ((mocks.draftFreezeError && input.draft.phase === 'checkout_pending') ||
           (mocks.confirmationFreezeError && input.draft.state.paymentAdmission === 'confirmed')) throw new Error('DISK_UNAVAILABLE');
-        draftStorage.draft = input.draft; draftStorage.generation++;
+        draftStorage.draft = mocks.readbackChange ? mocks.readbackChange(input.draft) : input.draft; draftStorage.generation++;
         if (mocks.freezeAckLost && input.draft.phase === 'checkout_pending') { mocks.freezeAckLost = false; throw new Error('IPC_LOST'); }
       }
       if (command === 'checkout_draft_delete') {
@@ -227,6 +233,7 @@ vi.mock('../PaymentModal', () => ({
     <button onClick={() => onBeforePayment({ method: 'card', amount: 7.2, transactionId: 'approved-card' })}>Admit card</button>
     <button onClick={() => onPaymentComplete({ method: 'card', amount: 7.2, transactionId: 'approved-card' })}>Complete approved card</button>
     <button onClick={async () => { const data = { method: 'cash', amount: orderTotal }; if (await onBeforePayment(data)) await onPaymentComplete(data); }}>Confirm cash</button>
+    <button onClick={async () => { if (await onBeforePayment({ method: 'cash', amount: orderTotal })) await onPaymentComplete({ method: 'cash', amount: orderTotal + 1 }); }}>Confirm cash for another amount</button>
     <button onClick={async () => { const data = { method: 'card', amount: orderTotal }; if (await onBeforePayment(data)) await onPaymentComplete(data); }}>Confirm card</button>
     <button onClick={() => onSplitPayment(null)}>Confirm split</button>
   </div> : null),
@@ -266,9 +273,11 @@ beforeEach(() => {
   mocks.confirmationFreezeError = false;
   mocks.readError = false;
   mocks.freezeAckLost = false;
+  mocks.readbackChange = null;
   mocks.inspect = null;
   mocks.applyEditSettlement.mockReset();
   mocks.recoverySnapshot.mockReset().mockResolvedValue({ id: 'pre-action-snapshot' });
+  mocks.appointmentClaims.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -361,6 +370,67 @@ describe('MenuModal recovery after a failed durable freeze', () => {
     await screen.findByText('Check original checkout');
     expect(mocks.toastError).not.toHaveBeenCalledWith(freezeNotSaved);
     expect(draftStorage.draft.state.paymentAdmission).toBe('admitted');
+  });
+
+  // Tomikro 22/10/2026: native read full-precision floats back a bit off, so
+  // every cash confirmation of a delivery was refused after the money was
+  // taken, for 12 minutes. Float noise is no change to the checkout.
+  it('a cash checkout whose floats native reads back a bit off completes once', async () => {
+    const accepted = vi.fn(async () => true);
+    mocks.readbackChange = draft => JSON.parse(JSON.stringify(draft), (key, item) =>
+      typeof item === 'number' && key !== 'schemaVersion' && item !== 0 ? item * (1 + Number.EPSILON) : item);
+    mocks.settings.unavailable = false;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={accepted} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    expect(draftStorage.draft.cartItems[0].quantity).not.toBe(1);
+    const originalId = draftStorage.draft.checkoutRequestId;
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(accepted).toHaveBeenCalledOnce());
+    expect(accepted.mock.calls[0][0]).toMatchObject({ clientRequestId: originalId, paymentData: { method: 'cash' } });
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it('a freeze native keeps differently returns the editable cart before any money moves, with its reason', async () => {
+    const accepted = vi.fn(async () => true);
+    mocks.settings.unavailable = false;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={accepted} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    const originalId = draftStorage.draft.checkoutRequestId;
+    mocks.readbackChange = draft => draft.phase === 'checkout_pending'
+      ? { ...draft, cartItems: draft.cartItems.map((item: any) => ({ ...item, notes: 'changed by storage' })) } : draft;
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(
+      'No payment was started: the till could not save this cart for payment exactly as entered. Select the customer or address again, then press Pay. If it happens again, contact support.'));
+    expect(accepted).not.toHaveBeenCalled();
+    expect(screen.queryByText('Check original checkout')).toBeNull();
+    expect(draftStorage.draft).toMatchObject({ checkoutRequestId: originalId, phase: 'editing' });
+    expect(draftStorage.draft.cartItems[0].notes).not.toBe('changed by storage');
+    mocks.readbackChange = null;
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(accepted).toHaveBeenCalledOnce());
+    expect(accepted.mock.calls[0][0]).toMatchObject({ clientRequestId: originalId, paymentData: { method: 'cash' } });
+  });
+
+  it('a confirmation the saved checkout refuses gives its reason, not "press Pay again"', async () => {
+    const accepted = vi.fn(async () => true);
+    mocks.settings.unavailable = false;
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" onOrderComplete={accepted} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    await waitFor(() => expect(draftStorage.draft?.cartItems).toHaveLength(1));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash for another amount'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(expect.stringContaining('pressing Pay again as it is will not help'), expect.anything()));
+    expect(mocks.toastError).not.toHaveBeenCalledWith(expect.stringContaining('The cart is kept: press Pay again'), expect.anything());
+    expect(accepted).not.toHaveBeenCalled();
+    expect(draftStorage.draft).toMatchObject({ phase: 'editing' });
   });
 });
 
@@ -955,6 +1025,62 @@ describe('coupon and loyalty checkout admission', () => {
     expect(draftStorage.draft?.phase).toBe('editing');
     expect(screen.getByTestId('loyalty-applied').textContent).toBe('0');
   });
+
+  // Ω11 (22/10/2026): points are redeemed only with a live server answer.
+  it('offline: the points come off with their own message and the sale continues', async () => {
+    mocks.settings.unavailable = false;
+    mocks.loyaltyEnabled = true;
+    mocks.redeem.mockResolvedValue({ success: false, errorCode: 'LOYALTY_REDEEM_OFFLINE' });
+    const complete = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={{ id: '11111111-1111-4111-8111-111111111111', name: 'Customer' }} onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Redeem points'));
+    fireEvent.click(await screen.findByText('Use 100 points'));
+    await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('loyalty.redeem.offlineRefused'));
+    expect(complete).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
+    expect(screen.getByTestId('loyalty-applied').textContent).toBe('0');
+  });
+
+  it('unconfirmed: the points stay, nothing is collected, and Retry or Remove points decides', async () => {
+    mocks.settings.unavailable = false;
+    mocks.loyaltyEnabled = true;
+    mocks.redeem.mockResolvedValue({ success: false, errorCode: 'LOYALTY_REDEEM_UNCONFIRMED' });
+    const complete = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={{ id: '11111111-1111-4111-8111-111111111111', name: 'Customer' }} onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Redeem points'));
+    fireEvent.click(await screen.findByText('Use 100 points'));
+    await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('100'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(
+      expect.any(Function), expect.objectContaining({ id: 'loyalty-redemption-unconfirmed' })));
+    expect(complete).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
+    expect(screen.getByTestId('loyalty-applied').textContent).toBe('100');
+    expect(screen.getByTestId('payment-modal')).toBeTruthy();
+    const unconfirmed = mocks.toastError.mock.calls.find(([, options]) => options?.id === 'loyalty-redemption-unconfirmed');
+    const renderToast = () => render(<>{unconfirmed![0]({ id: 'loyalty-redemption-unconfirmed' })}</>).container;
+
+    // Retry asks again under the same checkout; still no answer keeps the points.
+    fireEvent.click(within(renderToast()).getByText('common.actions.retry'));
+    await waitFor(() => expect(mocks.redeem).toHaveBeenCalledTimes(2));
+    expect(mocks.redeem.mock.calls[1][0]).toEqual(mocks.redeem.mock.calls[0][0]);
+    expect(screen.getByTestId('loyalty-applied').textContent).toBe('100');
+
+    // Remove points releases them and returns to the cart without the discount.
+    fireEvent.click(within(renderToast()).getByText('loyalty.redeem.removePoints'));
+    await waitFor(() => expect(screen.getByTestId('loyalty-applied').textContent).toBe('0'));
+    await waitFor(() => expect(screen.queryByTestId('payment-modal')).toBeNull());
+    expect(mocks.toastError).not.toHaveBeenCalledWith('loyalty.redeem.releaseFailed');
+    expect(complete).not.toHaveBeenCalled();
+  });
 });
 
 
@@ -1293,4 +1419,38 @@ it.each(['paid', 'not-paid'])('recovers an unconfirmed TWINT admission after res
     await waitFor(() => expect(complete).toHaveBeenCalledOnce());
     expect(mocks.redeem).toHaveBeenCalledTimes(2);
   }
+});
+
+// Codex review of PR #379 (22/10/2026): an appointment's checkout claim is
+// renewed right before money moves; a refusal starts no payment and the cart
+// stays editable (as on Android).
+describe('appointment checkout claim before payment', () => {
+  it('a renewal that no longer allows the checkout collects nothing and returns to the editable cart', async () => {
+    mocks.settings.unavailable = false;
+    mocks.appointmentClaims.mockResolvedValue({ appointmentId: 'appointment-1', outcome: { kind: 'needs_connection' } });
+    const complete = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={customer} onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(
+      'Checking out an appointment needs a connection. You can sell the services as a walk-in.'));
+    expect(mocks.appointmentClaims).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ name: expect.anything() })]));
+    expect(complete).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
+    expect(screen.queryByTestId('payment-modal')).toBeNull();
+  });
+
+  it('a renewal that still allows the checkout goes on to the payment', async () => {
+    mocks.settings.unavailable = false;
+    const complete = vi.fn();
+    render(<MenuModal isOpen onClose={vi.fn()} orderType="pickup" selectedCustomer={customer} onOrderComplete={complete} />);
+    await waitFor(() => expect(draftStorage.draft?.phase).toBe('editing'));
+    fireEvent.click(screen.getByText('Add espresso'));
+    fireEvent.click(screen.getByText('Checkout'));
+    fireEvent.click(await screen.findByText('Confirm cash'));
+    await waitFor(() => expect(complete).toHaveBeenCalled());
+    expect(mocks.appointmentClaims).toHaveBeenCalledTimes(1);
+  });
 });

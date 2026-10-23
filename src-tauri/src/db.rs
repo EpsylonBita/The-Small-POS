@@ -57,7 +57,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 102;
+pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 105;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -816,8 +816,212 @@ where
             .map_err(|error| format!("v102 canonical payment pull recovery: {error}"))
         })?;
     }
+    if current < 103 {
+        run_migration_tx(conn, 103, migrate_v103)?;
+    }
+    if current < 104 {
+        run_migration_tx(conn, 104, migrate_v104)?;
+    }
+    // v105 (VAT v3): each order stores its VAT per rate; existing orders keep
+    // NULL, never a guessed breakdown.
+    if current < 105 {
+        run_migration_tx(conn, 105, |conn| {
+            if !column_exists(conn, "orders", "tax_breakdown")? {
+                conn.execute_batch("ALTER TABLE orders ADD COLUMN tax_breakdown TEXT;")
+                    .map_err(|e| format!("v105 order VAT breakdown: {e}"))?;
+            }
+            conn.execute_batch("INSERT OR IGNORE INTO schema_version(version) VALUES(105);")
+                .map_err(|e| e.to_string())
+        })?;
+    }
 
     Ok(())
+}
+
+const ORDER_PAYMENT_TIP_ROLE_CHECK_V70: &str =
+    "CHECK (tip_recipient_role IN ('waiter', 'cashier', 'driver'))";
+const ORDER_PAYMENT_TIP_ROLE_CHECK_V103: &str =
+    "CHECK (tip_recipient_role IN ('waiter', 'cashier', 'driver', 'staff'))";
+
+/// Whether `order_payments` can hold a tip for a stylist of the order
+/// (`tip_recipient_role = 'staff'`, v103). A CHECK shape v103 did not know is
+/// `false`: the till then refuses a staff tip before it records anything.
+pub(crate) fn order_payments_support_staff_tips(conn: &Connection) -> Result<bool, String> {
+    let Some(sql) = order_payments_table_sql(conn)? else {
+        return Ok(false);
+    };
+    if !column_exists(conn, "order_payments", "tip_recipient_role")? {
+        return Ok(false);
+    }
+    let compact: String = sql.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let constrained = compact.contains("tip_recipient_roleIN(");
+    Ok(!constrained
+        || (sql.matches(ORDER_PAYMENT_TIP_ROLE_CHECK_V103).count() == 1
+            && !sql.contains(ORDER_PAYMENT_TIP_ROLE_CHECK_V70)))
+}
+
+/// Migration v103: a tip can go to a stylist of the order (founder,
+/// 21/10/2026). Widens the v70 `order_payments.tip_recipient_role` CHECK with
+/// `staff` by SQLite's documented schema edit (the v83/v90 technique), so no
+/// row, index, trigger or foreign key is rebuilt. An unknown CHECK shape, or a
+/// probe the edited schema refuses, leaves the table exactly as it was:
+/// ordinary payments keep working and staff tips are refused before any write
+/// (`order_payments_support_staff_tips`). It reads and writes no native repair state.
+fn migrate_v103(conn: &Connection) -> Result<(), String> {
+    let outcome = widen_order_payment_tip_roles_for_staff(conn)?;
+    info!(tip_role_check = ?outcome, "v103: order_payments tip recipients include staff");
+    conn.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (103);")
+        .map_err(|e| format!("v103 record schema_version: {e}"))
+}
+
+fn widen_order_payment_tip_roles_for_staff(
+    conn: &Connection,
+) -> Result<OrderPaymentStatusCheck, String> {
+    let Some(sql) = order_payments_table_sql(conn)? else {
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    };
+    if !column_exists(conn, "order_payments", "tip_recipient_role")? {
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    }
+    if order_payments_support_staff_tips(conn)? {
+        return Ok(if sql.contains(ORDER_PAYMENT_TIP_ROLE_CHECK_V103) {
+            OrderPaymentStatusCheck::AlreadyWide
+        } else {
+            OrderPaymentStatusCheck::Unconstrained
+        });
+    }
+    if sql.contains("/*")
+        || sql.contains("--")
+        || sql.matches(ORDER_PAYMENT_TIP_ROLE_CHECK_V70).count() != 1
+    {
+        warn!("v103: order_payments carries an unknown tip recipient CHECK; left unchanged");
+        return Ok(OrderPaymentStatusCheck::LeftUnchanged);
+    }
+    let widened_sql = sql.replacen(
+        ORDER_PAYMENT_TIP_ROLE_CHECK_V70,
+        ORDER_PAYMENT_TIP_ROLE_CHECK_V103,
+        1,
+    );
+
+    conn.execute_batch("SAVEPOINT v103_widen_tip_roles")
+        .map_err(|e| format!("v103 savepoint: {e}"))?;
+    let edited = (|| -> Result<(), String> {
+        let schema_version: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .map_err(|e| format!("v103 read schema_version pragma: {e}"))?;
+        conn.execute_batch("PRAGMA writable_schema = ON")
+            .map_err(|e| format!("v103 writable_schema on: {e}"))?;
+        let updated = conn.execute(
+            "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'order_payments'",
+            params![widened_sql],
+        );
+        // Always switch schema editing off again, whatever the UPDATE did.
+        let bumped = conn.execute_batch(&format!("PRAGMA schema_version = {}", schema_version + 1));
+        conn.execute_batch("PRAGMA writable_schema = OFF")
+            .map_err(|e| format!("v103 writable_schema off: {e}"))?;
+        let updated = updated.map_err(|e| format!("v103 rewrite order_payments schema: {e}"))?;
+        bumped.map_err(|e| format!("v103 bump schema_version: {e}"))?;
+        if updated != 1 {
+            return Err(format!("v103 rewrote {updated} order_payments schema rows"));
+        }
+        if order_payments_table_sql(conn)?.as_deref() != Some(widened_sql.as_str()) {
+            return Err("v103 order_payments schema edit did not persist".to_string());
+        }
+        // Prove it: a staff tip row must now be accepted. Foreign keys are
+        // deferred so the probe needs no parent order; it is rolled back
+        // before anything else can see it.
+        conn.execute_batch("PRAGMA defer_foreign_keys = ON; SAVEPOINT v103_probe;")
+            .map_err(|e| format!("v103 probe savepoint: {e}"))?;
+        let probe = conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, status, tip_recipient_role, created_at, updated_at)
+             VALUES ('__v103_tip_probe__', '__v103_tip_probe__', 'cash', 0, 'voided', 'staff',
+                     '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+            [],
+        );
+        conn.execute_batch("ROLLBACK TO v103_probe; RELEASE v103_probe;")
+            .map_err(|e| format!("v103 probe rollback: {e}"))?;
+        probe
+            .map(|_| ())
+            .map_err(|e| format!("v103 probe insert refused: {e}"))
+    })();
+
+    match edited {
+        Ok(()) => {
+            conn.execute_batch("RELEASE v103_widen_tip_roles")
+                .map_err(|e| format!("v103 release: {e}"))?;
+            Ok(OrderPaymentStatusCheck::Widened)
+        }
+        Err(error) => {
+            // Put the schema back exactly as it was; staff tips fail closed.
+            let _ = conn.execute_batch("PRAGMA writable_schema = OFF");
+            conn.execute_batch("ROLLBACK TO v103_widen_tip_roles; RELEASE v103_widen_tip_roles;")
+                .map_err(|e| format!("v103 rollback after {error}: {e}"))?;
+            warn!(error = %error, "v103: order_payments tip recipient CHECK left unchanged");
+            Ok(OrderPaymentStatusCheck::LeftUnchanged)
+        }
+    }
+}
+
+/// Migration v104 (offline week, founder 21/10/2026). A Z closed without a
+/// connection keeps its window on this till (`close_state = 'closed_local'`)
+/// until the server confirms it (`sync_state = 'applied'`); only then is its
+/// window swept (`'swept'`). A record the server refused for good can be set
+/// aside by a manager: kept, never re-sent on its own, out of the Z gates.
+/// The retry-schedule audit table moves here from its lazy creation, with the
+/// index its per-row trim needs. Additive and idempotent.
+fn migrate_v104(conn: &Connection) -> Result<(), String> {
+    for (column, ddl) in [
+        (
+            "close_state",
+            "ALTER TABLE z_reports ADD COLUMN close_state TEXT",
+        ),
+        (
+            "window_period_start",
+            "ALTER TABLE z_reports ADD COLUMN window_period_start TEXT",
+        ),
+        (
+            "window_cutoff",
+            "ALTER TABLE z_reports ADD COLUMN window_cutoff TEXT",
+        ),
+        (
+            "closed_order_client_ids",
+            "ALTER TABLE z_reports ADD COLUMN closed_order_client_ids TEXT",
+        ),
+    ] {
+        if !column_exists(conn, "z_reports", column)? {
+            conn.execute_batch(ddl)
+                .map_err(|error| format!("v104 z_reports.{column}: {error}"))?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_z_reports_close_state
+             ON z_reports(terminal_id, close_state, window_cutoff);
+         CREATE TABLE IF NOT EXISTS parity_sync_set_aside (
+             queue_id TEXT PRIMARY KEY,
+             table_name TEXT NOT NULL,
+             record_id TEXT NOT NULL,
+             z_report_id TEXT,
+             reason_code TEXT NOT NULL,
+             server_message TEXT,
+             set_aside_by_staff_id TEXT NOT NULL,
+             set_aside_at TEXT NOT NULL,
+             organization_id TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_parity_sync_set_aside_record
+             ON parity_sync_set_aside(table_name, record_id);
+         CREATE TABLE IF NOT EXISTS sync_retry_schedule_audit_v1(
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             queue_id TEXT NOT NULL,
+             organization_id TEXT NOT NULL,
+             before_json TEXT NOT NULL,
+             outcome TEXT NOT NULL,
+             created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_sync_retry_schedule_audit_queue
+             ON sync_retry_schedule_audit_v1(queue_id);
+         INSERT OR IGNORE INTO schema_version(version) VALUES(104);",
+    )
+    .map_err(|error| format!("v104 offline-week schema: {error}"))
 }
 
 /// Migration v85: the gift-card financial opening (`gift_opening_v1`). One
@@ -2109,7 +2313,7 @@ enum PreMigrationRecoveryMode {
 
 const NATIVE_REPAIR_ATOMIC_MIGRATION_ALLOWLIST: &[i32] = &[
     56, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98, 99, 100, 101, 102,
+    98, 99, 100, 101, 102, 103, 104, 105,
 ];
 
 fn computed_pending_migrations(
@@ -8166,6 +8370,25 @@ pub fn run_migrations_for_test(conn: &Connection) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_v105_preserves_existing_orders_without_guessing_a_breakdown() {
+        let (_tmp, conn) = current_file_fixture();
+        assert!(super::column_exists(&conn, "orders", "tax_breakdown").unwrap());
+        conn.execute("INSERT INTO orders(id,items,total_amount,tax_amount,created_at,updated_at) VALUES('v105','[]',12.4,2.4,'now','now')",[]).unwrap();
+        conn.execute_batch("ALTER TABLE orders DROP COLUMN tax_breakdown; DELETE FROM schema_version WHERE version=105;").unwrap();
+        super::run_migrations_for_test(&conn);
+        let row: (f64, f64, Option<String>) = conn
+            .query_row(
+                "SELECT total_amount,tax_amount,tax_breakdown FROM orders WHERE id='v105'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (12.4, 2.4, None));
+        super::run_migrations_for_test(&conn);
+        assert_eq!(super::CURRENT_SCHEMA_VERSION, 105);
+    }
+
     use super::*;
     use rusqlite::Connection;
     use std::cell::Cell;
@@ -9565,6 +9788,42 @@ mod tests {
     }
 
     #[test]
+    fn migration_v104_adds_the_local_close_and_set_aside_schema_idempotently() {
+        let (_tmp, conn) = current_file_fixture();
+        for column in [
+            "close_state",
+            "window_period_start",
+            "window_cutoff",
+            "closed_order_client_ids",
+        ] {
+            assert!(
+                column_exists(&conn, "z_reports", column).unwrap(),
+                "{column}"
+            );
+        }
+        for index in [
+            "idx_z_reports_close_state",
+            "idx_parity_sync_set_aside_record",
+            "idx_sync_retry_schedule_audit_queue",
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{index}");
+        }
+
+        // A second run (a till that re-applies v104) changes nothing.
+        conn.execute("DELETE FROM schema_version WHERE version = 104", [])
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn migration_v102_upgrades_v98_and_v101_preserving_registered_versions() {
         for starting_version in [98, 101] {
             let (_tmp, conn) = current_file_fixture();
@@ -9593,10 +9852,10 @@ mod tests {
             }
             assert_eq!(
                 computed_pending_migrations(starting_version, false, false, false, false).last(),
-                Some(&102)
+                Some(&CURRENT_SCHEMA_VERSION)
             );
             run_migrations(&conn).unwrap();
-            assert_eq!(max_schema_version(&conn), 102);
+            assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
             assert!(column_exists(&conn, "payment_adjustments", "imported_remote").unwrap());
             assert_eq!(
                 conn.query_row(
@@ -9625,6 +9884,135 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// Put `order_payments` back to its v102 tip recipient CHECK, as a
+    /// terminal that has not yet run v103 has it.
+    fn rewind_v103_tip_role_check(conn: &Connection) {
+        let sql = order_payments_table_sql(conn).unwrap().unwrap();
+        assert_eq!(
+            sql.matches(ORDER_PAYMENT_TIP_ROLE_CHECK_V103).count(),
+            1,
+            "{sql}"
+        );
+        let cookie: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        conn.execute_batch("PRAGMA writable_schema=ON;").unwrap();
+        conn.execute(
+            "UPDATE sqlite_master SET sql=?1 WHERE name='order_payments' AND type='table'",
+            [sql.replacen(
+                ORDER_PAYMENT_TIP_ROLE_CHECK_V103,
+                ORDER_PAYMENT_TIP_ROLE_CHECK_V70,
+                1,
+            )],
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA writable_schema=OFF; PRAGMA schema_version={};",
+            cookie + 1
+        ))
+        .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version >= 103", [])
+            .unwrap();
+    }
+
+    fn insert_tip_payment(conn: &Connection, id: &str, role: &str) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, amount_cents, tip_amount,
+                 tip_amount_cents, tip_recipient_role, tip_recipient_staff_id, status, created_at, updated_at)
+             VALUES (?1, 'order-v103', 'cash', 12.0, 1200, 2.0, 200, ?2, 'staff-v103', 'completed',
+                     '2026-10-21T10:00:00Z', '2026-10-21T10:00:00Z')",
+            params![id, role],
+        )
+    }
+
+    #[test]
+    fn migration_v103_lets_a_tip_go_to_staff_and_keeps_the_ledger() {
+        let (_tmp, conn) = current_file_fixture();
+        assert!(order_payments_support_staff_tips(&conn).unwrap());
+        rewind_v103_tip_role_check(&conn);
+        assert!(!order_payments_support_staff_tips(&conn).unwrap());
+        assert_eq!(max_schema_version(&conn), 102);
+        conn.execute(
+            "INSERT INTO orders (id, items, order_type, total_amount, status, created_at, updated_at)
+             VALUES ('order-v103', '[]', 'pickup', 12.0, 'completed', '2026-10-21T10:00:00Z', '2026-10-21T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        insert_tip_payment(&conn, "old-cashier-tip", "cashier").unwrap();
+        assert!(
+            insert_tip_payment(&conn, "early-staff-tip", "staff").is_err(),
+            "v102 refuses a staff tip"
+        );
+        let indexes_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE tbl_name='order_payments' AND type IN ('index','trigger')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            computed_pending_migrations(102, false, false, false, false),
+            vec![103, 104, 105]
+        );
+        run_migrations(&conn).expect("v102 to the current schema");
+
+        assert_eq!(max_schema_version(&conn), CURRENT_SCHEMA_VERSION);
+        assert!(order_payments_support_staff_tips(&conn).unwrap());
+        let old: (String, String) = conn
+            .query_row(
+                "SELECT tip_recipient_role, status FROM order_payments WHERE id='old-cashier-tip'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(old, ("cashier".to_string(), "completed".to_string()));
+        insert_tip_payment(&conn, "stylist-tip", "staff").expect("v103 admits a staff tip");
+        assert!(
+            insert_tip_payment(&conn, "chef-tip", "chef").is_err(),
+            "an unknown role is still refused"
+        );
+        let indexes_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE tbl_name='order_payments' AND type IN ('index','trigger')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            indexes_after, indexes_before,
+            "no index or trigger is rebuilt"
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        // Re-entry is a no-op.
+        assert!(matches!(
+            widen_order_payment_tip_roles_for_staff(&conn).unwrap(),
+            OrderPaymentStatusCheck::AlreadyWide
+        ));
+    }
+
+    #[test]
+    fn migration_v103_leaves_an_unknown_tip_check_untouched() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE order_payments (id TEXT PRIMARY KEY, order_id TEXT, method TEXT, amount REAL,
+                 status TEXT, created_at TEXT, updated_at TEXT,
+                 tip_recipient_role TEXT CHECK (tip_recipient_role IN ('waiter')));",
+        )
+        .unwrap();
+        let before = order_payments_table_sql(&conn).unwrap();
+        assert!(matches!(
+            widen_order_payment_tip_roles_for_staff(&conn).unwrap(),
+            OrderPaymentStatusCheck::LeftUnchanged
+        ));
+        assert_eq!(order_payments_table_sql(&conn).unwrap(), before);
+        assert!(!order_payments_support_staff_tips(&conn).unwrap());
     }
 
     #[test]
@@ -9731,21 +10119,21 @@ mod tests {
             computed_pending_migrations(75, true, false, false, false),
             vec![
                 56, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-                96, 97, 98, 99, 100, 101, 102
+                96, 97, 98, 99, 100, 101, 102, 103, 104, 105
             ]
         );
         assert_eq!(
             computed_pending_migrations(78, false, false, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102
+                100, 101, 102, 103, 104, 105
             ]
         );
         assert_eq!(
             computed_pending_migrations(79, false, true, false, false),
             vec![
                 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-                100, 101, 102
+                100, 101, 102, 103, 104, 105
             ]
         );
         // A v81 whose columns went missing is re-run even though it is no longer
@@ -9785,7 +10173,17 @@ mod tests {
         // v102 adds incoming-payment recovery tables/provenance only.
         assert!(native_repair_atomic_only_allowed(101, &[102]));
         assert!(native_repair_atomic_only_allowed(98, &[99, 100, 101, 102]));
-        assert!(!native_repair_atomic_only_allowed(102, &[103]));
+        // v103 only widens the `order_payments.tip_recipient_role` CHECK text
+        // (the v83/v90 schema edit); it reads and writes no native repair state.
+        assert!(native_repair_atomic_only_allowed(102, &[103]));
+        assert!(native_repair_atomic_only_allowed(101, &[102, 103]));
+        assert!(native_repair_atomic_only_allowed(102, &[103, 104]));
+        assert!(native_repair_atomic_only_allowed(103, &[104]));
+        // v105 only adds `orders.tax_breakdown` (VAT v3); it reads and writes no
+        // native repair state.
+        assert!(native_repair_atomic_only_allowed(104, &[105]));
+        assert!(native_repair_atomic_only_allowed(102, &[103, 104, 105]));
+        assert!(!native_repair_atomic_only_allowed(105, &[106]));
         assert!(native_repair_atomic_only_allowed(80, &[81]));
 
         // v82 only rewrites non-repair `parity_sync_queue` bookkeeping: its
@@ -10068,7 +10466,10 @@ mod tests {
         // guard trigger; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(85, false, false, false, false),
-            vec![86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
+            vec![
+                86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104,
+                105
+            ]
         );
         assert!(native_repair_atomic_only_allowed(85, &[86]));
     }
@@ -10079,7 +10480,7 @@ mod tests {
         // guard triggers; it reads and writes no native repair state.
         assert_eq!(
             computed_pending_migrations(86, false, false, false, false),
-            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
+            vec![87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105]
         );
         assert!(native_repair_atomic_only_allowed(86, &[87]));
         assert!(native_repair_atomic_only_allowed(85, &[86, 87]));
@@ -10185,7 +10586,7 @@ mod tests {
         // state.
         assert_eq!(
             computed_pending_migrations(87, false, false, false, false),
-            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
+            vec![88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105]
         );
         assert!(native_repair_atomic_only_allowed(87, &[88]));
         assert!(native_repair_atomic_only_allowed(86, &[87, 88]));
@@ -10225,7 +10626,10 @@ mod tests {
         gift_v83_rewind_check(&conn, ORDER_PAYMENT_METHOD_CHECK);
         assert_eq!(
             computed_pending_migrations(83, false, false, false, true),
-            vec![83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102]
+            vec![
+                83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
+                103, 104, 105
+            ]
         );
         let error = run_migrations_with_preflight(
             &conn,

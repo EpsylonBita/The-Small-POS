@@ -14,7 +14,6 @@ import { MenuItem, Ingredient, menuService } from '../services/MenuService';
 import { MenuPageSkeleton } from '../components/skeletons';
 import { ErrorDisplay } from '../components/error';
 import { POSError } from '../../shared/utils/error-handler';
-import { useRealTimeMenuSync } from '../hooks/useRealTimeMenuSync';
 import { useFeaturedItems } from '../hooks/useFeaturedItems';
 import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
 import { normalizePosOrderItems } from '../../shared/utils/pos-order-items';
@@ -22,7 +21,8 @@ import { Utensils } from 'lucide-react';
 import { getBridge, onEvent, offEvent } from '../../lib';
 import { pageMotionContainer, pageMotionItem } from '../components/ui/page-motion';
 import { getPosMenuImageUrl } from '../utils/menuImages';
-import { readOwnerVatRatePercent } from '../utils/printedVat';
+import { readSlipsPrintVat } from '../utils/printedVat';
+import { readBranchVatSettings } from '../utils/branchVatSettings';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -46,6 +46,11 @@ interface OrderItem {
   basePrice?: number;
   customizations?: SelectedCustomization[];
   totalPrice?: number;
+  unitPrice?: number;
+  originalUnitPrice?: number;
+  vatCategoryCode?: string | null;
+  vatClass?: string | null;
+  priceIncludesVat?: boolean | null;
 }
 
 interface CustomerInfo {
@@ -81,10 +86,26 @@ const MenuPage: React.FC = () => {
   const [hasLoadedMenu, setHasLoadedMenu] = useState(false);
   const bootstrapSyncAttemptedRef = useRef(false);
 
-  // Tax rate from terminal settings (percentage, e.g., 24 for 24%)
-  // The owner's VAT rate for the cart preview; the order's own VAT is computed
-  // natively from its lines (07/10/2026).
-  const ownerVatRatePercent = readOwnerVatRatePercent(getSetting);
+  // The cart preview shows the order's one VAT (21/10/2026): the branch VAT
+  // profile, and whether the slip prints VAT at all.
+  const vatSettings = readBranchVatSettings(getSetting);
+  const [fiscalActive, setFiscalActive] = useState(false);
+  const slipsPrintVat = readSlipsPrintVat(getSetting, fiscalActive);
+
+  useEffect(() => {
+    let mounted = true;
+    const readFiscalGate = async () => {
+      try {
+        const active = await bridge.settings.get('tax', 'vat_receipt_fiscal_active');
+        if (mounted) setFiscalActive(active === true);
+      } catch {
+        if (mounted) setFiscalActive(false);
+      }
+    };
+    void readFiscalGate();
+    const timer = setInterval(() => void readFiscalGate(), 30000);
+    return () => { mounted = false; clearInterval(timer); };
+  }, [getSetting]);
 
   // Delivery fee from URL params (set by delivery zone validation)
   const deliveryFeeParam = searchParams.get('deliveryFee');
@@ -250,9 +271,6 @@ const MenuPage: React.FC = () => {
       .catch(() => setBranchId(null));
   }, [])
 
-  // POS real-time sync (overrides preloaded when branchId available)
-  const { getEffectiveMenuItem, lastUpdate } = useRealTimeMenuSync({ branchId })
-
   // Dynamic featured items based on weekly sales (top 20 best sellers)
   const { topSellerIds } = useFeaturedItems(branchId);
 
@@ -294,20 +312,18 @@ const MenuPage: React.FC = () => {
 
     return items;
   }, [menuItems, selectedCategory, selectedSubcategory, topSellerIds]);
-  // Build MenuGrid items with branch override visuals applied (price + metadata)
+  // Build MenuGrid items. Branch overrides (POS audit K4) are already merged
+  // into the native menu rows, so the grid, the cart and the receipt price the
+  // same row; nothing is swapped for display here.
   // Uses shared PricingService for order-type-based pricing (Requirements 9.5, 9.6, 9.7)
   const gridItems = React.useMemo(() => {
     // Map UI order type to PricingService OrderType
     const pricingOrderType: OrderType = orderType === 'delivery' ? 'delivery' : orderType === 'dine-in' ? 'dine-in' : 'pickup';
-    
+
     return filteredItems.map((item) => {
-      const eff: any = getEffectiveMenuItem ? getEffectiveMenuItem(item as any) : (item as any)
-      const hasOverride = !!eff?.hasOverride && typeof eff?.price === 'number'
-      
       // Use shared PricingService for consistent price calculation with fallback logic
-      const basePriceForOrder = getMenuItemPrice(item as any, pricingOrderType);
-      const displayPrice: number = hasOverride ? (eff.price as number) : basePriceForOrder
-      
+      const displayPrice = getMenuItemPrice(item as any, pricingOrderType);
+
       return {
         id: item.id,
         name: (item as any).name || t('common.unknownItem'),
@@ -317,11 +333,9 @@ const MenuPage: React.FC = () => {
         preparationTime: (item as any).preparation_time || 0,
         image: getPosMenuImageUrl(item) || undefined,
         is_customizable: item.is_customizable,
-        hasOverride,
-        originalPrice: basePriceForOrder,
       }
     })
-  }, [filteredItems, orderType, getEffectiveMenuItem, t, lastUpdate])
+  }, [filteredItems, orderType, t])
 
   const handleMenuGridItemClick = React.useCallback((item: { id: string }) => {
     const originalItem = filteredItems.find(orig => orig.id === item.id);
@@ -366,7 +380,12 @@ const MenuPage: React.FC = () => {
         name: c.ingredient.name,
         price: getIngPrice(c.ingredient)
       })),
-      totalPrice: itemTotalPrice,
+      unitPrice: itemTotalPrice,
+      originalUnitPrice: itemTotalPrice,
+      totalPrice: itemTotalPrice * quantity,
+      vatClass: menuItem.vat_class ?? 'standard',
+      vatCategoryCode: menuItem.vat_category_code ?? null,
+      priceIncludesVat: menuItem.price_includes_vat ?? true,
     };
 
     setCartItems(prev => [...prev, orderItem]);
@@ -385,7 +404,7 @@ const MenuPage: React.FC = () => {
           ? {
               ...item,
               quantity: newQuantity,
-              price: ((item.basePrice || 0) + (item.customizations || []).reduce((sum, c) => sum + c.price, 0)) * newQuantity
+              totalPrice: (item.unitPrice ?? item.price) * newQuantity
             }
           : item
       )
@@ -402,7 +421,7 @@ const MenuPage: React.FC = () => {
    * Cart items already have prices calculated using shared PricingService (Requirements 9.5, 9.6, 9.7)
    * Delivery fee only applied for delivery orders
    */
-  const handlePlaceOrder = async () => {
+  const handlePlaceOrder = async (discountAmount = 0) => {
     if (cartItems.length === 0) {
       toast.error(t('menu.validation.cartEmpty'));
       return;
@@ -423,20 +442,21 @@ const MenuPage: React.FC = () => {
     setIsPlacingOrder(true);
     try {
       // Calculate subtotal from cart items (already priced by order type using PricingService)
-      const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || item.price * item.quantity), 0);
+      const subtotal = cartItems.reduce((sum, item) => sum + (item.unitPrice ?? item.price) * item.quantity, 0);
 
       // Delivery fee from delivery zone (only for delivery orders)
       const deliveryFee = orderType === 'delivery' ? deliveryFeeFromZone : 0;
 
       // Prices include VAT: the total is the items plus the delivery fee and
       // never gains tax on top (07/10/2026).
-      const finalTotal = Number((subtotal + deliveryFee).toFixed(2));
+      const finalTotal = Number((subtotal - discountAmount + deliveryFee).toFixed(2));
 
       const orderData = {
         items: normalizePosOrderItems(cartItems as any[]),
         // Pass all financial fields explicitly so backend doesn't need to derive them
         total_amount: finalTotal,
         subtotal: subtotal,
+        discount_amount: discountAmount,
         delivery_fee: deliveryFee,
         status: 'pending' as const,
         order_type: orderType,
@@ -619,7 +639,8 @@ const MenuPage: React.FC = () => {
               onPlaceOrder={handlePlaceOrder}
               isPlacingOrder={isPlacingOrder}
               deliveryFee={deliveryFeeFromZone}
-              ownerVatRatePercent={ownerVatRatePercent}
+              vatSettings={vatSettings}
+              slipsPrintVat={slipsPrintVat}
             />
           </motion.div>
         </motion.div>

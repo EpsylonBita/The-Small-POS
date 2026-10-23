@@ -10,6 +10,11 @@
  * 15/10/2026: anyone whose PIN this till holds). The native shift open
  * enforces the rules itself (`offline_check_in.rs`); this module only words
  * them and keeps the modal from offering what the till will refuse.
+ *
+ * In a gift-card store the cashier's hosted original opening needs the
+ * server. Without it the cashier opens an ordinary drawer that the server
+ * reviews (`ordinary_opening_offline`, founder 21/10/2026, Ω7; Android
+ * parity). Gift-card sales stay online-only.
  */
 import type { TFunction } from 'i18next';
 
@@ -17,17 +22,16 @@ import type { TFunction } from 'i18next';
 export const checkedOnTill = (answer: unknown): boolean =>
   !!answer && typeof answer === 'object' && (answer as { source?: unknown }).source === 'offline';
 
-export const offlineGiftCardsMessage = (t: TFunction): string =>
+/** Told after a gift-card store's cashier opened an ordinary drawer without the server. */
+export const giftCardOrdinaryOpeningMessage = (t: TFunction): string =>
   t(
-    'modals.staffShift.offlineCheckIn.giftCardsNeedServer',
-    'With gift cards, opening the drawer needs the server. Check in once the connection is back.',
+    'modals.staffShift.offlineCheckIn.giftCardOrdinaryOpening',
+    'An ordinary drawer was opened. Gift cards wait for the connection, and the server reviews this opening.',
   );
 
 /** The native shift-open refusals of an offline check-in, worded; null otherwise. */
 export function describeOfflineOpeningRefusal(error: string, t: TFunction): string | null {
   switch (error) {
-    case 'OFFLINE_CHECK_IN_GIFT_CARDS_NEED_SERVER':
-      return offlineGiftCardsMessage(t);
     case 'OFFLINE_CHECK_IN_WAITER_TERMINAL':
       return t(
         'modals.staffShift.offlineCheckIn.waiterPhone',

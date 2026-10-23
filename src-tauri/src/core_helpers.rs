@@ -743,11 +743,18 @@ mod tests {
                 "table_order_history_v1",
                 "table_attempt_recovery_v1",
                 "table_attempt_recovery_audit_v1",
-                "sync_retry_schedule_audit_v1",
             ] {
                 conn.execute_batch(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY); INSERT INTO {table}(id) VALUES ('old-table-order');"))
                     .expect("seed lazy table workflow cache");
             }
+            // Created by migration v104 (no longer lazily by the queue).
+            conn.execute(
+                "INSERT INTO sync_retry_schedule_audit_v1 (
+                    queue_id, organization_id, before_json, outcome, created_at
+                 ) VALUES ('queue-old', 'org', '{}', 'transient', datetime('now'))",
+                [],
+            )
+            .expect("seed retry schedule audit");
             conn.execute_batch("CREATE TABLE checkout_drafts_v1(organization_id TEXT,branch_id TEXT,terminal_id TEXT,generation INTEGER,draft_json TEXT,updated_at TEXT); INSERT INTO checkout_drafts_v1 VALUES('org','branch','terminal',0,'{}','now');").expect("seed draft reset fence");
         }
 

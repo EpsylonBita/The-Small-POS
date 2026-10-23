@@ -491,7 +491,6 @@ fn repair_http_classifier_parks_session_and_module_results_without_raw_payloads(
     for (status, code) in [
         (403, "STAFF_SESSION_REQUIRED"),
         (403, "STAFF_SESSION_INVALID"),
-        (403, "STAFF_SESSION_MISMATCH"),
         (409, "REPAIR_EXPIRED_SESSION"),
     ] {
         let disposition = classify_repair_http_response(
@@ -2956,8 +2955,11 @@ fn repair_typed_online_requests_compile_only_fixed_allowlisted_routes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn repair_offline_bootstrap_posts_native_empty_body_and_accepts_authoritative_token() {
     let _keyring = install_empty_repair_keyring();
+    crate::storage::session_set(&complete_session_blob()).unwrap();
+    let (generation, _) = crate::storage::repair_session_snapshot().unwrap();
     let response_body = serde_json::json!({
         "actor_attestation": repair_actor_attestation(),
         "numbering_lease": {
@@ -2976,6 +2978,8 @@ async fn repair_offline_bootstrap_posts_native_empty_body_and_accepts_authoritat
         Some(&complete_session_blob()),
         &native_scope(),
         SESSION_ID,
+        false,
+        generation,
     )
     .await
     .expect("offline bootstrap request");
@@ -3032,7 +3036,9 @@ fn repair_offline_bootstrap_rejects_renderer_fields_and_generic_transport() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn repair_offline_bootstrap_requires_native_session_before_network() {
+    let _keyring = install_empty_repair_keyring();
     let server = MockServer::new(
         r#"{"offline_terminal_token":"A9F0","offline_sequence_lease_start":1,"offline_sequence_lease_end":100}"#,
     );
@@ -3042,6 +3048,8 @@ async fn repair_offline_bootstrap_requires_native_session_before_network() {
         None,
         &native_scope(),
         SESSION_ID,
+        false,
+        0,
     )
     .await
     {
@@ -4505,4 +4513,363 @@ fn repair_typed_409_distinguishes_expired_session_from_version_conflict() {
         classify_repair_json_response_body(409, expired, None, &prepared),
         RepairJsonDisposition::SessionRequired { .. }
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn repairs_p4_reattributed_replay_keeps_author_and_uses_current_header() {
+    let _keys = install_repair_identity();
+    let connection = Mutex::new(Connection::open_in_memory().unwrap());
+    let mut envelope: serde_json::Value = serde_json::from_str(&repair_envelope()).unwrap();
+    let original_session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    envelope["staff_session_id"] = serde_json::json!(original_session);
+    seed_repair_queue(&connection.lock().unwrap(), envelope.to_string());
+    let server = MockServer::new(success_response());
+    let hooks = RecordingRepairHooks::default();
+    let result =
+        process_queue_with_repair_hooks(&connection, &server.url, "native-api-key", &hooks)
+            .await
+            .unwrap();
+    assert_eq!(result.processed, 1);
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.header("x-staff-session-id"), Some(SESSION_ID));
+    assert_eq!(
+        request
+            .json_body()
+            .unwrap()
+            .pointer("/items/0/staff_session_id")
+            .and_then(serde_json::Value::as_str),
+        Some(original_session)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn repairs_p4_current_actor_permission_never_permanently_parks_others_work() {
+    for refusal in [
+        None,
+        Some("REPAIR_PERMISSION_DENIED"),
+        Some("REPAIR_EXPIRED_SESSION"),
+    ] {
+        let _keys = install_repair_identity();
+        if refusal.is_none() {
+            let mut actor = repair_actor_attestation();
+            actor["permissions"] = serde_json::json!(["repairs.read"]);
+            crate::storage::set_repair_actor_attestation(&actor.to_string()).unwrap();
+        }
+        let connection = Mutex::new(Connection::open_in_memory().unwrap());
+        let mut envelope: serde_json::Value = serde_json::from_str(&repair_envelope()).unwrap();
+        envelope["staff_session_id"] = serde_json::json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        seed_repair_queue(&connection.lock().unwrap(), envelope.to_string());
+        let body = refusal
+            .map(|code| String::from_utf8(one_error_result(403, code)).unwrap())
+            .unwrap_or_else(success_response);
+        let server = MockServer::new(body);
+        let hooks = RecordingRepairHooks::default();
+        let result =
+            process_queue_with_repair_hooks(&connection, &server.url, "native-api-key", &hooks)
+                .await
+                .unwrap();
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(server.count(), usize::from(refusal.is_some()));
+        let (status, attempts): (String, i64) = connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, attempts FROM parity_sync_queue WHERE id = ?1",
+                [OPERATION_ID],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 0);
+    }
+}
+
+// This small server records complete HTTP requests and can hold the response
+// until the test invalidates the session on the same fake-keyring thread.
+fn repairs_bootstrap_server(
+    responses: Vec<(u16, String)>,
+    release: Option<std::sync::mpsc::Receiver<()>>,
+) -> (
+    String,
+    Arc<Mutex<Vec<Vec<u8>>>>,
+    std::sync::mpsc::Receiver<()>,
+    thread::JoinHandle<()>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        use std::io::{Read, Write};
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        for (status, body) in responses {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "bootstrap server timed out"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            recorded.lock().unwrap().push(request);
+            let _ = reached_tx.send(());
+            if let Some(release) = release.as_ref() {
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    (url, requests, reached_rx, handle)
+}
+
+fn retained_bootstrap_body() -> String {
+    serde_json::json!({"actor_attestation":repair_actor_attestation(),"numbering_lease":{"kind":"retained"}}).to_string()
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn repairs_p3_keep_request_falls_back_once_on_old_server_422() {
+    let _keys = install_repair_identity();
+    let (generation, session) = crate::storage::repair_session_snapshot().unwrap();
+    let (url,requests,_reached,server)=repairs_bootstrap_server(vec![(422,serde_json::json!({"error":"REPAIR_OFFLINE_BOOTSTRAP_INVALID"}).to_string()),(200,serde_json::json!({"actor_attestation":repair_actor_attestation(),"numbering_lease":{"kind":"sequence","offline_terminal_token":"A9F0","offline_sequence_lease_start":101,"offline_sequence_lease_end":200}}).to_string())],None);
+    let result = send_repair_actor_bootstrap_request(
+        &url,
+        "native-api-key",
+        session.as_deref().map(|s| s.as_str()),
+        &native_scope(),
+        SESSION_ID,
+        true,
+        generation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.numbering_lease.as_sequence(),
+        Some(("A9F0", 101, 200))
+    );
+    server.join().unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        split_recorded_request(&requests[0]).1,
+        br#"{"numbering_lease":"keep"}"#
+    );
+    assert_eq!(split_recorded_request(&requests[1]).1, b"{}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn repairs_p5_logout_during_bootstrap_cannot_restore_attestation() {
+    for restore_same_session in [false, true] {
+        let _keys = install_repair_identity();
+        crate::storage::delete_repair_actor_attestation().unwrap();
+        let (generation, session) = crate::storage::repair_session_snapshot().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (url, _requests, reached, server) =
+            repairs_bootstrap_server(vec![(200, retained_bootstrap_body())], Some(release_rx));
+        let scope = native_scope();
+        let request = send_repair_actor_bootstrap_request(
+            &url,
+            "native-api-key",
+            session.as_deref().map(|s| s.as_str()),
+            &scope,
+            SESSION_ID,
+            true,
+            generation,
+        );
+        let logout = async {
+            loop {
+                if reached.try_recv().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            if restore_same_session {
+                crate::storage::invalidate_repair_session_generation().unwrap();
+            } else {
+                crate::storage::session_clear().unwrap();
+            }
+            release_tx.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(request, logout);
+        server.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1)
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn repairs_p4_missing_attestation_keeps_reattributed_work_queued() {
+    let _keys = install_repair_identity();
+    crate::storage::delete_repair_actor_attestation().unwrap();
+    let connection = Mutex::new(Connection::open_in_memory().unwrap());
+    let mut envelope: serde_json::Value = serde_json::from_str(&repair_envelope()).unwrap();
+    envelope["staff_session_id"] = serde_json::json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    seed_repair_queue(&connection.lock().unwrap(), envelope.to_string());
+    let server = MockServer::new(success_response());
+    let hooks = RecordingRepairHooks::default();
+    let result =
+        process_queue_with_repair_hooks(&connection, &server.url, "native-api-key", &hooks)
+            .await
+            .unwrap();
+    assert_eq!(result.failed, 0);
+    assert_eq!(server.count(), 0);
+    assert_eq!(
+        connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status,attempts FROM parity_sync_queue WHERE id=?1",
+                [OPERATION_ID],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+        ("pending".to_string(), 0)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn review_retained_requires_the_successful_request_to_be_keep() {
+    for fallback in [false, true] {
+        let _keys = install_repair_identity();
+        crate::storage::delete_repair_actor_attestation().unwrap();
+        let (generation, session) = crate::storage::repair_session_snapshot().unwrap();
+        let mut responses = Vec::new();
+        if fallback {
+            responses.push((
+                422,
+                serde_json::json!({"code":"REPAIR_OFFLINE_BOOTSTRAP_INVALID"}).to_string(),
+            ));
+        }
+        responses.push((200, retained_bootstrap_body()));
+        let (url, requests, _, server) = repairs_bootstrap_server(responses, None);
+        let result = send_repair_actor_bootstrap_request(
+            &url,
+            "native-api-key",
+            session.as_deref().map(|s| s.as_str()),
+            &native_scope(),
+            SESSION_ID,
+            fallback,
+            generation,
+        )
+        .await;
+        server.join().unwrap();
+        assert_eq!(
+            result.err().unwrap().code(),
+            "REPAIR_OFFLINE_BOOTSTRAP_INVALID"
+        );
+        assert!(
+            crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1)
+                .is_none()
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), if fallback { 2 } else { 1 });
+        assert_eq!(split_recorded_request(requests.last().unwrap()).1, b"{}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn review_session_replacement_excludes_old_publication_during_actor_delete() {
+    let _keys = install_repair_identity();
+    let (generation, old_session) = crate::storage::repair_session_snapshot().unwrap();
+    let deleted = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = deleted.clone();
+    fake_keyring::after_next_delete(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1, move || {
+        assert!(
+            crate::storage::repair_session_publication_is_locked(),
+            "old bootstrap can publish between actor clear and session replacement"
+        );
+        observed.set(true);
+    });
+    let mut next: serde_json::Value = serde_json::from_str(&complete_session_blob()).unwrap();
+    next["sessionId"] = serde_json::json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (url, _, reached, server) =
+        repairs_bootstrap_server(vec![(200, retained_bootstrap_body())], Some(release_rx));
+    let scope = native_scope();
+    let request = send_repair_actor_bootstrap_request(
+        &url,
+        "native-api-key",
+        old_session.as_deref().map(|s| s.as_str()),
+        &scope,
+        SESSION_ID,
+        true,
+        generation,
+    );
+    let replace = async {
+        while reached.try_recv().is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        crate::commands::auth::auth_secure_session_set(Some(next))
+            .await
+            .unwrap();
+        assert!(deleted.get());
+        release_tx.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(request, replace);
+    server.join().unwrap();
+    assert_eq!(result.err().unwrap().code(), "REPAIR_EXPIRED_SESSION");
+    assert!(
+        crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1).is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn review_failed_session_delete_cannot_make_old_blob_eligible() {
+    let _keys = install_repair_identity();
+    fake_keyring::fail_deletes_for("pos_session", "test-delete-failure");
+    assert!(crate::commands::auth::auth_secure_session_clear()
+        .await
+        .is_err());
+    assert!(crate::storage::session_get_strict().unwrap().is_some());
+    assert!(crate::storage::repair_session_snapshot()
+        .unwrap()
+        .1
+        .is_none());
+    assert!(
+        crate::storage::get_credential(crate::storage::KEY_REPAIR_ACTOR_ATTESTATION_V1).is_none()
+    );
 }

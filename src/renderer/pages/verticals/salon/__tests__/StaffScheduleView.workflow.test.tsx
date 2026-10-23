@@ -2,8 +2,8 @@ import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { bridge, update, remove, translate, importSchedule } = vi.hoisted(() => ({
-  bridge: { staffSchedule: { list: vi.fn() } }, update: vi.fn(), remove: vi.fn(),
+const { bridge, create, update, remove, translate, importSchedule } = vi.hoisted(() => ({
+  bridge: { staffSchedule: { list: vi.fn() } }, create: vi.fn(), update: vi.fn(), remove: vi.fn(),
   importSchedule: vi.fn(async () => ({ shifts: [], format: 'xlsx' })),
   translate: (key: string, fallback?: string) => fallback || key,
 }));
@@ -12,10 +12,11 @@ vi.mock('../../../../contexts/theme-context', () => ({ useTheme: () => ({ resolv
 vi.mock('../../../../hooks/useTerminalSettings', () => ({ useTerminalSettings: () => ({ getSetting: (_category: string, key: string) => key === 'hotel_timezone' ? 'Europe/Athens' : 'branch-a' }) }));
 vi.mock('../../../../../lib', async (original) => ({ ...(await original<typeof import('../../../../../lib')>()), getBridge: () => bridge, isBrowser: () => false }));
 vi.mock('../../../../utils/api-helpers', () => ({ posApiGet: vi.fn(async () => ({ success: false })), posApiPost: vi.fn(), posApiPatch: vi.fn(), posApiFetch: vi.fn() }));
-vi.mock('../../../../services/offline-mutations', () => ({ offlineCreateStaffShift: vi.fn(), offlineUpdateStaffShift: update, offlineDeleteStaffShift: remove }));
+vi.mock('../../../../services/offline-mutations', () => ({ offlineCreateStaffShift: create, offlineUpdateStaffShift: update, offlineDeleteStaffShift: remove }));
 vi.mock('../../../../utils/staff-schedule-import', async original => ({
   ...(await original<typeof import('../../../../utils/staff-schedule-import')>()), importStaffScheduleFile: importSchedule,
 }));
+import * as XLSX from 'xlsx';
 import { StaffScheduleView } from '../StaffScheduleView';
 
 const shiftId = '11111111-1111-4111-8111-111111111111';
@@ -43,6 +44,26 @@ describe('durable staff schedule edit/delete', () => {
     await waitFor(() => expect(importSchedule).toHaveBeenCalledWith(file, expect.objectContaining({
       timeZone: 'Europe/Athens', staffList: expect.arrayContaining([expect.objectContaining({ id: 'staff-a' })]),
     })));
+  });
+  it('queues column-imported shifts as Z instants read in the branch zone', async () => {
+    const { importStaffScheduleFile } = await vi.importActual<typeof import('../../../../utils/staff-schedule-import')>('../../../../utils/staff-schedule-import');
+    importSchedule.mockImplementationOnce(importStaffScheduleFile as never);
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet([
+      { 'Staff Name': 'Ana Schedule', 'Start Time': '2026-10-21 09:00', 'End Time': 46316.708333333336 },
+      { 'Staff Name': 'Ana Schedule', Date: '2026-10-22', 'Start Time': '22:00', 'End Time': '02:00' },
+    ]), 'Shifts');
+    const file = { name: 'staff.xlsx', arrayBuffer: async () => XLSX.write(book, { type: 'array', bookType: 'xlsx' }) } as File;
+    const { container } = render(<StaffScheduleView />);
+    await screen.findByRole('button', { name: 'Edit shift' });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      staff_id: 'staff-a', start_time: '2026-10-21T06:00:00.000Z', end_time: '2026-10-21T14:00:00.000Z', break_start: null, break_end: null,
+    }));
+    expect(create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      staff_id: 'staff-a', start_time: '2026-10-22T19:00:00.000Z', end_time: '2026-10-22T23:00:00.000Z',
+    }));
   });
   it('edits the actual shift UUID instead of creating an optimistic replacement', async () => {
     render(<StaffScheduleView />);

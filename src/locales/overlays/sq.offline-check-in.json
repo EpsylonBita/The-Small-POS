@@ -4,7 +4,7 @@
       "offlineCheckIn": {
         "checkedInTitle": "Hyrje në turn pa lidhje",
         "checkedInMessage": "Serveri e kontrollon këtë hyrje në turn sapo të kthehet lidhja.",
-        "giftCardsNeedServer": "Me kartat dhuratë, hapja e sirtarit do serverin. Hyr në turn sapo të kthehet lidhja.",
+        "giftCardOrdinaryOpening": "U hap një sirtar i zakonshëm. Kartat dhuratë presin lidhjen dhe serveri e kontrollon këtë hapje.",
         "noPinOnTill": "Kjo arkë nuk e ka PIN-in e këtij personi, ndaj pa lidhje nuk mund të hyjë në turn.",
         "locked": "Shumë PIN të gabuar. Provo sërish pas 15 minutash ose sapo të kthehet lidhja.",
         "waiterPhone": "Në telefonin e kamarierit, hyrja në turn kalon nga serveri. Provo sërish sapo të kthehet lidhja."

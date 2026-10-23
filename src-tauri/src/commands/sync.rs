@@ -1476,8 +1476,10 @@ pub async fn sync_clear_old_orders(
         // Deletion is EARNED by a Z report, never by time passing (the
         // founder's day model — a day may run two hours or five days and
         // closes only at the Z). No Z yet → nothing to clear: the whole
-        // ledger is the open day.
-        match crate::business_day::retention_cutoff_utc(&conn) {
+        // ledger is the open day. Offline week (founder 21/10/2026): the
+        // deletion floor, never the day cursor, so a Z closed on this till
+        // without the server keeps its window until the server confirms it.
+        match crate::business_day::retention_deletion_cutoff_utc(&conn) {
             Some(cutoff_utc) => clear_old_orders_before(&conn, &cutoff_utc)?,
             None => 0,
         }
@@ -1511,13 +1513,25 @@ pub(crate) fn clear_old_orders_before(
         crate::payment_review::DUPLICATE_REVIEW_PAYMENT_STATUS,
         crate::unsaved_payments::UNSAVED_CHARGED_PAYMENT_CATEGORY
     );
+    // Offline week (invariant 1, founder 21/10/2026): an order whose money
+    // fell after the cutoff belongs to a later window, which the server may
+    // not have confirmed yet; and an order a queue row of any status still
+    // needs (a payment, a refund, a row a manager set aside, its own update)
+    // is never deleted here. `cutoff_utc` is the deletion floor.
+    let financial_at = crate::business_day::order_financial_timestamp_expr("o");
+    let queue_referenced = crate::business_day::order_referenced_by_sync_queue_expr(conn, "o")?;
+    let deletable = format!(
+        "o.created_at < ?1
+                  AND julianday({financial_at}) < julianday(?1)
+                  AND NOT {open_table_tab}
+                  AND NOT {holds_undecided_money}
+                  AND NOT {queue_referenced}"
+    );
     let _ = conn.execute(
         &format!(
             "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN (
                 SELECT o.id FROM orders o
-                WHERE o.created_at < ?1
-                  AND NOT {open_table_tab}
-                  AND NOT {holds_undecided_money}
+                WHERE {deletable}
             )"
         ),
         rusqlite::params![cutoff_utc],
@@ -1527,9 +1541,7 @@ pub(crate) fn clear_old_orders_before(
             "DELETE FROM orders
              WHERE id IN (
                 SELECT o.id FROM orders o
-                WHERE o.created_at < ?1
-                  AND NOT {open_table_tab}
-                  AND NOT {holds_undecided_money}
+                WHERE {deletable}
              )"
         ),
         rusqlite::params![cutoff_utc],

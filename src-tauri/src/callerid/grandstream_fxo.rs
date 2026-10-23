@@ -74,6 +74,9 @@ const ACTIVATION_REFUSED_RETRY_DELAYS: [Duration; 6] = [
 /// Local-only worker supervision: a listener that died or could not bind its
 /// port is restarted from the current activation without a network call.
 const LOCAL_WORKER_HEALTH_INTERVAL: Duration = Duration::from_secs(15);
+/// "Running past the lease expiry while the server is unreachable" is logged
+/// at most this often (offline week, founder choice α, 22/10/2026).
+const OFFLINE_PAST_EXPIRY_LOG_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const RECENT_CALL_TTL: Duration = Duration::from_secs(120);
 const RECENT_CALL_CAPACITY: usize = 512;
 const EVENT_RATE_LIMIT: usize = 20;
@@ -1329,6 +1332,82 @@ fn configuration_error_requires_worker_shutdown(status: Option<u16>) -> bool {
     matches!(status, Some(401 | 403 | 404 | 426))
 }
 
+/// True when an activation check got no answer from the server: the request
+/// never arrived or came back (transport failure, timeout), or a gateway in
+/// front of it answered instead (502, 503, 504). Only then may an expired
+/// lease keep listening (founder choice α). The rule is Android's
+/// (`isCallerIdServerUnreachable`, W6): a 500, a 429 or any other status is
+/// the server's answer, so the expiry applies. A local failure (no terminal
+/// credentials, an invalid admin URL, an unreadable body) keeps it too.
+fn activation_check_reached_no_server_answer(transport_failure: bool, status: Option<u16>) -> bool {
+    transport_failure || matches!(status, Some(502..=504))
+}
+
+/// Founder choice α (offline week, 22/10/2026): an expired offline lease is
+/// enforced only on a server answer. While checks reach no answer, the last
+/// verified, never-revoked lease keeps the listeners running past its expiry.
+#[derive(Debug, Default)]
+struct OfflineLeaseGrace {
+    /// A refusal seen by this runtime generation. Only a fresh verified lease
+    /// clears it, so a refused lease is never extended, even when its
+    /// revocation could not be written to the credential vault.
+    refused: bool,
+    last_logged_at: Option<Instant>,
+}
+
+impl OfflineLeaseGrace {
+    fn expiry_after_failed_check(&self, no_server_answer: bool) -> activation::LeaseExpiry {
+        if no_server_answer && !self.refused {
+            activation::LeaseExpiry::DeferWhileServerUnreachable
+        } else {
+            activation::LeaseExpiry::Enforce
+        }
+    }
+
+    /// The expiry policy before any check of this generation has answered
+    /// (cold boot or restart): the server has not answered yet, so only a
+    /// persisted revocation stops the source.
+    fn expiry_before_first_answer(&self) -> activation::LeaseExpiry {
+        self.expiry_after_failed_check(true)
+    }
+
+    fn record_verified(&mut self) {
+        self.refused = false;
+        self.last_logged_at = None;
+    }
+
+    fn record_refused(&mut self) {
+        self.refused = true;
+        self.last_logged_at = None;
+    }
+
+    /// Whether the "running past expiry" state should be logged now: the first
+    /// time, then at most once per `OFFLINE_PAST_EXPIRY_LOG_INTERVAL`.
+    fn should_log_running_past_expiry(&mut self, now: Instant) -> bool {
+        let due = self.last_logged_at.is_none_or(|last| {
+            now.saturating_duration_since(last) >= OFFLINE_PAST_EXPIRY_LOG_INTERVAL
+        });
+        if due {
+            self.last_logged_at = Some(now);
+        }
+        due
+    }
+
+    fn note_applied(&mut self, running_past_expiry: Option<DateTime<Utc>>) {
+        match running_past_expiry {
+            Some(expired_at) => {
+                if self.should_log_running_past_expiry(Instant::now()) {
+                    warn!(
+                        lease_expired_at = %expired_at,
+                        "Caller ID keeps listening past its offline lease: the activation server cannot be reached"
+                    );
+                }
+            }
+            None => self.last_logged_at = None,
+        }
+    }
+}
+
 pub fn start_connector_supervisor(
     app_handle: tauri::AppHandle,
     manager: Arc<CallerIdManager>,
@@ -1405,6 +1484,15 @@ impl AppliedActivation {
         Some(tokio::time::Instant::now() + (expires_at - now).to_std().unwrap_or(Duration::ZERO))
     }
 
+    /// The verified lease reached its expiry without a renewal. The listeners
+    /// keep running and the server is asked at once: its answer (a fresh
+    /// lease, a refusal) decides, and without an answer they keep running past
+    /// the expiry (founder choice α). Returns when the next check is due.
+    fn lease_reached_deadline(&mut self) -> tokio::time::Instant {
+        self.lease_expires_at = None;
+        tokio::time::Instant::now()
+    }
+
     fn needs_worker_restart(&self, active: &HashMap<Uuid, ActiveLine>) -> bool {
         self.desired.iter().any(|line| {
             !active
@@ -1430,13 +1518,22 @@ async fn run_connector_supervisor(
     let mut active = HashMap::<Uuid, ActiveLine>::new();
     let mut applied = AppliedActivation::default();
     let mut cadence = ActivationCadence::default();
+    let mut grace = OfflineLeaseGrace::default();
 
     // The native runtime is always part of the POS binary.  On a cold offline
-    // boot it may activate only from a terminal-bound, unexpired lease that
-    // was previously stored in the OS credential vault.
+    // boot it may activate only from a terminal-bound lease that was
+    // previously stored in the OS credential vault and never revoked. An
+    // expired one keeps listening until the immediate check below gets a
+    // server answer (founder choice α, 22/10/2026).
     if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
-        match activation::load_cached_snapshot(terminal_id.trim(), Utc::now()) {
+        match activation::load_cached_snapshot_with_expiry(
+            terminal_id.trim(),
+            Utc::now(),
+            grace.expiry_before_first_answer(),
+        ) {
             Ok(Some(decision)) => {
+                let running_past_expiry =
+                    decision.running_past_expiry.then_some(decision.expires_at);
                 match reconcile_activation_decision(
                     &app_handle,
                     &manager,
@@ -1447,7 +1544,10 @@ async fn run_connector_supervisor(
                 )
                 .await
                 {
-                    Ok(next) => applied = next,
+                    Ok(next) => {
+                        applied = next;
+                        grace.note_applied(running_past_expiry);
+                    }
                     Err(error) => {
                         cancel_active_lines(&mut active).await;
                         manager.set_error(generation, error, CallerIdStatusReason::InvalidConfig);
@@ -1489,6 +1589,7 @@ async fn run_connector_supervisor(
                     &cancel,
                     &mut active,
                     &mut applied,
+                    &mut grace,
                 )
                 .await
                 else {
@@ -1506,17 +1607,10 @@ async fn run_connector_supervisor(
             }
             _ = sleep_until_deadline(lease_deadline) => {
                 // The last verified lease expired without a successful renewal.
-                // Re-resolving the cached snapshot applies the existing policy:
-                // an expired lease is bridge-only and stops Caller ID emission.
-                reapply_cached_activation(
-                    &app_handle,
-                    &manager,
-                    generation,
-                    &cancel,
-                    &mut active,
-                    &mut applied,
-                )
-                .await;
+                // Founder choice α (offline week, 22/10/2026): the expiry is
+                // enforced only on a server answer, so ask now instead of
+                // stopping. A refusal stops the source; no answer keeps it.
+                next_check = applied.lease_reached_deadline();
             }
             _ = worker_health.tick() => {
                 if applied.needs_worker_restart(&active) {
@@ -1544,6 +1638,7 @@ async fn run_activation_check(
     cancel: &CancellationToken,
     active: &mut HashMap<Uuid, ActiveLine>,
     applied: &mut AppliedActivation,
+    grace: &mut OfflineLeaseGrace,
 ) -> Option<ActivationCheck> {
     let result = await_current_generation(manager, generation, cancel, async {
         let db_state = app_handle.state::<crate::db::DbState>();
@@ -1556,6 +1651,7 @@ async fn run_activation_check(
             let Some(terminal_id) = crate::storage::get_credential("terminal_id") else {
                 cancel_active_lines(active).await;
                 *applied = AppliedActivation::default();
+                grace.record_refused();
                 manager.set_error(
                     generation,
                     "Caller ID terminal identity is unavailable".into(),
@@ -1569,6 +1665,7 @@ async fn run_activation_check(
                     Err(_) => {
                         cancel_active_lines(active).await;
                         *applied = AppliedActivation::default();
+                        grace.record_refused();
                         manager.set_error(
                             generation,
                             "Caller ID activation policy is invalid".into(),
@@ -1585,11 +1682,14 @@ async fn run_activation_check(
             {
                 Ok(next) => {
                     *applied = next;
+                    // A fresh server lease: the normal renewal timer resumes.
+                    grace.record_verified();
                     Some(ActivationCheck::Verified { lease_expires_at })
                 }
                 Err(error) => {
                     cancel_active_lines(active).await;
                     *applied = AppliedActivation::default();
+                    grace.record_refused();
                     manager.set_error(generation, error, CallerIdStatusReason::InvalidConfig);
                     Some(ActivationCheck::Refused)
                 }
@@ -1598,6 +1698,7 @@ async fn run_activation_check(
         Err(error) => {
             let refused = configuration_error_requires_worker_shutdown(error.status());
             if refused {
+                grace.record_refused();
                 if let Some(terminal_id) = crate::storage::get_credential("terminal_id") {
                     if let Err(cache_error) =
                         activation::persist_online_revocation(terminal_id.trim(), Utc::now())
@@ -1611,11 +1712,20 @@ async fn run_activation_check(
                 cancel_active_lines(active).await;
                 *applied = AppliedActivation::default();
             } else if crate::storage::get_credential("terminal_id").is_some() {
-                // Ordinary network failures preserve the source only while the
-                // last server-issued lease remains valid.  Expiry transitions
-                // to bridge-only and stops Caller ID emission.
-                reapply_cached_activation(app_handle, manager, generation, cancel, active, applied)
-                    .await;
+                // Founder choice α (offline week, 22/10/2026): when the server
+                // gave no answer, the last verified, never-revoked lease keeps
+                // the source past its expiry. A local failure keeps the expiry:
+                // there, an expired lease is bridge-only.
+                let expiry =
+                    grace.expiry_after_failed_check(activation_check_reached_no_server_answer(
+                        error.is_transport_failure(),
+                        error.status(),
+                    ));
+                let running_past_expiry = reapply_cached_activation(
+                    app_handle, manager, generation, cancel, active, applied, expiry,
+                )
+                .await;
+                grace.note_applied(running_past_expiry);
             }
             manager.set_error(
                 generation,
@@ -1635,8 +1745,10 @@ async fn run_activation_check(
     }
 }
 
-/// Applies the last verified snapshot from the OS credential vault. An expired
-/// or revoked lease resolves to bridge-only, which stops Caller ID emission.
+/// Applies the last verified snapshot from the OS credential vault. A revoked
+/// lease, or an expired one under `LeaseExpiry::Enforce`, resolves to
+/// bridge-only, which stops Caller ID emission. Returns the passed expiry when
+/// the source keeps listening past it (`LeaseExpiry::DeferWhileServerUnreachable`).
 async fn reapply_cached_activation(
     app_handle: &tauri::AppHandle,
     manager: &Arc<CallerIdManager>,
@@ -1644,27 +1756,35 @@ async fn reapply_cached_activation(
     cancel: &CancellationToken,
     active: &mut HashMap<Uuid, ActiveLine>,
     applied: &mut AppliedActivation,
-) {
-    let cached = crate::storage::get_credential("terminal_id")
-        .map(|terminal_id| activation::load_cached_snapshot(terminal_id.trim(), Utc::now()));
+    expiry: activation::LeaseExpiry,
+) -> Option<DateTime<Utc>> {
+    let cached = crate::storage::get_credential("terminal_id").map(|terminal_id| {
+        activation::load_cached_snapshot_with_expiry(terminal_id.trim(), Utc::now(), expiry)
+    });
     match cached {
         Some(Ok(Some(decision))) => {
+            let running_past_expiry = decision.running_past_expiry.then_some(decision.expires_at);
             match reconcile_activation_decision(
                 app_handle, manager, generation, cancel, active, decision,
             )
             .await
             {
-                Ok(next) => *applied = next,
+                Ok(next) => {
+                    *applied = next;
+                    running_past_expiry
+                }
                 Err(cache_error) => {
                     warn!(error = %cache_error, "Caller ID cached activation could not be applied");
                     cancel_active_lines(active).await;
                     *applied = AppliedActivation::default();
+                    None
                 }
             }
         }
         _ => {
             cancel_active_lines(active).await;
             *applied = AppliedActivation::default();
+            None
         }
     }
 }
@@ -1692,6 +1812,8 @@ async fn reconcile_activation_decision(
             .await;
             // A transitional server without offline leases reports an expiry of
             // "now"; it gets no local deadline and is simply checked again soon.
+            // A lease kept past its expiry while the server is unreachable has
+            // no deadline either: the next server answer decides.
             let lease_expires_at =
                 (decision.expires_at > Utc::now()).then_some(decision.expires_at);
             Ok(AppliedActivation {
@@ -4224,6 +4346,146 @@ mod tests {
             lease_expires_at: Some(now - chrono::Duration::minutes(1)),
         };
         assert!(expired.lease_deadline(now).unwrap() <= tokio::time::Instant::now());
+    }
+
+    /// Founder choice α (offline week, 22/10/2026): reaching the lease expiry
+    /// no longer stops the listeners. The server is asked at once instead.
+    #[test]
+    fn a_lease_deadline_keeps_the_listeners_and_asks_the_server_at_once() {
+        let desired = parse_source_lines(&reviewed_source("grandstream_ht841_fxo", 2))
+            .expect("two desired workers");
+        let now = Utc::now();
+        let mut applied = AppliedActivation {
+            desired: desired.clone(),
+            lease_expires_at: Some(now - chrono::Duration::minutes(1)),
+        };
+
+        let before = tokio::time::Instant::now();
+        let next_check = applied.lease_reached_deadline();
+        assert!(next_check >= before && next_check <= tokio::time::Instant::now());
+        assert_eq!(
+            applied.desired, desired,
+            "the deadline must not stop the desired listeners"
+        );
+        assert!(
+            applied.lease_deadline(now).is_none(),
+            "no second deadline until the server answers"
+        );
+    }
+
+    #[test]
+    fn an_activation_check_without_a_server_answer_is_told_apart_from_an_answer() {
+        use crate::api::AdminFetchError;
+        let no_answer = |error: &AdminFetchError| {
+            activation_check_reached_no_server_answer(error.is_transport_failure(), error.status())
+        };
+
+        assert!(no_answer(&AdminFetchError::transport(
+            "Network unavailable"
+        )));
+        for status in [502, 503, 504] {
+            assert!(
+                no_answer(&AdminFetchError::with_status("no verdict", status)),
+                "{status} is not a server answer"
+            );
+        }
+        // Android parity (W6): a 500 or a 429 is the server answering.
+        for status in [400, 401, 403, 404, 408, 409, 426, 429, 500] {
+            assert!(
+                !no_answer(&AdminFetchError::with_status("answer", status)),
+                "{status} is a server answer"
+            );
+        }
+        // Local failures never reached the server, but they are not an outage.
+        assert!(!no_answer(&AdminFetchError::statusless(
+            "TERMINAL_MANAGED_TUPLE_MISSING"
+        )));
+    }
+
+    #[test]
+    fn expired_lease_keeps_listening_while_unreachable_and_a_refusal_stops_it() {
+        use crate::callerid::activation::LeaseExpiry::{DeferWhileServerUnreachable, Enforce};
+        let mut grace = OfflineLeaseGrace::default();
+
+        // Boot, and every check that reaches no server answer: defer the expiry.
+        assert_eq!(
+            grace.expiry_before_first_answer(),
+            DeferWhileServerUnreachable
+        );
+        assert_eq!(
+            grace.expiry_after_failed_check(true),
+            DeferWhileServerUnreachable
+        );
+        // A local failure keeps the expiry.
+        assert_eq!(grace.expiry_after_failed_check(false), Enforce);
+
+        // A refusal: never extended again in this generation, even when the
+        // next checks reach no answer (and even if the revocation could not
+        // be persisted).
+        grace.record_refused();
+        assert_eq!(grace.expiry_after_failed_check(true), Enforce);
+        assert_eq!(grace.expiry_before_first_answer(), Enforce);
+
+        // Only a fresh verified lease restores the rule.
+        grace.record_verified();
+        assert_eq!(
+            grace.expiry_after_failed_check(true),
+            DeferWhileServerUnreachable
+        );
+    }
+
+    #[test]
+    fn running_past_expiry_is_logged_at_most_once_an_hour() {
+        let mut grace = OfflineLeaseGrace::default();
+        let start = Instant::now();
+
+        assert!(grace.should_log_running_past_expiry(start));
+        // The capped retry checks every 30 minutes: every other one logs.
+        assert!(!grace.should_log_running_past_expiry(start + Duration::from_secs(30 * 60)));
+        assert!(!grace.should_log_running_past_expiry(start + Duration::from_secs(59 * 60)));
+        assert!(grace.should_log_running_past_expiry(start + Duration::from_secs(60 * 60)));
+        assert!(!grace.should_log_running_past_expiry(start + Duration::from_secs(90 * 60)));
+
+        // Back within a lease: the next expiry is logged at once.
+        grace.note_applied(None);
+        assert!(grace.should_log_running_past_expiry(start + Duration::from_secs(91 * 60)));
+    }
+
+    #[test]
+    fn a_fresh_lease_after_running_past_expiry_resumes_the_normal_renewal_timer() {
+        let mut cadence = ActivationCadence::default();
+        let mut grace = OfflineLeaseGrace::default();
+
+        // Day 4 of an outage: the checks sit at the 30-minute cap and the
+        // source runs past its lease.
+        for _ in 0..8 {
+            cadence.after_unavailable_check();
+        }
+        assert_eq!(
+            cadence.after_unavailable_check(),
+            Duration::from_secs(30 * 60)
+        );
+        assert!(grace.should_log_running_past_expiry(Instant::now()));
+
+        // The server answers with a fresh 72h lease.
+        let (now, expires_at) = lease(72);
+        grace.record_verified();
+        assert_eq!(
+            cadence.after_verified_snapshot(expires_at, now),
+            ACTIVATION_RENEWAL_INTERVAL
+        );
+        let applied = AppliedActivation {
+            desired: Vec::new(),
+            lease_expires_at: Some(expires_at),
+        };
+        assert!(
+            applied.lease_deadline(now).is_some(),
+            "the fresh lease has its own deadline again"
+        );
+        assert!(
+            grace.should_log_running_past_expiry(Instant::now()),
+            "a later expiry is logged again at once"
+        );
     }
 
     #[tokio::test]

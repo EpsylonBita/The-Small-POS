@@ -1162,7 +1162,7 @@ mod tests {
         let db = crate::tests::harness::TestDb::open();
         let mut input = seed(&db.state.conn.lock().unwrap());
         input["draft"]["phase"] = json!("checkout_pending");
-        crate::repairs::latch_startup_access_pending().unwrap();
+        crate::repairs::close_terminal_binding_for_test();
 
         assert_eq!(
             put(&db.state, &input).unwrap_err(),
@@ -1280,7 +1280,7 @@ mod tests {
         let _isolation = crate::repairs::isolate_lifecycle_for_test();
         let db = crate::tests::harness::TestDb::open();
         let input = seed(&db.state.conn.lock().unwrap());
-        crate::repairs::latch_startup_access_pending().unwrap();
+        crate::repairs::close_terminal_binding_for_test();
         assert_eq!(
             get(&db.state, &input).unwrap_err(),
             "REPAIR_SCOPE_TRANSITION_PENDING"
@@ -1497,6 +1497,69 @@ mod tests {
             "CHECKOUT_DRAFT_VERSION_CHANGED"
         );
         assert!(read(&conn, &scope(&conn, &input).unwrap()).unwrap()["draft"].is_null());
+    }
+    /// Tomikro 22/10/2026: serde_json without `float_roundtrip` read about 9%
+    /// of full-precision floats back one bit off (40.658475344543604 became
+    /// 40.6584753445436), so a frozen delivery never matched its cash
+    /// confirmation and the order could not be completed for 12 minutes. A
+    /// draft sent as text keeps every float bit for bit, across a restart and
+    /// in the reply the renderer reads.
+    #[test]
+    fn checkout_draft_keeps_full_precision_floats_bit_for_bit() {
+        let raw = r#"{"organizationId":"org","branchId":"branch",
+            "terminalId":"11111111-1111-4111-8111-111111111111","expectedGeneration":0,
+            "draft":{"checkoutRequestId":"original","cartItems":[{"name":"Crepe","quantity":1,"unitPrice":10.100000000000001}],
+            "context":{"orderType":"delivery","deliveryAddress":{"latitude":40.658475344543604,"longitude":22.94832123456789}}}}"#;
+        let expected = [
+            (
+                "/draft/context/deliveryAddress/latitude",
+                40.658475344543604_f64,
+            ),
+            (
+                "/draft/context/deliveryAddress/longitude",
+                22.94832123456789_f64,
+            ),
+            ("/draft/cartItems/0/unitPrice", 10.100000000000001_f64),
+        ];
+        let input: Value = serde_json::from_str(raw).unwrap();
+        for (pointer, value) in expected {
+            assert_eq!(
+                input
+                    .pointer(pointer)
+                    .and_then(Value::as_f64)
+                    .map(f64::to_bits),
+                Some(value.to_bits()),
+                "parsed {pointer}"
+            );
+        }
+        let db = crate::tests::harness::TestDb::open();
+        {
+            let conn = db.state.conn.lock().unwrap();
+            seed(&conn);
+            write(&conn, &input, false).unwrap();
+        }
+        let db = db.restart();
+        let conn = db.state.conn.lock().unwrap();
+        let reply = read(&conn, &scope(&conn, &input).unwrap()).unwrap();
+        let text = serde_json::to_string(&reply).unwrap();
+        for digits in [
+            "40.658475344543604",
+            "22.94832123456789",
+            "10.100000000000001",
+        ] {
+            assert!(text.contains(digits), "{digits} in {text}");
+        }
+        let readback: Value = serde_json::from_str(&text).unwrap();
+        for (pointer, value) in expected {
+            assert_eq!(
+                readback
+                    .pointer(pointer)
+                    .and_then(Value::as_f64)
+                    .map(f64::to_bits),
+                Some(value.to_bits()),
+                "read back {pointer}"
+            );
+        }
     }
     #[test]
     fn checkout_draft_rejects_scope_change_and_nested_approval_secrets() {

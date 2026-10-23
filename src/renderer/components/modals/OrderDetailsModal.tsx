@@ -846,9 +846,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const recentOrders = sortedCustomerOrders.filter((entry) => !orderMatchesCurrent(entry)).slice(0, 4);
 
   const subtotal = displayOrder.subtotal || 0;
-  // The VAT its slip prints (founder rule 07/10/2026): every order stores its
-  // computed VAT, which a store without a fiscal plugin or an owner rate never
-  // shows. Prices include VAT, so it is never added to the total.
+  // The VAT its slip prints (founder rule 21/10/2026): every order stores its
+  // one computed VAT, which shows only when a fiscal plugin or the owner's
+  // «VAT on receipts» switch prints it. Prices include VAT, so it is never
+  // added to the total.
   const tax = readPrintedVatAmount(displayOrder);
   const deliveryFee = displayOrder.delivery_fee ?? displayOrder.deliveryFee ?? 0;
   const discountAmount = displayOrder.discount_amount || displayOrder.discountAmount || 0;

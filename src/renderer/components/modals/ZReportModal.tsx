@@ -118,6 +118,20 @@ interface ZReportModalProps {
 
 type CloseoutChecklistState = 'ready' | 'warning' | 'error' | 'pending';
 
+/**
+ * The submit answer, with the local close of a Z without a connection
+ * (offline week, founder 21/10/2026): `{ success, localClose, pendingUpload,
+ * zReportId, reportDate, localDayClosed }`.
+ */
+type LocalCloseAwareSubmitResponse = ZReportSubmitResponse & {
+  localClose?: boolean;
+  pendingUpload?: boolean;
+  reportDate?: string;
+};
+
+/** How long the local-close message stays before the day restarts. */
+const LOCAL_CLOSE_RELOAD_DELAY_MS = 6000;
+
 // English fallbacks of the shared `phoneShifts.handover.*` keys.
 const PHONE_SHIFT_HANDOVER_LABELS: Record<ZReportPhoneShiftHandover, string> = {
   received: 'Received',
@@ -391,6 +405,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const reportCurrency = typeof zReport?.currency === 'string' && /^[A-Z]{3}$/.test(zReport.currency)
     ? zReport.currency : null;
   const formatMoney = (value?: number) => formatCurrency(value ?? 0, reportCurrency);
+  const staffTipRows = (Array.isArray(zReport?.staffTips) ? zReport?.staffTips ?? [] : [])
+    .filter((tip) => Number.isFinite(tip?.amount) && Math.abs(tip.amount) >= 0.005);
   const formatWindowDateTime = (value?: string | null) => (
     value
       ? `${formatDate(value)} ${formatTime(value)}`
@@ -1293,7 +1309,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     setSubmitting(true);
     try {
       console.log('[ZReportModal] Starting Z-Report submission...', { branchId, date: selectedDate });
-      const res: ZReportSubmitResponse = await bridge.reports.submitZReport({ branchId, date: selectedDate });
+      const res: LocalCloseAwareSubmitResponse = await bridge.reports.submitZReport({ branchId, date: selectedDate });
       const isInitiatingScope = statusScopeRef.current === statusScope;
 
       // The fiscal close-day guard refuses with a code + parameters; the
@@ -1341,8 +1357,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           syncState: res?.syncState,
         });
 
-        const successMessage =
-          res?.syncState === 'applied'
+        // Offline week (founder 21/10/2026): without a connection the day
+        // closes on this till and its Z is sent once the server is back.
+        const closedLocally = res?.localClose === true;
+        const successMessage = closedLocally
+          ? t('zReportOffline.localCloseDone', {
+            date: res?.reportDate || selectedDate,
+            defaultValue:
+              'The day of {{date}} is closed on this till without a connection. Its Z is sent to the server once the connection is back; nothing is lost. You can start the next day.',
+          })
+          : res?.syncState === 'applied'
             ? t('modals.zReport.submitSuccessSynced')
             : isPendingLocalSubmit
               ? t('modals.zReport.pendingLocalSubmitQueued')
@@ -1354,7 +1378,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         try { clearBusinessDayStorage(); } catch { }
         try { clearShift(); } catch { }
 
-        setTimeout(() => { window.location.reload(); }, 900);
+        // A local close gets time to be read before the day restarts.
+        setTimeout(() => { window.location.reload(); }, closedLocally ? LOCAL_CLOSE_RELOAD_DELAY_MS : 900);
       } else {
         if (!isInitiatingScope) return;
         const errorMessage = formatOperatorFacingError(
@@ -2520,6 +2545,21 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                               })}
                             </div>
                           )}
+                        </div>
+                      )}
+                      {/* Tips that went to a stylist of the order (salon, 21/10/2026): one row per
+                          staff member, shown only when there is one. Stylists without a shift show here only. */}
+                      {staffTipRows.length > 0 && (
+                        <div data-z-report-staff-tips className="mt-5">
+                          <h4 className={`text-base font-black ${strongTextClass}`}>{t('salonStaff.tipsByStaff', { defaultValue: 'Tips by staff' })}</h4>
+                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                            {staffTipRows.map((tip) => (
+                              <div key={tip.staffId || tip.staffName} data-z-report-staff-tip={tip.staffId} className="flex min-w-0 items-center justify-between gap-3 rounded-2xl border border-slate-900/[0.1] bg-white/45 p-3 dark:border-white/[0.12] dark:bg-black/10">
+                                <span className={`truncate text-sm font-black ${strongTextClass}`}>{tip.staffName || tip.staffId}</span>
+                                <span className="shrink-0 text-base font-black text-emerald-600 dark:text-emerald-300">{formatMoney(tip.amount)}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </section>

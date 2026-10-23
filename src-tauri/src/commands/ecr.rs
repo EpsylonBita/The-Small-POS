@@ -2974,15 +2974,19 @@ pub async fn ecr_test_print(
         // Read the print mode under the DB lock, then drop the guard
         // before the printer write below: the guard must not be held
         // across the await (it is not `Send`).
-        let print_mode = {
+        let (print_mode, store_time_zone) = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let device = db::ecr_get_device(&conn, &device_id)
                 .ok_or_else(|| format!("Device {device_id} not found"))?;
-            device
+            let print_mode = device
                 .get("printMode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("register_prints")
-                .to_string()
+                .to_string();
+            (
+                print_mode,
+                crate::store_time::resolve_store_time_zone(&conn),
+            )
             // MutexGuard drops here; DB lock released.
         };
 
@@ -2997,7 +3001,7 @@ pub async fn ecr_test_print(
             b.feed(1);
             b.text("Cash Register Test OK");
             b.feed(1);
-            let now = chrono::Local::now().format("%d/%m/%Y %H:%M").to_string();
+            let now = crate::store_time::format_now(store_time_zone, "%d/%m/%Y %H:%M");
             b.text(&now);
             b.feed(3);
             b.cut();
@@ -4679,10 +4683,12 @@ pub async fn ecr_fiscal_print(
         }));
     }
 
-    let currency = {
+    let (currency, store_time_zone) = {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
-        crate::fiscal::payload_builder::resolve_order_payment_currency(&conn, &order_id)?
-            .ok_or("PAYMENT_CURRENCY_UNAVAILABLE")?
+        let currency =
+            crate::fiscal::payload_builder::resolve_order_payment_currency(&conn, &order_id)?
+                .ok_or("PAYMENT_CURRENCY_UNAVAILABLE")?;
+        (currency, crate::store_time::resolve_store_time_zone(&conn))
     };
 
     // Phase 3 — dispatch to the fiscal device. NO DB lock held; this call
@@ -4708,6 +4714,7 @@ pub async fn ecr_fiscal_print(
                 &fiscal_data,
                 crate::escpos::PaperWidth::Mm80,
                 greek_mode,
+                store_time_zone,
             );
             mgr.send_raw_offloaded(&device_id, escpos_bytes).await?;
         }
@@ -5196,7 +5203,11 @@ mod dto_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn initial_fiscal_crash_reservation_commits_before_dispatch_and_restart_never_resends() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        assert!(crate::tests::fake_keyring::is_installed());
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let (cleanup, first, second, identity, attempt) = initial_fiscal_fixture();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         dispatch_after_durable_initial_attempt(&first,&attempt,&identity,||async {
@@ -5367,7 +5378,11 @@ mod dto_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn initial_fiscal_crash_approved_exact_request_reuses_result_without_hardware() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        assert!(crate::tests::fake_keyring::is_installed());
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let (cleanup, first, second, identity, attempt) = initial_fiscal_fixture();
         reserve_initial_fiscal_attempt(&first, &attempt, &identity).unwrap();
         persist_initial_attempt_outcome(
@@ -5430,7 +5445,11 @@ mod dto_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn initial_fiscal_retry_keeps_original_currency_after_country_changes() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        assert!(crate::tests::fake_keyring::is_installed());
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let (_cleanup, first, _second, _identity, mut attempt) = initial_fiscal_fixture();
         let original_payment = serde_json::json!({"orderId":"initial-original","method":"cash","amount":10,"currency":"CHF"});
         let identity = initial_fiscal_identity(
@@ -5476,7 +5495,11 @@ mod dto_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn initial_fiscal_crash_disconnected_has_positive_not_sent_proof_and_no_resend() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        assert!(crate::tests::fake_keyring::is_installed());
+        let _lifecycle = crate::repairs::isolate_lifecycle_for_test();
         let (cleanup, first, second, _identity, _attempt) = initial_fiscal_fixture();
         let payment = serde_json::json!({"method":"card","amount":10});
         let identity = initial_fiscal_identity(

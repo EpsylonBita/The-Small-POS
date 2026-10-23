@@ -7,6 +7,7 @@ import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../ut
 import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
 import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
+import { readPrintedVatAmount } from '../../utils/printedVat';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils';
 import { isKioskOriginOrder } from '../../../../../shared/order-approval';
@@ -831,7 +832,10 @@ export function OrderApprovalPanel({
       quantity: item.quantity
     })));
   }, [normalizedItems, showsBoxDisplayItems]);
-  const taxAmount = order.tax_amount || order.taxAmount || 0;
+  // The VAT the order's slip prints (founder rule 21/10/2026), as every till
+  // screen shows it: the stored VAT only when a fiscal plugin or the owner's
+  // «VAT on receipts» switch prints it. The Z always totals the stored VAT.
+  const taxAmount = readPrintedVatAmount(fullOrder || order);
   const deliveryFee = order.deliveryFee ?? 0;
   const discountAmount = order.discount_amount || 0;
   const discountPercentage = order.discount_percentage || 0;

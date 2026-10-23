@@ -187,8 +187,80 @@ fn monetary_dead_letter_category(module_type: &str) -> Option<MonetaryDeadLetter
         "staff_payment" => Some(MonetaryDeadLetterCategory::StaffPayment),
         "staff_cash_return" => Some(MonetaryDeadLetterCategory::StaffCashReturn),
         "driver_earning" | "driver_earnings" => Some(MonetaryDeadLetterCategory::DriverEarning),
+        // Offline week Ω9 (22/10/2026): driver earnings, shift expenses and
+        // staff payments are queued under the `financial` module. They are
+        // money like a payment: the 5 min retry cap and the monetary
+        // dead-letter notice, not the 60 s cap of a catalog toggle.
+        "financial" => Some(MonetaryDeadLetterCategory::Financial),
         _ => None,
     }
+}
+
+/// The code a server error of a row is stored under (`HTTP_{status}_SERVER_ERROR`).
+const HTTP_500_SERVER_ERROR: &str = "HTTP_500_SERVER_ERROR";
+
+/// Marker between [`HTTP_500_SERVER_ERROR`] and the time of a monetary row's
+/// first 500, in its stored `error_message`
+/// (`HTTP_500_SERVER_ERROR:SINCE_20261022T081500Z`).
+const MONETARY_500_SINCE_MARKER: &str = ":SINCE_";
+
+/// `chrono` format of the first-500 time in [`MONETARY_500_SINCE_MARKER`]:
+/// letters and digits only, so `bounded_queue_error_code` keeps it whole.
+const MONETARY_500_SINCE_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+
+/// How long a monetary row keeps retrying a server's 500 after its first one
+/// before it dead-letters (Ω9).
+const MONETARY_500_RETRY_WINDOW_HOURS: i64 = 24;
+
+/// What a 500 on a monetary row stores and whether it may still retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Monetary500Window {
+    /// The stored code, stamped with the time of the first 500.
+    stored_code: String,
+    /// Less than [`MONETARY_500_RETRY_WINDOW_HOURS`] since that first 500.
+    within: bool,
+}
+
+/// The first-500 time a stored `error_message` carries, if any.
+fn monetary_500_since(stored: &str) -> Option<chrono::DateTime<Utc>> {
+    let stamp = stored
+        .trim()
+        .strip_prefix(HTTP_500_SERVER_ERROR)?
+        .strip_prefix(MONETARY_500_SINCE_MARKER)?;
+    chrono::NaiveDateTime::parse_from_str(stamp, MONETARY_500_SINCE_FORMAT)
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// Offline week Ω9 (22/10/2026): a payment, refund, Z, cash return or
+/// `financial` row the server answers `500` no longer dead-letters after
+/// `MAX_RETRY_ATTEMPTS`. A week of replays can meet a server bug that lasts
+/// hours; ten tries at the 5 min cap (under an hour) parked money for good.
+/// It keeps retrying with backoff for 24 h from its first 500, then
+/// dead-letters as before. The first 500 is kept in the stored code, so the
+/// window survives restarts without a migration. `None` for every other
+/// failure, and for every non-monetary row (unchanged).
+fn monetary_500_window(
+    error_message: &str,
+    module_type: &str,
+    previous_error: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Option<Monetary500Window> {
+    if error_message != HTTP_500_SERVER_ERROR || !is_monetary_module(module_type) {
+        return None;
+    }
+    let since = previous_error
+        .and_then(monetary_500_since)
+        .filter(|since| *since <= now)
+        .unwrap_or(now);
+    Some(Monetary500Window {
+        stored_code: format!(
+            "{HTTP_500_SERVER_ERROR}{MONETARY_500_SINCE_MARKER}{}",
+            since.format(MONETARY_500_SINCE_FORMAT)
+        ),
+        within: now.signed_duration_since(since)
+            < ChronoDuration::hours(MONETARY_500_RETRY_WINDOW_HOURS),
+    })
 }
 
 /// Compute the next retry delay given the current `retry_delay_ms` base
@@ -260,13 +332,68 @@ fn is_parity_item_retryable_code(code: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(':'))
 }
 
+/// How many retry-schedule audit entries a queue row keeps (its newest).
+const RETRY_SCHEDULE_AUDIT_ROWS_PER_QUEUE_ROW: i64 = 32;
+
+/// The per-row trim of `sync_retry_schedule_audit_v1`. Offline week Ω2
+/// (22/10/2026): the table (and its `queue_id` index) is created by migration
+/// v104 instead of a `CREATE TABLE IF NOT EXISTS` on every call, and both
+/// halves of the trim ride `idx_sync_retry_schedule_audit_queue`. Before, each
+/// transport failure scanned the whole table twice, and a week offline grew it
+/// by 32 rows per queued row.
+const RETRY_SCHEDULE_AUDIT_TRIM_SQL: &str = "DELETE FROM sync_retry_schedule_audit_v1
+     WHERE queue_id = ?1
+       AND id NOT IN (
+            SELECT id FROM sync_retry_schedule_audit_v1
+             WHERE queue_id = ?1
+             ORDER BY id DESC
+             LIMIT ?2
+       )";
+
+/// Orphan audit entries one queue pass removes at most (rows whose queue row
+/// left through a path that did not clean its entries itself).
+const RETRY_SCHEDULE_AUDIT_ORPHAN_PRUNE_LIMIT: i64 = 500;
+
 fn audit_transient_schedule(conn: &Connection, id: &str, outcome: &str) -> Result<(), String> {
     let before:String=conn.query_row("SELECT json_object('status',status,'attempts',attempts,'last_attempt',last_attempt,'retry_delay_ms',retry_delay_ms,'next_retry_at',next_retry_at,'claim_generation',claim_generation) FROM parity_sync_queue WHERE id=?1",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS sync_retry_schedule_audit_v1(id INTEGER PRIMARY KEY AUTOINCREMENT,queue_id TEXT NOT NULL,organization_id TEXT NOT NULL,before_json TEXT NOT NULL,outcome TEXT NOT NULL,created_at TEXT NOT NULL);").map_err(|e|e.to_string())?;
     conn.execute("INSERT INTO sync_retry_schedule_audit_v1(queue_id,organization_id,before_json,outcome,created_at)
         SELECT id,organization_id,?2,?3,?4 FROM parity_sync_queue WHERE id=?1",params![id,before,outcome,Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
-    conn.execute("DELETE FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 AND id NOT IN (SELECT id FROM sync_retry_schedule_audit_v1 WHERE queue_id=?1 ORDER BY id DESC LIMIT 32)",[id]).map_err(|e|e.to_string())?;
+    conn.execute(
+        RETRY_SCHEDULE_AUDIT_TRIM_SQL,
+        params![id, RETRY_SCHEDULE_AUDIT_ROWS_PER_QUEUE_ROW],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Remove a queue row's retry-schedule audit entries: it synced or left the
+/// queue, so its scheduling history no longer protects anything (Ω2).
+fn delete_retry_schedule_audit(conn: &Connection, queue_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM sync_retry_schedule_audit_v1 WHERE queue_id = ?1",
+        params![queue_id],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("sync_queue delete retry-schedule audit: {e}"))
+}
+
+/// Remove, bounded, the audit entries of queue rows that are gone (Ω2). A row
+/// can leave through many paths (a local consumption, a replacement, a
+/// clear); one bounded sweep per pass keeps the table from outliving them.
+fn prune_orphan_retry_schedule_audit(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM sync_retry_schedule_audit_v1
+          WHERE id IN (
+                SELECT audit.id
+                  FROM sync_retry_schedule_audit_v1 AS audit
+                 WHERE NOT EXISTS (
+                       SELECT 1 FROM parity_sync_queue AS queue WHERE queue.id = audit.queue_id
+                 )
+                 LIMIT ?1
+          )",
+        params![RETRY_SCHEDULE_AUDIT_ORPHAN_PRUNE_LIMIT],
+    )
+    .map_err(|e| format!("sync_queue prune orphan retry-schedule audit: {e}"))
 }
 
 /// Audit the revival of a payment row a parent-order deferral escalated to a
@@ -288,7 +415,9 @@ fn resume_exhausted_transport_items(conn: &Connection) -> Result<(), String> {
     };
     retry_transaction(conn, |conn| {
         let owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
-        let mut statement=conn.prepare(&format!("SELECT id,attempts,error_message,module_type,retry_delay_ms FROM parity_sync_queue WHERE status='failed' AND organization_id=?2 AND attempts>=?1 AND error_message IN ('NETWORK_ERROR','HTTP_408_CLIENT_ERROR','HTTP_429_CLIENT_ERROR','HTTP_502_SERVER_ERROR','HTTP_503_SERVER_ERROR','HTTP_504_SERVER_ERROR') AND {owner} LIMIT 100")).map_err(|e|e.to_string())?;
+        // A row a manager set aside is never revived on its own (Ω4).
+        let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
+        let mut statement=conn.prepare(&format!("SELECT id,attempts,error_message,module_type,retry_delay_ms FROM parity_sync_queue WHERE status='failed' AND organization_id=?2 AND attempts>=?1 AND error_message IN ('NETWORK_ERROR','HTTP_408_CLIENT_ERROR','HTTP_429_CLIENT_ERROR','HTTP_502_SERVER_ERROR','HTTP_503_SERVER_ERROR','HTTP_504_SERVER_ERROR') AND {owner} AND {not_set_aside} LIMIT 100")).map_err(|e|e.to_string())?;
         let rows = statement
             .query_map(params![MAX_RETRY_ATTEMPTS, organization], |r| {
                 Ok((
@@ -547,6 +676,11 @@ pub struct SyncResult {
     /// emits each as `recovery:shift-conflict` so the till tells the cashier.
     #[serde(default)]
     pub shift_conflicts: Vec<ShiftConflictNotice>,
+    /// Offline week Ω2 (22/10/2026): the pass ended at its first transport
+    /// failure (no answer, or a `502`/`503`/`504`). The rows after it were
+    /// never claimed and keep their place, attempts and claim generation.
+    #[serde(default)]
+    pub stopped_on_transport_failure: bool,
 }
 
 /// One refused shift for the `recovery:shift-conflict` event. Machine codes
@@ -684,6 +818,8 @@ pub(crate) enum MonetaryDeadLetterCategory {
     StaffPayment,
     StaffCashReturn,
     DriverEarning,
+    /// A `financial` row: a driver earning, shift expense or staff payment.
+    Financial,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1503,6 +1639,32 @@ enum RequestPreparation {
         reason: String,
         local_order_id: String,
     },
+    /// Offline week Ω1 (22/10/2026): a shift opening waits while an earlier
+    /// row of the same person (an opening, close, transfer or expense of an
+    /// earlier shift) is still pending here. No budget spent; it is woken when
+    /// a shift row lands ([`wake_rows_waiting_for_shift_rows`]).
+    WaitingForEarlierShift {
+        reason: String,
+    },
+    /// Ω1: an order create, driver earning, shift expense, staff payment or
+    /// staff cash return waits for its shift's opening, still queued here. No
+    /// budget spent; it looks again with the opening and is woken when it
+    /// lands.
+    WaitingForShiftOpen {
+        reason: String,
+        shift_id: String,
+    },
+    /// Ω3: a Z waits for an earlier Z of this till to reach the server. No
+    /// budget spent; woken when a Z lands.
+    WaitingForEarlierZ {
+        reason: String,
+    },
+    /// Ω3: a Z waits for the money, shift and drawer rows of its window
+    /// (created at or before its cutoff) to reach the server or be set aside.
+    /// No budget spent; woken when the last of them lands.
+    WaitingForWindowMoney {
+        reason: String,
+    },
     Failed {
         reason: String,
     },
@@ -1597,6 +1759,33 @@ pub fn create_tables(conn: &Connection) -> Result<(), String> {
             is_monetary           INTEGER NOT NULL DEFAULT 0,
             reviewed_by_operator  INTEGER NOT NULL DEFAULT 0
         );
+
+        -- Migration v104 owns these; kept here too because every claim and
+        -- retry reads them, and a queue database exists before its first
+        -- full migration run (tests and bootstrap).
+        CREATE TABLE IF NOT EXISTS parity_sync_set_aside (
+            queue_id TEXT PRIMARY KEY,
+            table_name TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            z_report_id TEXT,
+            reason_code TEXT NOT NULL,
+            server_message TEXT,
+            set_aside_by_staff_id TEXT NOT NULL,
+            set_aside_at TEXT NOT NULL,
+            organization_id TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_parity_sync_set_aside_record
+            ON parity_sync_set_aside(table_name, record_id);
+        CREATE TABLE IF NOT EXISTS sync_retry_schedule_audit_v1(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            before_json TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_retry_schedule_audit_queue
+            ON sync_retry_schedule_audit_v1(queue_id);
         ",
     )
     .map_err(|e| format!("sync_queue create_tables: {e}"))?;
@@ -3276,6 +3465,7 @@ fn normalize_order_insert_items(raw_items: &Value) -> Vec<Value> {
             // Omit absent fields so legacy menu payloads stay byte-identical.
             // Preserve explicit nulls and false as well as snake/camel aliases.
             for (snake, camel) in [
+                ("vat_class", "vatClass"),
                 ("vat_category_code", "vatCategoryCode"),
                 ("price_includes_vat", "priceIncludesVat"),
                 ("tax_exemption_reason", "taxExemptionReason"),
@@ -3339,7 +3529,7 @@ fn load_local_order_insert_fallback(
             subtotal,
             subtotal_cents,
             status,
-            order_type,
+            order_type, plugin,
             table_number,
             delivery_address,
             delivery_address_id,
@@ -3399,6 +3589,11 @@ fn load_local_order_insert_fallback(
                     }
                 };
 
+            insert_string(
+                &mut object,
+                "plugin",
+                row.get::<_, Option<String>>("plugin")?,
+            );
             insert_string(
                 &mut object,
                 "order_number",
@@ -3693,6 +3888,10 @@ fn is_register_order_number(value: &str) -> bool {
 /// [`order_insert_vat`] computes the order's VAT from the same ones, so the
 /// till and the server see identical inputs.
 struct OrderInsertMoney {
+    order_type: Option<String>,
+    platform: Option<String>,
+    service_fee: f64,
+    tip_amount: f64,
     items: Vec<Value>,
     subtotal: f64,
     tax_amount: f64,
@@ -3767,6 +3966,12 @@ impl OrderInsertMoney {
                 .max(0.0);
 
         let money = Self {
+            order_type: string_field_from_sources(sources, &["order_type", "orderType"]),
+            platform: string_field_from_sources(sources, &["platform", "plugin"]),
+            service_fee: number_field_from_sources(sources, &["service_fee", "serviceFee"])
+                .unwrap_or(0.0),
+            tip_amount: number_field_from_sources(sources, &["tip_amount", "tipAmount"])
+                .unwrap_or(0.0),
             items,
             subtotal,
             tax_amount,
@@ -3796,6 +4001,7 @@ impl OrderInsertMoney {
         (self.subtotal
             + crate::fiscal::greece_vat::vat_added_on_top_of_subtotal(self.tax_amount)
             + self.delivery_fee
+            + self.service_fee
             - self.discount_amount
             - self.coupon_discount_amount)
             .max(0.0)
@@ -3805,6 +4011,10 @@ impl OrderInsertMoney {
     /// and cents siblings [`build_order_insert_body`] sends.
     fn vat_body(&self) -> Value {
         serde_json::json!({
+            "order_type": self.order_type,
+            "platform": self.platform,
+            "service_fee": self.service_fee,
+            "tip_amount": self.tip_amount,
             "items": self.items,
             "delivery_fee": self.delivery_fee,
             "delivery_fee_cents": Cents::round_half_even(self.delivery_fee).as_i64(),
@@ -3845,7 +4055,19 @@ pub(crate) fn order_insert_vat(
     if let Some(local_order) = local_order.as_ref() {
         sources.push(local_order);
     }
-    let money = OrderInsertMoney::from_sources(&sources)?;
+    let mut money = OrderInsertMoney::from_sources(&sources)?;
+    // The create body recovers a missing tip only with exact completed-ledger proof.
+    // Swiss turnover tips must use that same amount in the VAT calculation.
+    if money.tip_amount <= 0.0 {
+        let expected = Cents::round_half_even(money.total_amount).as_i64()
+            - Cents::round_half_even(money.pre_tip_total()).as_i64();
+        if expected > 0 {
+            let ledger: i64 = conn.query_row("SELECT COALESCE(SUM(COALESCE(tip_amount_cents,CAST(ROUND(COALESCE(tip_amount,0)*100) AS INTEGER),0)),0) FROM order_payments WHERE order_id=?1 AND lower(COALESCE(status,''))='completed'", [record_id], |r| r.get(0)).map_err(|e| format!("read VAT tip proof: {e}"))?;
+            if ledger == expected {
+                money.tip_amount = ledger as f64 / 100.0;
+            }
+        }
+    }
     let settings = crate::fiscal::greece_vat::branch_vat_settings(conn);
     Ok(
         crate::fiscal::greece_vat::calculate_order_vat_from_order_body(
@@ -3881,6 +4103,7 @@ fn build_order_insert_body(
         discount_amount,
         coupon_discount_amount,
         total_amount,
+        ..
     } = money;
 
     let branch_id = string_field_from_sources(&sources, &["branch_id", "branchId"])
@@ -4113,6 +4336,8 @@ fn build_order_insert_body(
         "branch_id": branch_id,
         "items": items,
         "order_type": order_type,
+        "platform": string_field_from_sources(&sources, &["platform", "plugin"]),
+        "service_fee": number_field_from_sources(&sources, &["service_fee", "serviceFee"]),
         "payment_status": payment_status,
         "payment_method": payment_method_json,
         "total_amount": total_amount,
@@ -4135,8 +4360,14 @@ fn build_order_insert_body(
         "coupon_discount_amount_cents": Cents::round_half_even(coupon_discount_amount).as_i64(),
         "tip_amount": tip_amount,
         "tip_amount_cents": Cents::round_half_even(tip_amount).as_i64(),
-        "country_code": string_field_from_sources(&sources, &["country_code", "countryCode"])
-            .map(|value| value.trim().to_ascii_uppercase()),
+        // The branch's VAT country (`tax.vat_country`), never a renderer
+        // constant; a till without it yet keeps what the order carried.
+        "country_code": crate::fiscal::greece_vat::branch_vat_country_code(conn)
+            .map(str::to_string)
+            .or_else(|| {
+                string_field_from_sources(&sources, &["country_code", "countryCode"])
+                    .map(|value| value.trim().to_ascii_uppercase())
+            }),
         "pricing_mode": string_field_from_sources(&sources, &["pricing_mode", "pricingMode"]),
         "customer_id": customer_id,
         "customer_name": customer_name,
@@ -4179,7 +4410,13 @@ fn build_order_insert_body(
     });
 
     if let Value::Object(object) = &mut body {
-        for optional_key in ["fiscal_receipt_number", "local_order_number", "currency"] {
+        for optional_key in [
+            "fiscal_receipt_number",
+            "local_order_number",
+            "currency",
+            "platform",
+            "service_fee",
+        ] {
             if object.get(optional_key).is_some_and(Value::is_null) {
                 object.remove(optional_key);
             }
@@ -4523,6 +4760,8 @@ fn requeue_failed_items(
 ) -> Result<RetryItemsResult, String> {
     let mut retried = 0_i64;
     let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    // Automatic retries never revive a set-aside row (Ω4).
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let update_sql = format!(
         "UPDATE parity_sync_queue
          SET status = 'pending',
@@ -4533,7 +4772,8 @@ fn requeue_failed_items(
              retry_delay_ms = ?1
          WHERE id = ?2
            AND status = 'failed'
-           AND {generic_owner}"
+           AND {generic_owner}
+           AND {not_set_aside}"
     );
 
     for queue_id in queue_ids {
@@ -4718,11 +4958,13 @@ fn resolve_failed_payment_total_conflict_items_limited(
     }
 
     let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let select_sql = format!(
         "SELECT id, record_id, data, error_message
              FROM parity_sync_queue
              WHERE table_name = 'payments'
                AND {generic_owner}
+               AND {not_set_aside}
                AND operation = 'INSERT'
                AND status = 'failed'
                AND error_message IS NOT NULL
@@ -5237,11 +5479,14 @@ fn retry_failed_invalid_fiscal_issued_at_items_limited(
     }
 
     let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+    // A set-aside receipt keeps its payload untouched (Ω4).
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let select_sql = format!(
         "SELECT id, data, error_message
              FROM parity_sync_queue
              WHERE module_type = 'fiscal'
                AND {generic_owner}
+               AND {not_set_aside}
                AND status = 'failed'
                AND error_message IS NOT NULL
              ORDER BY created_at ASC"
@@ -5330,12 +5575,15 @@ pub fn clear_unsynced_items(
 ) -> Result<usize, String> {
     let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
     let gift_close_bound = gift_close_bound_predicate("parity_sync_queue");
+    // A set-aside row is never deleted (Ω4): a replacement queues beside it.
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let sql = format!(
         "DELETE FROM parity_sync_queue
          WHERE table_name = ?1
            AND record_id = ?2
            AND {generic_owner}
            AND NOT {gift_close_bound}
+           AND {not_set_aside}
            AND status IN ('pending', 'failed', 'conflict')"
     );
     conn.execute(&sql, params![table_name, record_id])
@@ -5395,16 +5643,47 @@ fn dequeue_due_by_with_quarantine_count(
     conn: &Connection,
     due_by: Option<&str>,
 ) -> Result<(Option<SyncQueueItem>, i64), String> {
+    dequeue_due_by_with_repair_gate(conn, due_by, true)
+}
+
+/// [`dequeue_due_by_with_quarantine_count`] that claims a canonical repair
+/// row only when `include_repair` is set, which the queue pass does only
+/// while it holds a repair lease. Otherwise repair rows are skipped and stay
+/// pending untouched: no claim, no attempt, no dead letter.
+fn dequeue_due_by_with_repair_gate(
+    conn: &Connection,
+    due_by: Option<&str>,
+    include_repair: bool,
+) -> Result<(Option<SyncQueueItem>, i64), String> {
     retry_transaction(conn, |conn| {
         let table_quarantined = quarantine_existing_refused_table_batches(conn)? as i64;
         let quarantined = quarantine_reserved_repair_lookalikes(conn)? + table_quarantined;
-        claim_next_internal_item(conn, due_by).map(|item| (item, quarantined))
+        claim_next_internal_item(conn, due_by, include_repair).map(|item| (item, quarantined))
     })
+}
+
+/// Whether any canonical repair row is waiting to be claimed. The queue pass
+/// asks once, so a terminal without Repairs never pays for a repair lease
+/// per item.
+fn has_pending_canonical_repair_rows(conn: &Connection) -> Result<bool, String> {
+    let canonical = canonical_repair_owner_predicate("parity_sync_queue");
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM parity_sync_queue
+                  WHERE status = 'pending' AND {canonical}
+             )"
+        ),
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue repair rows: {e}"))
 }
 
 fn claim_next_internal_item(
     conn: &Connection,
     due_by: Option<&str>,
+    include_repair: bool,
 ) -> Result<Option<SyncQueueItem>, String> {
     let now = Utc::now().to_rfc3339();
     let candidate_generic = semantic_generic_nonfinancial_owner_predicate("candidate");
@@ -5413,6 +5692,9 @@ fn claim_next_internal_item(
     let unsafe_reserved = semantic_reserved_repair_owner_predicate("unsafe_repair");
     let unsafe_canonical = canonical_repair_owner_predicate("unsafe_repair");
     let table_order = table_mutation_dispatch_predicate("candidate");
+    // A row a manager set aside is never sent on its own (Ω4), whatever its
+    // status became.
+    let not_set_aside = set_aside_exclusion_sql("candidate");
     let sql = format!(
         "UPDATE parity_sync_queue
             SET status = 'processing',
@@ -5423,6 +5705,7 @@ fn claim_next_internal_item(
                  FROM parity_sync_queue AS candidate
                  WHERE candidate.status = 'pending'
                    AND {table_order}
+                   AND {not_set_aside}
                    AND (
                         candidate.next_retry_at IS NULL
                         OR julianday(candidate.next_retry_at) <= julianday(COALESCE(?2, 'now'))
@@ -5430,7 +5713,8 @@ fn claim_next_internal_item(
                    AND (
                         {candidate_generic}
                         OR (
-                            COALESCE(candidate.module_type, '') = 'repairs'
+                            ?3
+                            AND COALESCE(candidate.module_type, '') = 'repairs'
                             AND candidate.table_name IN ('repairs', 'repair_attachments')
                             AND
                             candidate.repair_aggregate_id IS NOT NULL
@@ -5539,7 +5823,7 @@ fn claim_next_internal_item(
                  LIMIT 1
           )
             AND status = 'pending'
-            AND ({claim_generic} OR {claim_canonical})
+            AND ({claim_generic} OR (?3 AND {claim_canonical}))
             AND (
                 next_retry_at IS NULL
                 OR julianday(next_retry_at) <= julianday(COALESCE(?2, 'now'))
@@ -5549,9 +5833,13 @@ fn claim_next_internal_item(
                   retry_delay_ms, priority, COALESCE(module_type, 'orders'),
                   conflict_strategy, version, claim_generation, status"
     );
-    conn.query_row(&sql, params![now, due_by], map_internal_queue_item)
-        .optional()
-        .map_err(|e| format!("sync_queue dequeue: {e}"))
+    conn.query_row(
+        &sql,
+        params![now, due_by, include_repair],
+        map_internal_queue_item,
+    )
+    .optional()
+    .map_err(|e| format!("sync_queue dequeue: {e}"))
 }
 
 /// Renderer-facing dequeue. Repair payloads are native-only and must never be
@@ -5573,6 +5861,7 @@ fn renderer_dequeue_due_by(
     let candidate_exclusion = renderer_non_repair_owned_predicate("candidate");
     let claim_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let table_order = table_mutation_dispatch_predicate("candidate");
+    let not_set_aside = set_aside_exclusion_sql("candidate");
     let sql = format!(
         "UPDATE parity_sync_queue
          SET status = 'processing', last_attempt = ?1,
@@ -5582,6 +5871,7 @@ fn renderer_dequeue_due_by(
              FROM parity_sync_queue candidate
              WHERE candidate.status = 'pending'
                    AND {table_order}
+               AND {not_set_aside}
                AND {candidate_generic}
                AND (
                     candidate.next_retry_at IS NULL
@@ -5665,6 +5955,10 @@ fn renderer_retry_and_dequeue_exact(
 
         if !table_mutation_dispatch_ready(conn, item_id)? {
             return Err("TABLE_MUTATION_BLOCKED: Resolve the earlier original batch item before retrying this suffix.".into());
+        }
+        // A set-aside row is sent only after a manager undoes the set-aside.
+        if queue_row_is_set_aside(conn, item_id)? {
+            return Err(PARITY_ITEM_SET_ASIDE.to_string());
         }
         let now = Utc::now().to_rfc3339();
         let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
@@ -5829,6 +6123,8 @@ fn cleanup_superseded_synced_order_status_updates_in_transaction(
     )> = {
         let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
         let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        // Sweeps never touch a set-aside row (Ω4).
+        let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
         let sql = format!(
             "SELECT id, record_id, operation, data, status, error_message, conflict_strategy
                  FROM parity_sync_queue
@@ -5837,6 +6133,7 @@ fn cleanup_superseded_synced_order_status_updates_in_transaction(
                    AND status IN ('pending', 'processing', 'failed', 'conflict')
                    AND {generic_owner}
                    AND {ownership_exclusion}
+                   AND {not_set_aside}
                 ORDER BY created_at ASC, id ASC"
         );
         let mut stmt = conn
@@ -6301,7 +6598,13 @@ pub fn get_status(conn: &Connection) -> Result<QueueStatus, String> {
 /// which never block the Z. Background sync, Sync health and every other
 /// reader keep using the queue-wide [`get_status`].
 pub(crate) fn get_closeout_blocking_status(conn: &Connection) -> Result<QueueStatus, String> {
-    let predicate = format!("NOT {}", closeout_exempt_row_predicate());
+    // A row a manager set aside no longer holds the Z (Ω4): it stays queued
+    // and is listed on the Z as "not on the server".
+    let predicate = format!(
+        "NOT {} AND {}",
+        closeout_exempt_row_predicate(),
+        set_aside_exclusion_sql("parity_sync_queue")
+    );
     let count = |status_filter: &str| -> Result<i64, String> {
         let sql = format!(
             "SELECT COUNT(*) FROM parity_sync_queue
@@ -6788,6 +7091,9 @@ pub fn retry_item(conn: &Connection, item_id: &str) -> Result<(), String> {
             Some((false, true)) => return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string()),
             _ => {}
         }
+        if queue_row_is_set_aside(conn, item_id)? {
+            return Err(PARITY_ITEM_SET_ASIDE.to_string());
+        }
         let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
         let update_sql = format!(
             "UPDATE parity_sync_queue
@@ -6833,6 +7139,10 @@ pub(crate) fn renderer_retry_item(conn: &Connection, item_id: &str) -> Result<()
             Some((true, _)) => return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string()),
             Some((false, true)) => return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string()),
             _ => {}
+        }
+        // Health's retry never re-sends a set-aside row: undo it first (Ω4).
+        if queue_row_is_set_aside(conn, item_id)? {
+            return Err(PARITY_ITEM_SET_ASIDE.to_string());
         }
         let update_sql = format!(
             "UPDATE parity_sync_queue
@@ -6902,6 +7212,7 @@ pub(crate) fn renderer_make_items_due(
     retry_transaction(conn, |conn| {
         let generic_owner = renderer_generic_owner_predicate("parity_sync_queue");
         let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
+        let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
         let waiting_sql = format!(
             "SELECT next_retry_at FROM parity_sync_queue
               WHERE id = ?1
@@ -6909,7 +7220,8 @@ pub(crate) fn renderer_make_items_due(
                 AND next_retry_at IS NOT NULL
                 AND julianday(next_retry_at) > julianday('now')
                 AND {generic_owner}
-                AND {ownership_exclusion}"
+                AND {ownership_exclusion}
+                AND {not_set_aside}"
         );
         let mut seen = std::collections::HashSet::new();
         let mut made_due = Vec::new();
@@ -7091,6 +7403,8 @@ pub fn retry_items_by_module(
             return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string());
         }
         let generic_owner = semantic_generic_nonfinancial_owner_predicate("parity_sync_queue");
+        // "Retry all" skips every set-aside row (Ω4).
+        let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
         let update_sql = format!(
             "UPDATE parity_sync_queue
              SET status = 'pending',
@@ -7101,7 +7415,8 @@ pub fn retry_items_by_module(
                  retry_delay_ms = ?1
              WHERE module_type = ?2
                AND status IN ('pending', 'failed', 'conflict')
-               AND {generic_owner}"
+               AND {generic_owner}
+               AND {not_set_aside}"
         );
         let retried = conn
             .execute(
@@ -7127,6 +7442,8 @@ pub(crate) fn renderer_retry_items_by_module(
     let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let replayable = table_mutation_replayable_predicate("parity_sync_queue");
+    // Health "retry all" skips every set-aside row (Ω4).
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let sql = format!(
         "UPDATE parity_sync_queue
          SET status = 'pending', attempts = 0, error_message = NULL,
@@ -7135,6 +7452,7 @@ pub(crate) fn renderer_retry_items_by_module(
            AND {generic_owner}
            AND {replayable}
            AND {ownership_exclusion}
+           AND {not_set_aside}
            AND status IN ('pending', 'failed', 'conflict')"
     );
     let retried = conn
@@ -7160,6 +7478,7 @@ pub(crate) fn renderer_retryable_item_ids_by_module(
     let generic_owner = renderer_visible_owner_predicate("parity_sync_queue");
     let ownership_exclusion = renderer_non_repair_owned_predicate("parity_sync_queue");
     let replayable = table_mutation_replayable_predicate("parity_sync_queue");
+    let not_set_aside = set_aside_exclusion_sql("parity_sync_queue");
     let sql = format!(
         "SELECT id
            FROM parity_sync_queue
@@ -7168,6 +7487,7 @@ pub(crate) fn renderer_retryable_item_ids_by_module(
             AND {generic_owner}
            AND {replayable}
             AND {ownership_exclusion}
+            AND {not_set_aside}
           ORDER BY priority DESC, created_at ASC, id ASC
           LIMIT ?2"
     );
@@ -7297,6 +7617,9 @@ pub fn mark_success(
             expected_generation,
             "Wave 10 H8: mark_success no-op — claim_generation mismatch (row reclaimed by another worker or already deleted)"
         );
+    } else {
+        // Ω2: the row left the queue, and its scheduling history with it.
+        delete_retry_schedule_audit(conn, item_id)?;
     }
 
     Ok(())
@@ -7975,16 +8298,21 @@ fn mark_failure_in_transaction(
     // Get current attempts, retry delay, and module type. The module
     // type drives the per-class retry cap below (Wave 2a).
     let read_sql = format!(
-        "SELECT attempts, retry_delay_ms, module_type
+        "SELECT attempts, retry_delay_ms, module_type, error_message
            FROM parity_sync_queue
           WHERE id = ?1
             AND status = 'processing'
             AND claim_generation = ?2
             AND {live_owner}"
     );
-    let Some((attempts, retry_delay_ms, module_type)): Option<(i64, i64, String)> = conn
+    let Some((attempts, retry_delay_ms, module_type, previous_error)): Option<(
+        i64,
+        i64,
+        String,
+        Option<String>,
+    )> = conn
         .query_row(&read_sql, params![item_id, expected_generation], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .optional()
         .map_err(|e| format!("sync_queue mark_failure read: {e}"))?
@@ -8004,8 +8332,21 @@ fn mark_failure_in_transaction(
 
     let new_attempts = attempts.saturating_add(1);
     let transient = is_safe_transient_retry(error_message, &module_type);
+    // Ω9: a 500 on money retries for 24 h from its first 500, then
+    // dead-letters as before. The stored code carries that first time.
+    let monetary_500 = monetary_500_window(
+        error_message,
+        &module_type,
+        previous_error.as_deref(),
+        Utc::now(),
+    );
+    let keeps_retrying = transient || monetary_500.as_ref().is_some_and(|window| window.within);
+    let stored_error = match monetary_500.as_ref() {
+        Some(window) if window.within => window.stored_code.as_str(),
+        _ => error_message,
+    };
 
-    if new_attempts >= MAX_RETRY_ATTEMPTS && !transient {
+    if new_attempts >= MAX_RETRY_ATTEMPTS && !keeps_retrying {
         // Max retries exhausted -- mark as permanently failed.
         // Wave 10 H8 sub-follow-up: the guard predicate
         // `claim_generation = ?N` mirrors the `mark_success` shape.
@@ -8099,7 +8440,7 @@ fn mark_failure_in_transaction(
                 params![
                     new_attempts,
                     now,
-                    error_message,
+                    stored_error,
                     new_delay,
                     next_retry.to_rfc3339(),
                     item_id,
@@ -8347,6 +8688,781 @@ fn wake_rows_waiting_for_order_create(
     )
     .map(|_| ())
     .map_err(|e| format!("sync_queue wake rows waiting for order create: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Offline week Ω1 / Ω3 (22/10/2026): the shift chain and the Zs replay in order
+// ---------------------------------------------------------------------------
+//
+// A week offline queues every check-in and check-out of every person, then
+// one Z per evening. On reconnection they used to race: a transient failure
+// on day N's close let day N+1's opening go first, which the server refused
+// for good (`unresolved_shift`), and that day's orders and earnings then
+// failed on a missing shift. Now an opening waits for the same person's
+// earlier shift rows, the rows of a shift wait for its opening, and a Z waits
+// for the Z before it and for the money of its own window. None of these
+// waits spends an attempt; each row looks again when what it waits for lands.
+
+/// The stored reason of a shift opening that waits for an earlier shift row
+/// of the same person (Ω1).
+pub(crate) const WAITING_FOR_EARLIER_SHIFT_REASON: &str =
+    "SHIFT_WAITING_FOR_EARLIER_SHIFT: Waiting for this person's earlier shift to reach the server";
+
+/// Leading code of the reason of a row that waits for its shift's opening
+/// (Ω1); [`waiting_for_shift_open_reason`] names the shift after it.
+pub(crate) const SHIFT_WAITING_FOR_CHECK_IN: &str = "SHIFT_WAITING_FOR_CHECK_IN";
+
+/// The stored reason of a Z that waits for an earlier Z of this till (Ω3).
+pub(crate) const WAITING_FOR_EARLIER_Z_REASON: &str =
+    "Z_WAITING_FOR_EARLIER_Z: Waiting for an earlier Z report of this till to reach the server";
+
+/// The stored reason of a Z that waits for the money, shift and drawer rows
+/// of its window (Ω3).
+pub(crate) const WAITING_FOR_WINDOW_MONEY_REASON: &str = "Z_WAITING_FOR_WINDOW_MONEY: Waiting for the payments, shifts and drawers of this Z to reach the server";
+
+/// How long a row waits between looks while its shift's opening is refused
+/// for good (failed or a conflict): only a manager's retry or set-aside moves
+/// that opening, and its success wakes the row at once.
+const SHIFT_OPEN_REFUSED_RECHECK_SECS: i64 = 300;
+
+/// The queue tables whose rows a Z's window waits for (Ω3): money, shift and
+/// drawer rows (the Z gate's tables, Android's ten included).
+const Z_WINDOW_MONEY_TABLES_SQL: &str = "('staff_shifts', 'cash_drawer_sessions', 'payments', \
+     'order_payments', 'payment_adjustments', 'driver_earnings', 'driver_earning', \
+     'shift_expenses', 'staff_payments', 'staff_order_cash_returns')";
+
+/// Whether a queue table is one a Z's window waits for.
+fn is_z_window_money_table(table_name: &str) -> bool {
+    matches!(
+        table_name,
+        "staff_shifts"
+            | "cash_drawer_sessions"
+            | "payments"
+            | "order_payments"
+            | "payment_adjustments"
+            | "driver_earnings"
+            | "driver_earning"
+            | "shift_expenses"
+            | "staff_payments"
+            | "staff_order_cash_returns"
+    )
+}
+
+/// The stored reason of a row that waits for this shift's opening.
+pub(crate) fn waiting_for_shift_open_reason(shift_id: &str) -> String {
+    format!(
+        "{SHIFT_WAITING_FOR_CHECK_IN}: Waiting for the shift's check-in to reach the server (shift {})",
+        shift_id.trim()
+    )
+}
+
+/// The shift ids a row names, when it is one that needs its shift on the
+/// server first (Ω1): an order create, a driver earning, a shift expense, a
+/// staff payment (the paying cashier's shift) or a staff cash return (both
+/// shifts it moves cash between).
+fn shift_ids_named_by(item: &SyncQueueItem, payload: &Value) -> Vec<String> {
+    let keys: &[&str] = match item.table_name.as_str() {
+        "orders" if item.operation == "INSERT" => &["staffShiftId", "staff_shift_id"],
+        "driver_earnings" | "driver_earning" => &["staff_shift_id", "staffShiftId"],
+        "shift_expenses" => &["shiftId", "staffShiftId", "staff_shift_id", "shift_id"],
+        "staff_payments" => &[
+            "paidByCashierShiftId",
+            "cashierShiftId",
+            "staffShiftId",
+            "staff_shift_id",
+        ],
+        "staff_order_cash_returns" => &["source_staff_shift_id", "receiving_cashier_shift_id"],
+        _ => return Vec::new(),
+    };
+    let mut shift_ids: Vec<String> = Vec::new();
+    for key in keys {
+        if let Some(shift_id) = payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !shift_ids.iter().any(|known| known == shift_id) {
+                shift_ids.push(shift_id.to_string());
+            }
+        }
+    }
+    shift_ids
+}
+
+/// Whether this shift's opening is still queued here (pending, processing,
+/// failed or a conflict): the server does not have the shift yet. A refused
+/// opening is the row Sync health shows; the rows of its shift wait with it
+/// and can be set aside with it as one group.
+fn shift_open_in_flight(conn: &Connection, shift_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM parity_sync_queue
+             WHERE table_name = 'staff_shifts'
+               AND record_id = ?1
+               AND operation = 'INSERT'
+               AND COALESCE(module_type, '') <> 'repairs'
+               AND status IN ('pending', 'processing', 'failed', 'conflict')
+         )",
+        params![shift_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue shift opening in flight: {e}"))
+}
+
+/// The person of a shift row: its payload's, else the local shift's.
+fn shift_row_staff_id(conn: &Connection, payload: &Value, shift_id: &str) -> Option<String> {
+    string_field(payload, &["staffId", "staff_id"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            conn.query_row(
+                "SELECT NULLIF(TRIM(COALESCE(staff_id, '')), '') FROM staff_shifts WHERE id = ?1",
+                params![shift_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+        })
+}
+
+/// Whether `earlier` was queued before `item` (by `created_at`, then id).
+fn queued_before(earlier_created_at: &str, earlier_id: &str, item: &SyncQueueItem) -> bool {
+    match (
+        parse_queue_timestamp(earlier_created_at),
+        parse_queue_timestamp(&item.created_at),
+    ) {
+        (Some(earlier), Some(own)) => {
+            earlier < own || (earlier == own && earlier_id < item.id.as_str())
+        }
+        _ => (earlier_created_at, earlier_id) < (item.created_at.as_str(), item.id.as_str()),
+    }
+}
+
+/// Ω1: whether an older row of the same person, an opening, close, transfer
+/// or expense of an EARLIER shift, is still pending or processing here and
+/// not set aside. A failed one does not hold the opening: it is the row
+/// Sync health shows, and the server answers the opening for itself.
+fn earlier_shift_row_in_flight(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    shift_id: &str,
+    staff_id: &str,
+) -> Result<bool, String> {
+    let not_set_aside = set_aside_exclusion_sql("earlier");
+    let sql = format!(
+        "SELECT earlier.id, earlier.table_name, earlier.record_id, earlier.data, earlier.created_at
+           FROM parity_sync_queue AS earlier
+          WHERE earlier.table_name IN ('staff_shifts', 'shift_expenses')
+            AND earlier.id <> ?1
+            AND earlier.status IN ('pending', 'processing')
+            AND COALESCE(earlier.module_type, '') <> 'repairs'
+            AND {not_set_aside}"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("sync_queue earlier shift rows prepare: {e}"))?;
+    let rows = statement
+        .query_map(params![item.id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| format!("sync_queue earlier shift rows query: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("sync_queue earlier shift rows read: {e}"))?;
+    drop(statement);
+    for (id, table_name, record_id, data, created_at) in rows {
+        if !queued_before(&created_at, &id, item) {
+            continue;
+        }
+        let payload = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
+        let their_shift = if table_name == "staff_shifts" {
+            string_field(&payload, &["shiftId", "shift_id"])
+                .unwrap_or_else(|| record_id.trim().to_string())
+        } else {
+            string_field(
+                &payload,
+                &["shiftId", "staffShiftId", "staff_shift_id", "shift_id"],
+            )
+            .unwrap_or_default()
+        };
+        let their_shift = their_shift.trim();
+        if their_shift.is_empty() || their_shift == shift_id {
+            continue;
+        }
+        if shift_row_staff_id(conn, &payload, their_shift).as_deref() == Some(staff_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The frozen cutoff of a queued Z: its row's `window_cutoff` (migration
+/// v104), else the `periodEnd` its submission carries.
+fn z_report_window_cutoff(conn: &Connection, z_report_id: &str, payload: &Value) -> Option<String> {
+    conn.query_row(
+        "SELECT NULLIF(TRIM(COALESCE(window_cutoff, '')), '') FROM z_reports WHERE id = ?1",
+        params![z_report_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .or_else(|| {
+        nested_string_field_from_sources(
+            &[payload],
+            &[
+                &["report_data", "periodEnd"],
+                &["report_data", "period_end"],
+            ],
+        )
+    })
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+/// Ω3: whether an older Z of this till (an earlier window) is still queued
+/// here and not set aside. Zs reach the server in window order.
+fn earlier_z_report_in_flight(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    cutoff: &str,
+) -> Result<bool, String> {
+    let Some(own_cutoff) = parse_queue_timestamp(cutoff) else {
+        return Ok(false);
+    };
+    let not_set_aside = set_aside_exclusion_sql("other");
+    let sql = format!(
+        "SELECT other.record_id, other.data
+           FROM parity_sync_queue AS other
+          WHERE other.table_name = 'z_reports'
+            AND other.id <> ?1
+            AND other.status IN ('pending', 'processing', 'failed', 'conflict')
+            AND {not_set_aside}"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("sync_queue earlier z reports prepare: {e}"))?;
+    let rows = statement
+        .query_map(params![item.id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("sync_queue earlier z reports query: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("sync_queue earlier z reports read: {e}"))?;
+    drop(statement);
+    for (record_id, data) in rows {
+        if record_id == item.record_id {
+            continue;
+        }
+        let payload = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
+        let earlier = z_report_window_cutoff(conn, &record_id, &payload)
+            .as_deref()
+            .and_then(parse_queue_timestamp)
+            .is_some_and(|their_cutoff| their_cutoff < own_cutoff);
+        if earlier {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Ω3: whether a money, shift or drawer row created at or before `cutoff` is
+/// still queued here (pending, processing, failed or a conflict) and not set
+/// aside. A Z never reaches the server before its own window's money.
+fn window_money_in_flight(conn: &Connection, cutoff: &str) -> Result<bool, String> {
+    let not_set_aside = set_aside_exclusion_sql("money");
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM parity_sync_queue AS money
+                 WHERE money.table_name IN {Z_WINDOW_MONEY_TABLES_SQL}
+                   AND money.status IN ('pending', 'processing', 'failed', 'conflict')
+                   AND {not_set_aside}
+                   AND julianday(money.created_at) <= julianday(?1)
+             )"
+        ),
+        params![cutoff],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue z window money in flight: {e}"))
+}
+
+/// The waits that come before a row's own preparation (Ω1, Ω3).
+fn prepare_dependency_wait(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    payload: &Value,
+) -> Result<Option<RequestPreparation>, String> {
+    if item.module_type == "repairs" {
+        return Ok(None);
+    }
+    match item.table_name.as_str() {
+        "staff_shifts" => {
+            let shift_id = string_field(payload, &["shiftId", "shift_id"])
+                .unwrap_or_else(|| item.record_id.trim().to_string());
+            if item.operation != "INSERT" {
+                // Ω1 (W8's 7-day test): a shift's close or transfer never
+                // overtakes its own opening. After a week of offline retries
+                // the opening sat in a long backoff and its close went first;
+                // the server then recorded the shift closed and answered the
+                // opening `skipped`, so the re-check of its `offline_check_in`
+                // (carried by the opening alone) never ran.
+                if shift_open_in_flight(conn, shift_id.trim())? {
+                    return Ok(Some(RequestPreparation::WaitingForShiftOpen {
+                        reason: waiting_for_shift_open_reason(shift_id.trim()),
+                        shift_id: shift_id.trim().to_string(),
+                    }));
+                }
+                return Ok(None);
+            }
+            let Some(staff_id) = shift_row_staff_id(conn, payload, shift_id.trim()) else {
+                return Ok(None);
+            };
+            if earlier_shift_row_in_flight(conn, item, shift_id.trim(), &staff_id)? {
+                return Ok(Some(RequestPreparation::WaitingForEarlierShift {
+                    reason: WAITING_FOR_EARLIER_SHIFT_REASON.to_string(),
+                }));
+            }
+            Ok(None)
+        }
+        "z_reports" => {
+            let Some(cutoff) = z_report_window_cutoff(conn, &item.record_id, payload) else {
+                return Ok(None);
+            };
+            if earlier_z_report_in_flight(conn, item, &cutoff)? {
+                return Ok(Some(RequestPreparation::WaitingForEarlierZ {
+                    reason: WAITING_FOR_EARLIER_Z_REASON.to_string(),
+                }));
+            }
+            if window_money_in_flight(conn, &cutoff)? {
+                return Ok(Some(RequestPreparation::WaitingForWindowMoney {
+                    reason: WAITING_FOR_WINDOW_MONEY_REASON.to_string(),
+                }));
+            }
+            Ok(None)
+        }
+        _ => {
+            for shift_id in shift_ids_named_by(item, payload) {
+                if shift_open_in_flight(conn, &shift_id)? {
+                    return Ok(Some(RequestPreparation::WaitingForShiftOpen {
+                        reason: waiting_for_shift_open_reason(&shift_id),
+                        shift_id,
+                    }));
+                }
+            }
+            // Ω11 (W10's order race): an order create waits for the loyalty
+            // release of its own checkout. If the order reached the server
+            // first, the release would get `LOYALTY_ORDER_EXISTS` and the
+            // customer would lose the points.
+            if item.table_name == "orders" && item.operation == "INSERT" {
+                for checkout_id in order_checkout_ids(conn, item, payload) {
+                    if loyalty_release_in_flight(conn, &checkout_id)? {
+                        return Ok(Some(RequestPreparation::WaitingForParent {
+                            reason: waiting_for_loyalty_release_reason(&checkout_id),
+                        }));
+                    }
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Leading code of the reason of an order create that waits for its
+/// checkout's loyalty release (Ω11); the checkout id ends the reason.
+pub(crate) const LOYALTY_WAITING_FOR_RELEASE: &str = "LOYALTY_WAITING_FOR_RELEASE";
+
+/// The stored reason of an order create waiting for its checkout's release.
+fn waiting_for_loyalty_release_reason(checkout_id: &str) -> String {
+    format!(
+        "{LOYALTY_WAITING_FOR_RELEASE}: Waiting for this checkout's loyalty release to reach the server (checkout {})",
+        checkout_id.trim()
+    )
+}
+
+/// The checkout ids an order create answers to: the order's
+/// `client_request_id` (the renderer's checkout id, which a loyalty release
+/// names as its `order_id`), the payload's, and the local id.
+fn order_checkout_ids(conn: &Connection, item: &SyncQueueItem, payload: &Value) -> Vec<String> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(COALESCE(client_request_id, '')), '') FROM orders WHERE id = ?1",
+            params![item.record_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten();
+    let mut checkout_ids: Vec<String> = Vec::new();
+    for candidate in [
+        stored,
+        string_field(payload, &["client_request_id", "clientRequestId"]),
+        Some(item.record_id.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let candidate = candidate.trim().to_string();
+        if !candidate.is_empty() && !checkout_ids.contains(&candidate) {
+            checkout_ids.push(candidate);
+        }
+    }
+    checkout_ids
+}
+
+/// Whether a loyalty RELEASE op of this checkout (`commands::loyalty`,
+/// `transaction_type: release`, queued as a `loyalty_transactions` DELETE)
+/// is still pending or processing here and not set aside (Ω11).
+fn loyalty_release_in_flight(conn: &Connection, checkout_id: &str) -> Result<bool, String> {
+    let not_set_aside = set_aside_exclusion_sql("loyalty_release");
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM parity_sync_queue AS loyalty_release
+                 WHERE loyalty_release.table_name = 'loyalty_transactions'
+                   AND loyalty_release.operation = 'DELETE'
+                   AND loyalty_release.status IN ('pending', 'processing')
+                   AND {not_set_aside}
+                   AND json_valid(loyalty_release.data)
+                   AND json_extract(loyalty_release.data, '$.transaction_type') = 'release'
+                   AND json_extract(loyalty_release.data, '$.order_id') = ?1
+             )"
+        ),
+        params![checkout_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue loyalty release in flight: {e}"))
+}
+
+/// Ω11: a checkout's loyalty release landed, was settled for good or set
+/// aside: the order create waiting for it goes out in this same pass.
+fn wake_orders_waiting_for_loyalty_release(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<(), String> {
+    if !is_loyalty_release_item(item) {
+        return Ok(());
+    }
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+    let Some(checkout_id) = string_field(&payload, &["order_id"]) else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET next_retry_at = NULL
+         WHERE table_name = 'orders'
+           AND operation = 'INSERT'
+           AND status = 'pending'
+           AND next_retry_at IS NOT NULL
+           AND error_message = ?1",
+        params![waiting_for_loyalty_release_reason(&checkout_id)],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("sync_queue wake orders waiting for a loyalty release: {e}"))
+}
+
+/// Park a row that waits for its shift's opening (Ω1), without spending its
+/// budget. It looks again with the opening's own next attempt, never sooner
+/// than `PARENT_WAIT_RECHECK_SECS`, and every `SHIFT_OPEN_REFUSED_RECHECK_SECS`
+/// while the opening is refused; the opening's success wakes it at once
+/// ([`wake_rows_waiting_for_shift_rows`]).
+fn mark_waiting_for_shift_open(
+    conn: &Connection,
+    item_id: &str,
+    reason: &str,
+    expected_generation: i64,
+    shift_id: &str,
+) -> Result<(), String> {
+    let now = Utc::now();
+    let floor = now + ChronoDuration::seconds(PARENT_WAIT_RECHECK_SECS);
+    let opening: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT status, next_retry_at
+             FROM parity_sync_queue
+             WHERE table_name = 'staff_shifts'
+               AND record_id = ?1
+               AND operation = 'INSERT'
+               AND status IN ('pending', 'processing', 'failed', 'conflict')
+             ORDER BY created_at ASC
+             LIMIT 1",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("sync_queue shift opening next attempt: {e}"))?;
+    let next_retry = match opening {
+        Some((status, _)) if matches!(status.as_str(), "failed" | "conflict") => {
+            now + ChronoDuration::seconds(SHIFT_OPEN_REFUSED_RECHECK_SECS)
+        }
+        Some((_, Some(next_attempt))) => parse_queue_timestamp(&next_attempt)
+            .filter(|next_attempt| *next_attempt > floor)
+            .unwrap_or(floor),
+        _ => floor,
+    };
+    mark_waiting_until(conn, item_id, reason, expected_generation, next_retry)
+}
+
+/// Ω1: a shift row landed. The openings waiting for an earlier shift row look
+/// again now; when it was an opening, the rows waiting for that shift go out
+/// in this same pass.
+fn wake_rows_waiting_for_shift_rows(conn: &Connection, item: &SyncQueueItem) -> Result<(), String> {
+    if !matches!(item.table_name.as_str(), "staff_shifts" | "shift_expenses") {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE parity_sync_queue
+         SET next_retry_at = NULL
+         WHERE table_name = 'staff_shifts'
+           AND status = 'pending'
+           AND next_retry_at IS NOT NULL
+           AND error_message = ?1",
+        params![WAITING_FOR_EARLIER_SHIFT_REASON],
+    )
+    .map_err(|e| format!("sync_queue wake shift openings: {e}"))?;
+    if item.table_name == "staff_shifts" && item.operation == "INSERT" {
+        let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+        let shift_id = string_field(&payload, &["shiftId", "shift_id"])
+            .unwrap_or_else(|| item.record_id.trim().to_string());
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET next_retry_at = NULL
+             WHERE status = 'pending'
+               AND next_retry_at IS NOT NULL
+               AND error_message = ?1",
+            params![waiting_for_shift_open_reason(&shift_id)],
+        )
+        .map_err(|e| format!("sync_queue wake rows of a shift: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Ω3: a Z landed (or was set aside): the Zs waiting for an earlier one look
+/// again now. A money, shift or drawer row landed (or was set aside): a Z
+/// waiting for its window goes out in this same pass, or the next, once
+/// nothing of that window is left.
+fn wake_z_reports_after_success(conn: &Connection, item: &SyncQueueItem) -> Result<(), String> {
+    if item.table_name == "z_reports" {
+        conn.execute(
+            "UPDATE parity_sync_queue
+             SET next_retry_at = NULL
+             WHERE table_name = 'z_reports'
+               AND status = 'pending'
+               AND next_retry_at IS NOT NULL
+               AND error_message = ?1",
+            params![WAITING_FOR_EARLIER_Z_REASON],
+        )
+        .map_err(|e| format!("sync_queue wake later z reports: {e}"))?;
+        return Ok(());
+    }
+    if !is_z_window_money_table(&item.table_name) {
+        return Ok(());
+    }
+    let waiting: Vec<(String, String, String)> = {
+        let mut statement = conn
+            .prepare(
+                "SELECT id, record_id, data
+                 FROM parity_sync_queue
+                 WHERE table_name = 'z_reports'
+                   AND status = 'pending'
+                   AND next_retry_at IS NOT NULL
+                   AND error_message = ?1",
+            )
+            .map_err(|e| format!("sync_queue z reports waiting for money prepare: {e}"))?;
+        let rows = statement
+            .query_map(params![WAITING_FOR_WINDOW_MONEY_REASON], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| format!("sync_queue z reports waiting for money query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("sync_queue z reports waiting for money read: {e}"))?;
+        rows
+    };
+    for (queue_id, record_id, data) in waiting {
+        let payload = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
+        let Some(cutoff) = z_report_window_cutoff(conn, &record_id, &payload) else {
+            continue;
+        };
+        if !window_money_in_flight(conn, &cutoff)? {
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = NULL
+                 WHERE id = ?1 AND status = 'pending' AND error_message = ?2",
+                params![queue_id, WAITING_FOR_WINDOW_MONEY_REASON],
+            )
+            .map_err(|e| format!("sync_queue wake z report for its window: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Everything a row's success wakes (Ω1, Ω3), after its own row left the
+/// queue in the same transaction.
+fn wake_rows_after_success(conn: &Connection, item: &SyncQueueItem) -> Result<(), String> {
+    wake_rows_waiting_for_shift_rows(conn, item)?;
+    wake_orders_waiting_for_loyalty_release(conn, item)?;
+    wake_z_reports_after_success(conn, item)
+}
+
+/// Server machine codes for "the shift this row needs is not on the server
+/// yet" (Ω1, `/api/pos/shifts/sync` and `/api/pos/financial/sync`; the orders
+/// route's `ORDER_SHIFT_NOT_SYNCED`). Each is a wait, never a conflict, never
+/// "server wins", never a refusal for good.
+pub(crate) const SHIFT_PREDECESSOR_PENDING: &str = "SHIFT_PREDECESSOR_PENDING";
+pub(crate) const SHIFT_NOT_SYNCED: &str = "SHIFT_NOT_SYNCED";
+const ORDER_SHIFT_NOT_SYNCED: &str = "ORDER_SHIFT_NOT_SYNCED";
+
+fn is_shift_wait_code(code: &str) -> bool {
+    matches!(
+        code,
+        SHIFT_PREDECESSOR_PENDING | SHIFT_NOT_SYNCED | ORDER_SHIFT_NOT_SYNCED
+    )
+}
+
+/// The shift wait code a stored transient code carries
+/// (`PARITY_ITEM_RETRYABLE:SHIFT_NOT_SYNCED`).
+fn shift_wait_code_of_retryable(code: &str) -> Option<&str> {
+    code.strip_prefix(PARITY_ITEM_RETRYABLE)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .filter(|server_code| is_shift_wait_code(server_code))
+}
+
+/// The sibling of [`is_parent_order_wait_response`] for shifts (Ω1): a `409`
+/// (or `425`) whose body names a shift wait code. Answers that code.
+fn shift_parent_wait_response_code(status: u16, response_body: &str) -> Option<String> {
+    if !matches!(status, 409 | 425) {
+        return None;
+    }
+    let body = serde_json::from_str::<Value>(response_body).ok()?;
+    let code = body
+        .get("code")
+        .or_else(|| body.pointer("/error/code"))
+        .and_then(Value::as_str)
+        .and_then(bounded_parity_machine_code)?;
+    is_shift_wait_code(&code).then_some(code)
+}
+
+/// Leading code of the reason of a row the server holds because it does not
+/// have the row's shift yet, while nothing of that shift is queued here (Ω1):
+/// `SHIFT_WAITING_ON_SERVER:<server code>: …`.
+pub(crate) const SHIFT_WAITING_ON_SERVER: &str = "SHIFT_WAITING_ON_SERVER";
+
+/// The stored reason of a row the server holds for its shift (Ω1).
+fn waiting_on_server_shift_reason(server_code: &str) -> String {
+    format!(
+        "{SHIFT_WAITING_ON_SERVER}:{server_code}: Waiting for the server to have this row's shift"
+    )
+}
+
+/// What a server's "shift not on the server yet" answer does to a row (Ω1).
+/// It is always a wait that spends no attempt (W7: `SHIFT_PREDECESSOR_PENDING`
+/// per shift event, `SHIFT_NOT_SYNCED` per financial item, both
+/// `retryable: true`): for the shift row it needs while that row is still
+/// queued here, else on the server with its own backoff.
+enum ShiftWaitDisposition {
+    WaitForEarlierShift,
+    WaitForShiftOpen(String),
+    WaitOnServer,
+}
+
+fn shift_wait_disposition(
+    conn: &Connection,
+    item: &SyncQueueItem,
+) -> Result<ShiftWaitDisposition, String> {
+    let payload = serde_json::from_str::<Value>(&item.data).unwrap_or(Value::Null);
+    if item.table_name == "staff_shifts" && item.operation == "INSERT" {
+        let shift_id = string_field(&payload, &["shiftId", "shift_id"])
+            .unwrap_or_else(|| item.record_id.trim().to_string());
+        if let Some(staff_id) = shift_row_staff_id(conn, &payload, shift_id.trim()) {
+            if earlier_shift_row_in_flight(conn, item, shift_id.trim(), &staff_id)? {
+                return Ok(ShiftWaitDisposition::WaitForEarlierShift);
+            }
+        }
+        return Ok(ShiftWaitDisposition::WaitOnServer);
+    }
+    for shift_id in shift_ids_named_by(item, &payload) {
+        if shift_open_in_flight(conn, &shift_id)? {
+            return Ok(ShiftWaitDisposition::WaitForShiftOpen(shift_id));
+        }
+    }
+    Ok(ShiftWaitDisposition::WaitOnServer)
+}
+
+/// Park a row the server holds for its shift (Ω1) without spending an
+/// attempt: its retry delay grows as a transport retry's would (to the 60 s
+/// cap, 5 min for money), only `attempts` stays. It is the row Sync health
+/// shows, and a manager may set it aside when the shift never comes.
+fn mark_waiting_on_server_shift(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    server_code: &str,
+) -> Result<(), String> {
+    let now = Utc::now();
+    let delay = compute_next_retry_delay_ms(item.retry_delay_ms, &item.module_type);
+    let next_retry = now + ChronoDuration::milliseconds(delay);
+    let rows_affected = conn
+        .execute(
+            "UPDATE parity_sync_queue
+             SET status = 'pending',
+                 error_message = ?1,
+                 retry_delay_ms = ?2,
+                 next_retry_at = ?3,
+                 last_attempt = ?4
+             WHERE id = ?5 AND claim_generation = ?6",
+            params![
+                waiting_on_server_shift_reason(server_code),
+                delay,
+                next_retry.to_rfc3339(),
+                now.to_rfc3339(),
+                item.id,
+                item.claim_generation,
+            ],
+        )
+        .map_err(|e| format!("sync_queue mark waiting on server shift: {e}"))?;
+    if rows_affected == 0 {
+        debug!(
+            item_id = %item.id,
+            "mark_waiting_on_server_shift no-op: claim_generation mismatch"
+        );
+        return Ok(());
+    }
+    reconcile_payment_queue_mirrors(conn, Some(&item.id))
+}
+
+/// Apply a server's shift wait answer to a live claim (Ω1): the row waits,
+/// for free, for whatever holds it.
+fn apply_shift_wait_answer(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    server_code: &str,
+) -> Result<(), String> {
+    match shift_wait_disposition(conn, item)? {
+        ShiftWaitDisposition::WaitForEarlierShift => mark_waiting_for_parent(
+            conn,
+            &item.id,
+            WAITING_FOR_EARLIER_SHIFT_REASON,
+            item.claim_generation,
+        ),
+        ShiftWaitDisposition::WaitForShiftOpen(shift_id) => mark_waiting_for_shift_open(
+            conn,
+            &item.id,
+            &waiting_for_shift_open_reason(&shift_id),
+            item.claim_generation,
+            &shift_id,
+        ),
+        ShiftWaitDisposition::WaitOnServer => mark_waiting_on_server_shift(conn, item, server_code),
+    }
 }
 
 fn mark_waiting_until(
@@ -9668,6 +10784,12 @@ fn prepare_request(conn: &Connection, item: &SyncQueueItem) -> Result<RequestPre
         }
     };
 
+    // Ω1 / Ω3 (offline week, 22/10/2026): the shift chain and the Zs go out in
+    // order; a row whose predecessor is still queued here waits for free.
+    if let Some(waiting) = prepare_dependency_wait(conn, item, &payload)? {
+        return Ok(waiting);
+    }
+
     if item.module_type == "fiscal" {
         return prepare_fiscal_request(conn, item, &payload, terminal_id);
     }
@@ -9809,6 +10931,235 @@ fn prepare_reservation_request(
         body: Some(body.to_string()),
         terminal_id: terminal_id.into(),
     }))
+}
+
+/// Stored reason of a reservation status change the server refused because
+/// the reservation moved on elsewhere (vertical salon follow-ups item 3,
+/// 21/10/2026). Android keeps the same code on its conflict draft.
+pub(crate) const RESERVATION_STATUS_REJECTED: &str = "RESERVATION_STATUS_REJECTED";
+
+/// The server's code for a status transition its rules refuse
+/// (`PATCH /api/pos/reservations/{id}`, HTTP 400). Older servers send only the
+/// sentence [`RESERVATION_STATUS_TRANSITION_INVALID_MESSAGE`].
+const RESERVATION_STATUS_TRANSITION_INVALID: &str = "RESERVATION_STATUS_TRANSITION_INVALID";
+const RESERVATION_STATUS_TRANSITION_INVALID_MESSAGE: &str = "Invalid status transition";
+
+/// The server's 409 code for a revision-guarded PATCH whose revision is stale.
+/// Its body carries the current `reservation`.
+const RESERVATION_CHANGED: &str = "RESERVATION_CHANGED";
+
+/// The reservation fields a status change writes on the server. When newer
+/// local edits of the same reservation are still queued, only these come
+/// back from the server, so those edits stay visible until they replay.
+const RESERVATION_STATUS_FIELDS: [&str; 7] = [
+    "status",
+    "confirmed_at",
+    "seated_at",
+    "completed_at",
+    "cancelled_at",
+    "cancellation_reason",
+    "updated_at",
+];
+
+/// A reservation status change the server refused.
+struct ReservationStatusRefusal {
+    /// The reservation as the server holds it, when the refusal carried it
+    /// (409 `RESERVATION_CHANGED`). A 400 carries none; the replay reads it.
+    server_row: Option<Value>,
+    /// The server's own sentence, kept on the conflict for the operator.
+    detail: Option<String>,
+}
+
+/// Is this answer the server refusing a queued reservation *status* change?
+///
+/// Another till cancelled (or completed, or marked no-show) the reservation,
+/// so the transition this till asked for is no longer allowed. Replaying it
+/// can never succeed, and the generic failure kept the refused status on
+/// screen. Matches the code `RESERVATION_STATUS_TRANSITION_INVALID`, the
+/// sentence `Invalid status transition` of older servers, and a 409
+/// `RESERVATION_CHANGED` on a status intent. Any other answer, and any
+/// reservation change without a status, keeps its existing path.
+fn reservation_status_refusal(
+    status: u16,
+    response_body: &str,
+    item: &SyncQueueItem,
+) -> Option<ReservationStatusRefusal> {
+    if item.table_name != "reservations"
+        || item.operation != "UPDATE"
+        || matches!(status, 408 | 429)
+        || !(400..500).contains(&status)
+    {
+        return None;
+    }
+    let intent = serde_json::from_str::<Value>(&item.data).ok()?;
+    if !intent.get("status").is_some_and(Value::is_string) {
+        return None;
+    }
+    let body = serde_json::from_str::<Value>(response_body).unwrap_or(Value::Null);
+    let text = |key: &str| {
+        body.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let code = text("code");
+    let error = text("error");
+    let refused = code == Some(RESERVATION_STATUS_TRANSITION_INVALID)
+        || (status == 400
+            && error.is_some_and(|message| {
+                message.eq_ignore_ascii_case(RESERVATION_STATUS_TRANSITION_INVALID_MESSAGE)
+            }))
+        || (status == 409
+            && (code == Some(RESERVATION_CHANGED) || error == Some(RESERVATION_CHANGED)));
+    if !refused {
+        return None;
+    }
+    Some(ReservationStatusRefusal {
+        server_row: body
+            .get("reservation")
+            .filter(|row| row.is_object())
+            .cloned(),
+        detail: text("details")
+            .or_else(|| text("message"))
+            .or(error)
+            .map(str::to_string),
+    })
+}
+
+/// Read one reservation as the server holds it
+/// (`GET /api/pos/reservations/{id}`, the endpoint the refused PATCH used).
+async fn fetch_reservation_server_row(
+    client: &reqwest::Client,
+    api_base_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+    endpoint: &str,
+) -> Option<Value> {
+    let url = format!("{}{}", api_base_url.trim_end_matches('/'), endpoint);
+    let response = client
+        .get(&url)
+        .header("x-pos-api-key", api_key)
+        .header("x-terminal-id", terminal_id)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.json::<Value>().await.ok()?;
+    body.get("reservation")
+        .or_else(|| body.pointer("/data/reservation"))
+        .filter(|row| row.is_object())
+        .cloned()
+}
+
+/// Write the server's reservation into this till's local reservation document,
+/// so every screen (online overlay and offline fallback) shows it again.
+///
+/// The row must belong to the queue item's organization and to the branch of
+/// the local document. With no other live change of the reservation queued,
+/// the document becomes the server row; otherwise only the status fields come
+/// back, so the newer queued edits stay visible. Returns whether a document
+/// was written.
+fn refresh_reservation_document(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    server_row: &Value,
+) -> Result<bool, String> {
+    let Some(server_id) = server_row.get("id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if server_row.get("organization_id").and_then(Value::as_str)
+        != Some(item.organization_id.as_str())
+    {
+        return Ok(false);
+    }
+    let Some(branch) = server_row.get("branch_id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let stored = conn
+        .query_row(
+            "SELECT local_id, data FROM reservation_local_identity
+              WHERE (local_id = ?1 OR server_id = ?1 OR server_id = ?2)
+                AND organization_id = ?3 AND branch_id = ?4",
+            params![item.record_id, server_id, item.organization_id, branch],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("reservation refusal: read local document: {e}"))?;
+    let Some((local_id, text)) = stored else {
+        return Ok(false);
+    };
+    // Parked conflicts are drafts, not live changes: they never replay.
+    let has_followups: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue
+              WHERE organization_id = ?1 AND table_name = 'reservations'
+                AND record_id IN (?2, ?3, ?4) AND id <> ?5 AND status <> 'conflict')",
+            params![
+                item.organization_id,
+                local_id,
+                server_id,
+                item.record_id,
+                item.id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("reservation refusal: read follow-ups: {e}"))?;
+    let doc = if has_followups {
+        let mut doc = serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| server_row.clone());
+        for key in RESERVATION_STATUS_FIELDS {
+            if let Some(value) = server_row.get(key) {
+                doc[key] = value.clone();
+            }
+        }
+        doc
+    } else {
+        server_row.clone()
+    };
+    conn.execute(
+        "UPDATE reservation_local_identity SET data = ?1
+          WHERE local_id = ?2 AND organization_id = ?3 AND branch_id = ?4",
+        params![doc.to_string(), local_id, item.organization_id, branch],
+    )
+    .map_err(|e| format!("reservation refusal: write local document: {e}"))?;
+    Ok(true)
+}
+
+/// Keep a refused reservation status change as a conflict draft (its original
+/// payload, never replayed again) and show the server's reservation again.
+fn apply_reservation_status_refusal(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    refusal: &ReservationStatusRefusal,
+    response_body: &str,
+) -> Result<(), String> {
+    if let Some(server_row) = refusal.server_row.as_ref() {
+        refresh_reservation_document(conn, item, server_row)?;
+    }
+    let server_version =
+        derive_server_version(refusal.server_row.as_ref(), response_body, item.version);
+    log_conflict(
+        conn,
+        &item.operation,
+        &item.record_id,
+        &item.table_name,
+        item.version,
+        server_version,
+        &item.data,
+        "manual",
+        false,
+        false,
+    )?;
+    let reason = match refusal.detail.as_deref() {
+        Some(detail) => format!("{RESERVATION_STATUS_REJECTED}: {detail}"),
+        None => RESERVATION_STATUS_REJECTED.to_string(),
+    };
+    mark_conflict(conn, &item.id, item.claim_generation, &reason)
 }
 
 /// Why a fiscal receipt waits: the server must know its order first.
@@ -10353,7 +11704,39 @@ fn is_loyalty_order_ended_response(
     item.table_name == "loyalty_transactions"
         && status == 409
         && body.and_then(|v| v.get("success")).and_then(Value::as_bool) == Some(false)
-        && body.and_then(|v| v.get("code")).and_then(Value::as_str) == Some("LOYALTY_ORDER_ENDED")
+        && match body.and_then(|v| v.get("code")).and_then(Value::as_str) {
+            Some("LOYALTY_ORDER_ENDED") => true,
+            // Ω11: a reservation queued before the upgrade whose checkout was
+            // released meets the server's tombstone; nothing was debited
+            // there, so its local debit is reversed.
+            Some(code) if code == crate::commands::loyalty::LOYALTY_REDEMPTION_RELEASED => {
+                !is_loyalty_release_item(item)
+            }
+            // Ω11: a release the server refuses for good. An order owns the
+            // redemption (cancelling it returns the points), or the
+            // redemption is another customer's.
+            Some(code)
+                if code == crate::commands::loyalty::LOYALTY_ORDER_EXISTS
+                    || code == crate::commands::loyalty::LOYALTY_RELEASE_CUSTOMER_MISMATCH =>
+            {
+                is_loyalty_release_item(item)
+            }
+            _ => false,
+        }
+}
+
+/// A checkout redemption's RELEASE op (Ω11, `commands::loyalty`).
+fn is_loyalty_release_item(item: &SyncQueueItem) -> bool {
+    item.table_name == "loyalty_transactions"
+        && serde_json::from_str::<Value>(&item.data)
+            .ok()
+            .and_then(|payload| {
+                payload
+                    .get("transaction_type")
+                    .and_then(Value::as_str)
+                    .map(|kind| kind == "release")
+            })
+            .unwrap_or(false)
 }
 
 fn retire_ended_loyalty_item(conn: &Connection, item: &SyncQueueItem) -> Result<(), String> {
@@ -10362,6 +11745,14 @@ fn retire_ended_loyalty_item(conn: &Connection, item: &SyncQueueItem) -> Result<
         &item.organization_id,
         &item.record_id,
     )?;
+    // A released checkout redemption waits `pending` for its RELEASE op.
+    conn.execute(
+        "UPDATE loyalty_transactions SET sync_state = 'applied'
+         WHERE id = ?1 AND organization_id = ?2
+           AND COALESCE(sync_last_error, '') = 'LOYALTY_LOCAL_REVERSED'",
+        params![item.record_id, item.organization_id],
+    )
+    .map_err(|e| format!("sync_queue retire loyalty item: {e}"))?;
     mark_success(conn, &item.id, item.claim_generation)
 }
 
@@ -10375,12 +11766,40 @@ fn retire_ended_loyalty_item(conn: &Connection, item: &SyncQueueItem) -> Result<
 /// as a negative delta). On top of the legacy shape it swaps the POS-local
 /// `order_id` for the server-resolvable reference via
 /// `resolve_loyalty_order_reference`.
+///
+/// Ω11 (22/10/2026): a checkout redemption is debited live and never queued.
+/// A `checkout_reservation` row below is one queued before the upgrade and
+/// still drains. A `release` row returns a live redemption whose checkout
+/// never became an order, under the checkout key it was debited with.
 fn prepare_loyalty_request(
     conn: &Connection,
     item: &SyncQueueItem,
     payload: &Value,
     terminal_id: &str,
 ) -> Result<RequestPreparation, String> {
+    if payload.get("transaction_type").and_then(Value::as_str) == Some("release") {
+        let order_id = payload
+            .get("order_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let customer_id = payload
+            .get("customer_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if order_id.trim().is_empty() || customer_id.trim().is_empty() {
+            return Ok(RequestPreparation::Failed {
+                reason: "Loyalty release is missing its checkout or customer".to_string(),
+            });
+        }
+        return Ok(RequestPreparation::Ready(RequestSpec {
+            endpoint: crate::commands::loyalty::REDEEM_RELEASE_PATH.to_string(),
+            method: Method::POST,
+            body: Some(
+                serde_json::json!({ "order_id": order_id, "customer_id": customer_id }).to_string(),
+            ),
+            terminal_id: terminal_id.to_string(),
+        }));
+    }
     if payload.get("checkout_reservation").and_then(Value::as_bool) == Some(true) {
         let checkout_id = payload
             .get("order_id")
@@ -11412,6 +12831,55 @@ fn merge_recorded_payment_metadata(payload: &Value, trace: Value) -> Value {
     Value::Object(metadata)
 }
 
+/// Offline week Ω13 (22/10/2026): when the money moved at this till. A
+/// payment or refund sent days later carried no time of its own, so the
+/// admin dated it by its arrival (`created_at` is server time). Every
+/// payment and adjustment body now carries `clientOccurredAt`: the local
+/// row's `created_at` (else its payload's, else the queue row's), RFC 3339
+/// in UTC. The server stores it clamped (never later than its own now) and
+/// keeps `created_at` as server time.
+fn client_occurred_at(
+    conn: &Connection,
+    local_table: &str,
+    record_id: &str,
+    payload: &Value,
+    item: &SyncQueueItem,
+) -> Option<String> {
+    let local_created_at: Option<String> = match local_table {
+        "order_payments" => conn
+            .query_row(
+                "SELECT created_at FROM order_payments WHERE id = ?1",
+                params![record_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten(),
+        "payment_adjustments" => conn
+            .query_row(
+                "SELECT created_at FROM payment_adjustments WHERE id = ?1",
+                params![record_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten(),
+        _ => None,
+    };
+    local_created_at
+        .as_deref()
+        .and_then(parse_queue_timestamp)
+        .or_else(|| {
+            string_field(payload, &["createdAt", "created_at"])
+                .as_deref()
+                .and_then(parse_queue_timestamp)
+        })
+        .or_else(|| parse_queue_timestamp(&item.created_at))
+        .map(|occurred_at| occurred_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
 fn prepare_payment_request(
     conn: &Connection,
     item: &SyncQueueItem,
@@ -11600,6 +13068,12 @@ fn prepare_payment_request(
     }
     if let Some(value) = string_field(payload, &["currency"]) {
         body["currency"] = Value::String(value);
+    }
+    // Ω13: the till's own time of this payment.
+    if let Some(occurred_at) =
+        client_occurred_at(conn, "order_payments", &item.record_id, payload, item)
+    {
+        body["clientOccurredAt"] = Value::String(occurred_at);
     }
     if let Some(items) = payload.get("items") {
         if items
@@ -11855,6 +13329,12 @@ fn build_adjustment_request(
     );
     if let Some(receipt) = payload.get("staff_cash_return") {
         body["staff_cash_return"] = receipt.clone();
+    }
+    // Ω13: the till's own time of this refund or void.
+    if let Some(occurred_at) =
+        client_occurred_at(conn, "payment_adjustments", &item.record_id, payload, item)
+    {
+        body["clientOccurredAt"] = Value::String(occurred_at);
     }
 
     let _ = conn.execute(
@@ -13133,6 +14613,7 @@ fn apply_edit_settlement_ack(
             Cents::round_half_even(subtotal).as_i64(),Cents::round_half_even(tax).as_i64(),Cents::round_half_even(discount).as_i64(),Cents::round_half_even(delivery).as_i64(),Cents::round_half_even(tip).as_i64(),
             now,item.record_id,scope.organization,local_items,canonical["notes"].as_str(),canonical["special_instructions"].as_str()]).map_err(|error|error.to_string())?;
     if projected == 1 {
+        crate::fiscal::greece_vat::adopt_server_order_vat(conn, &item.record_id, canonical);
         adopt_edit_ack_headers(conn, &item.record_id, &scope.organization, &adopted_headers)?;
     }
     Ok(true)
@@ -13556,10 +15037,12 @@ fn apply_success(
                 .map_err(|e| e.to_string())?
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_else(|| remote.clone());
+            // A parked conflict is a kept draft, not a newer edit to preserve.
             let has_followups: bool = conn
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE organization_id=?1
-              AND table_name='reservations' AND record_id IN (?2,?3) AND id<>?4)",
+              AND table_name='reservations' AND record_id IN (?2,?3) AND id<>?4
+              AND status<>'conflict')",
                     params![item.organization_id, item.record_id, remote_id, item.id],
                     |r| r.get(0),
                 )
@@ -14185,7 +15668,11 @@ fn classify_item_failure(
     }
     let lock_contention = code.as_deref() == Some(REMOTE_HANDOVER_RETRY_CODE)
         || message.contains(REMOTE_HANDOVER_RETRY_CODE);
+    // Ω1: "the shift is not on the server yet" is always a wait, whatever
+    // flag the answer carries.
+    let shift_wait = code.as_deref().is_some_and(is_shift_wait_code);
     let retry = lock_contention
+        || shift_wait
         || retryable.unwrap_or_else(|| item_failure_text_is_retryable(code.as_deref(), &message));
     if retry {
         return ItemAcknowledgement::Retryable {
@@ -14577,6 +16064,9 @@ fn apply_repair_hook_failure(
     }
 }
 
+/// `_lifecycle_lease` is the repair lease the pass took before it claimed
+/// `item`; it is held through HTTP and the authoritative acknowledgement, so
+/// a revoke purge waits for this row instead of deleting it mid-claim.
 async fn process_repair_command_item(
     conn: &std::sync::Mutex<Connection>,
     client: &reqwest::Client,
@@ -14584,16 +16074,8 @@ async fn process_repair_command_item(
     api_key: &str,
     item: &SyncQueueItem,
     hooks: &dyn RepairQueueHooks,
+    _lifecycle_lease: crate::repairs::RepairLifecycleLease,
 ) -> Result<RepairQueueProcessOutcome, String> {
-    let _lifecycle_lease = match crate::repairs::acquire_transport_lease() {
-        Ok(lease) => lease,
-        Err(error) => {
-            let db = conn
-                .lock()
-                .map_err(|lock_error| format!("lock: {lock_error}"))?;
-            return apply_repair_hook_failure(&db, item, error);
-        }
-    };
     let safe_base = match crate::api::resolve_admin_base(api_base_url) {
         Ok(base) => base,
         Err(_) => {
@@ -14656,7 +16138,7 @@ async fn process_repair_command_item(
         }
     };
 
-    let disposition = if response.exceeded_limit {
+    let mut disposition = if response.exceeded_limit {
         RepairSyncDisposition::MalformedResponse
     } else {
         classify_repair_http_response(
@@ -14666,6 +16148,17 @@ async fn process_repair_command_item(
             &prepared.expected_identity,
         )
     };
+
+    if prepared.reattributed {
+        if let RepairSyncDisposition::PermanentFailure(error) = &disposition {
+            if matches!(
+                error.code.as_str(),
+                "REPAIR_PERMISSION_DENIED" | "REPAIR_EXPIRED_SESSION"
+            ) {
+                disposition = RepairSyncDisposition::SessionRequired(error.clone());
+            }
+        }
+    }
 
     let db = crate::database_lock::lock(conn, "parity_queue_process")
         .map_err(|error| format!("lock: {error}"))?;
@@ -14734,6 +16227,12 @@ async fn process_repair_command_item(
             Ok(RepairQueueProcessOutcome::RateLimited(code.to_string()))
         }
         RepairSyncDisposition::PermanentFailure(error) => {
+            if error.code == "STAFF_SESSION_MISMATCH" {
+                if let Err(error) = hooks.park_session_refusal(&db, &prepared.context) {
+                    return apply_repair_hook_failure(&db, item, error);
+                }
+                return Ok(RepairQueueProcessOutcome::Conflict);
+            }
             let outcome = force_repair_permanent_failure(&db, item, &error.code)?;
             if !outcome.applied {
                 return Ok(RepairQueueProcessOutcome::Stale);
@@ -14767,22 +16266,15 @@ async fn process_repair_command_item(
     }
 }
 
+/// See [`process_repair_command_item`] for the pre-claim repair lease.
 async fn process_repair_attachment_item(
     conn: &std::sync::Mutex<Connection>,
     api_base_url: &str,
     api_key: &str,
     item: &SyncQueueItem,
     hooks: &dyn RepairQueueHooks,
+    _lifecycle_lease: crate::repairs::RepairLifecycleLease,
 ) -> Result<RepairQueueProcessOutcome, String> {
-    let _lifecycle_lease = match crate::repairs::acquire_transport_lease() {
-        Ok(lease) => lease,
-        Err(error) => {
-            let db = conn
-                .lock()
-                .map_err(|lock_error| format!("lock: {lock_error}"))?;
-            return apply_repair_hook_failure(&db, item, error);
-        }
-    };
     if crate::api::resolve_admin_base(api_base_url).is_err() {
         let db = crate::database_lock::lock(conn, "parity_queue_process")
             .map_err(|error| format!("lock: {error}"))?;
@@ -15051,6 +16543,8 @@ where
     let queue_depth_before: i64;
     let mut quarantined = 0_i64;
     let mut exact_item = None;
+    // Set by the prepass: whether this pass may need a repair lease at all.
+    let mut repair_rows_pending = false;
     // Exact manual retry uses one lease from before its atomic retry+claim
     // through the sole HTTP request and acknowledgement. It intentionally
     // skips every queue-wide maintenance prepass.
@@ -15077,6 +16571,7 @@ where
                     telemetry,
                     closeout_exempt: CloseoutExemptCounts::default(),
                     shift_conflicts: Vec::new(),
+                    stopped_on_transport_failure: false,
                 });
             }
         };
@@ -15116,6 +16611,7 @@ where
                     telemetry,
                     closeout_exempt: CloseoutExemptCounts::default(),
                     shift_conflicts: Vec::new(),
+                    stopped_on_transport_failure: false,
                 });
             }
         };
@@ -15127,6 +16623,10 @@ where
                 quarantined += quarantine_reserved_repair_lookalikes(&db)?;
                 let _ = redact_identifiable_legacy_repair_audit_payloads(&db)?;
                 let _ = check_age_warnings(&db);
+                // Ω2: bounded clean-up of audit entries whose row is gone.
+                if let Err(error) = prune_orphan_retry_schedule_audit(&db) {
+                    warn!(error = %error, "Retry-schedule audit clean-up deferred");
+                }
             }
             match visibility {
                 QueueProcessVisibility::InternalAll => {
@@ -15208,6 +16708,8 @@ where
                 QueueProcessVisibility::InternalAll => get_length(&db)?,
                 QueueProcessVisibility::RendererNonRepair => renderer_get_length(&db)?,
             };
+            repair_rows_pending = visibility == QueueProcessVisibility::InternalAll
+                && has_pending_canonical_repair_rows(&db)?;
         }
         drop(prepass_gate_lease);
         None
@@ -15238,6 +16740,14 @@ where
     // `sync:dead-letter:monetary` events in the Tauri command layer.
     let mut monetary_dead_letters: Vec<MonetaryDeadLetter> = Vec::new();
     let mut shift_conflicts: Vec<ShiftConflictNotice> = Vec::new();
+    // Ω2 (offline week, 22/10/2026): the pass ends at its first transport
+    // failure, as a 429 already ends it. Offline, every due row used to be
+    // claimed and sent into the same dead connection, each with a full-queue
+    // claim and an audit write: 530 rows took 18 minutes of DB lock per pass
+    // (`desktop-offline-pass-probe`). Rows are claimed one at a time, so no
+    // row after the failing one was claimed: they keep their order, attempts
+    // and claim generation.
+    let mut stopped_on_transport_failure = false;
     let mut telemetry = SyncTelemetryBuilder::new(started_at, queue_depth_before);
     let mut exact_claim_consumed = false;
     // One visit per row per pass: only rows due when the pass starts are
@@ -15272,6 +16782,18 @@ where
             },
             QueueProcessSelection::ExactRendererItem(_) => None,
         };
+        // A repair-owned row is claimed only under a repair lease taken before
+        // the claim and held through HTTP and acknowledgement, so a revoke
+        // purge (which drains repair readers) never deletes a row mid-claim.
+        // While Repairs access is closed (revoked, latched, no entitlement or
+        // a pending scope) the lease is refused and repair rows are skipped,
+        // pending and untouched, as Android's repair drains do. Generic rows
+        // need only the binding lease above.
+        let mut repair_lease = if repair_rows_pending {
+            crate::repairs::acquire_transport_lease().ok()
+        } else {
+            None
+        };
         // Dequeue next item under lock, then release lock before HTTP call
         let item = match selection {
             QueueProcessSelection::ExactRendererItem(_) => {
@@ -15283,8 +16805,11 @@ where
                     .map_err(|e| format!("lock: {e}"))?;
                 match visibility {
                     QueueProcessVisibility::InternalAll => {
-                        let (item, newly_quarantined) =
-                            dequeue_due_by_with_quarantine_count(&db, Some(&pass_due_by))?;
+                        let (item, newly_quarantined) = dequeue_due_by_with_repair_gate(
+                            &db,
+                            Some(&pass_due_by),
+                            repair_lease.is_some(),
+                        )?;
                         quarantined += newly_quarantined;
                         item
                     }
@@ -15299,6 +16824,12 @@ where
             Some(i) => i,
             None => break,
         };
+        let claimed_repair_row =
+            matches!(item.table_name.as_str(), "repairs" | "repair_attachments");
+        if !claimed_repair_row {
+            // A generic row never holds up a Repairs access decision.
+            repair_lease = None;
+        }
         telemetry.record_attempt();
 
         if crate::gift_financial_opening::is_financial_opening_item(&item) {
@@ -15341,6 +16872,9 @@ where
         }
 
         if item.table_name == "repairs" {
+            let Some(lease) = repair_lease.take() else {
+                return Err("sync_queue repair row claimed without its repair lease".to_string());
+            };
             let outcome = process_repair_command_item(
                 conn,
                 &repair_client,
@@ -15348,6 +16882,7 @@ where
                 api_key,
                 &item,
                 repair_hooks,
+                lease,
             )
             .await?;
             match outcome {
@@ -15395,9 +16930,18 @@ where
         }
 
         if item.table_name == "repair_attachments" {
-            let outcome =
-                process_repair_attachment_item(conn, api_base_url, api_key, &item, repair_hooks)
-                    .await?;
+            let Some(lease) = repair_lease.take() else {
+                return Err("sync_queue repair row claimed without its repair lease".to_string());
+            };
+            let outcome = process_repair_attachment_item(
+                conn,
+                api_base_url,
+                api_key,
+                &item,
+                repair_hooks,
+                lease,
+            )
+            .await?;
             match outcome {
                 RepairQueueProcessOutcome::Processed => {
                     processed += 1;
@@ -15465,7 +17009,8 @@ where
                     let db = crate::database_lock::lock(conn, "parity_queue_process")
                         .map_err(|e| format!("lock: {e}"))?;
                     with_live_generic_claim(&db, &item, |db| {
-                        mark_success(db, &item.id, item.claim_generation)
+                        mark_success(db, &item.id, item.claim_generation)?;
+                        wake_rows_after_success(db, &item)
                     })?
                 };
                 if applied.is_some() {
@@ -15515,6 +17060,41 @@ where
                             &reason,
                             item.claim_generation,
                             &local_order_id,
+                        )
+                    })?
+                };
+                if applied.is_some() {
+                    telemetry.record_deferred(&item, &reason);
+                }
+                continue;
+            }
+            // Ω1 / Ω3: waits behind an earlier row of this till; no budget spent.
+            RequestPreparation::WaitingForEarlierShift { reason }
+            | RequestPreparation::WaitingForEarlierZ { reason }
+            | RequestPreparation::WaitingForWindowMoney { reason } => {
+                let applied = {
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_waiting_for_parent(db, &item.id, &reason, item.claim_generation)
+                    })?
+                };
+                if applied.is_some() {
+                    telemetry.record_deferred(&item, &reason);
+                }
+                continue;
+            }
+            RequestPreparation::WaitingForShiftOpen { reason, shift_id } => {
+                let applied = {
+                    let db = crate::database_lock::lock(conn, "parity_queue_process")
+                        .map_err(|e| format!("lock: {e}"))?;
+                    with_live_generic_claim(&db, &item, |db| {
+                        mark_waiting_for_shift_open(
+                            db,
+                            &item.id,
+                            &reason,
+                            item.claim_generation,
+                            &shift_id,
                         )
                     })?
                 };
@@ -15678,7 +17258,10 @@ where
                     let retired = {
                         let db = conn.lock().map_err(|e| format!("lock: {e}"))?;
                         with_live_generic_claim(&db, &item, |db| {
-                            retire_ended_loyalty_item(db, &item)
+                            retire_ended_loyalty_item(db, &item)?;
+                            // Ω11: a release settled for good frees the order
+                            // create of its checkout in this same pass.
+                            wake_rows_after_success(db, &item)
                         })?
                     };
                     if retired.is_some() {
@@ -15831,12 +17414,53 @@ where
                                     db, &item.id, "resolved",
                                 )?;
                             }
-                            mark_success(db, &item.id, item.claim_generation)
+                            mark_success(db, &item.id, item.claim_generation)?;
+                            // Ω1 / Ω3: what waited on this row goes out now.
+                            wake_rows_after_success(db, &item)
                         })?
                     };
                     if applied.is_some() {
                         processed += 1;
                         telemetry.record_success(&item);
+                        if item.table_name == "z_reports" {
+                            // Ω3: the server confirmed this Z. Its own
+                            // transaction (W2's `on_z_report_confirmed`) marks
+                            // it confirmed and sweeps its window; a failure is
+                            // logged and left to that sweep's next run, the
+                            // acknowledgement stands.
+                            let db = crate::database_lock::lock(conn, "parity_queue_process")
+                                .map_err(|e| format!("lock: {e}"))?;
+                            if let Err(error) =
+                                crate::zreport::on_z_report_confirmed(&db, &item.record_id)
+                            {
+                                warn!(
+                                    error = %error,
+                                    "Confirmed Z: its window sweep did not run"
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(server_code) = match &item_acknowledgement {
+                    ItemAcknowledgement::Retryable { code } => {
+                        shift_wait_code_of_retryable(code).map(str::to_string)
+                    }
+                    _ => None,
+                } {
+                    // Ω1: the server does not have the shift this row needs
+                    // yet (`SHIFT_PREDECESSOR_PENDING` per shift event,
+                    // `SHIFT_NOT_SYNCED` per financial item, inside the 207).
+                    // The row waits without spending an attempt: for that
+                    // shift row while it is queued here, else with its own
+                    // backoff. Never a conflict, never a refusal for good.
+                    let waited = {
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            apply_shift_wait_answer(db, &item, &server_code)
+                        })?
+                    };
+                    if waited.is_some() {
+                        telemetry.record_deferred(&item, &server_code);
                     }
                 } else if let ItemAcknowledgement::Retryable { code } = &item_acknowledgement {
                     // The server refused this one item for now (a lock, a
@@ -15990,6 +17614,22 @@ where
                             retry_secs = Z_REPORT_UNIT_SHIFTS_RETRY_SECS,
                             "Queued Z held by the server: phone shifts of this register are still open"
                         );
+                    }
+                } else if let Some(server_code) =
+                    shift_parent_wait_response_code(status, &response_body)
+                {
+                    // Ω1, the sibling of the parent-order wait below: a `409`
+                    // naming a shift the server does not have yet. Never a
+                    // replay conflict, never "server wins".
+                    let waited = {
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            apply_shift_wait_answer(db, &item, &server_code)
+                        })?
+                    };
+                    if waited.is_some() {
+                        telemetry.record_deferred(&item, &server_code);
                     }
                 } else if is_remote_handover_frozen_response(status, &response_body) {
                     // The server refused a write against a shift whose money a
@@ -16326,6 +17966,48 @@ where
                             "Parity item parked pending module acquisition"
                         );
                     }
+                } else if let Some(mut refusal) =
+                    reservation_status_refusal(status, &response_body, &item)
+                {
+                    // Vertical salon follow-ups item 3 (21/10/2026): another
+                    // till moved the reservation on. The refused status is
+                    // kept as a conflict draft and never replayed, and the
+                    // till shows the server's reservation again. An exact
+                    // renderer retry stays one request (see below): it parks
+                    // the draft without reading the server row, and the
+                    // reservation overlay stops applying it either way.
+                    if refusal.server_row.is_none() && !exact_renderer_item {
+                        refusal.server_row = fetch_reservation_server_row(
+                            &client,
+                            api_base_url,
+                            api_key,
+                            request_spec.terminal_id.as_str(),
+                            &request_spec.endpoint,
+                        )
+                        .await;
+                    }
+                    let applied = {
+                        let db = crate::database_lock::lock(conn, "parity_queue_process")
+                            .map_err(|e| format!("lock: {e}"))?;
+                        with_live_generic_claim(&db, &item, |db| {
+                            apply_reservation_status_refusal(db, &item, &refusal, &response_body)
+                        })?
+                    };
+                    if applied.is_some() {
+                        conflicts += 1;
+                        closeout_exempt.record_conflict(closeout_exempt_row);
+                        telemetry.record_error(
+                            &item,
+                            "conflict",
+                            RESERVATION_STATUS_REJECTED,
+                            Some(status),
+                        );
+                        errors.push(safe_sync_error(
+                            &item,
+                            RESERVATION_STATUS_REJECTED,
+                            Some(status),
+                        ));
+                    }
                 } else if is_replay_conflict_response(status, &response_body, &item) {
                     {
                         let db = crate::database_lock::lock(conn, "parity_queue_process")
@@ -16363,6 +18045,18 @@ where
                         _ if is_monetary => "server-wins",
                         _ => "auto-server-wins",
                     };
+                    // Ω4 (offline week, 22/10/2026): "auto server wins" deleted
+                    // the row on any 409, and the record never reached the
+                    // server. Only the known cases still resolve that way
+                    // (`is_known_server_wins_conflict`); an unknown one parks
+                    // as a conflict for review and set-aside, kept.
+                    let unknown_conflict = resolution == "auto-server-wins"
+                        && !is_known_server_wins_conflict(status, &response_body, &item);
+                    let resolution = if unknown_conflict {
+                        "manual"
+                    } else {
+                        resolution
+                    };
                     let requires_operator_review = resolution == "manual"
                         || resolution == "client-wins"
                         || is_monetary
@@ -16372,8 +18066,11 @@ where
                     // whose phone already belongs to another record) and a
                     // human sentence; both are worth more to the shop than the
                     // blank the row used to get.
-                    let conflict_reason =
-                        server_conflict_reason(&response_body, &item.table_name, &item.operation);
+                    let conflict_reason = if unknown_conflict {
+                        UNKNOWN_CONFLICT_REVIEW.to_string()
+                    } else {
+                        server_conflict_reason(&response_body, &item.table_name, &item.operation)
+                    };
 
                     let applied = {
                         let db = crate::database_lock::lock(conn, "parity_queue_process")
@@ -16639,6 +18336,9 @@ where
                     }
 
                     let error_code = format!("HTTP_{status}_SERVER_ERROR");
+                    // Ω2: a 502/503/504 is the transport failing, not this
+                    // row: it is marked as before, then the pass ends.
+                    let transport_failure = matches!(status, 502..=504);
                     let failure = {
                         let db = crate::database_lock::lock(conn, "parity_queue_process")
                             .map_err(|e| format!("lock: {e}"))?;
@@ -16651,27 +18351,39 @@ where
                             )
                         })?
                     };
-                    let Some(failure) = failure else {
-                        continue;
-                    };
-                    if !failure.applied {
-                        continue;
+                    if let Some(failure) = failure.filter(|failure| failure.applied) {
+                        if let Some(dl) = failure.monetary_notice {
+                            monetary_dead_letters.push(dl);
+                        }
+                        if failure.transitioned_to_dead_letter {
+                            dead_lettered += 1;
+                        }
+                        failed += 1;
+                        // Like a 429, a pass stopped by the transport is not
+                        // tallied as closeout-exempt: the rows after it were
+                        // never tried, and the Z must not proceed on it.
+                        if !transport_failure {
+                            closeout_exempt.record_failure(
+                                closeout_exempt_row,
+                                failure.transitioned_to_dead_letter,
+                            );
+                        }
+                        telemetry.record_error(&item, "failed", &error_code, Some(status));
+                        errors.push(safe_sync_error(&item, &error_code, Some(status)));
                     }
-                    if let Some(dl) = failure.monetary_notice {
-                        monetary_dead_letters.push(dl);
+                    if transport_failure {
+                        stopped_on_transport_failure = true;
+                        warn!(
+                            status,
+                            "Parity queue pass stopped at its first transport failure"
+                        );
+                        break;
                     }
-                    if failure.transitioned_to_dead_letter {
-                        dead_lettered += 1;
-                    }
-                    failed += 1;
-                    closeout_exempt
-                        .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
-                    telemetry.record_error(&item, "failed", &error_code, Some(status));
-                    errors.push(safe_sync_error(&item, &error_code, Some(status)));
                 }
             }
             Err(_) => {
-                // Network error (retriable)
+                // Network error (retriable). Ω2: the row is marked as before,
+                // then the pass ends; the rows after it were never claimed.
                 let error_code = "NETWORK_ERROR".to_string();
                 let failure = {
                     let db = crate::database_lock::lock(conn, "parity_queue_process")
@@ -16685,23 +18397,20 @@ where
                         )
                     })?
                 };
-                let Some(failure) = failure else {
-                    continue;
-                };
-                if !failure.applied {
-                    continue;
+                if let Some(failure) = failure.filter(|failure| failure.applied) {
+                    if let Some(dl) = failure.monetary_notice {
+                        monetary_dead_letters.push(dl);
+                    }
+                    if failure.transitioned_to_dead_letter {
+                        dead_lettered += 1;
+                    }
+                    failed += 1;
+                    telemetry.record_error(&item, "failed", &error_code, None);
+                    errors.push(safe_sync_error(&item, &error_code, None));
                 }
-                if let Some(dl) = failure.monetary_notice {
-                    monetary_dead_letters.push(dl);
-                }
-                if failure.transitioned_to_dead_letter {
-                    dead_lettered += 1;
-                }
-                failed += 1;
-                closeout_exempt
-                    .record_failure(closeout_exempt_row, failure.transitioned_to_dead_letter);
-                telemetry.record_error(&item, "failed", &error_code, None);
-                errors.push(safe_sync_error(&item, &error_code, None));
+                stopped_on_transport_failure = true;
+                debug!("Parity queue pass stopped at its first network failure");
+                break;
             }
         }
     }
@@ -16733,6 +18442,7 @@ where
         telemetry,
         closeout_exempt,
         shift_conflicts,
+        stopped_on_transport_failure,
     })
 }
 
@@ -17165,6 +18875,557 @@ fn derive_server_version(
     }
 
     local_version + 1
+}
+
+// ---------------------------------------------------------------------------
+// Set aside (offline week Ω4, founder decision 21/10/2026)
+// ---------------------------------------------------------------------------
+//
+// A record the server refused for good used to hold every Z with no way
+// round it but wiping the queue. A manager may now set its queue row aside
+// (own-PIN approval, the 1.4.135 parking primitive, in the Health command):
+// the row and its record stay on this till, keep their terminal status, are
+// never sent again on their own, and leave the Z gates; the Z lists them as
+// "not on the server". The listing is `parity_sync_set_aside` (migration
+// v104). No row is ever set aside automatically (`.claude/rules/health-recovery.md`).
+
+/// Refusal of a send or retry of a row a manager set aside: undo the
+/// set-aside first.
+pub(crate) const PARITY_ITEM_SET_ASIDE: &str = "PARITY_ITEM_SET_ASIDE";
+
+/// The stored reason of a row the server answered with a `409` the till
+/// does not know (Ω4). It used to resolve "server wins" and delete the row;
+/// it now parks as a conflict for review, and may be set aside.
+pub(crate) const UNKNOWN_CONFLICT_REVIEW: &str = "UNKNOWN_CONFLICT_REVIEW";
+
+/// Rows [`rows_waiting_on_queue_row`] returns at most.
+const SET_ASIDE_GROUP_LIMIT: i64 = 500;
+
+/// SQL predicate: the queue row aliased `alias` is not set aside.
+pub(crate) fn set_aside_exclusion_sql(alias: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM parity_sync_set_aside AS set_aside \
+         WHERE set_aside.queue_id = {alias}.id)"
+    )
+}
+
+/// Whether a manager set this queue row aside.
+pub(crate) fn queue_row_is_set_aside(conn: &Connection, queue_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM parity_sync_set_aside WHERE queue_id = ?1)",
+        params![queue_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue read set-aside listing: {e}"))
+}
+
+/// One row of `parity_sync_set_aside`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAsideEntry {
+    pub queue_id: String,
+    pub table_name: String,
+    pub record_id: String,
+    pub z_report_id: Option<String>,
+    pub reason_code: String,
+    pub server_message: Option<String>,
+    pub set_aside_by_staff_id: String,
+    pub set_aside_at: String,
+    pub organization_id: String,
+}
+
+fn map_set_aside_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<SetAsideEntry> {
+    Ok(SetAsideEntry {
+        queue_id: row.get(0)?,
+        table_name: row.get(1)?,
+        record_id: row.get(2)?,
+        z_report_id: row.get(3)?,
+        reason_code: row.get(4)?,
+        server_message: row.get(5)?,
+        set_aside_by_staff_id: row.get(6)?,
+        set_aside_at: row.get(7)?,
+        organization_id: row.get(8)?,
+    })
+}
+
+const SET_ASIDE_ENTRY_COLUMNS: &str = "queue_id, table_name, record_id, z_report_id, reason_code, \
+     server_message, set_aside_by_staff_id, set_aside_at, organization_id";
+
+/// Every set-aside row, oldest first (the Z's "not on the server" lines and
+/// Health read them).
+#[allow(dead_code)] // Health / Z readers (W2) may read the table directly.
+pub(crate) fn list_set_aside_entries(conn: &Connection) -> Result<Vec<SetAsideEntry>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {SET_ASIDE_ENTRY_COLUMNS} FROM parity_sync_set_aside
+             ORDER BY set_aside_at ASC, queue_id ASC"
+        ))
+        .map_err(|e| format!("sync_queue list set-aside prepare: {e}"))?;
+    let entries = statement
+        .query_map([], map_set_aside_entry)
+        .map_err(|e| format!("sync_queue list set-aside query: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("sync_queue list set-aside read: {e}"))?;
+    Ok(entries)
+}
+
+/// Run `operation` in its own `BEGIN IMMEDIATE` transaction, or inside the
+/// caller's when one is already open (a Health command that authorizes and
+/// sets aside in one transaction).
+fn in_own_transaction<T>(
+    conn: &Connection,
+    operation: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    if conn.is_autocommit() {
+        retry_transaction(conn, operation)
+    } else {
+        operation(conn)
+    }
+}
+
+fn load_queue_row(conn: &Connection, queue_id: &str) -> Result<Option<SyncQueueItem>, String> {
+    conn.query_row(
+        "SELECT id, table_name, record_id, operation, data, organization_id,
+                created_at, attempts, last_attempt, error_message, next_retry_at,
+                retry_delay_ms, priority, COALESCE(module_type, 'orders'),
+                conflict_strategy, version, claim_generation, status
+           FROM parity_sync_queue
+          WHERE id = ?1",
+        params![queue_id],
+        map_internal_queue_item,
+    )
+    .optional()
+    .map_err(|e| format!("sync_queue load queue row: {e}"))
+}
+
+/// Whether a stored failure is a refusal for good (Ω4 eligibility): a typed
+/// non-retryable code, a 4xx other than 408/425/429, a refused offline
+/// check-in, an unknown 409, a local preparation that cannot succeed. Not a
+/// transport failure, a rate limit, a server error or a missing terminal
+/// identity, which heal on their own or by a retry.
+fn is_refused_for_good(error_message: &str, module_type: &str) -> bool {
+    let error = error_message.trim();
+    if error.is_empty() || error == REPAIR_RESERVED_OWNER_QUARANTINED {
+        return false;
+    }
+    let code = bounded_queue_error_code(error).unwrap_or_default();
+    if is_safe_transient_retry(&code, module_type) || is_safe_transient_retry(error, module_type) {
+        return false;
+    }
+    if ["HTTP_5", "HTTP_408", "HTTP_425", "HTTP_429"]
+        .iter()
+        .any(|prefix| code.starts_with(prefix))
+    {
+        return false;
+    }
+    let lower = error.to_ascii_lowercase();
+    !(lower.contains("terminal_id") || lower.contains("rate limit"))
+}
+
+/// Whether a queued row of `table_name`/`record_id` is set aside (`INSERT`
+/// rows only when `insert_only`).
+fn record_row_set_aside(
+    conn: &Connection,
+    table_name: &str,
+    record_id: &str,
+    insert_only: bool,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM parity_sync_queue AS queued
+             JOIN parity_sync_set_aside AS set_aside ON set_aside.queue_id = queued.id
+             WHERE queued.table_name = ?1
+               AND queued.record_id = ?2
+               AND (?3 = 0 OR queued.operation = 'INSERT')
+         )",
+        params![table_name, record_id, i64::from(insert_only)],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("sync_queue read parent set-aside: {e}"))
+}
+
+/// Whether a pending row waits for a parent a manager set aside: a row of a
+/// shift whose opening is set aside, a row of an order whose create is set
+/// aside, a refund of a payment set aside. Such a row can never go out on
+/// its own, so it may be set aside with its parent as one group.
+fn waiting_parent_is_set_aside(conn: &Connection, row: &SyncQueueItem) -> Result<bool, String> {
+    let error = row.error_message.as_deref().unwrap_or_default();
+    let payload = serde_json::from_str::<Value>(&row.data).unwrap_or(Value::Null);
+    if error.starts_with(SHIFT_WAITING_FOR_CHECK_IN) {
+        // A shift's own close or transfer waits for that shift's opening.
+        let shift_ids = if row.table_name == "staff_shifts" {
+            vec![string_field(&payload, &["shiftId", "shift_id"])
+                .unwrap_or_else(|| row.record_id.trim().to_string())]
+        } else {
+            shift_ids_named_by(row, &payload)
+        };
+        for shift_id in shift_ids {
+            if record_row_set_aside(conn, "staff_shifts", shift_id.trim(), true)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    if error.starts_with("Waiting for parent order") || error == FISCAL_ORDER_WAIT_REASON {
+        let order_id = if row.table_name == "orders" || row.module_type == "fiscal" {
+            Some(row.record_id.clone())
+        } else {
+            string_field(&payload, &["orderId", "order_id"])
+        };
+        return match order_id {
+            Some(order_id) => record_row_set_aside(conn, "orders", order_id.trim(), true),
+            None => Ok(false),
+        };
+    }
+    if error.starts_with("Waiting for parent payment") {
+        return match string_field(&payload, &["paymentId", "payment_id"]) {
+            Some(payment_id) => record_row_set_aside(conn, "payments", payment_id.trim(), false),
+            None => Ok(false),
+        };
+    }
+    Ok(false)
+}
+
+/// The pending rows that wait on this queue row and can never go out while it
+/// is set aside: the rows of a shift's opening, the rows of an order's create,
+/// the refunds of a payment. Health offers them with it as one group (the
+/// caller sets each aside; nothing here changes).
+#[allow(dead_code)] // For the Health group set-aside (W2).
+pub(crate) fn rows_waiting_on_queue_row(
+    conn: &Connection,
+    queue_id: &str,
+) -> Result<Vec<String>, String> {
+    let Some(parent) = load_queue_row(conn, queue_id)? else {
+        return Ok(Vec::new());
+    };
+    let not_set_aside = set_aside_exclusion_sql("waiting");
+    let payload = serde_json::from_str::<Value>(&parent.data).unwrap_or(Value::Null);
+    let (sql, key): (String, String) = match (parent.table_name.as_str(), parent.operation.as_str())
+    {
+        ("staff_shifts", "INSERT") => {
+            let shift_id = string_field(&payload, &["shiftId", "shift_id"])
+                .unwrap_or_else(|| parent.record_id.trim().to_string());
+            (
+                format!(
+                    "SELECT waiting.id FROM parity_sync_queue AS waiting
+                      WHERE waiting.status = 'pending' AND waiting.id <> ?1
+                        AND waiting.error_message = ?2 AND {not_set_aside}
+                      ORDER BY waiting.created_at ASC, waiting.id ASC LIMIT ?3"
+                ),
+                waiting_for_shift_open_reason(&shift_id),
+            )
+        }
+        ("orders", "INSERT") => (
+            format!(
+                "SELECT waiting.id FROM parity_sync_queue AS waiting
+                  WHERE waiting.status = 'pending' AND waiting.id <> ?1
+                    AND (waiting.error_message LIKE 'Waiting for parent order%'
+                         OR waiting.error_message = '{FISCAL_ORDER_WAIT_REASON}')
+                    AND (waiting.record_id = ?2
+                         OR (json_valid(waiting.data) AND COALESCE(
+                               json_extract(waiting.data, '$.orderId'),
+                               json_extract(waiting.data, '$.order_id')) = ?2))
+                    AND {not_set_aside}
+                  ORDER BY waiting.created_at ASC, waiting.id ASC LIMIT ?3"
+            ),
+            parent.record_id.trim().to_string(),
+        ),
+        ("payments", _) => (
+            format!(
+                "SELECT waiting.id FROM parity_sync_queue AS waiting
+                  WHERE waiting.status = 'pending' AND waiting.id <> ?1
+                    AND waiting.table_name = 'payment_adjustments'
+                    AND waiting.error_message LIKE 'Waiting for parent payment%'
+                    AND json_valid(waiting.data) AND COALESCE(
+                          json_extract(waiting.data, '$.paymentId'),
+                          json_extract(waiting.data, '$.payment_id')) = ?2
+                    AND {not_set_aside}
+                  ORDER BY waiting.created_at ASC, waiting.id ASC LIMIT ?3"
+            ),
+            parent.record_id.trim().to_string(),
+        ),
+        _ => return Ok(Vec::new()),
+    };
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("sync_queue rows waiting on a row prepare: {e}"))?;
+    let ids = statement
+        .query_map(params![queue_id, key, SET_ASIDE_GROUP_LIMIT], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| format!("sync_queue rows waiting on a row query: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("sync_queue rows waiting on a row read: {e}"))?;
+    Ok(ids)
+}
+
+/// A bounded machine code for a set-aside reason: `[A-Za-z0-9_.-]`, at most
+/// 64 characters, any other character folded to `_` (the Health command
+/// passes the row's own leading error code). `None` when nothing is left.
+fn bounded_set_aside_reason(reason: &str) -> Option<String> {
+    let folded: String = reason
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let code = folded.trim_matches('_');
+    (!code.is_empty()).then(|| code.to_string())
+}
+
+/// Set aside one queue row (Ω4). The caller has already approved the action
+/// with the manager's own PIN (the 1.4.135 parking primitive) and passes the
+/// approving staff member and a reason code. In one transaction: the
+/// `parity_sync_set_aside` listing (who, when, why, the server's message)
+/// and a `recovery_action_log` entry. The queue row keeps its status and
+/// payload: nothing is deleted, nothing is sent. Eligible: a row the server
+/// refused for good (`failed` / `conflict`, see [`is_refused_for_good`]), a
+/// pending row the server holds for a shift not queued here
+/// (`SHIFT_WAITING_ON_SERVER`), or a pending row that can only wait on a
+/// parent already set aside ([`rows_waiting_on_queue_row`]). Rows that never
+/// hold a Z (the customer directory) and native repair rows are refused.
+pub(crate) fn set_aside_queue_row(
+    conn: &Connection,
+    queue_id: &str,
+    staff_id: &str,
+    reason: &str,
+) -> Result<SetAsideEntry, String> {
+    let staff_id = staff_id.trim();
+    if staff_id.is_empty() || staff_id.len() > 128 {
+        return Err("SET_ASIDE_STAFF_REQUIRED".to_string());
+    }
+    let reason_code =
+        bounded_set_aside_reason(reason).ok_or_else(|| "SET_ASIDE_REASON_INVALID".to_string())?;
+    in_own_transaction(conn, |conn| {
+        let row =
+            load_queue_row(conn, queue_id)?.ok_or_else(|| "SET_ASIDE_NOT_FOUND".to_string())?;
+        // Native repair rows and repair-settlement money have their own
+        // recovery routes; a refused table batch (not replayable) may still
+        // be set aside, so the replay predicate is not asked here.
+        let reserved = semantic_reserved_repair_owner_predicate("parity_sync_queue");
+        let repair_money = semantic_repair_financial_queue_owner_predicate("parity_sync_queue");
+        let (reserved, repair_money): (bool, bool) = conn
+            .query_row(
+                &format!(
+                    "SELECT ({reserved}), ({repair_money}) FROM parity_sync_queue WHERE id = ?1"
+                ),
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("sync_queue set-aside owner guard: {e}"))?;
+        if reserved {
+            return Err("REPAIR_TYPED_CONFLICT_REQUIRED".to_string());
+        }
+        if repair_money {
+            return Err("REPAIR_SETTLEMENT_ROUTE_REQUIRED".to_string());
+        }
+        if queue_row_is_set_aside(conn, queue_id)? {
+            return Err("SET_ASIDE_ALREADY".to_string());
+        }
+        if is_closeout_exempt_row(&row.table_name, &row.module_type) {
+            return Err("SET_ASIDE_NOT_A_Z_GATE".to_string());
+        }
+        let eligible = match row.status.as_str() {
+            "failed" | "conflict" => is_refused_for_good(
+                row.error_message.as_deref().unwrap_or_default(),
+                &row.module_type,
+            ),
+            // A row the server holds for a shift that is not queued here
+            // (Ω1) may wait forever: like a refusal, a manager may set it
+            // aside.
+            "pending" => {
+                row.error_message
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with(SHIFT_WAITING_ON_SERVER))
+                    || waiting_parent_is_set_aside(conn, &row)?
+            }
+            _ => false,
+        };
+        if !eligible {
+            return Err("SET_ASIDE_NOT_ELIGIBLE".to_string());
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let server_message = row
+            .error_message
+            .as_deref()
+            .map(normalize_conflict_reason)
+            .filter(|message| !message.trim().is_empty());
+        let entry = SetAsideEntry {
+            queue_id: row.id.clone(),
+            table_name: row.table_name.clone(),
+            record_id: row.record_id.clone(),
+            z_report_id: None,
+            reason_code: reason_code.clone(),
+            server_message,
+            set_aside_by_staff_id: staff_id.to_string(),
+            set_aside_at: now.clone(),
+            organization_id: row.organization_id.clone(),
+        };
+        conn.execute(
+            &format!(
+                "INSERT INTO parity_sync_set_aside ({SET_ASIDE_ENTRY_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            ),
+            params![
+                entry.queue_id,
+                entry.table_name,
+                entry.record_id,
+                entry.z_report_id,
+                entry.reason_code,
+                entry.server_message,
+                entry.set_aside_by_staff_id,
+                entry.set_aside_at,
+                entry.organization_id,
+            ],
+        )
+        .map_err(|e| format!("sync_queue write set-aside listing: {e}"))?;
+        // What waited only for this row (a Z for its window's money or an
+        // earlier Z, an order create for its checkout's loyalty release, a
+        // shift opening for an earlier shift row) looks again in the next
+        // pass, not at its recheck.
+        wake_rows_after_success(conn, &row)?;
+        let evidence = serde_json::json!({
+            "queueId": row.id,
+            "tableName": row.table_name,
+            "recordId": row.record_id,
+            "operation": row.operation,
+            "status": row.status,
+            "errorCode": row.error_message.as_deref().and_then(bounded_queue_error_code),
+            "reasonCode": reason_code,
+        });
+        conn.execute(
+            "INSERT INTO recovery_action_log
+                (id, action_id, issue_code, entity_type, entity_id, success, message,
+                 actor_staff_id, payload_json, created_at)
+             VALUES (?1, 'parity_set_aside', ?2, 'parity_sync_queue', ?3, 1, ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                reason_code,
+                row.id,
+                "Queue row set aside: kept on this till, never sent on its own, out of the Z gates",
+                staff_id,
+                evidence.to_string(),
+                now,
+            ],
+        )
+        .map_err(|e| format!("sync_queue audit set-aside: {e}"))?;
+        info!(
+            queue_id = %row.id,
+            table = %row.table_name,
+            reason = %reason_code,
+            "Parity row set aside by a manager"
+        );
+        Ok(entry)
+    })
+}
+
+/// Undo a set-aside (Ω4, manager PIN approved by the caller): the listing
+/// goes, in one transaction with its `recovery_action_log` entry. The row
+/// keeps its status (failed or a conflict), so it holds the Z again and a
+/// retry may send it.
+pub(crate) fn undo_set_aside(
+    conn: &Connection,
+    queue_id: &str,
+    staff_id: &str,
+) -> Result<(), String> {
+    let staff_id = staff_id.trim();
+    if staff_id.is_empty() || staff_id.len() > 128 {
+        return Err("SET_ASIDE_STAFF_REQUIRED".to_string());
+    }
+    in_own_transaction(conn, |conn| {
+        let entry = conn
+            .query_row(
+                &format!(
+                    "SELECT {SET_ASIDE_ENTRY_COLUMNS} FROM parity_sync_set_aside WHERE queue_id = ?1"
+                ),
+                params![queue_id],
+                map_set_aside_entry,
+            )
+            .optional()
+            .map_err(|e| format!("sync_queue read set-aside entry: {e}"))?
+            .ok_or_else(|| "SET_ASIDE_NOT_FOUND".to_string())?;
+        conn.execute(
+            "DELETE FROM parity_sync_set_aside WHERE queue_id = ?1",
+            params![queue_id],
+        )
+        .map_err(|e| format!("sync_queue undo set-aside: {e}"))?;
+        let now = Utc::now().to_rfc3339();
+        let evidence = serde_json::to_value(&entry)
+            .map_err(|e| format!("sync_queue undo set-aside evidence: {e}"))?;
+        conn.execute(
+            "INSERT INTO recovery_action_log
+                (id, action_id, issue_code, entity_type, entity_id, success, message,
+                 actor_staff_id, payload_json, created_at)
+             VALUES (?1, 'parity_set_aside_undo', ?2, 'parity_sync_queue', ?3, 1, ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                entry.reason_code,
+                queue_id,
+                "Set-aside undone: the row holds the Z again and may be retried",
+                staff_id,
+                evidence.to_string(),
+                now,
+            ],
+        )
+        .map_err(|e| format!("sync_queue audit undo set-aside: {e}"))?;
+        info!(queue_id = %queue_id, "Parity row set-aside undone by a manager");
+        Ok(())
+    })
+}
+
+/// Ω4: the replay conflicts the till still resolves "server wins" (the row
+/// is removed): a table's live status (`restaurant_tables`), and a version
+/// conflict the server states (`412`, or a `409` naming a version) on the
+/// server-owned catalog, settings and operations rows. Every other 409 that
+/// used to be "auto server wins" is not understood here: it parks as a
+/// conflict (`UNKNOWN_CONFLICT_REVIEW`) for review and set-aside, and the
+/// record is kept.
+fn is_known_server_wins_conflict(status: u16, response_body: &str, item: &SyncQueueItem) -> bool {
+    if item.table_name == "restaurant_tables" && item.operation == "UPDATE" {
+        return true;
+    }
+    if status != 409 {
+        // Matched by `is_replay_conflict_response` only through its explicit
+        // version-conflict language on the server-owned tables.
+        return true;
+    }
+    let lower = response_body.to_ascii_lowercase();
+    let states_version_conflict = [
+        "version conflict",
+        "version mismatch",
+        "stale version",
+        "expected_version",
+        "expected version",
+        "optimistic lock",
+        "updated by another terminal",
+        "already changed",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    states_version_conflict
+        && (matches!(
+            item.table_name.as_str(),
+            "menu_categories"
+                | "menu_subcategories"
+                | "menu_ingredients"
+                | "menu_combos"
+                | "products"
+                | "rooms"
+                | "branch_settings"
+                | "terminal_settings"
+                | "local_settings"
+        ) || matches!(
+            item.module_type.as_str(),
+            "catalog" | "settings" | "operations"
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -18646,6 +20907,74 @@ mod tests {
         assert_eq!(warning.replayable, 0);
     }
 
+    /// Π1 (21/10/2026): a canonical repair row is claimed only while the pass
+    /// holds a repair lease. Without one it is skipped, pending and untouched,
+    /// and the generic rows behind it are still claimed.
+    #[test]
+    fn repair_rows_are_claimed_only_with_the_repair_gate_open() {
+        let conn = test_connection();
+        let repair_id = "44444444-4444-4444-8444-444444444444";
+        let operation_id = "66666666-6666-4666-8666-666666666666";
+        enqueue_repair_with_fixed_id(
+            &conn,
+            operation_id,
+            repair_id,
+            &EnqueueInput {
+                table_name: "repairs".to_string(),
+                record_id: repair_id.to_string(),
+                operation: "INSERT".to_string(),
+                data: "ciphertext-only".to_string(),
+                organization_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                priority: Some(10),
+                module_type: Some("repairs".to_string()),
+                conflict_strategy: Some("manual".to_string()),
+                version: Some(1),
+            },
+        )
+        .expect("queue a canonical repair row");
+        let generic = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "customers".to_string(),
+                record_id: "customer-behind-the-repair".to_string(),
+                operation: "UPDATE".to_string(),
+                data: "{}".to_string(),
+                organization_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                priority: Some(0),
+                module_type: Some("customers".to_string()),
+                conflict_strategy: None,
+                version: None,
+            },
+        )
+        .expect("queue a generic row");
+        assert!(has_pending_canonical_repair_rows(&conn).unwrap());
+
+        let claimed = dequeue_due_by_with_repair_gate(&conn, None, false)
+            .unwrap()
+            .0
+            .expect("the generic row is still claimed");
+        assert_eq!(claimed.id, generic);
+        assert!(dequeue_due_by_with_repair_gate(&conn, None, false)
+            .unwrap()
+            .0
+            .is_none());
+        let untouched: (String, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, attempts, claim_generation, last_attempt
+                   FROM parity_sync_queue WHERE id = ?1",
+                [operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(untouched, ("pending".to_string(), 0, 0, None));
+
+        let claimed = dequeue_due_by_with_repair_gate(&conn, None, true)
+            .unwrap()
+            .0
+            .expect("claimed once the repair lease is held");
+        assert_eq!(claimed.id, operation_id);
+    }
+
     #[test]
     fn generic_enqueue_rejects_every_semantic_reserved_repair_owner_without_mutation() {
         let conn = test_connection();
@@ -19083,6 +21412,374 @@ mod tests {
             serde_json::from_str::<Value>(spec.body.as_deref().unwrap()).unwrap(),
             json!({"status":"cancelled","cancellation_reason":"Guest called"})
         );
+    }
+
+    // Vertical salon follow-ups item 3 (21/10/2026): a reservation status
+    // change refused after another till's change.
+    const REFUSED_RESERVATION: &str = "33333333-aaaa-4aaa-8aaa-333333333333";
+
+    fn reservation_keyring() -> crate::tests::fake_keyring::Guard {
+        crate::tests::fake_keyring::install_seeded([
+            ("terminal_id".to_string(), TEST_TERMINAL_ID.to_string()),
+            ("organization_id".to_string(), "org-1".to_string()),
+            ("branch_id".to_string(), TEST_BRANCH_ID.to_string()),
+        ])
+    }
+
+    /// This till confirmed the reservation offline; meanwhile another till
+    /// cancelled it on the server.
+    fn seed_refused_reservation(conn: &Connection, intent: &Value) -> String {
+        seed_terminal_context(conn);
+        let doc = json!({"id":REFUSED_RESERVATION,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"status":"confirmed","customer_name":"Guest","notes":"Window seat","table_id":"table-2"});
+        conn.execute(
+            "INSERT INTO reservation_local_identity(local_id,server_id,organization_id,branch_id,data)
+             VALUES(?1,?1,'org-1',?2,?3)",
+            params![REFUSED_RESERVATION, TEST_BRANCH_ID, doc.to_string()],
+        )
+        .unwrap();
+        enqueue_reservation_change(conn, intent)
+    }
+
+    fn enqueue_reservation_change(conn: &Connection, intent: &Value) -> String {
+        enqueue(
+            conn,
+            &EnqueueInput {
+                table_name: "reservations".into(),
+                record_id: REFUSED_RESERVATION.into(),
+                operation: "UPDATE".into(),
+                data: intent.to_string(),
+                organization_id: "org-1".into(),
+                priority: Some(0),
+                module_type: Some("hospitality".into()),
+                conflict_strategy: Some("manual".into()),
+                version: Some(1),
+            },
+        )
+        .unwrap()
+    }
+
+    fn confirm_intent() -> Value {
+        json!({"id":REFUSED_RESERVATION,"status":"confirmed","organization_id":"org-1","branch_id":TEST_BRANCH_ID})
+    }
+
+    fn server_cancelled_reservation() -> Value {
+        json!({"id":REFUSED_RESERVATION,"organization_id":"org-1","branch_id":TEST_BRANCH_ID,"status":"cancelled","cancelled_at":"2026-10-21T09:00:00Z","cancellation_reason":"Guest called the other till","customer_name":"Guest","notes":null,"table_id":"table-2","updated_at":"2026-10-21T09:00:00Z"})
+    }
+
+    fn local_reservation_doc(conn: &Connection) -> Value {
+        let text: String = conn
+            .query_row(
+                "SELECT data FROM reservation_local_identity WHERE local_id=?1",
+                [REFUSED_RESERVATION],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn queue_row(conn: &Connection, id: &str) -> (String, Option<String>, String, i64) {
+        conn.query_row(
+            "SELECT status, error_message, data, attempts FROM parity_sync_queue WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reservation_status_refusal_matches_only_refused_status_intents() {
+        let status_item = queue_item("reservations", "UPDATE", "res-1", confirm_intent());
+        let coded = r#"{"success":false,"error":"Invalid status transition","code":"RESERVATION_STATUS_TRANSITION_INVALID","details":"Cannot transition from 'cancelled' to 'confirmed'"}"#;
+        let refusal = reservation_status_refusal(400, coded, &status_item).expect("coded 400");
+        assert!(refusal.server_row.is_none());
+        assert_eq!(
+            refusal.detail.as_deref(),
+            Some("Cannot transition from 'cancelled' to 'confirmed'")
+        );
+        // An older server sends only the sentence.
+        let legacy = r#"{"success":false,"error":"Invalid status transition","details":"x"}"#;
+        assert!(reservation_status_refusal(400, legacy, &status_item).is_some());
+        // A stale revision on a status intent carries the current row.
+        let changed = json!({"success":false,"error":"RESERVATION_CHANGED","code":"RESERVATION_CHANGED","reservation":server_cancelled_reservation()}).to_string();
+        let refusal = reservation_status_refusal(409, &changed, &status_item).expect("409");
+        assert_eq!(refusal.server_row, Some(server_cancelled_reservation()));
+
+        // Everything else keeps its existing path.
+        let other_400 = r#"{"success":false,"error":"Validation failed"}"#;
+        assert!(reservation_status_refusal(400, other_400, &status_item).is_none());
+        assert!(reservation_status_refusal(409, other_400, &status_item).is_none());
+        assert!(reservation_status_refusal(429, coded, &status_item).is_none());
+        assert!(reservation_status_refusal(500, coded, &status_item).is_none());
+        let details_item = queue_item(
+            "reservations",
+            "UPDATE",
+            "res-1",
+            json!({"notes":"Window seat"}),
+        );
+        assert!(reservation_status_refusal(400, legacy, &details_item).is_none());
+        assert!(reservation_status_refusal(409, &changed, &details_item).is_none());
+        let create = queue_item("reservations", "INSERT", "res-1", confirm_intent());
+        assert!(reservation_status_refusal(400, coded, &create).is_none());
+        for table in ["appointments", "rooms", "orders"] {
+            let other = queue_item(table, "UPDATE", "res-1", confirm_intent());
+            assert!(reservation_status_refusal(400, coded, &other).is_none());
+            assert!(reservation_status_refusal(400, legacy, &other).is_none());
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reservation_status_refused_400_keeps_draft_shows_server_row_and_never_retries() {
+        let _keyring = reservation_keyring();
+        let conn = test_connection();
+        let queue_id = seed_refused_reservation(&conn, &confirm_intent());
+        let conn = std::sync::Mutex::new(conn);
+        let (url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(
+                400,
+                r#"{"success":false,"error":"Invalid status transition","code":"RESERVATION_STATUS_TRANSITION_INVALID","details":"Cannot transition from 'cancelled' to 'confirmed'"}"#,
+            ),
+            MockResponse::json(
+                200,
+                json!({"success":true,"reservation":server_cancelled_reservation()}).to_string(),
+            ),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &url, "api-key").await.unwrap();
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 0, 1)
+        );
+        assert_eq!(result.errors[0].error.as_str(), RESERVATION_STATUS_REJECTED);
+        let patch = requests.recv().await.unwrap();
+        assert!(patch.request_line.starts_with(&format!(
+            "PATCH /api/pos/reservations/{REFUSED_RESERVATION} "
+        )));
+        let read = requests.recv().await.unwrap();
+        assert!(read
+            .request_line
+            .starts_with(&format!("GET /api/pos/reservations/{REFUSED_RESERVATION} ")));
+        assert_eq!(
+            read.headers.get("x-terminal-id").map(String::as_str),
+            Some(TEST_TERMINAL_ID)
+        );
+        server.await.unwrap();
+        {
+            let db = conn.lock().unwrap();
+            let (status, reason, data, _) = queue_row(&db, &queue_id);
+            assert_eq!(status, "conflict");
+            assert_eq!(
+                reason.as_deref(),
+                Some("RESERVATION_STATUS_REJECTED: Cannot transition from 'cancelled' to 'confirmed'")
+            );
+            // The original payload is the draft, untouched.
+            assert_eq!(
+                serde_json::from_str::<Value>(&data).unwrap(),
+                confirm_intent()
+            );
+            let (entity, payload, resolution): (String, String, String) = db
+                .query_row(
+                    "SELECT entity_type, discarded_payload, resolution FROM conflict_audit_log
+                      WHERE entity_id=?1",
+                    [REFUSED_RESERVATION],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (entity.as_str(), resolution.as_str()),
+                ("reservations", "manual")
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&payload).unwrap(),
+                confirm_intent()
+            );
+            // The local document is the server row again.
+            assert_eq!(local_reservation_doc(&db), server_cancelled_reservation());
+        }
+
+        // Never retried: the next pass sends nothing.
+        let again = process_queue(&conn, &url, "api-key").await.unwrap();
+        assert_eq!((again.processed, again.failed, again.conflicts), (0, 0, 0));
+        assert!(
+            requests.recv().await.is_none(),
+            "a parked draft was replayed"
+        );
+        assert_eq!(queue_row(&conn.lock().unwrap(), &queue_id).0, "conflict");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reservation_status_409_changed_uses_the_row_it_carries() {
+        let _keyring = reservation_keyring();
+        let conn = test_connection();
+        let queue_id = seed_refused_reservation(&conn, &confirm_intent());
+        let conn = std::sync::Mutex::new(conn);
+        let changed = json!({"success":false,"error":"RESERVATION_CHANGED","code":"RESERVATION_CHANGED","message":"The reservation was changed on another terminal. Review it and try again.","reservation":server_cancelled_reservation()});
+        let (url, mut requests, server) =
+            spawn_mock_http_server(vec![MockResponse::json(409, changed.to_string())]).await;
+
+        let result = process_queue(&conn, &url, "api-key").await.unwrap();
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 0, 1)
+        );
+        requests.recv().await.unwrap();
+        server.await.unwrap();
+        assert!(requests.recv().await.is_none(), "the 409 row needs no read");
+        let db = conn.lock().unwrap();
+        let (status, reason, _, _) = queue_row(&db, &queue_id);
+        assert_eq!(status, "conflict");
+        assert!(reason.unwrap().starts_with(RESERVATION_STATUS_REJECTED));
+        assert_eq!(local_reservation_doc(&db), server_cancelled_reservation());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reservation_status_refusal_on_exact_retry_stays_one_request() {
+        let _keyring = reservation_keyring();
+        let conn = test_connection();
+        let queue_id = seed_refused_reservation(&conn, &confirm_intent());
+        // A row parked as `failed` by the generic 4xx path before this fix.
+        conn.execute(
+            "UPDATE parity_sync_queue SET status='failed', attempts=1,
+                    error_message='HTTP_400_CLIENT_ERROR' WHERE id=?1",
+            [&queue_id],
+        )
+        .unwrap();
+        let conn = std::sync::Mutex::new(conn);
+        let (url, mut requests, server) = spawn_mock_http_server(vec![MockResponse::json(
+            400,
+            r#"{"success":false,"error":"Invalid status transition"}"#,
+        )])
+        .await;
+
+        let result = process_queue_renderer_safe_item_with_claim_gate(
+            &conn,
+            &url,
+            "api-key",
+            &queue_id,
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 0, 1)
+        );
+        requests.recv().await.unwrap();
+        server.await.unwrap();
+        assert!(
+            requests.recv().await.is_none(),
+            "exact retry is one request"
+        );
+        let db = conn.lock().unwrap();
+        let (status, reason, _, _) = queue_row(&db, &queue_id);
+        assert_eq!(status, "conflict");
+        assert_eq!(
+            reason.as_deref(),
+            Some("RESERVATION_STATUS_REJECTED: Invalid status transition")
+        );
+        // No server row was read; the overlay stops applying the draft instead.
+        assert_eq!(local_reservation_doc(&db)["status"], "confirmed");
+    }
+
+    #[test]
+    fn reservation_refusal_keeps_newer_queued_edits_and_takes_server_status() {
+        let _keyring = reservation_keyring();
+        let conn = test_connection();
+        let refused_id = seed_refused_reservation(&conn, &confirm_intent());
+        let notes = json!({"id":REFUSED_RESERVATION,"notes":"Birthday cake","organization_id":"org-1","branch_id":TEST_BRANCH_ID});
+        enqueue_reservation_change(&conn, &notes);
+        conn.execute(
+            "UPDATE reservation_local_identity SET data=json_set(data,'$.notes','Birthday cake')",
+            [],
+        )
+        .unwrap();
+        let mut refused = queue_item(
+            "reservations",
+            "UPDATE",
+            REFUSED_RESERVATION,
+            confirm_intent(),
+        );
+        refused.id = refused_id;
+        assert!(
+            refresh_reservation_document(&conn, &refused, &server_cancelled_reservation()).unwrap()
+        );
+        let doc = local_reservation_doc(&conn);
+        assert_eq!(doc["status"], "cancelled");
+        assert_eq!(doc["cancelled_at"], "2026-10-21T09:00:00Z");
+        assert_eq!(doc["cancellation_reason"], "Guest called the other till");
+        assert_eq!(
+            doc["notes"], "Birthday cake",
+            "the queued edit stays visible"
+        );
+
+        // A row of another organization or branch is never written.
+        let mut foreign = server_cancelled_reservation();
+        foreign["branch_id"] = json!("99999999-9999-4999-8999-999999999999");
+        assert!(!refresh_reservation_document(&conn, &refused, &foreign).unwrap());
+        foreign = server_cancelled_reservation();
+        foreign["organization_id"] = json!("org-2");
+        assert!(!refresh_reservation_document(&conn, &refused, &foreign).unwrap());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ordinary_client_errors_keep_the_generic_failed_path() {
+        let _keyring = reservation_keyring();
+        let conn = test_connection();
+        // A reservation details change and another entity's status change.
+        let details_id = seed_refused_reservation(
+            &conn,
+            &json!({"id":REFUSED_RESERVATION,"notes":"Window seat","organization_id":"org-1","branch_id":TEST_BRANCH_ID}),
+        );
+        let room_id = enqueue(
+            &conn,
+            &EnqueueInput {
+                table_name: "rooms".into(),
+                record_id: "room-1".into(),
+                operation: "UPDATE".into(),
+                data: json!({"status":"cleaning"}).to_string(),
+                organization_id: "org-1".into(),
+                priority: Some(0),
+                module_type: Some("hospitality".into()),
+                conflict_strategy: Some("manual".into()),
+                version: Some(1),
+            },
+        )
+        .unwrap();
+        let before = local_reservation_doc(&conn);
+        let conn = std::sync::Mutex::new(conn);
+        let refused = r#"{"success":false,"error":"Invalid status transition"}"#;
+        let (url, mut requests, server) = spawn_mock_http_server(vec![
+            MockResponse::json(400, refused),
+            MockResponse::json(400, refused),
+        ])
+        .await;
+
+        let result = process_queue(&conn, &url, "api-key").await.unwrap();
+        assert_eq!(
+            (result.processed, result.failed, result.conflicts),
+            (0, 2, 0)
+        );
+        requests.recv().await.unwrap();
+        requests.recv().await.unwrap();
+        server.await.unwrap();
+        assert!(requests.recv().await.is_none(), "no server read for these");
+        let db = conn.lock().unwrap();
+        for id in [&details_id, &room_id] {
+            let (status, reason, _, _) = queue_row(&db, id);
+            assert_eq!(
+                (status.as_str(), reason.as_deref()),
+                ("failed", Some("HTTP_400_CLIENT_ERROR"))
+            );
+        }
+        assert_eq!(local_reservation_doc(&db), before);
+        let conflicts: i64 = db
+            .query_row("SELECT COUNT(*) FROM conflict_audit_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(conflicts, 0);
     }
 
     #[test]
@@ -21304,6 +24001,12 @@ mod tests {
     fn crash_retry_transient_outage_beyond_ten_preserves_original_payment_and_event() {
         let conn = test_connection();
         let id = seed_workflow_table_payment(&conn);
+        // It is a payment's row: the monetary class (Ω9 rules below).
+        conn.execute(
+            "UPDATE parity_sync_queue SET module_type = 'payment' WHERE id = ?1",
+            [&id],
+        )
+        .unwrap();
         let original: String = conn
             .query_row(
                 "SELECT data FROM parity_sync_queue WHERE id=?1",
@@ -21332,9 +24035,82 @@ mod tests {
             assert_eq!(row.2, original);
             assert!(row.3.is_some());
         }
+
+        // Offline week Ω9 (22/10/2026): a 500 on money no longer dead-letters
+        // after ten tries. It keeps retrying with backoff for 24 h from its
+        // first 500, the payment and its event untouched.
         conn.execute("UPDATE parity_sync_queue SET status='processing',attempts=10,claim_generation=7 WHERE id=?1",[&id]).unwrap();
+        let within = mark_failure(&conn, &id, "HTTP_500_SERVER_ERROR", 7).unwrap();
+        assert!(within.applied);
+        assert!(!within.transitioned_to_dead_letter);
+        assert!(within.monetary_notice.is_none());
+        let (status, attempts, data, stored): (String, i64, String, String) = conn
+            .query_row(
+                "SELECT status,attempts,data,error_message FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), attempts), ("pending", 11));
+        assert_eq!(data, original);
+        let first_500 = monetary_500_since(&stored).expect("the first 500 is stamped");
+        assert!(Utc::now().signed_duration_since(first_500) < ChronoDuration::minutes(1));
+
+        // A later 500 keeps the first one's time: the window does not slide.
+        conn.execute("UPDATE parity_sync_queue SET status='processing',attempts=30,claim_generation=7 WHERE id=?1",[&id]).unwrap();
         assert!(
-            mark_failure(&conn, &id, "HTTP_500_SERVER_ERROR", 7)
+            !mark_failure(&conn, &id, "HTTP_500_SERVER_ERROR", 7)
+                .unwrap()
+                .transitioned_to_dead_letter
+        );
+        let restamped: String = conn
+            .query_row(
+                "SELECT error_message FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(restamped, stored);
+
+        // 24 h after its first 500 it dead-letters as before, with the notice.
+        let day_ago = (Utc::now() - ChronoDuration::hours(25)).format(MONETARY_500_SINCE_FORMAT);
+        conn.execute(
+            "UPDATE parity_sync_queue SET status='processing',attempts=40,claim_generation=7,error_message=?2 WHERE id=?1",
+            params![id, format!("{HTTP_500_SERVER_ERROR}{MONETARY_500_SINCE_MARKER}{day_ago}")],
+        )
+        .unwrap();
+        let expired = mark_failure(&conn, &id, "HTTP_500_SERVER_ERROR", 7).unwrap();
+        assert!(expired.transitioned_to_dead_letter);
+        assert_eq!(
+            expired.monetary_notice,
+            Some(MonetaryDeadLetter {
+                category: MonetaryDeadLetterCategory::Payment
+            })
+        );
+        let (status, stored, data): (String, String, String) = conn
+            .query_row(
+                "SELECT status,error_message,data FROM parity_sync_queue WHERE id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), stored.as_str()),
+            ("failed", "HTTP_500_SERVER_ERROR")
+        );
+        assert_eq!(data, original);
+
+        // A row outside the monetary class is unchanged: dead at ten tries.
+        let customer = enqueue_test_item(
+            &conn,
+            "customers",
+            "UPDATE",
+            "customer-500",
+            json!({"id": "customer-500", "name": "Ten tries"}),
+        );
+        conn.execute("UPDATE parity_sync_queue SET status='processing',attempts=10,claim_generation=7 WHERE id=?1",[&customer]).unwrap();
+        assert!(
+            mark_failure(&conn, &customer, "HTTP_500_SERVER_ERROR", 7)
                 .unwrap()
                 .transitioned_to_dead_letter
         );
@@ -21904,6 +24680,7 @@ mod tests {
                         ("staff_id", "staffId"),
                         ("line_role", "lineRole"),
                         ("is_manual", "isManual"),
+                        ("vat_class", "vatClass"),
                         ("vat_category_code", "vatCategoryCode"),
                         ("price_includes_vat", "priceIncludesVat"),
                         ("tax_exemption_reason", "taxExemptionReason"),
@@ -21969,6 +24746,44 @@ mod tests {
     }
 
     #[test]
+    fn vat_replay_uses_delivery_platform_never_recovery_origin() {
+        let conn = test_connection();
+        crate::db::set_setting(&conn, "tax", "vat_country", "CH").unwrap();
+        crate::db::set_setting(
+            &conn,
+            "tax",
+            "vat_channel_default_takeaway",
+            "ch_reduced_26",
+        )
+        .unwrap();
+        crate::db::set_setting(
+            &conn,
+            "tax",
+            "vat_channel_default_platform",
+            "ch_exempt_platform",
+        )
+        .unwrap();
+        let mut payload = json!({"branch_id":TEST_BRANCH_ID,"order_type":"pickup","source":"qr_recovery","ghost_source":"kiosk_recovery","items":[{"menu_item_id":TEST_MENU_ITEM_ID,"quantity":1,"unit_price":10.26,"vat_class":"food"}]});
+        let own = build_order_insert_body(&conn, "origin-vat", &payload).unwrap();
+        assert_eq!(own["platform"], Value::Null);
+        assert_eq!(
+            order_insert_vat(&conn, "origin-vat", &payload)
+                .unwrap()
+                .tax_amount_cents,
+            26
+        );
+        payload["plugin"] = json!("wolt");
+        let platform = build_order_insert_body(&conn, "platform-vat", &payload).unwrap();
+        assert_eq!(platform["platform"], "wolt");
+        assert_eq!(
+            order_insert_vat(&conn, "platform-vat", &payload)
+                .unwrap()
+                .tax_amount_cents,
+            0
+        );
+    }
+
+    #[test]
     fn order_line_replay_vat_uses_the_same_fractional_reduced_rate_lines_as_insert() {
         let conn = test_connection();
         let payload = json!({"branch_id":TEST_BRANCH_ID, "order_type":"pickup", "items":[{
@@ -21986,6 +24801,52 @@ mod tests {
         assert_eq!(vat.tax_amount_cents, 48); // 4.20 - 4.20 / 1.13
         assert_eq!(vat.tax_amount_cents, from_body.tax_amount_cents);
         assert_eq!(vat.breakdown.lines, from_body.breakdown.lines);
+    }
+
+    #[test]
+    fn order_insert_body_names_the_branch_vat_country_and_its_vat() {
+        let conn = test_connection();
+        // The renderer used to hard-code GR; the branch's profile decides.
+        let payload = json!({"branch_id":TEST_BRANCH_ID, "order_type":"pickup", "country_code":"GR",
+        "items":[
+            {"menu_item_id":TEST_MENU_ITEM_ID, "quantity":1, "unit_price":10.0, "total_price":10.0,
+             "name":"Crepe", "vat_category_code":"ch_reduced_26"},
+            {"menu_item_id":null, "quantity":1, "unit_price":5.0, "total_price":5.0,
+             "name":"Manual", "vat_category_code":null, "is_manual":true}
+        ]});
+        let body = build_order_insert_body(&conn, "swiss-order", &payload).unwrap();
+        assert_eq!(
+            body["country_code"], "GR",
+            "without tax.vat_country the order keeps what it carried"
+        );
+        let greek = order_insert_vat(&conn, "swiss-order", &payload).unwrap();
+        // A Swiss code in a Greek branch takes the branch default (24%).
+        assert_eq!(greek.tax_amount_cents, 194 + 97);
+
+        crate::db::set_setting(&conn, "tax", "vat_country", "ch").unwrap();
+        crate::db::set_setting(&conn, "tax", "vat_default_category_code", "ch_standard_81")
+            .unwrap();
+        let body = build_order_insert_body(&conn, "swiss-order", &payload).unwrap();
+        assert_eq!(body["country_code"], "CH");
+        let swiss = order_insert_vat(&conn, "swiss-order", &payload).unwrap();
+        let rates: Vec<f64> = swiss
+            .breakdown
+            .lines
+            .iter()
+            .map(|line| line.vat_rate)
+            .collect();
+        // The crepe at its own 2.6%, the manual line at the branch's 8.1%.
+        assert_eq!(rates, vec![2.6, 8.1]);
+        assert_eq!(swiss.tax_amount_cents, 25 + 37);
+
+        crate::db::set_setting(&conn, "tax", "vat_registered", "false").unwrap();
+        let unregistered = order_insert_vat(&conn, "swiss-order", &payload).unwrap();
+        assert_eq!(unregistered.tax_amount_cents, 0);
+        assert!(unregistered
+            .breakdown
+            .lines
+            .iter()
+            .all(|line| line.vat_category_code == "pos_receipt_zero"));
     }
 
     #[test]
@@ -22133,6 +24994,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!((tax, synced.as_str()), (2.51, "synced"));
+        let buckets: String = conn
+            .query_row(
+                "SELECT tax_breakdown FROM orders WHERE id='ack-vat-same'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&buckets).unwrap(),
+            answer(13.0)["data"]["tax_breakdown"]
+        );
 
         // Another total: the answer is about other money.
         seed_vat_ack_order(&conn, "ack-vat-other-total");
@@ -25542,6 +28414,135 @@ mod tests {
             409,
             Some(&body)
         ));
+        // Ω11: only a RELEASE op takes "an order owns this redemption" as final.
+        let exists = json!({"success":false,"code":"LOYALTY_ORDER_EXISTS"});
+        assert!(!is_loyalty_order_ended_response(&item, 409, Some(&exists)));
+        let release = queue_item(
+            "loyalty_transactions",
+            "DELETE",
+            "tx",
+            json!({"transaction_type":"release","order_id":"checkout-1","customer_id":"customer-1"}),
+        );
+        assert!(is_loyalty_order_ended_response(
+            &release,
+            409,
+            Some(&exists)
+        ));
+        assert!(is_loyalty_order_ended_response(&release, 409, Some(&body)));
+        assert!(!is_loyalty_order_ended_response(
+            &release,
+            500,
+            Some(&exists)
+        ));
+        let mismatch = json!({"success":false,"code":"LOYALTY_RELEASE_CUSTOMER_MISMATCH"});
+        assert!(is_loyalty_order_ended_response(
+            &release,
+            409,
+            Some(&mismatch)
+        ));
+        assert!(!is_loyalty_order_ended_response(
+            &item,
+            409,
+            Some(&mismatch)
+        ));
+        // A legacy reservation of a released checkout: nothing was debited on
+        // the server, so it retires and its local debit is reversed.
+        let released = json!({"success":false,"code":"LOYALTY_REDEMPTION_RELEASED"});
+        let legacy = queue_item(
+            "loyalty_transactions",
+            "INSERT",
+            "tx",
+            json!({"transaction_type":"redeem","checkout_reservation":true}),
+        );
+        assert!(is_loyalty_order_ended_response(
+            &legacy,
+            409,
+            Some(&released)
+        ));
+        assert!(!is_loyalty_order_ended_response(
+            &release,
+            409,
+            Some(&released)
+        ));
+    }
+
+    /// Ω11 (22/10/2026): a released live redemption goes to the release route
+    /// under the checkout key it was debited with, never remapped to an order.
+    #[test]
+    fn loyalty_release_op_posts_the_checkout_key_to_the_release_route() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (id, client_request_id, items, total_amount, status, sync_status)
+             VALUES ('checkout-1', 'other-request', '[]', 10, 'completed', 'synced')",
+            [],
+        )
+        .unwrap();
+        let payload = json!({"transaction_type":"release","order_id":"checkout-1",
+            "customer_id":"customer-1","points":-100,"organization_id":"org-1"});
+        let item = queue_item(
+            "loyalty_transactions",
+            "DELETE",
+            "redemption",
+            payload.clone(),
+        );
+        let RequestPreparation::Ready(spec) =
+            prepare_loyalty_request(&conn, &item, &payload, TEST_TERMINAL_ID).unwrap()
+        else {
+            panic!("a release is sent at once");
+        };
+        assert_eq!(spec.endpoint, "/api/pos/loyalty/redeem/release");
+        assert_eq!(spec.method, Method::POST);
+        assert_eq!(
+            serde_json::from_str::<Value>(spec.body.as_deref().unwrap()).unwrap(),
+            json!({"order_id":"checkout-1","customer_id":"customer-1"})
+        );
+        let incomplete = json!({"transaction_type":"release","order_id":"checkout-1"});
+        assert!(matches!(
+            prepare_loyalty_request(&conn, &item, &incomplete, TEST_TERMINAL_ID).unwrap(),
+            RequestPreparation::Failed { .. }
+        ));
+    }
+
+    /// Ω11: a RELEASE op the server settles as final (the order ended or owns
+    /// the points) leaves the released row applied, so a loyalty snapshot can
+    /// run again, and changes no balance twice.
+    #[test]
+    fn retiring_a_loyalty_release_marks_the_released_row_applied_once() {
+        let conn = test_connection();
+        conn.execute_batch("INSERT INTO loyalty_customers (id, user_profile_id, customer_id, organization_id, points_balance, total_redeemed)
+            VALUES ('balance', 'profile-1', 'customer-1', 'org-1', 120, 0);
+            INSERT INTO loyalty_transactions (id, customer_id, organization_id, points, transaction_type, order_id, sync_state, sync_last_error)
+            VALUES ('redemption', 'customer-1', 'org-1', -100, 'redeem', 'checkout-1', 'pending', 'LOYALTY_LOCAL_REVERSED');
+            INSERT INTO parity_sync_queue (id, table_name, record_id, operation, data, organization_id)
+            VALUES ('queue-1', 'loyalty_transactions', 'redemption', 'DELETE', '{\"transaction_type\":\"release\"}', 'org-1');").unwrap();
+        let item = queue_item(
+            "loyalty_transactions",
+            "DELETE",
+            "redemption",
+            json!({"transaction_type":"release"}),
+        );
+        retire_ended_loyalty_item(&conn, &item).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT sync_state FROM loyalty_transactions WHERE id = 'redemption'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "applied"
+        );
+        assert_eq!(
+            conn.query_row("SELECT points_balance FROM loyalty_customers", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            120
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -37504,7 +40505,13 @@ mod tests {
         let conn = test_connection();
         crate::db::set_setting(&conn, "terminal", "terminal_id", "terminal-test")
             .expect("store terminal id");
-        let orders = 300 * days;
+        // `CATCH_UP_ORDERS_PER_DAY` sizes another store (offline week, 21/10/2026:
+        // Tomikro now takes about 110 a day).
+        let per_day: u64 = std::env::var("CATCH_UP_ORDERS_PER_DAY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let orders = per_day * days;
         let started = Utc::now() - ChronoDuration::days(i64::try_from(days).unwrap_or(1));
         conn.execute_batch("BEGIN").expect("begin seed");
         let mut rows = 0_u64;
@@ -37702,6 +40709,9 @@ mod tests {
 
     /// Numbers for the report (about 80 s per run in a debug build):
     /// `cargo test --lib catch_up_harness_report -- --ignored --nocapture`.
+    /// `CATCH_UP_DAYS` and `CATCH_UP_ORDERS_PER_DAY` size the backlog
+    /// (default 4 days of 300); a Tomikro week is `CATCH_UP_DAYS=7
+    /// CATCH_UP_ORDERS_PER_DAY=110` (15 min at 250 ms, measured 21/10/2026).
     #[tokio::test]
     #[serial_test::serial]
     #[ignore = "measurement, run on demand"]
@@ -37712,8 +40722,12 @@ mod tests {
             (400, "server now", SIM_SERVER_NOW),
             (250, "server before", SIM_SERVER_BEFORE),
         ] {
-            let report = run_catch_up_harness(4, limits, latency_ms).await;
-            eprintln!("desktop catch-up, 4 days, {latency_ms} ms, {label}: {report:?}");
+            let days: u64 = std::env::var("CATCH_UP_DAYS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(4);
+            let report = run_catch_up_harness(days, limits, latency_ms).await;
+            eprintln!("desktop catch-up, {days} days, {latency_ms} ms, {label}: {report:?}");
         }
     }
 
@@ -38836,6 +41850,1577 @@ mod tests {
                 pass_ms / SAMPLE as f64,
             );
             assert_eq!(waiting, SAMPLE, "each waited without spending an attempt");
+        }
+    }
+
+    // ── Offline week, wave 2 (22/10/2026): Ω1, Ω2, Ω3/Ω4 queue parts, Ω9, Ω13 ──
+
+    mod offline_week_wave2 {
+        use super::*;
+
+        const SHIFT_OK: &str = r#"{"success":true,"results":[{"shift_id":"SHIFT","status":"ok"}]}"#;
+
+        fn shift_ok(shift_id: &str) -> MockResponse {
+            MockResponse::json(207, SHIFT_OK.replace("SHIFT", shift_id))
+        }
+
+        fn queue_row(
+            conn: &Connection,
+            table_name: &str,
+            record_id: &str,
+            operation: &str,
+            module_type: &str,
+            data: Value,
+        ) -> String {
+            enqueue(
+                conn,
+                &EnqueueInput {
+                    table_name: table_name.to_string(),
+                    record_id: record_id.to_string(),
+                    operation: operation.to_string(),
+                    data: data.to_string(),
+                    organization_id: "org-1".to_string(),
+                    priority: Some(1),
+                    module_type: Some(module_type.to_string()),
+                    conflict_strategy: Some("manual".to_string()),
+                    version: Some(1),
+                },
+            )
+            .expect("enqueue wave 2 row")
+        }
+
+        /// `(status, attempts, error_message, next_retry_at, claim_generation)`.
+        fn state(
+            conn: &Connection,
+            id: &str,
+        ) -> Option<(String, i64, Option<String>, Option<String>, i64)> {
+            conn.query_row(
+                "SELECT status, attempts, error_message, next_retry_at, claim_generation
+                 FROM parity_sync_queue WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .expect("read wave 2 row")
+        }
+
+        fn set_created_at(conn: &Connection, id: &str, created_at: &str) {
+            conn.execute(
+                "UPDATE parity_sync_queue SET created_at = ?1 WHERE id = ?2",
+                params![created_at, id],
+            )
+            .expect("set created_at");
+        }
+
+        fn make_due(conn: &Connection, id: &str) {
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = NULL WHERE id = ?1",
+                params![id],
+            )
+            .expect("make due");
+        }
+
+        fn shift_open(conn: &Connection, shift_id: &str, staff_id: &str) -> String {
+            queue_row(
+                conn,
+                "staff_shifts",
+                shift_id,
+                "INSERT",
+                "shifts",
+                json!({
+                    "shiftId": shift_id,
+                    "staffId": staff_id,
+                    "branchId": TEST_BRANCH_ID,
+                    "terminalId": TEST_TERMINAL_ID,
+                    "roleType": "cashier",
+                    "openingCash": 50.0,
+                    "checkInTime": "2026-10-21T08:00:00Z",
+                    "offline_check_in": true
+                }),
+            )
+        }
+
+        fn shift_close(conn: &Connection, shift_id: &str, staff_id: &str) -> String {
+            queue_row(
+                conn,
+                "staff_shifts",
+                shift_id,
+                "UPDATE",
+                "shifts",
+                json!({
+                    "shiftId": shift_id,
+                    "staffId": staff_id,
+                    "branchId": TEST_BRANCH_ID,
+                    "terminalId": TEST_TERMINAL_ID,
+                    "checkOutTime": "2026-10-20T22:00:00Z",
+                    "closingCash": 120.0
+                }),
+            )
+        }
+
+        fn queue_z(conn: &Connection, z_report_id: &str, period_end: &str) -> String {
+            queue_row(
+                conn,
+                "z_reports",
+                z_report_id,
+                "INSERT",
+                "z_report",
+                json!({
+                    "terminal_id": TEST_TERMINAL_ID,
+                    "branch_id": TEST_BRANCH_ID,
+                    "report_date": &period_end[..10],
+                    "report_data": { "periodEnd": period_end }
+                }),
+            )
+        }
+
+        fn claimed(conn: &Connection, id: &str) -> SyncQueueItem {
+            conn.execute(
+                "UPDATE parity_sync_queue
+                 SET status = 'processing', claim_generation = claim_generation + 1
+                 WHERE id = ?1",
+                params![id],
+            )
+            .expect("claim");
+            load_queue_row(conn, id).expect("load").expect("row")
+        }
+
+        async fn run_pass(
+            conn: Connection,
+            responses: Vec<MockResponse>,
+        ) -> (Connection, SyncResult, Vec<CapturedRequest>) {
+            let expected = responses.len();
+            let conn = std::sync::Mutex::new(conn);
+            let (base_url, mut requests, server) = spawn_mock_http_server(responses).await;
+            let result = process_queue(&conn, &base_url, "api-key")
+                .await
+                .expect("process queue");
+            let mut captured = Vec::new();
+            for _ in 0..expected {
+                if let Ok(Some(request)) =
+                    tokio::time::timeout(Duration::from_millis(500), requests.recv()).await
+                {
+                    captured.push(request);
+                }
+            }
+            server.abort();
+            (conn.into_inner().expect("db"), result, captured)
+        }
+
+        /// A pass against a closed local port: every request fails on the
+        /// network, as a till behind a router whose line is down.
+        async fn run_offline_pass(conn: Connection) -> (Connection, SyncResult) {
+            let conn = std::sync::Mutex::new(conn);
+            let result = process_queue(&conn, "http://127.0.0.1:9", "api-key")
+                .await
+                .expect("process queue offline");
+            (conn.into_inner().expect("db"), result)
+        }
+
+        // ── Ω2: no offline hammering ────────────────────────────────────────
+
+        /// Measured before the fix (`desktop-offline-pass-probe`): 530 rows
+        /// and an unreachable server took 18 minutes of DB lock per pass,
+        /// every row claimed, sent and audited. One pass now makes one
+        /// request and leaves the other rows exactly as they were.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_offline_pass_makes_one_request_and_leaves_the_rest_untouched() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            conn.execute_batch("BEGIN").unwrap();
+            for index in 0..500 {
+                conn.execute(
+                    "INSERT INTO parity_sync_queue (
+                         id, table_name, record_id, operation, data, organization_id,
+                         created_at, attempts, retry_delay_ms, priority, module_type,
+                         conflict_strategy, version, claim_generation, status
+                     ) VALUES (?1, 'coupons', ?2, 'UPDATE', ?3, 'org-1', ?4, 0, 1000, 0,
+                               'coupons', 'manual', 1, 0, 'pending')",
+                    params![
+                        format!("offline-row-{index:03}"),
+                        format!("coupon-{index:03}"),
+                        json!({ "code": format!("WEEK{index:03}") }).to_string(),
+                        format!("2026-10-20T08:{:02}:{:02}Z", index / 60, index % 60),
+                    ],
+                )
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+
+            let (conn, result) = run_offline_pass(conn).await;
+
+            assert!(result.stopped_on_transport_failure);
+            assert_eq!(
+                result.telemetry.replay_attempts, 1,
+                "exactly one row was claimed"
+            );
+            assert_eq!(result.failed, 1);
+            let (status, attempts, error, next, _) =
+                state(&conn, "offline-row-000").expect("first row kept");
+            assert_eq!((status.as_str(), attempts), ("pending", 1));
+            assert_eq!(error.as_deref(), Some("NETWORK_ERROR"));
+            assert!(next.is_some(), "it waits out its backoff");
+            let untouched: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM parity_sync_queue
+                     WHERE id <> 'offline-row-000'
+                       AND status = 'pending' AND attempts = 0 AND claim_generation = 0
+                       AND error_message IS NULL AND next_retry_at IS NULL
+                       AND last_attempt IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                untouched, 499,
+                "no other row was claimed, sent or rescheduled"
+            );
+            let audited: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_retry_schedule_audit_v1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(audited, 1, "one audit entry, for the one failed row");
+        }
+
+        /// A `503` is the transport failing too: the pass ends, like a 429,
+        /// without pausing the origin. A `500` is the server's answer for
+        /// that row and the pass goes on.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_503_ends_the_pass_and_a_500_does_not() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let first = queue_row(
+                &conn,
+                "coupons",
+                "coupon-a",
+                "UPDATE",
+                "coupons",
+                json!({"code":"A"}),
+            );
+            let second = queue_row(
+                &conn,
+                "coupons",
+                "coupon-b",
+                "UPDATE",
+                "coupons",
+                json!({"code":"B"}),
+            );
+            set_created_at(&conn, &first, "2026-10-20T08:00:00Z");
+            set_created_at(&conn, &second, "2026-10-20T08:00:01Z");
+
+            let (conn, result, requests) = run_pass(
+                conn,
+                vec![MockResponse::json(503, r#"{"error":"unavailable"}"#)],
+            )
+            .await;
+            assert_eq!(requests.len(), 1);
+            assert!(result.stopped_on_transport_failure);
+            let (status, attempts, error, _, _) = state(&conn, &first).unwrap();
+            assert_eq!((status.as_str(), attempts), ("pending", 1));
+            assert_eq!(error.as_deref(), Some("HTTP_503_SERVER_ERROR"));
+            let (_, attempts, _, _, generation) = state(&conn, &second).unwrap();
+            assert_eq!(
+                (attempts, generation),
+                (0, 0),
+                "the next row was never claimed"
+            );
+
+            make_due(&conn, &first);
+            conn.execute(
+                "UPDATE parity_sync_queue SET retry_delay_ms = 1000 WHERE id = ?1",
+                params![first],
+            )
+            .unwrap();
+            let (conn, result, requests) = run_pass(
+                conn,
+                vec![
+                    MockResponse::json(500, r#"{"error":"bug"}"#),
+                    MockResponse::json(200, r#"{"success":true}"#),
+                ],
+            )
+            .await;
+            assert_eq!(requests.len(), 2, "a 500 does not end the pass");
+            assert!(!result.stopped_on_transport_failure);
+            assert_eq!(result.processed, 1);
+            assert!(state(&conn, &second).is_none());
+        }
+
+        /// The retry-schedule audit keeps at most 32 entries per queue row,
+        /// trims on its `queue_id` index (migration v104), and leaves with
+        /// its row.
+        #[test]
+        fn the_retry_schedule_audit_is_bounded_indexed_and_leaves_with_its_row() {
+            let conn = test_connection();
+            let id = queue_row(
+                &conn,
+                "coupons",
+                "coupon-audit",
+                "UPDATE",
+                "coupons",
+                json!({"code":"A"}),
+            );
+            for _ in 0..40 {
+                audit_transient_schedule(&conn, &id, "transport_retry_scheduled").unwrap();
+            }
+            let count = |conn: &Connection, queue_id: &str| -> i64 {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sync_retry_schedule_audit_v1 WHERE queue_id = ?1",
+                    params![queue_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(count(&conn, &id), RETRY_SCHEDULE_AUDIT_ROWS_PER_QUEUE_ROW);
+
+            let mut statement = conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {RETRY_SCHEDULE_AUDIT_TRIM_SQL}"
+                ))
+                .unwrap();
+            let plan = statement
+                .query_map(
+                    params![id, RETRY_SCHEDULE_AUDIT_ROWS_PER_QUEUE_ROW],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(" | ");
+            drop(statement);
+            assert!(
+                plan.contains("idx_sync_retry_schedule_audit_queue"),
+                "{plan}"
+            );
+            assert!(
+                !plan.contains("SCAN sync_retry_schedule_audit_v1"),
+                "{plan}"
+            );
+
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'processing', claim_generation = 3 WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+            mark_success(&conn, &id, 3).unwrap();
+            assert_eq!(count(&conn, &id), 0, "a synced row takes its audit with it");
+
+            conn.execute(
+                "INSERT INTO sync_retry_schedule_audit_v1
+                    (queue_id, organization_id, before_json, outcome, created_at)
+                 VALUES ('row-gone', 'org-1', '{}', 'transport_retry_scheduled', '2026-10-20T08:00:00Z')",
+                [],
+            )
+            .unwrap();
+            assert_eq!(prune_orphan_retry_schedule_audit(&conn).unwrap(), 1);
+            assert_eq!(count(&conn, "row-gone"), 0);
+        }
+
+        // ── Ω1: the shift chain replays in order ────────────────────────────
+
+        /// Day N's check-out fails once on the network. Day N+1's check-in of
+        /// the same person is not sent before it (the server refused that
+        /// order for good, `unresolved_shift`), spends no attempt waiting,
+        /// and both land in order once the line is back.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn the_next_check_in_waits_for_the_previous_check_out_and_both_land() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let close = shift_close(&conn, "shift-day-1", "staff-1");
+            let open = shift_open(&conn, "shift-day-2", "staff-1");
+            set_created_at(&conn, &close, "2026-10-20T22:00:00Z");
+            set_created_at(&conn, &open, "2026-10-21T08:00:00Z");
+
+            // Offline: the check-out goes first, fails, and ends the pass.
+            let (mut conn, first) = run_offline_pass(conn).await;
+            assert!(first.stopped_on_transport_failure);
+            let (status, attempts, error, _, _) = state(&conn, &close).unwrap();
+            assert_eq!((status.as_str(), attempts), ("pending", 1));
+            assert_eq!(error.as_deref(), Some("NETWORK_ERROR"));
+            assert_eq!(state(&conn, &open).unwrap().1, 0);
+            conn.execute(
+                "UPDATE parity_sync_queue SET next_retry_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339(),
+                    close
+                ],
+            )
+            .unwrap();
+
+            // Still offline, the check-out in its backoff: the check-in is due
+            // but waits for it. Nothing is sent (a send would have failed and
+            // spent an attempt), so the pass does not stop on the network.
+            for _ in 0..3 {
+                make_due(&conn, &open);
+                let (next_conn, waiting) = run_offline_pass(conn).await;
+                conn = next_conn;
+                assert!(!waiting.stopped_on_transport_failure);
+            }
+            let (status, attempts, error, next, _) = state(&conn, &open).unwrap();
+            assert_eq!(
+                (status.as_str(), attempts),
+                ("pending", 0),
+                "no attempt spent"
+            );
+            assert_eq!(error.as_deref(), Some(WAITING_FOR_EARLIER_SHIFT_REASON));
+            assert!(next.is_some());
+
+            // Back online: the check-out lands, wakes the check-in, and the
+            // check-in lands in the same pass.
+            make_due(&conn, &close);
+            let (conn, online, requests) =
+                run_pass(conn, vec![shift_ok("shift-day-1"), shift_ok("shift-day-2")]).await;
+            assert_eq!(requests.len(), 2);
+            let sent: Vec<Value> = requests
+                .iter()
+                .map(|request| serde_json::from_str::<Value>(&request.body).unwrap())
+                .collect();
+            assert_eq!(sent[0]["events"][0]["event_type"], "shift_close");
+            assert_eq!(sent[0]["events"][0]["shift_id"], "shift-day-1");
+            assert_eq!(sent[1]["events"][0]["event_type"], "shift_open");
+            assert_eq!(sent[1]["events"][0]["shift_id"], "shift-day-2");
+            assert_eq!(online.processed, 2);
+            assert!(state(&conn, &close).is_none());
+            assert!(state(&conn, &open).is_none());
+        }
+
+        /// Another person's earlier row, a failed earlier row of the same
+        /// person, or a set-aside one does not hold a check-in.
+        #[test]
+        fn a_check_in_waits_only_for_the_same_persons_pending_earlier_rows() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let other = shift_close(&conn, "shift-other", "staff-2");
+            set_created_at(&conn, &other, "2026-10-20T22:00:00Z");
+            let open = shift_open(&conn, "shift-mine", "staff-1");
+            set_created_at(&conn, &open, "2026-10-21T08:00:00Z");
+            let item = load_queue_row(&conn, &open).unwrap().unwrap();
+            assert!(matches!(
+                prepare_request(&conn, &item).unwrap(),
+                RequestPreparation::Ready(_)
+            ));
+
+            let mine = shift_close(&conn, "shift-earlier", "staff-1");
+            set_created_at(&conn, &mine, "2026-10-20T23:00:00Z");
+            assert!(matches!(
+                prepare_request(&conn, &item).unwrap(),
+                RequestPreparation::WaitingForEarlierShift { .. }
+            ));
+
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', error_message = 'HTTP_422_CLIENT_ERROR' WHERE id = ?1",
+                params![mine],
+            )
+            .unwrap();
+            assert!(matches!(
+                prepare_request(&conn, &item).unwrap(),
+                RequestPreparation::Ready(_)
+            ));
+
+            // Pending again but set aside: it no longer holds the check-in.
+            conn.execute(
+                "INSERT INTO parity_sync_set_aside (
+                     queue_id, table_name, record_id, reason_code, set_aside_by_staff_id,
+                     set_aside_at, organization_id
+                 ) VALUES (?1, 'staff_shifts', 'shift-earlier', 'manager_reviewed', 'manager-1',
+                           '2026-10-21T09:00:00Z', 'org-1')",
+                params![mine],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'pending' WHERE id = ?1",
+                params![mine],
+            )
+            .unwrap();
+            assert!(matches!(
+                prepare_request(&conn, &item).unwrap(),
+                RequestPreparation::Ready(_)
+            ));
+        }
+
+        /// A driver earning of a shift whose check-in is still queued waits
+        /// for it, any number of passes, without spending an attempt, and
+        /// looks again with the check-in's own next attempt.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_earning_of_a_queued_shift_waits_for_free() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let open = shift_open(&conn, "shift-driver", "driver-1");
+            let open_next = Utc::now() + ChronoDuration::seconds(50);
+            conn.execute(
+                "UPDATE parity_sync_queue SET attempts = 1, error_message = 'NETWORK_ERROR', next_retry_at = ?1 WHERE id = ?2",
+                params![open_next.to_rfc3339(), open],
+            )
+            .unwrap();
+            let earning = queue_row(
+                &conn,
+                "driver_earnings",
+                "earning-1",
+                "INSERT",
+                "financial",
+                json!({
+                    "id": "earning-1",
+                    "driver_id": "driver-1",
+                    "staff_shift_id": "shift-driver",
+                    "total_earning": 3.5,
+                    "total_earning_cents": 350
+                }),
+            );
+
+            let db = std::sync::Mutex::new(conn);
+            for _ in 0..(MAX_DEFERRAL_CYCLES + 5) {
+                make_due(&db.lock().unwrap(), &earning);
+                process_queue(&db, "http://127.0.0.1:9", "api-key")
+                    .await
+                    .expect("process queue");
+            }
+            let conn = db.into_inner().unwrap();
+            let (status, attempts, error, next, _) = state(&conn, &earning).unwrap();
+            assert_eq!(
+                (status.as_str(), attempts),
+                ("pending", 0),
+                "never a conflict, no attempt"
+            );
+            assert_eq!(error, Some(waiting_for_shift_open_reason("shift-driver")));
+            let next = parse_queue_timestamp(&next.expect("rescheduled")).unwrap();
+            assert_eq!(next, open_next, "it looks again with its check-in");
+            assert_eq!(
+                state(&conn, &open).unwrap().1,
+                1,
+                "the check-in kept its backoff"
+            );
+        }
+
+        /// The rows that need their shift on the server: an order create, a
+        /// driver earning, an expense, a staff payment (the paying cashier's
+        /// shift) and a staff cash return (both shifts). A payment does not:
+        /// it waits for its order.
+        #[test]
+        fn the_rows_of_a_shift_name_it() {
+            let mut item = queue_item("orders", "INSERT", "order-1", json!({}));
+            let names = |item: &SyncQueueItem, payload: Value| shift_ids_named_by(item, &payload);
+            assert_eq!(names(&item, json!({"staffShiftId": "s-1"})), vec!["s-1"]);
+            item.operation = "UPDATE".to_string();
+            assert!(names(&item, json!({"staffShiftId": "s-1"})).is_empty());
+            item.table_name = "shift_expenses".to_string();
+            item.operation = "INSERT".to_string();
+            assert_eq!(names(&item, json!({"shiftId": "s-2"})), vec!["s-2"]);
+            item.table_name = "staff_payments".to_string();
+            assert_eq!(
+                names(
+                    &item,
+                    json!({"cashierShiftId": "s-3", "paidByCashierShiftId": "s-3"})
+                ),
+                vec!["s-3"]
+            );
+            item.table_name = "staff_order_cash_returns".to_string();
+            assert_eq!(
+                names(
+                    &item,
+                    json!({"source_staff_shift_id": "s-4", "receiving_cashier_shift_id": "s-5"})
+                ),
+                vec!["s-4", "s-5"]
+            );
+            item.table_name = "payments".to_string();
+            assert!(names(&item, json!({"staffShiftId": "s-6"})).is_empty());
+        }
+
+        /// W7's per-item answers arrive inside the 207 with `retryable: true`
+        /// (`SHIFT_NOT_SYNCED` per financial item, `SHIFT_PREDECESSOR_PENDING`
+        /// per shift event). Each is a wait that spends no attempt: never a
+        /// conflict, never failed for good, never "server wins", even when an
+        /// answer forgets the flag.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn the_servers_shift_answers_are_waits_that_spend_no_attempt() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let earning = queue_row(
+                &conn,
+                "driver_earnings",
+                "earning-elsewhere",
+                "INSERT",
+                "financial",
+                json!({"id": "earning-elsewhere", "driver_id": "driver-9", "staff_shift_id": "shift-not-here"}),
+            );
+            let open = shift_open(&conn, "shift-after", "staff-7");
+            set_created_at(&conn, &earning, "2026-10-21T08:00:00Z");
+            set_created_at(&conn, &open, "2026-10-21T08:00:01Z");
+            let (conn, result, requests) = run_pass(
+                conn,
+                vec![
+                    MockResponse::json(
+                        207,
+                        r#"{"success":false,"results":[{"entity_type":"driver_earning","entity_id":"earning-elsewhere","success":false,"status":"error","code":"SHIFT_NOT_SYNCED","retryable":true,"message":"Driver staff shift was not found on the backend"}]}"#,
+                    ),
+                    MockResponse::json(
+                        207,
+                        r#"{"success":false,"results":[{"shift_id":"shift-after","status":"error","code":"SHIFT_PREDECESSOR_PENDING","retryable":false,"message":"An earlier shift of this person on this till is not closed yet"}]}"#,
+                    ),
+                ],
+            )
+            .await;
+            assert_eq!(requests.len(), 2, "one request each, no follow-up lookup");
+            assert_eq!(
+                (result.conflicts, result.failed, result.processed),
+                (0, 0, 0)
+            );
+            assert!(result.shift_conflicts.is_empty());
+            for (id, code) in [
+                (&earning, SHIFT_NOT_SYNCED),
+                (&open, SHIFT_PREDECESSOR_PENDING),
+            ] {
+                let (status, attempts, error, next, _) = state(&conn, id).expect("kept");
+                assert_eq!((status.as_str(), attempts), ("pending", 0), "{code}");
+                assert_eq!(error, Some(waiting_on_server_shift_reason(code)));
+                assert!(next.is_some(), "{code} waits with its own backoff");
+            }
+            let delay: i64 = conn
+                .query_row(
+                    "SELECT retry_delay_ms FROM parity_sync_queue WHERE id = ?1",
+                    params![earning],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(delay >= 2_000, "the backoff grows: {delay}");
+
+            // It may wait forever (the shift never reaches the server): a
+            // manager may set it aside.
+            set_aside_queue_row(&conn, &earning, "manager-1", "shift_never_synced").unwrap();
+        }
+
+        /// When the check-in the server waits for is still queued here, the
+        /// row waits for that row, woken when it lands.
+        #[test]
+        fn a_predecessor_answer_waits_for_the_queued_earlier_shift() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let earlier = shift_close(&conn, "shift-n", "staff-1");
+            set_created_at(&conn, &earlier, "2026-10-20T22:00:00Z");
+            let open = shift_open(&conn, "shift-n1", "staff-1");
+            set_created_at(&conn, &open, "2026-10-21T08:00:00Z");
+            let item = claimed(&conn, &open);
+            apply_shift_wait_answer(&conn, &item, SHIFT_PREDECESSOR_PENDING).unwrap();
+            let (status, attempts, error, _, _) = state(&conn, &open).unwrap();
+            assert_eq!((status.as_str(), attempts), ("pending", 0));
+            assert_eq!(error.as_deref(), Some(WAITING_FOR_EARLIER_SHIFT_REASON));
+
+            // The earlier row lands: the check-in is due at once.
+            let landed = claimed(&conn, &earlier);
+            mark_success(&conn, &earlier, landed.claim_generation).unwrap();
+            wake_rows_after_success(&conn, &landed).unwrap();
+            assert_eq!(state(&conn, &open).unwrap().3, None);
+        }
+
+        /// The top-level sibling of the parent-order wait still recognises a
+        /// shift code in a 409 body; any other 409 is left to its own arms.
+        #[test]
+        fn a_409_naming_a_shift_wait_code_is_a_shift_wait() {
+            assert_eq!(
+                shift_parent_wait_response_code(
+                    409,
+                    r#"{"code":"SHIFT_NOT_SYNCED","retryable":true}"#
+                ),
+                Some(SHIFT_NOT_SYNCED.to_string())
+            );
+            assert_eq!(
+                shift_parent_wait_response_code(
+                    409,
+                    r#"{"error":{"code":"order_shift_not_synced"}}"#
+                ),
+                Some(ORDER_SHIFT_NOT_SYNCED.to_string())
+            );
+            assert!(shift_parent_wait_response_code(409, r#"{"code":"DUPLICATE"}"#).is_none());
+            assert!(
+                shift_parent_wait_response_code(500, r#"{"code":"SHIFT_NOT_SYNCED"}"#).is_none()
+            );
+        }
+
+        /// W8's 7-day test: after a week of offline retries the day-1 opening
+        /// sat in a long backoff and its own close went out first. The server
+        /// then recorded the shift closed and answered the opening `skipped`,
+        /// so its `offline_check_in` re-check never ran. A close now waits
+        /// for its shift's opening, for free, and follows it in the same pass.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_shifts_close_never_overtakes_its_own_opening() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let open = shift_open(&conn, "shift-week", "staff-1");
+            let close = shift_close(&conn, "shift-week", "staff-1");
+            set_created_at(&conn, &open, "2026-10-14T08:00:00Z");
+            set_created_at(&conn, &close, "2026-10-14T22:00:00Z");
+            // A week of offline retries: the opening is deep in its backoff.
+            let open_next = Utc::now() + ChronoDuration::seconds(600);
+            conn.execute(
+                "UPDATE parity_sync_queue SET attempts = 15, error_message = 'NETWORK_ERROR',
+                        retry_delay_ms = 60000, next_retry_at = ?1
+                 WHERE id = ?2",
+                params![open_next.to_rfc3339(), open],
+            )
+            .unwrap();
+
+            // The close is due, the opening is not: the close waits, sending
+            // nothing (a send would have failed on the closed port).
+            let (conn, waiting) = run_offline_pass(conn).await;
+            assert!(!waiting.stopped_on_transport_failure, "nothing was sent");
+            let (status, attempts, error, next, _) = state(&conn, &close).unwrap();
+            assert_eq!(
+                (status.as_str(), attempts),
+                ("pending", 0),
+                "no attempt spent"
+            );
+            assert_eq!(error, Some(waiting_for_shift_open_reason("shift-week")));
+            let next = parse_queue_timestamp(&next.expect("rescheduled")).unwrap();
+            assert_eq!(next, open_next, "it looks again with its opening");
+            assert_eq!(
+                state(&conn, &open).unwrap().1,
+                15,
+                "the opening kept its backoff"
+            );
+
+            // The line is back and the opening is due: the opening goes first,
+            // wakes its close, and the close follows in the same pass.
+            make_due(&conn, &open);
+            let (conn, online, requests) =
+                run_pass(conn, vec![shift_ok("shift-week"), shift_ok("shift-week")]).await;
+            assert_eq!(requests.len(), 2);
+            let sent: Vec<Value> = requests
+                .iter()
+                .map(|request| serde_json::from_str::<Value>(&request.body).unwrap())
+                .collect();
+            assert_eq!(sent[0]["events"][0]["event_type"], "shift_open");
+            assert_eq!(sent[0]["events"][0]["data"]["offline_check_in"], true);
+            assert_eq!(sent[1]["events"][0]["event_type"], "shift_close");
+            assert_eq!(online.processed, 2);
+            assert!(state(&conn, &open).is_none());
+            assert!(state(&conn, &close).is_none());
+        }
+
+        /// A close waiting on an opening refused for good belongs to that
+        /// opening's group: once the opening is set aside, the close may be.
+        #[test]
+        fn a_close_waiting_on_a_refused_opening_is_in_its_group() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let open = shift_open(&conn, "shift-refused-close", "staff-4");
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed',
+                        error_message = 'PARITY_ITEM_REJECTED:OFFLINE_CHECK_IN_CONFLICT: unresolved_shift'
+                 WHERE id = ?1",
+                params![open],
+            )
+            .unwrap();
+            let close = shift_close(&conn, "shift-refused-close", "staff-4");
+            let item = claimed(&conn, &close);
+            let RequestPreparation::WaitingForShiftOpen { reason, shift_id } =
+                prepare_request(&conn, &item).unwrap()
+            else {
+                panic!("the close waits for its opening");
+            };
+            assert_eq!(shift_id, "shift-refused-close");
+            mark_waiting_for_shift_open(&conn, &item.id, &reason, item.claim_generation, &shift_id)
+                .unwrap();
+            assert_eq!(
+                rows_waiting_on_queue_row(&conn, &open).unwrap(),
+                vec![close.clone()]
+            );
+            assert_eq!(
+                set_aside_queue_row(&conn, &close, "manager-1", "check_in_refused").unwrap_err(),
+                "SET_ASIDE_NOT_ELIGIBLE"
+            );
+            set_aside_queue_row(&conn, &open, "manager-1", "check_in_refused").unwrap();
+            set_aside_queue_row(&conn, &close, "manager-1", "check_in_refused").unwrap();
+        }
+
+        /// Setting aside the last row a Z waits for sends the Z in the next
+        /// pass instead of at its 15 s recheck.
+        #[test]
+        fn a_set_aside_wakes_the_z_that_waited_for_it() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let z = queue_z(&conn, "z-woken", "2026-10-21T23:00:00Z");
+            let payment = queue_row(
+                &conn,
+                "payments",
+                "pay-woken",
+                "INSERT",
+                "payment",
+                json!({"paymentId": "pay-woken", "orderId": "order-woken", "amount": 5.0}),
+            );
+            set_created_at(&conn, &payment, "2026-10-21T12:00:00Z");
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', attempts = 1,
+                        error_message = 'HTTP_422_CLIENT_ERROR'
+                 WHERE id = ?1",
+                params![payment],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE parity_sync_queue SET error_message = ?1, next_retry_at = ?2 WHERE id = ?3",
+                params![
+                    WAITING_FOR_WINDOW_MONEY_REASON,
+                    (Utc::now() + ChronoDuration::seconds(15)).to_rfc3339(),
+                    z
+                ],
+            )
+            .unwrap();
+
+            set_aside_queue_row(&conn, &payment, "manager-1", "manager_reviewed").unwrap();
+            assert_eq!(state(&conn, &z).unwrap().3, None, "the Z is due at once");
+        }
+
+        // ── Ω11: an order create waits for its checkout's loyalty release ───
+
+        fn queue_loyalty_release(conn: &Connection, tx_id: &str, checkout_id: &str) -> String {
+            enqueue(
+                conn,
+                &EnqueueInput {
+                    table_name: "loyalty_transactions".to_string(),
+                    record_id: tx_id.to_string(),
+                    operation: "DELETE".to_string(),
+                    data: json!({
+                        "id": tx_id,
+                        "transaction_type": "release",
+                        "customer_id": "customer-1",
+                        "organization_id": "org-1",
+                        "order_id": checkout_id,
+                        "points": -100,
+                        "created_at": "2026-10-21T12:00:00Z"
+                    })
+                    .to_string(),
+                    organization_id: "org-1".to_string(),
+                    priority: Some(2),
+                    module_type: Some("loyalty".to_string()),
+                    conflict_strategy: Some("manual".to_string()),
+                    version: Some(1),
+                },
+            )
+            .expect("enqueue loyalty release")
+        }
+
+        fn is_waiting_for_release(preparation: &RequestPreparation) -> bool {
+            matches!(
+                preparation,
+                RequestPreparation::WaitingForParent { reason }
+                    if reason.starts_with(LOYALTY_WAITING_FOR_RELEASE)
+            )
+        }
+
+        /// W10's order race: a checkout's points were released offline (a
+        /// queued RELEASE op), then the same checkout was saved without them.
+        /// Had the order's create reached the server first, the release would
+        /// get `LOYALTY_ORDER_EXISTS` and the customer would lose the points.
+        /// The create now waits for the release, spends no attempt, and is
+        /// woken when the release lands, is settled for good or set aside.
+        #[test]
+        fn an_order_create_waits_for_its_checkouts_loyalty_release() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            conn.execute(
+                "INSERT INTO orders (id, client_request_id, items, total_amount, total_amount_cents,
+                                     status, sync_status, created_at, updated_at)
+                 VALUES ('order-loyalty', 'checkout-1', '[]', 9.0, 900, 'pending', 'pending',
+                         datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let release = queue_loyalty_release(&conn, "loyalty-release-1", "checkout-1");
+            let order = queue_row(
+                &conn,
+                "orders",
+                "order-loyalty",
+                "INSERT",
+                "orders",
+                json!({"orderId": "order-loyalty", "totalAmount": 9.0}),
+            );
+            let order_item = load_queue_row(&conn, &order).unwrap().unwrap();
+            assert!(is_waiting_for_release(
+                &prepare_request(&conn, &order_item).unwrap()
+            ));
+
+            // Another checkout's release does not hold it.
+            let other = queue_loyalty_release(&conn, "loyalty-release-2", "checkout-2");
+            conn.execute(
+                "DELETE FROM parity_sync_queue WHERE id = ?1",
+                params![release],
+            )
+            .unwrap();
+            assert!(!is_waiting_for_release(
+                &prepare_request(&conn, &order_item).unwrap()
+            ));
+            conn.execute(
+                "DELETE FROM parity_sync_queue WHERE id = ?1",
+                params![other],
+            )
+            .unwrap();
+
+            // The wait spends no attempt; the release landing wakes it.
+            let release = queue_loyalty_release(&conn, "loyalty-release-3", "checkout-1");
+            let waiting = claimed(&conn, &order);
+            let RequestPreparation::WaitingForParent { reason } =
+                prepare_request(&conn, &waiting).unwrap()
+            else {
+                panic!("the order create waits for its release");
+            };
+            assert_eq!(reason, waiting_for_loyalty_release_reason("checkout-1"));
+            mark_waiting_for_parent(&conn, &waiting.id, &reason, waiting.claim_generation).unwrap();
+            let (status, attempts, _, next, _) = state(&conn, &order).unwrap();
+            assert_eq!((status.as_str(), attempts), ("pending", 0));
+            assert!(next.is_some());
+            let landed = claimed(&conn, &release);
+            mark_success(&conn, &release, landed.claim_generation).unwrap();
+            wake_rows_after_success(&conn, &landed).unwrap();
+            assert_eq!(state(&conn, &order).unwrap().3, None, "due at once");
+            assert!(!is_waiting_for_release(
+                &prepare_request(&conn, &order_item).unwrap()
+            ));
+
+            // Settled for good (`LOYALTY_ORDER_EXISTS`, the loop's retire arm):
+            // the order is woken the same way.
+            let release = queue_loyalty_release(&conn, "loyalty-release-4", "checkout-1");
+            let waiting = claimed(&conn, &order);
+            mark_waiting_for_parent(&conn, &waiting.id, &reason, waiting.claim_generation).unwrap();
+            let settled = claimed(&conn, &release);
+            retire_ended_loyalty_item(&conn, &settled).unwrap();
+            wake_rows_after_success(&conn, &settled).unwrap();
+            assert_eq!(state(&conn, &order).unwrap().3, None);
+
+            // A failed release (it is the row Health shows) and a set-aside
+            // one no longer hold the order.
+            let release = queue_loyalty_release(&conn, "loyalty-release-5", "checkout-1");
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', error_message = 'HTTP_400_CLIENT_ERROR' WHERE id = ?1",
+                params![release],
+            )
+            .unwrap();
+            assert!(!is_waiting_for_release(
+                &prepare_request(&conn, &order_item).unwrap()
+            ));
+            set_aside_queue_row(&conn, &release, "manager-1", "manager_reviewed").unwrap();
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'pending' WHERE id = ?1",
+                params![release],
+            )
+            .unwrap();
+            assert!(!is_waiting_for_release(
+                &prepare_request(&conn, &order_item).unwrap()
+            ));
+        }
+
+        // ── Ω3: the Zs reach the server in window order ─────────────────────
+
+        /// A Z waits for the Z before it, then for the money, shift and drawer
+        /// rows of its own window; neither spends an attempt. Money after its
+        /// cutoff and money set aside do not hold it.
+        #[test]
+        fn a_z_waits_for_the_z_before_it_and_for_its_window() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let z1 = queue_z(&conn, "z-day-1", "2026-10-20T23:00:00Z");
+            let z2 = queue_z(&conn, "z-day-2", "2026-10-21T23:00:00Z");
+            let later = load_queue_row(&conn, &z2).unwrap().unwrap();
+            let earlier = load_queue_row(&conn, &z1).unwrap().unwrap();
+            assert!(matches!(
+                prepare_request(&conn, &later).unwrap(),
+                RequestPreparation::WaitingForEarlierZ { .. }
+            ));
+            assert!(
+                matches!(
+                    prepare_request(&conn, &earlier).unwrap(),
+                    RequestPreparation::Ready(_)
+                ),
+                "the earlier Z does not wait for the later one"
+            );
+
+            // Day 1's Z reached the server.
+            conn.execute("DELETE FROM parity_sync_queue WHERE id = ?1", params![z1])
+                .unwrap();
+            let payment = queue_row(
+                &conn,
+                "payments",
+                "pay-day-2",
+                "INSERT",
+                "payment",
+                json!({"paymentId": "pay-day-2", "orderId": "order-day-2", "amount": 5.0}),
+            );
+            set_created_at(&conn, &payment, "2026-10-21T12:00:00Z");
+            assert!(matches!(
+                prepare_request(&conn, &later).unwrap(),
+                RequestPreparation::WaitingForWindowMoney { .. }
+            ));
+
+            set_created_at(&conn, &payment, "2026-10-22T09:00:00Z");
+            assert!(
+                matches!(
+                    prepare_request(&conn, &later).unwrap(),
+                    RequestPreparation::Ready(_)
+                ),
+                "the next day's money does not hold day 2's Z"
+            );
+
+            set_created_at(&conn, &payment, "2026-10-21T12:00:00Z");
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', attempts = 1,
+                        error_message = 'HTTP_422_CLIENT_ERROR'
+                 WHERE id = ?1",
+                params![payment],
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    prepare_request(&conn, &later).unwrap(),
+                    RequestPreparation::WaitingForWindowMoney { .. }
+                ),
+                "a refused payment of the window holds it"
+            );
+            set_aside_queue_row(&conn, &payment, "manager-1", "manager_reviewed").unwrap();
+            assert!(
+                matches!(
+                    prepare_request(&conn, &later).unwrap(),
+                    RequestPreparation::Ready(_)
+                ),
+                "a set-aside payment no longer holds it"
+            );
+        }
+
+        /// The Z waiting for its window goes out in the same pass as the last
+        /// row of that window, never before it, and spends no attempt.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_z_goes_out_right_after_the_last_row_of_its_window() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let z = queue_z(&conn, "z-window", "2026-10-21T23:00:00Z");
+            let close = shift_close(&conn, "shift-window", "staff-1");
+            set_created_at(&conn, &z, "2026-10-21T23:00:00Z");
+            set_created_at(&conn, &close, "2026-10-21T22:00:00Z");
+            // The close is in its backoff: the Z is claimed first and waits.
+            conn.execute(
+                "UPDATE parity_sync_queue SET attempts = 1, next_retry_at = ?1 WHERE id = ?2",
+                params![
+                    (Utc::now() + ChronoDuration::seconds(30)).to_rfc3339(),
+                    close
+                ],
+            )
+            .unwrap();
+            let (conn, waiting) = run_offline_pass(conn).await;
+            assert!(!waiting.stopped_on_transport_failure, "the Z sent nothing");
+            let (status, attempts, error, _, _) = state(&conn, &z).unwrap();
+            assert_eq!((status.as_str(), attempts), ("pending", 0));
+            assert_eq!(error.as_deref(), Some(WAITING_FOR_WINDOW_MONEY_REASON));
+
+            make_due(&conn, &close);
+            let (conn, online, requests) = run_pass(
+                conn,
+                vec![
+                    shift_ok("shift-window"),
+                    MockResponse::json(200, r#"{"success":true,"id":"server-z"}"#),
+                ],
+            )
+            .await;
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0]
+                .request_line
+                .starts_with("POST /api/pos/shifts/sync"));
+            assert!(requests[1]
+                .request_line
+                .starts_with("POST /api/pos/z-report/submit"));
+            assert_eq!(online.processed, 2);
+            assert!(state(&conn, &z).is_none());
+        }
+
+        // ── Ω4: unknown conflicts are kept; set aside is explicit ───────────
+
+        /// An unknown 409 used to resolve "server wins" and delete the row:
+        /// the record never reached the server. It now parks as a conflict,
+        /// `UNKNOWN_CONFLICT_REVIEW`, kept for review and set-aside.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn an_unknown_409_parks_for_review_instead_of_deleting_the_row() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let coupon = enqueue(
+                &conn,
+                &EnqueueInput {
+                    table_name: "coupons".to_string(),
+                    record_id: "coupon-409".to_string(),
+                    operation: "UPDATE".to_string(),
+                    data: json!({"code": "SUMMER"}).to_string(),
+                    organization_id: "org-1".to_string(),
+                    priority: Some(0),
+                    module_type: Some("coupons".to_string()),
+                    conflict_strategy: Some("server-wins".to_string()),
+                    version: Some(1),
+                },
+            )
+            .unwrap();
+            let (conn, result, _) = run_pass(
+                conn,
+                vec![
+                    MockResponse::json(409, r#"{"success":false,"error":"Coupon is locked"}"#),
+                    MockResponse::json(404, r#"{"success":false}"#),
+                ],
+            )
+            .await;
+            assert_eq!((result.processed, result.conflicts), (0, 1));
+            let (status, _, error, _, _) = state(&conn, &coupon).expect("the row is kept");
+            assert_eq!(status, "conflict");
+            assert_eq!(error.as_deref(), Some(UNKNOWN_CONFLICT_REVIEW));
+        }
+
+        /// A table's live status is still "server wins": the server owns it.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_table_status_409_still_resolves_server_wins() {
+            clear_terminal_identity();
+            let _keyring =
+                crate::tests::fake_keyring::install_seeded([("terminal_id", TEST_TERMINAL_ID)]);
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let table = enqueue(
+                &conn,
+                &EnqueueInput {
+                    table_name: "restaurant_tables".to_string(),
+                    record_id: "table-7".to_string(),
+                    operation: "UPDATE".to_string(),
+                    data: json!({"status": "occupied", "updated_at": "2026-10-21T10:00:00Z"})
+                        .to_string(),
+                    organization_id: "org-1".to_string(),
+                    priority: Some(0),
+                    module_type: Some("operations".to_string()),
+                    conflict_strategy: Some("server-wins".to_string()),
+                    version: Some(1),
+                },
+            )
+            .unwrap();
+            let (conn, result, _) = run_pass(
+                conn,
+                vec![
+                    MockResponse::json(409, r#"{"success":false,"error":"Table changed"}"#),
+                    MockResponse::json(404, r#"{"success":false}"#),
+                ],
+            )
+            .await;
+            assert_eq!(result.processed, 1);
+            assert!(state(&conn, &table).is_none());
+        }
+
+        fn refused_payment(conn: &Connection, payment_id: &str) -> String {
+            let id = queue_row(
+                conn,
+                "payments",
+                payment_id,
+                "INSERT",
+                "payment",
+                json!({"paymentId": payment_id, "orderId": "order-refused", "amount": 7.0}),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', attempts = 1,
+                        error_message = 'HTTP_422_CLIENT_ERROR:POS_ORDER_CUSTOMER_UNKNOWN'
+                 WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+            id
+        }
+
+        /// A set-aside row stays in the queue with its status and payload,
+        /// listed with who, when and why, audited, and never claimed, retried
+        /// or revived; undoing it brings it back to the Z gates.
+        #[test]
+        fn a_set_aside_row_is_kept_audited_and_never_sent_until_undone() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            crate::db::set_setting(&conn, "terminal", "organization_id", "org-1").unwrap();
+            let id = refused_payment(&conn, "pay-refused");
+            let before: (String, String, i64) = conn
+                .query_row(
+                    "SELECT status, data, attempts FROM parity_sync_queue WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(get_closeout_blocking_status(&conn).unwrap().failed, 1);
+
+            let entry = set_aside_queue_row(&conn, &id, "manager-1", "manager_reviewed").unwrap();
+            assert_eq!(entry.queue_id, id);
+            assert_eq!(entry.table_name, "payments");
+            assert_eq!(entry.reason_code, "manager_reviewed");
+            assert_eq!(entry.set_aside_by_staff_id, "manager-1");
+            assert!(entry
+                .server_message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("HTTP_422_CLIENT_ERROR")));
+            assert_eq!(list_set_aside_entries(&conn).unwrap(), vec![entry.clone()]);
+            let after: (String, String, i64) = conn
+                .query_row(
+                    "SELECT status, data, attempts FROM parity_sync_queue WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(after, before, "the row keeps its status and payload");
+            let audited: (String, String, Option<String>) = conn
+                .query_row(
+                    "SELECT action_id, issue_code, actor_staff_id FROM recovery_action_log
+                     WHERE entity_id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                audited,
+                (
+                    "parity_set_aside".to_string(),
+                    "manager_reviewed".to_string(),
+                    Some("manager-1".to_string())
+                )
+            );
+            assert_eq!(
+                get_closeout_blocking_status(&conn).unwrap().failed,
+                0,
+                "out of the Z gate"
+            );
+            assert_eq!(
+                set_aside_queue_row(&conn, &id, "manager-1", "manager_reviewed").unwrap_err(),
+                "SET_ASIDE_ALREADY"
+            );
+
+            // Every retry path skips it.
+            assert_eq!(retry_items_by_module(&conn, "payment").unwrap().retried, 0);
+            assert_eq!(
+                renderer_retry_items_by_module(&conn, "payment")
+                    .unwrap()
+                    .retried,
+                0
+            );
+            assert!(renderer_retryable_item_ids_by_module(&conn, "payment", 10)
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                renderer_retry_item(&conn, &id).unwrap_err(),
+                PARITY_ITEM_SET_ASIDE
+            );
+            assert_eq!(retry_item(&conn, &id).unwrap_err(), PARITY_ITEM_SET_ASIDE);
+            assert_eq!(
+                renderer_retry_and_dequeue_exact(&conn, &id).unwrap_err(),
+                PARITY_ITEM_SET_ASIDE
+            );
+            assert_eq!(
+                clear_unsynced_items(&conn, "payments", "pay-refused").unwrap(),
+                0
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', attempts = ?1, error_message = 'NETWORK_ERROR' WHERE id = ?2",
+                params![MAX_RETRY_ATTEMPTS, id],
+            )
+            .unwrap();
+            resume_exhausted_transport_items(&conn).unwrap();
+            assert_eq!(
+                state(&conn, &id).unwrap().0,
+                "failed",
+                "never revived on its own"
+            );
+            // Even revived by some other path, it is never claimed.
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'pending', next_retry_at = NULL WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+            assert!(dequeue(&conn).unwrap().is_none());
+            assert!(renderer_dequeue(&conn).unwrap().is_none());
+
+            undo_set_aside(&conn, &id, "manager-2").unwrap();
+            assert!(list_set_aside_entries(&conn).unwrap().is_empty());
+            let undo_audit: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recovery_action_log
+                     WHERE entity_id = ?1 AND action_id = 'parity_set_aside_undo'
+                       AND actor_staff_id = 'manager-2'",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(undo_audit, 1);
+            assert_eq!(
+                dequeue(&conn).unwrap().map(|item| item.id),
+                Some(id.clone())
+            );
+            assert_eq!(
+                undo_set_aside(&conn, &id, "manager-2").unwrap_err(),
+                "SET_ASIDE_NOT_FOUND"
+            );
+        }
+
+        /// Set aside is for a record refused for good that holds a Z: not a
+        /// pending row, a transport failure, a server error or a customer
+        /// directory row, and never without a manager and a reason.
+        #[test]
+        fn only_a_row_refused_for_good_may_be_set_aside() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let id = refused_payment(&conn, "pay-eligible");
+            assert_eq!(
+                set_aside_queue_row(&conn, &id, " ", "manager_reviewed").unwrap_err(),
+                "SET_ASIDE_STAFF_REQUIRED"
+            );
+            assert_eq!(
+                set_aside_queue_row(&conn, &id, "manager-1", " ;; ").unwrap_err(),
+                "SET_ASIDE_REASON_INVALID"
+            );
+            assert_eq!(
+                bounded_set_aside_reason("Deferred too many times (50×)").as_deref(),
+                Some("Deferred_too_many_times__50")
+            );
+            assert_eq!(
+                set_aside_queue_row(&conn, "missing", "manager-1", "manager_reviewed").unwrap_err(),
+                "SET_ASIDE_NOT_FOUND"
+            );
+            for (status, error) in [
+                ("pending", None),
+                ("failed", Some("NETWORK_ERROR")),
+                ("failed", Some("HTTP_500_SERVER_ERROR")),
+                ("failed", Some("HTTP_429_RATE_LIMITED")),
+                (
+                    "failed",
+                    Some("Parity sync request is missing terminal_id context"),
+                ),
+                ("processing", None),
+            ] {
+                conn.execute(
+                    "UPDATE parity_sync_queue SET status = ?1, error_message = ?2 WHERE id = ?3",
+                    params![status, error, id],
+                )
+                .unwrap();
+                assert_eq!(
+                    set_aside_queue_row(&conn, &id, "manager-1", "manager_reviewed").unwrap_err(),
+                    "SET_ASIDE_NOT_ELIGIBLE",
+                    "{status} {error:?}"
+                );
+            }
+            let customer = enqueue_test_item(
+                &conn,
+                "customers",
+                "INSERT",
+                "customer-refused",
+                json!({"name": "Refused"}),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed', error_message = 'HTTP_400_CLIENT_ERROR:INVALID_PHONE' WHERE id = ?1",
+                params![customer],
+            )
+            .unwrap();
+            assert_eq!(
+                set_aside_queue_row(&conn, &customer, "manager-1", "manager_reviewed").unwrap_err(),
+                "SET_ASIDE_NOT_A_Z_GATE"
+            );
+            // An unknown conflict and a refused offline check-in are eligible.
+            for error in [
+                UNKNOWN_CONFLICT_REVIEW,
+                "PARITY_ITEM_REJECTED:OFFLINE_CHECK_IN_CONFLICT: refused",
+            ] {
+                conn.execute(
+                    "UPDATE parity_sync_queue SET status = 'conflict', error_message = ?1 WHERE id = ?2",
+                    params![error, id],
+                )
+                .unwrap();
+                set_aside_queue_row(&conn, &id, "manager-1", "manager_reviewed").unwrap();
+                undo_set_aside(&conn, &id, "manager-1").unwrap();
+            }
+        }
+
+        /// A refused check-in and the rows that can only wait on it form one
+        /// group: once the check-in is set aside, each of them may be too.
+        #[test]
+        fn the_rows_of_a_refused_check_in_can_be_set_aside_with_it() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            let open = shift_open(&conn, "shift-refused", "staff-3");
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'failed',
+                        error_message = 'PARITY_ITEM_REJECTED:OFFLINE_CHECK_IN_CONFLICT: active_shift_elsewhere'
+                 WHERE id = ?1",
+                params![open],
+            )
+            .unwrap();
+            let expense = queue_row(
+                &conn,
+                "shift_expenses",
+                "expense-refused",
+                "INSERT",
+                "financial",
+                json!({"expenseId": "expense-refused", "shiftId": "shift-refused", "staffId": "staff-3", "amount": 4.0}),
+            );
+            let item = claimed(&conn, &expense);
+            let RequestPreparation::WaitingForShiftOpen { reason, shift_id } =
+                prepare_request(&conn, &item).unwrap()
+            else {
+                panic!("the expense waits for its check-in");
+            };
+            mark_waiting_for_shift_open(&conn, &item.id, &reason, item.claim_generation, &shift_id)
+                .unwrap();
+            let (_, attempts, _, next, _) = state(&conn, &expense).unwrap();
+            assert_eq!(attempts, 0);
+            let next = parse_queue_timestamp(&next.unwrap()).unwrap();
+            assert!(
+                next > Utc::now() + ChronoDuration::seconds(SHIFT_OPEN_REFUSED_RECHECK_SECS - 10),
+                "a refused check-in is looked at rarely"
+            );
+
+            assert_eq!(
+                set_aside_queue_row(&conn, &expense, "manager-1", "check_in_refused").unwrap_err(),
+                "SET_ASIDE_NOT_ELIGIBLE",
+                "not before its check-in"
+            );
+            assert_eq!(
+                rows_waiting_on_queue_row(&conn, &open).unwrap(),
+                vec![expense.clone()]
+            );
+            set_aside_queue_row(&conn, &open, "manager-1", "check_in_refused").unwrap();
+            set_aside_queue_row(&conn, &expense, "manager-1", "check_in_refused").unwrap();
+            assert!(rows_waiting_on_queue_row(&conn, &open).unwrap().is_empty());
+        }
+
+        // ── Ω9: the monetary class ──────────────────────────────────────────
+
+        /// Driver earnings, expenses and staff payments are `financial` rows:
+        /// money, with the 5 min retry cap and the monetary dead-letter notice.
+        #[test]
+        fn financial_rows_are_money() {
+            assert_eq!(
+                monetary_dead_letter_category("financial"),
+                Some(MonetaryDeadLetterCategory::Financial)
+            );
+            assert_eq!(
+                compute_next_retry_delay_ms(MAX_MONETARY_RETRY_DELAY_MS, "financial"),
+                MAX_MONETARY_RETRY_DELAY_MS
+            );
+            let conn = test_connection();
+            let id = queue_row(
+                &conn,
+                "shift_expenses",
+                "expense-dead",
+                "INSERT",
+                "financial",
+                json!({"expenseId": "expense-dead", "shiftId": "shift-x", "amount": 2.0}),
+            );
+            conn.execute(
+                "UPDATE parity_sync_queue SET status = 'processing', attempts = ?1, claim_generation = 4 WHERE id = ?2",
+                params![MAX_RETRY_ATTEMPTS - 1, id],
+            )
+            .unwrap();
+            let outcome = mark_failure(&conn, &id, "HTTP_422_CLIENT_ERROR", 4).unwrap();
+            assert!(outcome.transitioned_to_dead_letter);
+            assert_eq!(
+                serde_json::to_value(outcome.monetary_notice.expect("notice")).unwrap(),
+                json!({ "category": "financial" })
+            );
+        }
+
+        // ── Ω13: the till's own time of money ───────────────────────────────
+
+        /// Payment and refund bodies carry `clientOccurredAt`: the local row's
+        /// `created_at`, normalized to RFC 3339 UTC (a SQLite
+        /// `YYYY-MM-DD HH:MM:SS` value is stored as NULL by the server).
+        #[test]
+        fn payment_and_refund_bodies_carry_the_tills_own_time() {
+            let conn = test_connection();
+            seed_terminal_context(&conn);
+            conn.execute_batch(
+                "INSERT INTO orders (id, supabase_id, items, total_amount, total_amount_cents, status, sync_status, created_at, updated_at)
+                 VALUES ('order-time', '33333333-3333-4333-8333-333333333333', '[]', 9.0, 900, 'completed', 'synced', datetime('now'), datetime('now'));
+                 INSERT INTO order_payments (id, order_id, method, amount, amount_cents, currency, status, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+                 VALUES ('pay-time', 'order-time', 'cash', 9.0, 900, 'EUR', 'completed', 'synced', 'applied', '44444444-4444-4444-8444-444444444444', '2026-10-15 08:30:00', datetime('now'));",
+            )
+            .unwrap();
+            let payment = queue_item(
+                "payments",
+                "INSERT",
+                "pay-time",
+                json!({"paymentId": "pay-time", "orderId": "order-time", "amount": 9.0, "method": "cash"}),
+            );
+            let RequestPreparation::Ready(spec) = prepare_payment_request(
+                &conn,
+                &payment,
+                &serde_json::from_str(&payment.data).unwrap(),
+                TEST_TERMINAL_ID,
+            )
+            .unwrap() else {
+                panic!("the payment is ready");
+            };
+            let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["clientOccurredAt"], "2026-10-15T08:30:00.000Z");
+
+            // The payment reached the server before its refund is sent.
+            conn.execute(
+                "UPDATE order_payments SET sync_state = 'applied', sync_status = 'synced' WHERE id = 'pay-time'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, created_at, updated_at)
+                 VALUES ('adj-time', 'pay-time', 'order-time', 'refund', 2.0, 'Cold', '2026-10-15T09:45:00+03:00', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let adjustment = queue_item(
+                "payment_adjustments",
+                "INSERT",
+                "adj-time",
+                json!({"adjustmentId": "adj-time", "paymentId": "pay-time", "orderId": "order-time", "adjustmentType": "refund", "amount": 2.0, "reason": "Cold"}),
+            );
+            let spec = match prepare_adjustment_request(
+                &conn,
+                &adjustment,
+                &serde_json::from_str(&adjustment.data).unwrap(),
+                TEST_TERMINAL_ID,
+            )
+            .unwrap()
+            {
+                RequestPreparation::Ready(spec) => spec,
+                other => panic!("the refund is ready: {other:?}"),
+            };
+            let body: Value = serde_json::from_str(spec.body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["clientOccurredAt"], "2026-10-15T06:45:00.000Z");
         }
     }
 }

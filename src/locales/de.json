@@ -1,4 +1,10 @@
 {
+  "missedPlatformOrders": {
+    "title_one": "{{count}} Plattform-Bestellung wurde abgelehnt, während die Kasse offline war",
+    "title_other": "{{count}} Plattform-Bestellungen wurden abgelehnt, während die Kasse offline war",
+    "body": "≈{{total}} an Bestellungen automatisch abgelehnt (Kasse offline). Halten Sie die Kasse verbunden, um Plattform-Bestellungen zu erhalten.",
+    "dismiss": "OK"
+  },
   "twintPayment": {
     "receiptNotSaved": "Bestätigt, nicht gespeichert",
     "receiptConfirmedAt": "Vom Kassierer bestätigt um",
@@ -953,6 +959,13 @@
       "deliveryFeeZoneNotChecked": "Zone nicht geprüft",
       "deliveryZoneNotCheckedNotice": "Die Lieferzone wurde nicht geprüft. Wählen Sie die Adresse erneut aus.",
       "repickDeliveryAddress": "Adresse erneut auswählen",
+      "deliveryFeeChooseZone": "Zone wählen",
+      "offlineZoneChoiceTitle": "Lieferzone wählen",
+      "offlineZoneChoiceHint": "Keine Verbindung: Diese Adresse kann nicht geortet werden. Wählen Sie ihre Zone; es gilt die Liefergebühr dieser Zone.",
+      "offlineZoneChoiceLoading": "Zonen des Geschäfts werden geladen…",
+      "offlineZoneChoiceNoZones": "Auf dieser Kasse sind keine Lieferzonen gespeichert. Verbinden Sie sich einmal, um sie herunterzuladen, oder ändern Sie die Bestellart.",
+      "offlineZoneChoiceRequired": "Wählen Sie zuerst die Lieferzone.",
+      "zoneChosenManually": "Zone manuell gewählt",
       "deliveryFeeOutOfZone": "Außerhalb der Lieferzone",
       "deliveryFeeUnavailable": "Liefergebühr nicht verfügbar",
       "total": "Gesamt:",
@@ -3447,6 +3460,40 @@
     }
   },
   "sync": {
+    "zGate": {
+      "approvalTitle": "Mit Ihrer PIN bestätigen",
+      "approvalSubtitle": "Einen Datensatz zurückzustellen erfordert das Recht, Zahlungen zu stornieren. Ein Mitarbeiter mit diesem Recht gibt seine eigene PIN ein. Nichts wird gelöscht oder belastet.",
+      "setAsideDone": "Zurückgestellt. Der Datensatz bleibt an dieser Kasse, und der Z-Bericht führt ihn als nicht auf dem Server.",
+      "undoDone": "Der Datensatz ist zurück: Er hält den Tagesabschluss wieder auf, bis der Server ihn annimmt.",
+      "actionFailed": "Das ging nicht. Nichts wurde geändert.",
+      "stale": "Diese Liste konnte nicht neu gelesen werden. Sie zeigt den letzten gültigen Stand.",
+      "unavailable": "Die an dieser Kasse abgeschlossenen Tage konnten nicht gelesen werden. Versuchen Sie es erneut.",
+      "localTitle": "An dieser Kasse abgeschlossene Tage, noch nicht auf dem Server: {{count}}",
+      "localDay": "Tag vom {{date}}: an dieser Kasse ohne Verbindung abgeschlossen",
+      "waits": {
+        "earlier_z": "Er wartet, bis der frühere abgeschlossene Tag den Server erreicht hat.",
+        "window_rows": "Er wartet, bis {{count}} Datensätze dieses Tages den Server erreichen.",
+        "server_refusal": "Der Server hat ihn abgelehnt. Wenden Sie sich mit den Details unten an den Support.",
+        "sending": "Er wird bei der nächsten Synchronisierung gesendet.",
+        "cleanup": "Der Server hat ihn bestätigt. Seine Daten werden von dieser Kasse bereinigt."
+      },
+      "details": "Details für den Support",
+      "refusedTitle": "Vom Server abgelehnt: {{count}}",
+      "refusedIntro": "Der Server hat diese Datensätze endgültig abgelehnt, daher halten sie den Tagesabschluss auf. Eine verantwortliche Person kann einen zurückstellen: Er bleibt an dieser Kasse, der Z-Bericht führt ihn als nicht auf dem Server, und er wird nie mehr von selbst gesendet.",
+      "kind": {
+        "payment": "Zahlung",
+        "refund": "Erstattung oder Storno",
+        "driverEarning": "Fahrerverdienst",
+        "expense": "Ausgabe",
+        "staffPayment": "Mitarbeiterzahlung",
+        "cashReturn": "Bargeldrückgabe",
+        "shift": "Schicht",
+        "record": "Datensatz"
+      },
+      "setAsideState": "Zurückgestellt: an dieser Kasse behalten, nicht auf dem Server",
+      "setAside": "Zurückstellen",
+      "undo": "Zurückholen"
+    },
     "capacity": {
       "badge": "Rückstau {{percent}}%",
       "title": "Sync-Rückstau wächst",
@@ -3510,7 +3557,7 @@
     "closeoutBlocked": {
       "single": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{orderReference}} noch blockiert ist: {{reason}}.",
       "multiple": "Der Tag kann während {{stage}} nicht geschlossen werden, weil {{count}} Synchronisationselemente noch blockiert sind.",
-      "moneyNotSynced": "Der Tag kann noch nicht geschlossen werden: {{count}} Zahlungs- oder Rückzahlungsdatensätze dieses Tages haben den Server nicht erreicht. Stellen Sie sicher, dass die Kasse online ist, tippen Sie auf Jetzt synchronisieren und schließen Sie den Tag erneut."
+      "moneyNotSynced": "Der Tag kann noch nicht geschlossen werden: {{count}} Zahlungs-, Rückzahlungs- oder Schichtdatensätze dieses Tages haben den Server nicht erreicht. Stellen Sie sicher, dass die Kasse online ist, tippen Sie auf Jetzt synchronisieren und schließen Sie den Tag erneut."
     },
     "time": {
       "never": "Nie",
@@ -7293,6 +7340,19 @@
     "depositTotal": "Pfand",
     "depositLineName": "Pfand — {{name}}"
   },
+  "appointmentCheckoutClaim": {
+    "claimedElsewhere": "Dieser Termin wird gerade an einer anderen Kasse ({{terminal}}) kassiert, bis {{time}} Uhr.",
+    "claimedElsewhereNow": "Dieser Termin wird gerade an einer anderen Kasse ({{terminal}}) kassiert.",
+    "claimedElsewhereUnknown": "Dieser Termin wird gerade an einer anderen Kasse kassiert. Versuche es in ein paar Minuten erneut.",
+    "settled": "Dieser Termin ist bereits bezahlt oder abgeschlossen.",
+    "notFound": "Dieser Termin wurde nicht gefunden. Aktualisiere und versuche es erneut.",
+    "needsConnection": "Zum Kassieren eines Termins braucht es eine Verbindung. Du kannst die Leistungen ohne Termin verkaufen.",
+    "failed": "Das Kassieren konnte nicht starten. Versuche es erneut."
+  },
+  "retailStock": {
+    "onlyAvailable": "Nur {{available}} {{unit}} auf Lager",
+    "unitPiece": "Stk."
+  },
   "staffSchedule": {
     "loading": "Personalplan wird geladen...",
     "weeklyProgram": "Wöchentlicher Personalplan",
@@ -7855,6 +7915,15 @@
     "redeemSuccess": "{{points}} Punkte für {{discount}} Rabatt eingelöst",
     "redeemFailed": "Bestellung gespeichert, aber Treuepunkte wurden nicht eingelöst",
     "checkoutRefused": "Treuepunkte konnten nicht reserviert werden. Die Bestellung wurde nicht gespeichert. Entfernen Sie die Einlösung oder versuchen Sie es erneut.",
+    "redeem": {
+      "offlineRefused": "Punkte können nur mit Internetverbindung eingelöst werden. Der Verkauf wird ohne den Rabatt fortgesetzt; gesammelte Punkte bleiben erhalten.",
+      "refusedBody": "Der Server hat die Einlösung abgelehnt. Es wurde kein Rabatt gewährt.",
+      "confirmationRequired": "Bestätigen Sie die ursprüngliche Punkteeinlösung online, bevor Sie kassieren.",
+      "releasedForCheckout": "Die Punkte dieses Verkaufs wurden dem Kunden zurückgegeben. Starten Sie einen neuen Verkauf, um erneut Punkte einzulösen.",
+      "removePoints": "Punkte entfernen",
+      "confirmed": "Punkte bestätigt. Fahren Sie mit der Zahlung fort.",
+      "releaseFailed": "Die Punkte konnten nicht auf das Kundenkonto zurückgebucht werden. Versuchen Sie es erneut."
+    },
     "redeemPrepared": "{{points}} Punkte bereit für {{discount}} Rabatt",
     "noCustomerSelected": "Wählen Sie einen gespeicherten Kunden aus, um Punkte einzulösen",
     "moduleUnavailable": "Das Treuemodul ist auf diesem Terminal nicht aktiviert",
@@ -10163,8 +10232,17 @@
   },
   "zReportOffline": {
     "refusal": "Ohne Verbindung lässt sich der Tag nicht abschließen. Verkaufen Sie weiter: Der Tag bleibt offen, und Sie schließen ihn, sobald die Verbindung zurück ist. Um die Kasse jetzt zu zählen, nutzen Sie den Kassiererabschluss, der auch ohne Internet druckt, und die Vorschau auf diesem Bildschirm.",
-    "status": "Keine Verbindung: Der Tag wird abgeschlossen, sobald sie zurück ist",
-    "checklist": "Keine Verbindung zum Server. Verkaufen Sie weiter und schließen Sie den Tag, sobald die Verbindung zurück ist."
+    "status": "Keine Verbindung: Der Z-Bericht schließt den Tag an dieser Kasse und wird später gesendet",
+    "checklist": "Keine Verbindung zum Server. Der Z-Bericht schließt den Tag an dieser Kasse und wird gesendet, sobald die Verbindung zurück ist. Ein Geschäft mit aktivem Fiskaldienst schließt den Tag, sobald die Verbindung zurück ist.",
+    "localCloseDone": "Der Tag vom {{date}} ist an dieser Kasse ohne Verbindung abgeschlossen. Sein Z-Bericht wird an den Server gesendet, sobald die Verbindung zurück ist; nichts wird gelöscht, bevor der Server ihn hat. Sie können den nächsten Tag beginnen."
+  },
+  "salonStaff": {
+    "pickerTitle": "Wer führt diese Leistung aus?",
+    "noStylist": "Ohne Mitarbeiter",
+    "tipRecipient": "Mitarbeiter",
+    "tipRecipientHelp": "Wird dem Mitarbeiter gutgeschrieben, der die Leistung erbracht hat.",
+    "tipChooseStaff": "Wer bekommt das Trinkgeld?",
+    "tipsByStaff": "Trinkgeld pro Mitarbeiter"
   },
   "salonSale": {
     "newSale": "Neuer Dienstleistungsverkauf",

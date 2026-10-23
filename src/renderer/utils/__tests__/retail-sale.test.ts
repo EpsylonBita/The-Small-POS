@@ -38,7 +38,20 @@ describe('retail checkout lines', () => {
   it('allows zero stock unless overselling is blocked', () => {
     expect(variantBlocked(product.variants![0], false)).toBe(false);
     expect(variantBlocked(product.variants![0], true)).toBe(true);
-    expect(variantBlocked({ ...product.variants![0], quantity: 0.5 }, true)).toBe(false);
+  });
+  it('leaves the stock decision to the shared rule: one more unit must fit what is left', () => {
+    // Half a unit left cannot hold one more whole unit (the old `<= 0` check let it through).
+    expect(variantBlocked({ ...product.variants![0], quantity: 0.5 }, true)).toBe(true);
+    expect(variantBlocked({ ...product.variants![0], quantity: 0.5 }, false)).toBe(false);
+    const one = { ...product.variants![0], quantity: 1 };
+    expect(variantBlocked(one, true, { productId: product.id })).toBe(false);
+    // The unit already in the cart, or sold here and not yet synced, is gone.
+    expect(variantBlocked(one, true, { productId: product.id,
+      lines: [{ id: 'line-1', retailProductId: product.id, retailVariantId: 'v1', quantity: 1 }] })).toBe(true);
+    expect(variantBlocked(one, true, { productId: product.id, unsynced: new Map([[`${product.id}::v1`, 1]]) })).toBe(true);
+  });
+  it('never sells an inactive variant, whatever the setting', () => {
+    expect(variantBlocked({ ...product.variants![0], quantity: 9, isActive: false }, false)).toBe(true);
   });
 });
 

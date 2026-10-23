@@ -139,6 +139,12 @@ describe('RepairWorkspaceActions', () => {
     }))
   })
 
+  it('caps the diagnosis at the shared 10,000-character limit', () => {
+    renderActions({ tab: 'diagnosis' })
+
+    expect(screen.getByRole('textbox', { name: 'Diagnosis' })).toHaveAttribute('maxLength', '10000')
+  })
+
   it('adds a manual planned line without using an untyped catalog lookup', async () => {
     const props = renderActions({ tab: 'partsLabour' })
     fireEvent.change(screen.getByRole('textbox', { name: 'Line name' }), { target: { value: 'Screen assembly' } })

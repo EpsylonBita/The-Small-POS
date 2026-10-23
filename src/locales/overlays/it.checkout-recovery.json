@@ -40,7 +40,10 @@
       "checkoutParked": "Il pagamento è stato messo da parte e si possono prendere nuovi ordini. Controlla il POS della banca: se il cliente è stato addebitato, non addebitarlo di nuovo; lo sistema un responsabile. Lo stato del POS mostra questo tentativo.",
       "checkoutParkFailed": "Non è stato possibile mettere da parte il pagamento. Resta protetto; non è stato modificato nulla.",
       "checkoutParkApprovalSubtitle": "Mettere da parte un pagamento richiede il permesso di annullare i pagamenti. Chi ce l’ha inserisce il proprio PIN. Non viene addebitato nulla.",
-      "freezeNotSaved": "Non è stato possibile salvare il carrello per il pagamento, quindi nessun pagamento è stato avviato. Premi Paga per riprovare."
+      "freezeNotSaved": "Non è stato possibile salvare il carrello per il pagamento, quindi nessun pagamento è stato avviato. Premi Paga per riprovare.",
+      "orderNotSavedCartKept": "L’ordine non è stato salvato e non è stato registrato alcun pagamento. Il carrello resta: premi di nuovo Paga. Se hai già incassato il denaro, non incassarlo di nuovo.",
+      "freezeReadbackChanged": "Nessun pagamento è stato avviato: la cassa non è riuscita a salvare il carrello per il pagamento esattamente come inserito. Seleziona di nuovo il cliente o l’indirizzo, poi premi Paga. Se succede di nuovo, contatta l’assistenza.",
+      "orderConfirmationRefused": "L’ordine non è stato salvato: il pagamento salvato nella cassa non corrispondeva a questo incasso, quindi premere di nuovo Paga senza modifiche non servirà. Non è stato registrato alcun pagamento e il carrello resta. Se hai incassato il denaro, non incassarlo di nuovo. Seleziona di nuovo il cliente o l’indirizzo, poi premi Paga. Se succede di nuovo, contatta l’assistenza."
     }
   },
   "checkoutRecovery": {

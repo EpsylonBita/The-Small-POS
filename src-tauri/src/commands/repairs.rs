@@ -1199,12 +1199,12 @@ fn pending_payload(
 fn pending_string(
     payload: &serde_json::Map<String, serde_json::Value>,
     key: &str,
-    maximum_bytes: usize,
+    maximum_units: usize,
 ) -> Result<String, String> {
     payload
         .get(key)
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= maximum_bytes)
+        .filter(|value| !value.is_empty() && value.encode_utf16().count() <= maximum_units)
         .map(str::to_string)
         .ok_or_else(|| "REPAIR_CACHE_DECRYPT_FAILED".to_string())
 }
@@ -1212,11 +1212,11 @@ fn pending_string(
 fn pending_optional_string(
     payload: &serde_json::Map<String, serde_json::Value>,
     key: &str,
-    maximum_bytes: usize,
+    maximum_units: usize,
 ) -> Result<Option<String>, String> {
     match payload.get(key) {
         Some(serde_json::Value::String(value))
-            if !value.is_empty() && value.len() <= maximum_bytes =>
+            if !value.is_empty() && value.encode_utf16().count() <= maximum_units =>
         {
             Ok(Some(value.clone()))
         }
@@ -1298,7 +1298,7 @@ fn reduce_pending_workspace(
                 workspace.repair.priority = pending_string(payload, "priority", 32)?;
                 workspace.repair.currency = pending_string(payload, "currency", 3)?;
                 workspace.repair.intake_notes =
-                    pending_optional_string(payload, "intake_notes", 4_000)?;
+                    pending_optional_string(payload, "intake_notes", 5_000)?;
                 workspace.repair.due_at = pending_optional_string(payload, "due_at", 64)?;
                 workspace.repair.status = "received".to_string();
                 workspace.repair.updated_at = occurred_at.to_string();
@@ -1314,7 +1314,7 @@ fn reduce_pending_workspace(
                 if payload.get("draft").and_then(serde_json::Value::as_bool) != Some(true) {
                     return Err("REPAIR_CACHE_DECRYPT_FAILED".to_string());
                 }
-                workspace.repair.diagnosis = pending_optional_string(payload, "diagnosis", 8_000)?;
+                workspace.repair.diagnosis = pending_optional_string(payload, "diagnosis", 10_000)?;
                 workspace.repair.updated_at = occurred_at.to_string();
             }
             "plan_line" => {
@@ -3235,5 +3235,30 @@ mod tests {
                 offset: 0,
             }
         ));
+    }
+    #[test]
+    fn repairs_p5_workspace_limits_count_utf16_units() {
+        let mut operations = complete_pending_sequence();
+        operations[0]["payload"]["intake_notes"] = serde_json::json!("\u{03b1}".repeat(4000));
+        operations[2]["payload"]["diagnosis"] = serde_json::json!("\u{1f600}".repeat(5000));
+        let projected = project_workspace(
+            "99999999-9999-4999-8999-999999999999",
+            cached_workspace(None, operations.clone(), false),
+        )
+        .unwrap();
+        assert_eq!(
+            projected.repair.intake_notes.unwrap(),
+            "\u{03b1}".repeat(4000)
+        );
+        assert_eq!(
+            projected.repair.diagnosis.unwrap().encode_utf16().count(),
+            10000
+        );
+        operations[0]["payload"]["intake_notes"] = serde_json::json!("\u{03b1}".repeat(5001));
+        assert!(project_workspace(
+            "99999999-9999-4999-8999-999999999999",
+            cached_workspace(None, operations, false)
+        )
+        .is_err());
     }
 }

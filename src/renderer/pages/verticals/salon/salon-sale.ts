@@ -2,16 +2,20 @@ import { branchWallTime } from '../../../utils/branch-time';
 import type { Appointment } from '../../../services/AppointmentsService';
 import type { Service } from '../../../services/ServicesService';
 import { serviceSaleGrossPrice, type ServiceSaleVatDefaults } from '../../../../../../shared/services/GreeceVatService';
+import { readBranchVatSettings } from '../../../utils/branchVatSettings';
 
 export interface SalonSale {
   items: any[];
   customer: { id: string; name: string; phone: string; email?: string };
 }
 
-/** The branch VAT defaults this till holds (`tax.*` terminal settings), for net-priced services. */
+/**
+ * The branch VAT defaults this till holds (`tax.*` terminal settings), for net-priced services:
+ * the default category, the region, the country (`tax.vat_country`) and whether the branch is
+ * VAT-registered (`tax.vat_registered`, registered when unset).
+ */
 export function serviceVatDefaults(getSetting: <T = unknown>(category: string, key: string) => T | undefined): ServiceSaleVatDefaults {
-  return { defaultVatCategoryCode: getSetting<string>('tax', 'vat_default_category_code') ?? null,
-    vatRegionProfile: getSetting<string>('tax', 'vat_region_profile') ?? null };
+  return readBranchVatSettings(getSetting);
 }
 
 /** A service sells VAT-inclusive; the conversion is shared with Android and pinned to the server. */
@@ -19,23 +23,41 @@ export function serviceGrossPrice(service: Service, catalogPrice = service.price
   return serviceSaleGrossPrice(catalogPrice, service, defaults);
 }
 
+/** The stylist the cashier picked for a walk-in service line (ids and names only). */
+export interface WalkInStylist { id: string; name: string }
+
+/**
+ * One service line. A booked segment or appointment names its own staff; a
+ * walk-in line takes the stylist the cashier picked, with the same `staff_id`
+ * and `metadata.staff_name` the appointment lines carry (Android `serviceCartLine`).
+ */
 export function serviceSaleLine(service: Service, appointment?: Appointment, segment?: Appointment['services'][number],
-  defaults?: ServiceSaleVatDefaults | null) {
+  defaults?: ServiceSaleVatDefaults | null, walkInStylist?: WalkInStylist | null) {
   const price = serviceGrossPrice(service, segment?.price ?? appointment?.totalPrice ?? service.price, defaults);
+  const bookedStaffId = segment?.staffId ?? appointment?.staffId ?? null;
+  const walkIn = !bookedStaffId && walkInStylist?.id?.trim() ? walkInStylist : null;
   return {
     id: crypto.randomUUID(), menu_item_id: null, menuItemId: null,
     service_id: service.id, appointment_id: appointment?.id ?? null,
-    staff_id: segment?.staffId ?? appointment?.staffId ?? null,
+    staff_id: bookedStaffId ?? walkIn?.id ?? null,
     name: segment?.serviceName || service.name,
     quantity: 1, price, unitPrice: price, basePrice: price, totalPrice: price,
     originalUnitPrice: price, customizations: [],
+    vat_class: service.vatClass,
     vat_category_code: service.vatCategoryCode,
     price_includes_vat: true,
     tax_exemption_reason: service.taxExemptionReason,
     fiscal_document_profile: service.fiscalDocumentProfile,
-    metadata: { staff_id: segment?.staffId ?? appointment?.staffId ?? null,
-      staff_name: segment?.staffName ?? appointment?.staffName ?? null },
+    metadata: { staff_id: bookedStaffId ?? walkIn?.id ?? null,
+      staff_name: walkIn ? walkIn.name : (segment?.staffName ?? appointment?.staffName ?? null) },
   };
+}
+
+/** A walk-in service line with the stylist picked for it; `null` keeps it without one. Booked lines never change. */
+export function withWalkInStylist<T extends { appointment_id?: string | null; staff_id?: string | null; metadata?: Record<string, unknown> | null }>(
+  line: T, stylist: WalkInStylist | null): T {
+  if (!stylist?.id?.trim() || line.appointment_id || line.staff_id) return line;
+  return { ...line, staff_id: stylist.id, metadata: { ...(line.metadata ?? {}), staff_id: stylist.id, staff_name: stylist.name } };
 }
 
 export function appointmentSale(appointment: Appointment, catalog: Service[], defaults?: ServiceSaleVatDefaults | null): SalonSale {

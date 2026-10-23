@@ -1,4 +1,9 @@
-import { secureLoyaltyCheckout, LoyaltyCheckoutRefused } from '../../services/LoyaltyCheckout';
+import {
+  secureLoyaltyCheckout,
+  LoyaltyCheckoutRefused,
+  LoyaltyRedemptionUnconfirmed,
+  loyaltyCheckoutMessageKey,
+} from '../../services/LoyaltyCheckout';
 import { SalonCatalogPicker } from '../../pages/verticals/salon/SalonCatalogPicker';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -14,7 +19,7 @@ import {
   PaymentModal,
   type RoomChargeContext,
 } from './PaymentModal';
-import type { TipSelection } from './TipModal';
+import { tipPaymentFields, tipStaffOptionsFromItems, type TipSelection } from './TipModal';
 import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersistence';
@@ -25,6 +30,7 @@ import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
 import { useFeaturedItems } from '../../hooks/useFeaturedItems';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
+import { useOfflineDeliveryZoneChoice } from '../../hooks/useOfflineDeliveryZoneChoice';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
@@ -71,6 +77,8 @@ import { shouldBypassPaymentForTableOrder } from '../../utils/tableOrderFlow';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
+import { confirmAppointmentClaimsBeforePayment } from '../../services/appointment-checkout-claims';
+import { appointmentClaimRefusalMessage } from '../../pages/verticals/salon/appointment-claim-message';
 import type { CatalogOfferEvaluationResult, MatchedCatalogOffer, OfferEvaluationCartItem } from '../../../../../shared/types/catalog-offer';
 import type { CartItem as MenuCartItem } from '../menu/MenuCart';
 import { normalizePosOrderItem, normalizePosOrderItems } from '../../../shared/utils/pos-order-items';
@@ -103,6 +111,7 @@ const RETAINED_LINE_FISCAL_FIELDS = [
   ['retail_variant_id', 'retailVariantId'],
   ['line_role', 'lineRole'],
   ['metadata', 'metadata'],
+  ['vat_class', 'vatClass'],
   ['vat_category_code', 'vatCategoryCode'],
   ['price_includes_vat', 'priceIncludesVat'],
   ['vat_rate_percent', 'vatRatePercent'],
@@ -838,13 +847,52 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return false;
   };
 
+  // Parents rebuild the address object on every render. The zone check keys
+  // on the address's content, so an identical address is never searched or
+  // checked again just because the parent re-rendered.
+  const zoneAddressKey = savedAddressIdentityKey(selectedAddress);
+  const zoneAddressRef = useRef<{ key: string; address: any }>({ key: zoneAddressKey, address: selectedAddress });
+  if (zoneAddressRef.current.key !== zoneAddressKey) {
+    zoneAddressRef.current = { key: zoneAddressKey, address: selectedAddress };
+  }
+  const zoneSelectedAddress = zoneAddressRef.current.address;
+
   // Effective delivery zone info - use the caller's verdict when it actually
   // checked the zone; a "not checked" verdict (no usable point) lets the menu
   // try the address's automatic geolocation and check the zone itself.
   const isProvidedZoneInfoUsable = Boolean(deliveryZoneInfo) && !isDeliveryZoneUnchecked(deliveryZoneInfo);
-  const effectiveDeliveryZoneInfo = isProvidedZoneInfoUsable
-    ? deliveryZoneInfo
-    : localDeliveryZoneInfo || deliveryZoneInfo || null;
+  // The store's zones, local-first: offline this is the till's cached list.
+  const loadStoreDeliveryZones = useCallback(async (preferredBranchId: string | null) => {
+    const refreshed = await refreshTerminalCredentialCache();
+    const branchId = preferredBranchId || refreshed.branchId || getCachedTerminalCredentials().branchId;
+    if (!branchId) {
+      return [];
+    }
+    return isBrowser()
+      ? await import('../../utils/api-helpers').then(({ posApiGet }) =>
+          posApiGet<any[]>(`pos/delivery-zones?branch_id=${branchId}`),
+        )
+      : await bridge.branchData.getDeliveryZones({ branch_id: branchId });
+  }, [bridge.branchData]);
+  // Offline week Ω6β: offline, an address that cannot be located (its Google
+  // point expired after 28 days, or it has none) gets its zone from the
+  // cashier, chosen from the store's cached zones. Never fee 0 without that
+  // choice; never the expired point.
+  const offlineZoneChoice = useOfflineDeliveryZoneChoice({
+    enabled: isOpen && orderType === 'delivery' && hasDeliveryPro && !editMode,
+    address: zoneSelectedAddress,
+    addressKey: zoneAddressKey,
+    located: Boolean(resolvedSelectedAddressCoordinates ?? extractSavedAddressCoordinates(zoneSelectedAddress)),
+    resolving: isResolvingSelectedAddressCoordinates,
+    providedZoneUsable: isProvidedZoneInfoUsable,
+    branchId: staff?.branchId ?? null,
+    loadZones: loadStoreDeliveryZones,
+  });
+  const effectiveDeliveryZoneInfo = offlineZoneChoice.active
+    ? offlineZoneChoice.zoneInfo
+    : isProvidedZoneInfoUsable
+      ? deliveryZoneInfo
+      : localDeliveryZoneInfo || deliveryZoneInfo || null;
 
   // Effective minimum order amount - prefer zone-specific, fallback to default
   const effectiveMinimumOrderAmount = hasDeliveryPro
@@ -922,16 +970,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     selectedCustomerName,
   ]);
 
-  // Parents rebuild the address object on every render. The zone check keys
-  // on the address's content, so an identical address is never searched or
-  // checked again just because the parent re-rendered.
-  const zoneAddressKey = savedAddressIdentityKey(selectedAddress);
-  const zoneAddressRef = useRef<{ key: string; address: any }>({ key: zoneAddressKey, address: selectedAddress });
-  if (zoneAddressRef.current.key !== zoneAddressKey) {
-    zoneAddressRef.current = { key: zoneAddressKey, address: selectedAddress };
-  }
-  const zoneSelectedAddress = zoneAddressRef.current.address;
-
   const buildSelectedAddressString = useCallback(() => {
     return buildSavedAddressQuery(zoneSelectedAddress);
   }, [zoneSelectedAddress]);
@@ -944,6 +982,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return (resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates()) ?? buildSelectedAddressString();
   }, [buildSelectedAddressString, getSelectedAddressCoordinates, resolvedSelectedAddressCoordinates]);
 
+  // Re-runs when the connection changes (offlineZoneChoice.offline): offline
+  // the address is never searched, so once the connection returns it is
+  // located online again, as before.
   useEffect(() => {
     let cancelled = false;
 
@@ -1018,7 +1059,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [bridge.customers, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, orderType, selectedCustomer?.id, staff?.branchId, zoneSelectedAddress]);
+  }, [bridge.customers, editMode, getSelectedAddressCoordinates, hasDeliveryPro, isOpen, offlineZoneChoice.offline, orderType, selectedCustomer?.id, staff?.branchId, zoneSelectedAddress]);
 
   // Fetch order items from backend
   const fetchOrderItems = useCallback(async (orderId: string, supabaseId?: string): Promise<any[]> => {
@@ -1970,18 +2011,26 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }));
   };
 
-  const handleRemoveLoyaltyRedemption = async () => {
-    if (draftPersistence.isPending()) return;
+  // Ω11 (22/10/2026): points secured live on the server go back through the
+  // server (queued when offline); the local balance returns at once.
+  const releaseLoyaltyRedemption = async (): Promise<boolean> => {
+    if (draftPersistence.isPending()) return false;
     setIsLocalProcessing(true);
     try {
       const released = await bridge.loyalty.releaseRedemption({ orderId: draftPersistence.identity() });
       if (released?.success !== true) throw new Error('LOYALTY_RELEASE_NOT_CONFIRMED');
       setAppliedLoyaltyRedemption(null);
+      return true;
     } catch {
-      toast.error(t('modals.menu.draftRecoveryUnavailable'));
+      toast.error(t('loyalty.redeem.releaseFailed'));
+      return false;
     } finally {
       setIsLocalProcessing(false);
     }
+  };
+
+  const handleRemoveLoyaltyRedemption = async () => {
+    await releaseLoyaltyRedemption();
   };
 
   const buildMenuOfferCartItems = useCallback((items: MenuModalCartItem[]): OfferEvaluationCartItem[] => {
@@ -2206,6 +2255,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         ? 'resolved'
         : !hasDeliveryPro
           ? 'resolved'
+          : offlineZoneChoice.active
+            ? (offlineZoneChoice.zoneInfo ? 'resolved' : 'requires_zone_choice')
           : !selectedAddressValidationTarget
             ? 'requires_selection'
             : (isResolvingSelectedAddressCoordinates && !isProvidedZoneInfoUsable)
@@ -2432,6 +2483,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return null;
     }
 
+    // Offline, an address that cannot be located: the cashier's zone is the
+    // answer (null while none is chosen). Nothing to check again.
+    if (offlineZoneChoice.active) {
+      return offlineZoneChoice.zoneInfo;
+    }
+
     // A known fee, or a zone that was not checked (non-blocking, with the
     // notice): nothing to re-check at checkout.
     if (canCheckoutWithDeliveryFeeStatus(deliveryFeeStatus)) {
@@ -2455,6 +2512,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     discountedSubtotal,
     effectiveDeliveryZoneInfo,
     hasDeliveryPro,
+    offlineZoneChoice.active,
+    offlineZoneChoice.zoneInfo,
     orderType,
     selectedAddressValidationTarget,
     selectedAddressCoordinates,
@@ -2554,6 +2613,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           { previousCheckoutRequestId });
         setShowPaymentModal(false);
         setCheckoutPhase('editing');
+        // Ω11 (22/10/2026): the points were debited live under the declined
+        // identity and Pay secures them again under the renewed one, so the
+        // old debit is released. Unconfirmed, the points come off this cart
+        // rather than being spent twice.
+        if (resumed.state?.appliedLoyaltyRedemption) {
+          const released = await bridge.loyalty.releaseRedemption({ orderId: previousCheckoutRequestId }).catch(() => null);
+          if (released?.success !== true) {
+            setAppliedLoyaltyRedemption(null);
+            toast.error(t('loyalty.redeem.releaseFailed'));
+          }
+        }
         const message = proof.outcome === 'declined' ? 'draftDeclinedResumed' : proof.outcome === 'not_sent' ? 'draftNotSentResumed' : 'draftNotChargedResumed';
         toast.success(t(`modals.menu.${message}`));
         return;
@@ -2876,6 +2946,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
     if (orderType === 'delivery' && hasDeliveryPro) {
       const validationResult = await ensureDeliveryValidationForCheckout();
+      if (offlineZoneChoice.active && !validationResult) {
+        toast.error(t('menu.cart.offlineZoneChoiceRequired'));
+        return;
+      }
       if (!selectedAddressValidationTarget) {
         toast.error(t('orderFlow.zoneValidationRequired'));
         return;
@@ -3018,16 +3092,72 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       }, bridge.loyalty);
       return true;
     } catch (error) {
-      if (error instanceof LoyaltyCheckoutRefused) {
+      if (error instanceof LoyaltyRedemptionUnconfirmed) {
+        // Ω11 D2: sent without an answer. The points stay on the sale and no
+        // money is taken; Retry asks the server under the same checkout, and
+        // only "Remove points" continues without the discount.
+        notifyLoyaltyRedemptionUnconfirmed();
+      } else if (error instanceof LoyaltyCheckoutRefused) {
+        // Offline or refused: nothing was debited; the sale continues without points.
         setAppliedLoyaltyRedemption(null);
         setShowPaymentModal(false);
         setCheckoutPhase('editing');
-        toast.error(t('loyalty.checkoutRefused'));
+        toast.error(t(loyaltyCheckoutMessageKey(error) ?? 'loyalty.checkoutRefused'));
       } else {
-        toast.error(t('modals.menu.draftRecoveryUnavailable'));
+        toast.error(t('loyalty.redeem.releaseFailed'));
       }
       return false;
     }
+  };
+
+  const retryLoyaltyConfirmation = async () => {
+    if (draftPersistence.isPending()) return;
+    setIsLocalProcessing(true);
+    try {
+      if (await prepareCheckoutDiscounts()) toast.success(t('loyalty.redeem.confirmed'));
+    } finally {
+      setIsLocalProcessing(false);
+    }
+  };
+
+  const removeUnconfirmedLoyaltyPoints = async () => {
+    if (!await releaseLoyaltyRedemption()) return;
+    // Back to the cart with its new total; Pay continues without points.
+    setShowPaymentModal(false);
+    setCheckoutPhase('editing');
+  };
+
+  const notifyLoyaltyRedemptionUnconfirmed = () => {
+    toast.error(
+      (current) => (
+        <span className="flex flex-col gap-2" data-testid="loyalty-redemption-unconfirmed">
+          <span>{t('loyalty.redeem.confirmationRequired')}</span>
+          <span className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-lg border border-current px-2 py-1 text-xs font-bold"
+              onClick={() => {
+                toast.dismiss(current.id);
+                void retryLoyaltyConfirmation();
+              }}
+            >
+              {t('common.actions.retry')}
+            </button>
+            <button
+              type="button"
+              className="rounded-lg border border-current px-2 py-1 text-xs font-bold"
+              onClick={() => {
+                toast.dismiss(current.id);
+                void removeUnconfirmedLoyaltyPoints();
+              }}
+            >
+              {t('loyalty.redeem.removePoints')}
+            </button>
+          </span>
+        </span>
+      ),
+      { id: 'loyalty-redemption-unconfirmed', duration: 15000 },
+    );
   };
 
   const buildCheckoutSubmission = (paymentData?: any, isGhostOrder = shouldBypassPaymentWithGhostMode) => {
@@ -3068,6 +3198,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
   };
 
+  // An appointment's checkout claim is renewed right before money moves, as
+  // on Android (codex review of PR #379, 22/10/2026). Any outcome that no
+  // longer allows the checkout (another till holds it, it was settled, no
+  // connection once the lease ran out) starts no payment and returns to the
+  // editable cart. The cart's own lines name the appointments, so a restored
+  // salon draft is checked too; an edit of a saved order is not a checkout.
+  const appointmentClaimsAllowPayment = async (): Promise<boolean> => {
+    if (editMode) return true;
+    const refusal = await confirmAppointmentClaimsBeforePayment(cartItems);
+    if (!refusal) return true;
+    toast.error(appointmentClaimRefusalMessage(refusal.outcome, t));
+    return false;
+  };
+
   const admitCheckoutPayment = async (paymentData?: any) => {
     const original = admittedCheckoutRef.current;
     if (original) {
@@ -3077,6 +3221,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         paymentData.existingOrderId === original.fallbackOrderId && paymentData.amount === original.submission.paymentData.amount);
     }
     if (draftPersistence.isPending()) return false;
+    if (!await appointmentClaimsAllowPayment()) {
+      setShowPaymentModal(false);
+      setCheckoutPhase('editing');
+      return false;
+    }
     if (!await prepareCheckoutDiscounts()) return false;
     const { ordinaryOwner: _owner, ...durablePayment } = paymentData || {};
     const submission = JSON.parse(JSON.stringify(buildCheckoutSubmission(paymentData ? durablePayment : undefined)));
@@ -3084,24 +3233,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     try {
       await draftPersistence.freeze({ ...draftSnapshot, state: { ...draftSnapshot.state, paymentAdmission: 'admitted' } }, submission);
       return true;
-    } catch {
+    } catch (cause) {
       // No QR or terminal operation was started. Tomikro 21/10/2026: when
       // native proves the frozen write never committed, the cart is editable
       // again and Pay retries it; otherwise the retained draft owns recovery.
       setShowPaymentModal(false);
       setCheckoutPhase('editing');
-      await returnFailedFreezeToCart();
+      await returnFailedFreezeToCart(cause instanceof Error && cause.message === 'CHECKOUT_DRAFT_READBACK_CHANGED');
       return false;
     }
   };
 
   // `confirmed`: the cashier says a card the app had confirmed, whose order
   // was never written, was not charged (Tomikro 21/10/2026).
-  const returnFailedFreezeToCart = async (): Promise<boolean> => {
+  // `readback`: native kept the frozen request differently from this cart
+  // (Tomikro 22/10/2026), so the same Pay would fail the same way.
+  const returnFailedFreezeToCart = async (readback = false): Promise<boolean> => {
     try {
       await draftPersistence.abandonFailedFreeze();
       admittedCheckoutRef.current = null;
-      toast.error(t('modals.menu.freezeNotSaved', { defaultValue: 'The cart could not be saved for payment, so no payment was started. Press Pay to try again.' }));
+      toast.error(readback
+        ? t('modals.menu.freezeReadbackChanged', { defaultValue: 'No payment was started: the till could not save this cart for payment exactly as entered. Select the customer or address again, then press Pay. If it happens again, contact support.' })
+        : t('modals.menu.freezeNotSaved', { defaultValue: 'The cart could not be saved for payment, so no payment was started. Press Pay to try again.' }));
       return true;
     } catch { return false; }
   };
@@ -3132,13 +3285,18 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // split, a card this till records by hand), the admission ends and the cart
   // is editable again under the same identity, as before 20/10. A provider's
   // attempt (TWINT, a register that charges cards) stays for recovery.
-  const releaseUnwrittenAdmission = async (): Promise<boolean> => {
+  // `confirmationRefused`: the saved checkout refused this payment's
+  // confirmation, so pressing Pay again would fail the same way (Tomikro
+  // 22/10/2026).
+  const releaseUnwrittenAdmission = async (confirmationRefused = false): Promise<boolean> => {
     const admission = admittedCheckoutRef.current;
     if (!draftPersistence.isPending() || admission?.fallbackOrderId) return false;
     try {
       await draftPersistence.cancelPaymentAdmission({ confirmed: true, automatic: true });
       admittedCheckoutRef.current = null;
-      toast.error(t('modals.menu.orderNotSavedCartKept', { defaultValue: 'The order was not saved and no payment was recorded. The cart is kept: press Pay again. If you already took the money, do not take it again.' }), { duration: 10000 });
+      toast.error(confirmationRefused
+        ? t('modals.menu.orderConfirmationRefused', { defaultValue: 'The order was not saved: its saved checkout did not match this payment, so pressing Pay again as it is will not help. No payment was recorded and the cart is kept. If you took the money, do not take it again. Select the customer or address again, then press Pay. If it happens again, contact support.' })
+        : t('modals.menu.orderNotSavedCartKept', { defaultValue: 'The order was not saved and no payment was recorded. The cart is kept: press Pay again. If you already took the money, do not take it again.' }), { duration: 10000 });
       return true;
     } catch { return false; }
   };
@@ -3146,6 +3304,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const handlePaymentComplete = async (paymentData?: any): Promise<boolean> => {
     setIsLocalProcessing(true);
     setCheckoutPhase('finishing');
+    let confirmationRefused = false;
     try {
       const admission = admittedCheckoutRef.current;
       if (!admission) throw new Error('CHECKOUT_DRAFT_ADMISSION_REQUIRED');
@@ -3156,7 +3315,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       const submission = isRoomChargeFallback
         ? { ...admission.submission, paymentData }
         : paymentData
-        ? await draftPersistence.confirmPaymentAdmission(paymentData)
+        ? await draftPersistence.confirmPaymentAdmission(paymentData).catch(cause => {
+          confirmationRefused = /CHECKOUT_DRAFT_(AWAITING_RECONCILIATION|PAYMENT_CHANGED)/.test(cause instanceof Error ? cause.message : String(cause));
+          throw cause;
+        })
         : admission.submission;
       if (onOrderComplete) {
         const completionSubmission = { ...submission,
@@ -3196,7 +3358,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return true;
     } catch (error) {
       console.error('Error completing order:', error);
-      if (!await releaseUnwrittenAdmission()) toast.error(t('modals.menu.orderFailed'));
+      if (!await releaseUnwrittenAdmission(confirmationRefused)) toast.error(t('modals.menu.orderFailed'));
       setShowPaymentModal(false);
       setIsLocalProcessing(false);
       setCheckoutPhase('editing');
@@ -3204,12 +3366,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
   };
 
+  // The stylists on the ticket's lines: a tip may go to one of them (salon, 21/10/2026).
+  const tipStaffOptions = React.useMemo(() => tipStaffOptionsFromItems(cartItems), [cartItems]);
+
   // Split creates the frozen pending order before its payment modal collects.
   const handleSplitPayment = async (tipSelection: TipSelection | null) => {
     if (!onOrderComplete) return;
     setIsLocalProcessing(true);
     const paymentData = { method: 'pending', status: 'pending', amount: 0,
-      tipAmount: tipSelection?.amount, tipRecipientRole: tipSelection?.recipientRole };
+      ...tipPaymentFields(tipSelection) };
     if (!await admitCheckoutPayment(paymentData)) { setIsLocalProcessing(false); return; }
     const completionResult = await handlePaymentComplete(paymentData);
     if (completionResult === false) {
@@ -3428,7 +3593,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
             {salonMode ? <SalonCatalogPicker branchId={staff?.branchId || ''} organizationId={getCachedTerminalCredentials()?.organizationId || ''}
-              search={menuSearchQuery} menuItems={menuItemsForCategoryTabs} onAdd={line => setCartItems(previous => [...previous, line])} /> : <>
+              search={menuSearchQuery} menuItems={menuItemsForCategoryTabs} cartItems={cartItems}
+              onAdd={line => setCartItems(previous => [...previous, line])} /> : <>
             <MenuCategoryTabs
               selectedCategory={selectedCategory}
               onCategoryChange={(cat) => { setSelectedCategory(cat); setMenuSearchQuery(''); }}
@@ -3488,6 +3654,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               deliveryFee={resolvedDeliveryFee}
               deliveryFeeStatus={deliveryFeeStatus}
               onRepickDeliveryAddress={editMode ? undefined : onRepickDeliveryAddress}
+              deliveryZoneChoice={offlineZoneChoice.active ? {
+                options: offlineZoneChoice.options,
+                loading: offlineZoneChoice.loading,
+                selectedZoneId: offlineZoneChoice.selectedZoneId,
+                onChoose: offlineZoneChoice.choose,
+              } : null}
               allowManualDeliveryFee={orderType === 'delivery' && hasDeliveryModule && !hasDeliveryPro}
               manualDeliveryFeeValue={manualDeliveryFee}
               onManualDeliveryFeeChange={editMode ? undefined : value => {manualDeliveryFeeEditedRef.current = true; setManualDeliveryFee(value)}}
@@ -3582,7 +3754,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 const released = await bridge.loyalty.releaseRedemption({ orderId: draftPersistence.identity() });
                 if (released?.success !== true) throw new Error('LOYALTY_RELEASE_NOT_CONFIRMED');
               } catch {
-                toast.error(t('modals.menu.draftRecoveryUnavailable'));
+                toast.error(t('loyalty.redeem.releaseFailed'));
                 setIsLocalProcessing(false);
                 return;
               }
@@ -3608,6 +3780,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           onSplitPayment={onOrderComplete ? handleSplitPayment : undefined}
           isProcessing={effectiveProcessing}
           roomChargeContext={roomChargeContext}
+          tipStaffOptions={tipStaffOptions}
         />
       )}
 

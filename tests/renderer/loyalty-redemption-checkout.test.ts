@@ -77,7 +77,25 @@ test('orders secure prepared loyalty points before saving under the checkout ide
     assert.match(checkoutSource, /takeCheckoutRequestId\(orderData\.clientRequestId\)/);
     assert.doesNotMatch(checkoutSource, /bridge\.loyalty\s*\.redeemPoints/);
     assert.match(checkoutSource, /loyalty\.checkoutRefused/);
+    // Ω11: offline, refused and unconfirmed points each say what happened.
+    assert.match(checkoutSource, /error instanceof LoyaltyRedemptionUnconfirmed/);
+    assert.match(checkoutSource, /loyaltyCheckoutMessageKey\(error\)/);
   }
+});
+
+// Ω11 (22/10/2026): points are redeemed only with a live server answer. An
+// unconfirmed answer keeps the points with Retry and Remove points; offline or
+// refused clears them and the sale continues without the discount.
+test('the menu offers Retry and Remove points for an unconfirmed redemption', () => {
+  const menuModal = source(menuModalPath);
+  assert.match(menuModal, /error instanceof LoyaltyRedemptionUnconfirmed/);
+  assert.match(menuModal, /notifyLoyaltyRedemptionUnconfirmed\(\)/);
+  assert.match(menuModal, /retryLoyaltyConfirmation/);
+  assert.match(menuModal, /removeUnconfirmedLoyaltyPoints/);
+  assert.match(menuModal, /loyalty\.redeem\.removePoints/);
+  assert.match(menuModal, /loyaltyCheckoutMessageKey\(error\)/);
+  // A declined card renews the checkout: its old live debit is released.
+  assert.match(menuModal, /releaseRedemption\(\{ orderId: previousCheckoutRequestId \}\)/);
 });
 
 test('loyalty redemption checkout translations exist in every POS locale', () => {
@@ -106,6 +124,13 @@ test('loyalty redemption checkout translations exist in every POS locale', () =>
     'maxRedeemable',
     'minimumRedeemable',
     'manualRedeemHint',
+    'redeem.offlineRefused',
+    'redeem.refusedBody',
+    'redeem.confirmationRequired',
+    'redeem.releasedForCheckout',
+    'redeem.removePoints',
+    'redeem.confirmed',
+    'redeem.releaseFailed',
   ];
 
   const localeFiles = readdirSync(localesDir)

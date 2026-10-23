@@ -242,7 +242,7 @@ export async function posApiFetch<T = any>(
           ),
           status: ipcResult?.status,
           ...(code ? { code } : {}),
-          ...((code === 'ROOM_RESERVATION_DATES_MISMATCH' || String(ipcResult?.error).includes('ROOM_RESERVATION_DATES_MISMATCH')) ? { errorBody: (() => {
+          ...((code === 'ROOM_RESERVATION_DATES_MISMATCH' || code === 'APPOINTMENT_CHECKOUT_CLAIMED' || String(ipcResult?.error).includes('ROOM_RESERVATION_DATES_MISMATCH')) ? { errorBody: (() => {
             if (ipcResult?.data && typeof ipcResult.data === 'object') return ipcResult.data;
             const raw=String(ipcResult?.error ?? '');
             try { return JSON.parse(raw.slice(raw.indexOf('{'))); } catch { return undefined; }
@@ -275,7 +275,7 @@ export async function posApiFetch<T = any>(
         error: errorData.error || errorData.message || `HTTP ${response.status}`,
         status: response.status,
         ...(code ? { code } : {}),
-        ...(code === 'ROOM_RESERVATION_DATES_MISMATCH' ? { errorBody: errorData } : {}),
+        ...((code === 'ROOM_RESERVATION_DATES_MISMATCH' || code === 'APPOINTMENT_CHECKOUT_CLAIMED') ? { errorBody: errorData } : {}),
       };
     }
 

@@ -1,11 +1,23 @@
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
+import {
+  buildManualDeliveryZoneMarker,
+  readDeliveryZoneSelection,
+  withDeliveryZoneSelection,
+  type ManualDeliveryZoneMarker,
+  type ManualDeliveryZoneOption,
+} from '../../../../shared/utils/offline-delivery-zone';
 
 /**
- * - 'resolved': the fee is known (in zone, override, or a verdict that lets
- *   the order through with fee 0, such as out of zone or an unavailable check);
+ * - 'resolved': the fee is known (in zone, override, a zone the cashier chose
+ *   offline, or a verdict that lets the order through with fee 0, such as out
+ *   of zone or an unavailable check);
  * - 'not_checked': the address has no usable point, so its delivery zone was
- *   NOT checked. The order proceeds (fee 0) with a notice and a re-pick action;
- *   it is never shown as "out of zone" (founder rule, 2026-09-29);
+ *   NOT checked. Online the order proceeds (fee 0) with a notice and a re-pick
+ *   action; it is never shown as "out of zone" (founder rule, 2026-09-29);
+ * - 'requires_zone_choice': offline, the address could not be located (its
+ *   Google point expired or it has none): the cashier must choose the zone
+ *   from the store's cached zones before checkout (offline week Ω6β). Never
+ *   fee 0 without that choice;
  * - 'requires_selection': there is no delivery address to check at all;
  * - 'loading': a check is running.
  */
@@ -13,6 +25,7 @@ export type DeliveryFeeStatus =
   | 'loading'
   | 'resolved'
   | 'not_checked'
+  | 'requires_zone_choice'
   | 'requires_selection'
   | 'out_of_zone'
   | 'unavailable';
@@ -90,6 +103,61 @@ export function createUncheckedDeliveryZoneResult(): DeliveryBoundaryValidationR
       canProceed: false,
     },
   };
+}
+
+/** Where a zone answer keeps the marker of a zone the cashier chose. */
+const MANUAL_ZONE_SELECTION_FIELD = 'delivery_zone_selection';
+
+/**
+ * The zone answer for a zone the cashier chose offline (Ω6β): the zone's own
+ * fee and minimum, and the marker the order carries
+ * (`deliveryZoneSelectionMetadata`). No point was checked; the marker, not
+ * `zone_checked`, says so, so this answer never reads as "zone not checked"
+ * (fee 0) anywhere.
+ */
+export function createManualDeliveryZoneResult(
+  zone: ManualDeliveryZoneOption
+): DeliveryBoundaryValidationResponse {
+  return {
+    success: true,
+    isValid: true,
+    deliveryAvailable: true,
+    validation_status: 'manual_zone',
+    requires_override: false,
+    zone: {
+      id: zone.id,
+      name: zone.name,
+      deliveryFee: zone.deliveryFee,
+      minimumOrderAmount: zone.minimumOrderAmount,
+    },
+    [MANUAL_ZONE_SELECTION_FIELD]: buildManualDeliveryZoneMarker(zone),
+  };
+}
+
+/** The marker of a zone answer the cashier chose by hand, or null. */
+export function readManualDeliveryZoneSelection(
+  validationResult?: DeliveryBoundaryValidationResponse | null
+): ManualDeliveryZoneMarker | null {
+  const marker = validationResult?.[MANUAL_ZONE_SELECTION_FIELD];
+  return marker ? readDeliveryZoneSelection({ [MANUAL_ZONE_SELECTION_FIELD]: marker }) : null;
+}
+
+/**
+ * The order's `ghost_metadata` with the "zone chosen manually" marker of a
+ * delivery whose zone the cashier chose offline. Every other order keeps its
+ * metadata exactly as before (null stays null). The order paths
+ * (OrderDashboard, OrderFlow, NewOrderPage) call this with the zone answer
+ * the menu handed over.
+ */
+export function deliveryZoneSelectionMetadata<T>(
+  ghostMetadata: T,
+  orderType: string | null | undefined,
+  validationResult?: DeliveryBoundaryValidationResponse | null
+): T | Record<string, unknown> {
+  if (orderType !== 'delivery') {
+    return ghostMetadata;
+  }
+  return withDeliveryZoneSelection(ghostMetadata, readManualDeliveryZoneSelection(validationResult));
 }
 
 export function resolveDeliveryFee(

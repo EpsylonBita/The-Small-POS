@@ -261,6 +261,65 @@ export function getLastParitySyncSnapshot(): ParitySyncSnapshot {
   return lastParitySyncSnapshot;
 }
 
+export const PARITY_SYNC_RETRY_INTERVAL_MS = 30_000;
+
+export interface ScheduledParityRetryInput {
+  /** `navigator.onLine`: only a link on the network card. */
+  navigatorOnline: boolean;
+  /** The till's own connectivity check (native `network:status`); null before its first report. */
+  serverReachable: boolean | null;
+  queueStatus: { pending: number; failed: number };
+  lastSnapshot: Pick<ParitySyncSnapshot, 'status'> | null;
+}
+
+/**
+ * Whether the renderer's 30 s retry pass may run (offline week Ω2,
+ * 22/10/2026). Only when the till's own connectivity check says the admin
+ * server is reachable: during an ISP outage `navigator.onLine` stays true
+ * while the router is up, and every pass then claimed the whole due backlog
+ * against the database lock for nothing. The native loop already skips
+ * parity offline; the `online` event and reconnection keep their own triggers.
+ */
+export function shouldRunScheduledParityRetry(input: ScheduledParityRetryInput): boolean {
+  if (!input.navigatorOnline || input.serverReachable !== true) {
+    return false;
+  }
+  if (input.queueStatus.pending > 0 || input.queueStatus.failed > 0) {
+    return true;
+  }
+  return (
+    input.lastSnapshot?.status === 'failed' ||
+    input.lastSnapshot?.status === 'skipped_missing_credentials'
+  );
+}
+
+/**
+ * Starts the renderer's scheduled parity retry: every `intervalMs`, `run()`
+ * when `shouldRunScheduledParityRetry` allows it. Returns the stop function.
+ */
+export function startScheduledParityRetry(options: {
+  readQueueStatus: () => { pending: number; failed: number };
+  readLastSnapshot: () => Pick<ParitySyncSnapshot, 'status'> | null;
+  readServerReachable: () => boolean | null;
+  run: () => void;
+  intervalMs?: number;
+}): () => void {
+  const intervalId = setInterval(() => {
+    const allowed = shouldRunScheduledParityRetry({
+      navigatorOnline: typeof navigator === 'undefined' || navigator.onLine !== false,
+      serverReachable: options.readServerReachable(),
+      queueStatus: options.readQueueStatus(),
+      lastSnapshot: options.readLastSnapshot(),
+    });
+    if (allowed) {
+      options.run();
+    }
+  }, options.intervalMs ?? PARITY_SYNC_RETRY_INTERVAL_MS);
+  return () => {
+    clearInterval(intervalId);
+  };
+}
+
 export async function emitParityQueueStatus(queueStatus?: QueueStatus | null): Promise<QueueStatus | null> {
   const resolvedStatus = queueStatus ?? (await getSyncQueueBridge().getStatus().catch(() => null));
   emitCompatEvent(PARITY_QUEUE_STATUS_EVENT, resolvedStatus);

@@ -139,6 +139,17 @@ pub(crate) fn purge_scope(scope_token: &str) -> Result<(), String> {
     remove_without_following(&directory)
 }
 
+#[cfg(test)]
+pub(crate) fn seed_scope_cache_for_test(scope_token: &str) -> PathBuf {
+    let root = CACHE_ROOT.get_or_init(|| {
+        std::env::temp_dir().join(format!("repair-cache-test-{}", std::process::id()))
+    });
+    let directory = scope_directory(root, scope_token).unwrap();
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("fixture.jpg"), b"plaintext fixture").unwrap();
+    directory
+}
+
 pub(crate) fn purge_all() -> Result<(), String> {
     let Some(root) = CACHE_ROOT.get() else {
         return Ok(());
