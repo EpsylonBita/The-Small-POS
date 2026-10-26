@@ -11468,7 +11468,7 @@ pub(crate) fn resolve_stale_local_payment_total_conflict(
     resolve_stale_local_payment_total_conflict_with_conn(&conn, payment_id, &resolved_at)
 }
 
-fn recompute_local_order_payment_snapshot(
+pub(crate) fn recompute_local_order_payment_snapshot(
     conn: &Connection,
     order_id: &str,
     now: &str,
@@ -15331,7 +15331,7 @@ fn attach_remote_order_identity_to_local_order(
     Ok(Some(remote_order_id))
 }
 
-fn sync_remote_order_snapshot_into_local(
+pub(crate) fn sync_remote_order_snapshot_into_local(
     conn: &Connection,
     local_order_id: &str,
     remote_order: &Value,

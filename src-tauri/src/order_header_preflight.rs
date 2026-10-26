@@ -44,13 +44,11 @@ pub(crate) fn capture(conn: &Connection, order: &str, request: &Value) -> Result
     Ok(original)
 }
 
-fn same(left: &Value, right: &Value) -> bool {
-    left == right
-        || ((left.is_null() || left.as_str() == Some(""))
-            && (right.is_null() || right.as_str() == Some("")))
+fn item_signatures(raw: &Value) -> Result<Vec<String>, String> {
+    item_signatures_with_display(raw, true)
 }
 
-fn item_signatures(raw: &Value) -> Result<Vec<String>, String> {
+fn item_signatures_with_display(raw: &Value, display: bool) -> Result<Vec<String>, String> {
     let value = if let Some(raw) = raw.as_str() {
         serde_json::from_str(raw).map_err(|_| "EDIT_CANONICAL_SNAPSHOT_INVALID")?
     } else {
@@ -73,6 +71,10 @@ fn item_signatures(raw: &Value) -> Result<Vec<String>, String> {
         object.insert("id".into(), json!("11111111-1111-4111-8111-111111111111"));
         let mut normalized = crate::edit_settlement_recovery::items(&json!([item]))?.remove(0);
         normalized.as_object_mut().unwrap().remove("id");
+        if !display {
+            normalized.as_object_mut().unwrap().remove("name");
+            normalized.as_object_mut().unwrap().remove("notes");
+        }
         signatures.push(normalized.to_string());
     }
     signatures.sort();
@@ -81,15 +83,18 @@ fn item_signatures(raw: &Value) -> Result<Vec<String>, String> {
 
 /// Reads never change the cached order. Only an exact original permits the
 /// fresh wire version; a changed order remains editable for explicit refresh.
+#[cfg(test)]
 pub(crate) fn verify(
     conn: &Connection,
     order: &str,
     before: &Value,
     answer: &Value,
 ) -> Result<Value, String> {
-    if capture(conn, order, &json!({}))? != *before {
-        return Err("ORDER_VERSION_CONFLICT".into());
-    }
+    verify_detailed(conn, order, before, answer).map_err(|refusal| refusal.code)
+}
+
+/// The one order of an exact `GET /api/pos/orders/sync?order_id=` answer.
+pub(crate) fn exact_order(answer: &Value) -> Result<&Value, String> {
     let rows = answer
         .get("orders")
         .and_then(Value::as_array)
@@ -97,7 +102,75 @@ pub(crate) fn verify(
     if answer["success"] != true || answer["exact_order_lookup"] != true || rows.len() != 1 {
         return Err("EDIT_CANONICAL_SNAPSHOT_INVALID".into());
     }
-    let canonical = &rows[0];
+    Ok(&rows[0])
+}
+
+/// Every difference between the till's original and the server's order:
+/// `(field, adoptable)`. Headers other than the fulfillment and the two
+/// notes are non-money and may be adopted; the rest refuses.
+pub(crate) fn drift(
+    before: &Value,
+    canonical: &Value,
+) -> Result<Vec<(&'static str, bool)>, String> {
+    let mut drifts = Vec::new();
+    let amount = canonical["total_amount"]
+        .as_f64()
+        .filter(|v| v.is_finite())
+        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+    if json!(crate::money::Cents::round_half_even(amount).as_i64()) != before["totalCents"] {
+        drifts.push(("total_amount", false));
+    }
+    if canonical["status"] != before["status"] {
+        drifts.push(("status", false));
+    }
+    for (_, field) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
+        if !crate::edit_settlement_recovery::same_canonical_header(
+            &canonical[*field],
+            &before["headers"][*field],
+        ) {
+            let name = crate::edit_settlement_recovery::EDIT_REFUSAL_FIELDS
+                .iter()
+                .copied()
+                .find(|known| known == field)
+                .unwrap_or("items");
+            drifts.push((name, *field != "order_type"));
+        }
+    }
+    if item_signatures(&canonical["items"])? != item_signatures(&before["items"])? {
+        if item_signatures_with_display(&canonical["items"], false)?
+            == item_signatures_with_display(&before["items"], false)?
+        {
+            drifts.push(("items.name", true));
+        } else {
+            drifts.push(("items", false));
+        }
+    }
+    for (field, name) in [
+        ("notes", "notes"),
+        ("special_instructions", "special_instructions"),
+    ] {
+        if !crate::edit_settlement_recovery::same_canonical_header(
+            &canonical[field],
+            &before[field],
+        ) {
+            drifts.push((name, true));
+        }
+    }
+    Ok(drifts)
+}
+
+/// [`verify`] naming the first differing field.
+pub(crate) fn verify_detailed(
+    conn: &Connection,
+    order: &str,
+    before: &Value,
+    answer: &Value,
+) -> Result<Value, crate::edit_settlement_recovery::EditRefusal> {
+    use crate::edit_settlement_recovery::EditRefusal;
+    if capture(conn, order, &json!({}))? != *before {
+        return Err("ORDER_VERSION_CONFLICT".into());
+    }
+    let canonical = exact_order(answer)?;
     if canonical["id"] != before["id"]
         || canonical["organization_id"] != before["organizationId"]
         || canonical["branch_id"] != before["branchId"]
@@ -112,29 +185,16 @@ pub(crate) fn verify(
         .as_i64()
         .is_some_and(|known| version < known)
     {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some("canonical_version"),
+        ));
     }
-    let amount = canonical["total_amount"]
-        .as_f64()
-        .filter(|v| v.is_finite())
-        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
-    if json!(crate::money::Cents::round_half_even(amount).as_i64()) != before["totalCents"]
-        || canonical["status"] != before["status"]
-    {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-    }
-    for (_, field) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
-        if !same(&canonical[*field], &before["headers"][*field]) {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-        }
-    }
-    if item_signatures(&canonical["items"])? != item_signatures(&before["items"])? {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-    }
-    for field in ["notes", "special_instructions"] {
-        if !same(&canonical[field], &before[field]) {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-        }
+    if let Some((field, _)) = drift(before, canonical)?.first() {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some(field),
+        ));
     }
     Ok(json!({"version":1,"canonicalVersion":version,"original":before}))
 }

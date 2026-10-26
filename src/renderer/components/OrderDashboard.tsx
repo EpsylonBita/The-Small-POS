@@ -122,6 +122,11 @@ import PickupOrderIcon from "./icons/PickupOrderIcon";
 import { submitTableReservation } from "../utils/table-reservation-submit";
 import { debugLog } from "../utils/debugLog";
 import {
+  canChangeOrderDriver,
+  currentOrderDriver,
+  driverChangeErrorKey,
+} from "../utils/driverChange";
+import {
   reservationsService,
   type Reservation,
 } from "../services/ReservationsService";
@@ -1015,6 +1020,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     // panel: remounting it re-appends its portal, so it lands above a dialog
     // (settings, a wizard) that had covered it.
     const [approvalPanelInstance, setApprovalPanelInstance] = useState(0);
+
+    // "Change driver" from the Edit options (founder request, Tomikro
+    // 26/10/2026): the order whose driver is being corrected.
+    const [driverChangeTarget, setDriverChangeTarget] = useState<{
+      orderId: string;
+      orderNumber?: string;
+      currentDriverId: string | null;
+      currentDriverName: string | null;
+    } | null>(null);
+    const [isChangingDriver, setIsChangingDriver] = useState(false);
 
     // State for edit modals
     const [showEditOptionsModal, setShowEditOptionsModal] = useState(false);
@@ -7310,6 +7325,72 @@ export const OrderDashboard = memo<OrderDashboardProps>(
       setEditingSingleOrder(null);
     };
 
+    // "Change driver" (founder request, Tomikro 26/10/2026): the cashier
+    // picked the wrong driver. The till moves the order, its driver earning
+    // and the courier's cash to the driver who carried it while both shifts
+    // are open; a correction asks for the void-payments approval.
+    const canChangeEditedOrderDriver = canChangeOrderDriver(editablePaymentOrder);
+    const editedOrderDriver = currentOrderDriver(editablePaymentOrder);
+
+    const handleChangeDriver = () => {
+      if (!editablePaymentOrder || !canChangeOrderDriver(editablePaymentOrder)) {
+        toast.error(t("orderDashboard.driverChange.errors.notDelivery"));
+        return;
+      }
+      const driver = currentOrderDriver(editablePaymentOrder);
+      setDriverChangeTarget({
+        orderId: editablePaymentOrder.id,
+        orderNumber:
+          formatCompactOrderNumberForDisplay(getVisibleOrderNumber(editablePaymentOrder)) ||
+          undefined,
+        currentDriverId: driver?.id ?? null,
+        currentDriverName: driver?.name ?? null,
+      });
+      setShowEditOptionsModal(false);
+    };
+
+    const handleDriverChangeClose = () => {
+      if (isChangingDriver) return;
+      setDriverChangeTarget(null);
+      setPendingEditOrders([]);
+      setEditingSingleOrder(null);
+    };
+
+    const handleDriverChangeSelect = async (driver: { id: string; name: string }) => {
+      const target = driverChangeTarget;
+      if (!target || isChangingDriver) return;
+      setIsChangingDriver(true);
+      try {
+        const result: any = await runTableReleaseApproval({
+          scope: "cash_drawer_control",
+          action: () =>
+            bridge.orders.changeDriver({ orderId: target.orderId, driverId: driver.id }),
+          title: t("orderDashboard.driverChange.approvalTitle"),
+          approvalSubtitle: t("orderDashboard.driverChange.approvalSubtitle"),
+        });
+        if (result?.success !== true) {
+          throw new Error(result?.error || "DRIVER_CHANGE_FAILED");
+        }
+        toast.success(
+          t("orderDashboard.driverChange.success", {
+            name: result?.data?.driverName || driver.name,
+          }),
+        );
+        setDriverChangeTarget(null);
+        setPendingEditOrders([]);
+        setEditingSingleOrder(null);
+        clearBulkSelection();
+        await loadOrders();
+      } catch (error) {
+        const message = extractOrderDashboardErrorMessage(error) || String(error ?? "");
+        if (/confirmation cancelled/i.test(message)) return;
+        console.error("Failed to change the driver:", error);
+        toast.error(t(driverChangeErrorKey(error)), { id: "driver-change-error", duration: 8000 });
+      } finally {
+        setIsChangingDriver(false);
+      }
+    };
+
     const handleEditPaymentClose = () => {
       if (isUpdatingPaymentMethod) return;
       setShowEditPaymentModal(false);
@@ -8831,6 +8912,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           onClose={handleDriverModalClose}
         />
 
+        <DriverAssignmentModal
+          isOpen={Boolean(driverChangeTarget)}
+          mode="change"
+          orderCount={1}
+          currentDriverId={driverChangeTarget?.currentDriverId}
+          currentDriverName={driverChangeTarget?.currentDriverName}
+          isSaving={isChangingDriver}
+          onDriverAssign={handleDriverChangeSelect}
+          onClose={handleDriverChangeClose}
+        />
+
         <OrderCancellationModal
           isOpen={showCancelModal}
           orderCount={pendingCancelOrders.length}
@@ -8888,6 +8980,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(
               ? t("orderDashboard.paymentMethodEditChecking")
               : paymentEditIneligibilityReason
           }
+          canChangeDriver={canChangeEditedOrderDriver}
+          currentDriverName={editedOrderDriver?.name ?? editedOrderDriver?.id ?? null}
+          onChangeDriver={handleChangeDriver}
           onClose={handleEditOptionsClose}
         />
 

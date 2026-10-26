@@ -20,6 +20,16 @@ interface DriverAssignmentModalProps {
   branchId?: string;
   onDriverAssign: (driver: Driver) => void;
   onClose: () => void;
+  /**
+   * `change`: "Change driver" from an order's Edit options (founder request,
+   * Tomikro 26/10/2026). The current driver is shown and cannot be picked
+   * again; the parent announces the outcome and closes the picker once the
+   * change is saved (it may first ask for an approval PIN).
+   */
+  mode?: 'assign' | 'change';
+  currentDriverId?: string | null;
+  currentDriverName?: string | null;
+  isSaving?: boolean;
 }
 
 export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
@@ -27,8 +37,13 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
   orderCount,
   branchId,
   onDriverAssign,
-  onClose
+  onClose,
+  mode = 'assign',
+  currentDriverId,
+  currentDriverName,
+  isSaving = false,
 }) => {
+  const isChange = mode === 'change';
   const bridge = getBridge();
   const { t } = useTranslation();
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -85,6 +100,15 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
   };
 
   const handleDriverSelect = (driver: Driver) => {
+    if (isChange) {
+      if (isSaving || driver.id === currentDriverId) return;
+      if (driver.assignable === false) {
+        toast.error(t('modals.driverAssignment.notAvailable', { name: driver.name }));
+        return;
+      }
+      onDriverAssign(driver);
+      return;
+    }
     if (driver.assignable !== false) {
       onDriverAssign(driver);
       toast.success(t('modals.driverAssignment.assignedTo', { name: driver.name }));
@@ -100,14 +124,27 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
-      title={t('modals.driverAssignment.title')}
+      title={isChange ? t('modals.driverAssignment.changeTitle') : t('modals.driverAssignment.title')}
       size="md"
       className="!max-w-lg"
       closeOnBackdrop={false}
     >
-      <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
-        {t('modals.driverAssignment.message', { count: orderCount })}
-      </p>
+      {isChange ? (
+        <div className="mb-6 space-y-1">
+          <p className="text-sm text-gray-600 dark:text-gray-400" data-testid="driver-change-current">
+            {currentDriverName
+              ? t('modals.driverAssignment.currentDriver', { name: currentDriverName })
+              : t('modals.driverAssignment.noCurrentDriver')}
+          </p>
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t('modals.driverAssignment.changeMessage')}
+          </p>
+        </div>
+      ) : (
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+          {t('modals.driverAssignment.message', { count: orderCount })}
+        </p>
+      )}
 
       {/* Loading State */}
       {isLoading && (
@@ -134,11 +171,13 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       {!isLoading && drivers.length > 0 && (
         <div className="space-y-3 mb-6">
           {drivers.map((driver) => {
-            const isDisabled = driver.assignable === false;
+            const isCurrent = isChange && driver.id === currentDriverId;
+            const isDisabled = driver.assignable === false || isCurrent || (isChange && isSaving);
             return (
               <button
                 type="button"
                 key={driver.id}
+                data-testid={`driver-option-${driver.id}`}
                 onClick={() => handleDriverSelect(driver)}
                 disabled={isDisabled}
                 className={`
@@ -149,7 +188,14 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
                   }
                     `}
               >
-                <div className="font-medium liquid-glass-modal-text">{driver.name}</div>
+                <div className="font-medium liquid-glass-modal-text">
+                  {driver.name}
+                  {isCurrent && (
+                    <span className="ml-2 text-xs liquid-glass-modal-text-muted">
+                      {t('modals.driverAssignment.currentLabel')}
+                    </span>
+                  )}
+                </div>
               </button>
             );
           })}

@@ -5557,7 +5557,10 @@
       "editPaymentMethodDesc": "Ndërro mes keshit dhe kartës",
       "changeOrderType": "Ndrysho llojin e porosisë",
       "changeOrderTypeDesc": "Rillogarit porosinë me çmimet për me vete, dërgesë ose në lokal",
-      "cancel": "Anulo"
+      "cancel": "Anulo",
+      "changeDriver": "Ndrysho korrierin",
+      "changeDriverCurrent": "Korrieri aktual: {{name}}",
+      "changeDriverNone": "Ende pa korrier. Zgjidhni korrierin që e dorëzon."
     },
     "editPaymentMethod": {
       "title": "Ndrysho mënyrën e pagesës",
@@ -5587,7 +5590,12 @@
         "busy": "I zënë",
         "offline": "Offline"
       },
-      "cancel": "Anulo"
+      "cancel": "Anulo",
+      "changeTitle": "Ndrysho korrierin",
+      "currentDriver": "Korrieri aktual: {{name}}",
+      "noCurrentDriver": "Kjo porosi nuk ka ende korrier.",
+      "changeMessage": "Zgjidhni korrierin që e dorëzoi realisht porosinë. Tarifa e dorëzimit, bakshishi dhe paratë në dorë për t'u dorëzuar kalojnë te ky korrier.",
+      "currentLabel": "(aktual)"
     },
     "addressSelection": {
       "title": "Zgjidh adresën ({{type}})",
@@ -6318,7 +6326,25 @@
     "refundNoEligiblePayment": "Nuk ka asnjë pagesë të përfunduar me mjaftueshëm mbetje për rimbursim.",
     "tableOrderNotLoaded": "Llogaria e tavolinës është e hapur, por porosia e lidhur nuk është ngarkuar ende në këtë arkë. Rifresko porositë dhe provo përsëri.",
     "tableSessionQueued": "Tavolina u ruajt lokalisht; sinkronizimi i sesionit u vu në radhë.",
-    "tableSessionSyncFailed": "Porosia u ruajt, por sinkronizimi i sesionit të tavolinës duhet përsëritur."
+    "tableSessionSyncFailed": "Porosia u ruajt, por sinkronizimi i sesionit të tavolinës duhet përsëritur.",
+    "driverChange": {
+      "success": "Korrieri u ndryshua në {{name}}",
+      "approvalTitle": "Mirato ndryshimin e korrierit",
+      "approvalSubtitle": "Ndryshimi i korrierit zhvendos paratë në dorë të korrierit. Një anëtar i stafit me të drejtë anulimi pagesash fut PIN-in e vet.",
+      "errors": {
+        "cancelled": "Një porosi e anuluar ose e rimbursuar nuk ka korrier për t'u ndryshuar.",
+        "notDelivery": "Vetëm një porosi me dorëzim ka korrier.",
+        "platformFleet": "Këtë porosi e çon korrieri i platformës së dorëzimit. Nuk ka korrier të dyqanit.",
+        "sameDriver": "Porosia e ka tashmë këtë korrier.",
+        "newDriverOffShift": "Korrieri i zgjedhur nuk ka bërë check-in në këtë dyqan. Bëjini fillimisht check-in.",
+        "shiftClosed": "Turni i korrierit për këtë porosi është mbyllur ose shlyer. Paratë e tij janë përfundimtare, prandaj korrieri nuk mund të ndryshohet.",
+        "adjustedOrder": "Kjo porosi ka një rimbursim, një anulim ose para të kthyera. Korrieri i saj nuk mund të ndryshohet.",
+        "syncInProgress": "Fitimi i korrierit po dërgohet tani. Provoni përsëri pas pak.",
+        "currencyMismatch": "Turni i korrierit të zgjedhur është në një monedhë tjetër.",
+        "moneyChanged": "Paratë e korrierit do të ndryshonin, prandaj nuk u zhvendos asgjë. Provoni përsëri.",
+        "failed": "Korrieri nuk mund të ndryshohej."
+      }
+    }
   },
   "bulkActions": {
     "driver": "Korrieri",

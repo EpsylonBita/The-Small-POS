@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   editOrder: null as any,
   inspect: null as any,
   applyEditSettlement: vi.fn(),
+  refreshFromServer: vi.fn(async (): Promise<any> => ({ success: true, orderId: 'paid-order', refreshed: ['items.identity'] })),
+  reportEditRefusal: vi.fn(async () => ({ success: true })),
   recoverySnapshot: vi.fn(),
   appointmentClaims: vi.fn(async (): Promise<any> => null),
 }));
@@ -181,7 +183,8 @@ vi.mock('../../../../lib', async (importOriginal) => {
     }),
     settings: { get: vi.fn(async () => null) },
     recovery: { createPreActionSnapshot: mocks.recoverySnapshot },
-    orders: { getById: vi.fn(async () => mocks.editOrder), applyEditSettlement: (...args: any[]) => mocks.applyEditSettlement(...args) },
+    orders: { getById: vi.fn(async () => mocks.editOrder), applyEditSettlement: (...args: any[]) => mocks.applyEditSettlement(...args),
+      refreshFromServer: (...args: any[]) => mocks.refreshFromServer(...args), reportEditRefusal: (...args: any[]) => mocks.reportEditRefusal(...args) },
     branchData: { validateCoupon: vi.fn(async () => ({ success: true, data: { valid: true, coupon: mocks.coupon } })) },
     loyalty: {
       redeemPoints: (...args: any[]) => mocks.redeem(...args),
@@ -241,6 +244,7 @@ vi.mock('../PaymentModal', () => ({
 vi.mock('../LoyaltyRedeemModal', () => ({ LoyaltyRedeemModal: ({ isOpen, onRedeem }: any) => isOpen ? <button onClick={() => onRedeem(1, 100)}>Use 100 points</button> : null }));
 
 import { MenuModal } from '../MenuModal';
+import { RendererEditRefusal } from '../../../services/MenuOrderEdit';
 import { menuService } from '../../../services/MenuService';
 import { getBridge } from '../../../../lib';
 
@@ -501,6 +505,49 @@ describe('MenuModal paid edit lifecycle', () => {
     expect(commit).not.toHaveBeenCalled();
     expect(draftStorage.draft?.phase).toBe('editing');
     expect(draftStorage.draft?.submission).toBeUndefined();
+  });
+
+  // Tomikro 25-26/10/2026: "Refresh the order" never re-read the server and
+  // every retry was refused the same way. The refusal now offers a real refresh.
+  it.each(['EDIT_CANONICAL_ORIGINAL_CHANGED', 'ORDER_VERSION_CONFLICT'])('a refused correction (%s) offers a refresh from the server, then reopens the order', async (code) => {
+    mocks.refreshFromServer.mockClear();
+    const commit = vi.fn();
+    const close = await openEdit(commit, vi.fn(), 'collect', { preflight: async () => { throw new Error(code); } });
+    const refresh = await screen.findByTestId('menu-edit-refresh-order');
+    expect(screen.getByTestId('menu-edit-stale').textContent).toContain('modals.menu.editCanonicalChanged');
+    fireEvent.click(refresh);
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(mocks.refreshFromServer).toHaveBeenCalledWith('paid-order');
+    expect(commit).not.toHaveBeenCalled();
+    // Nothing was charged; the cart built on the old order is let go.
+    expect(draftStorage.draft).toBeNull();
+  });
+
+  it('a failed refresh keeps the editor and says what to do', async () => {
+    mocks.toastError.mockClear();
+    mocks.refreshFromServer.mockImplementationOnce(async () => { throw new Error('EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED'); });
+    const close = await openEdit(vi.fn(), vi.fn(), 'collect', { preflight: async () => { throw new Error('EDIT_ORIGINAL_ITEMS_UNAVAILABLE'); } });
+    fireEvent.click(await screen.findByTestId('menu-edit-refresh-order'));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('modals.menu.editRefreshFailed'));
+    expect(close).not.toHaveBeenCalled();
+    expect(draftStorage.draft?.phase).toBe('editing');
+  });
+
+  it('an order the till refreshed from the server closes the editor with a reopen message', async () => {
+    mocks.toastError.mockClear();
+    const close = await openEdit(vi.fn(), vi.fn(), 'collect', { preflight: async () => { throw new Error('EDIT_ORDER_REFRESHED'); } });
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('modals.menu.editOrderRefreshed'));
+    expect(close).toHaveBeenCalledOnce();
+    expect(draftStorage.draft).toBeNull();
+  });
+
+  it('a refusal the renderer decides is reported once with its field name', async () => {
+    mocks.reportEditRefusal.mockClear();
+    await openEdit(vi.fn(), vi.fn(), 'collect', {
+      preflight: async () => { throw new RendererEditRefusal('EDIT_CANONICAL_QUOTE_CHANGED', 'quote_financials'); },
+    });
+    await waitFor(() => expect(mocks.reportEditRefusal).toHaveBeenCalledWith({ refusal: 'EDIT_CANONICAL_QUOTE_CHANGED', field: 'quote_financials' }));
+    expect(mocks.reportEditRefusal).toHaveBeenCalledOnce();
   });
 
   it('fences same-tick repeated Save and Close while preflight is unresolved, then unlocks on refusal', async () => {

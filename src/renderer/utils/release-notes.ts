@@ -247,5 +247,7 @@ export function getReleaseNotesHtml(
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: SAFE_RELEASE_NOTE_TAGS,
     ALLOWED_ATTR: [],
+    ALLOW_DATA_ATTR: false,
+    ALLOW_ARIA_ATTR: false,
   });
 }

@@ -22,6 +22,10 @@ use tracing::warn;
 #[path = "diagnostics_runtime_logs.rs"]
 mod runtime_logs;
 
+pub(crate) fn is_runtime_error_code(code: &str) -> bool {
+    runtime_logs::RUNTIME_ERROR_CODES.contains(&code)
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

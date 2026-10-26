@@ -105,22 +105,40 @@ fn customizations(mut value: Value) -> Value {
     }
 }
 
+/// A line's canonical UUID (never a renderer cart id or a menu id).
+pub(crate) fn canonical_line_id(item: &Value) -> Option<String> {
+    text_alias(
+        item,
+        &[
+            "source_order_item_id",
+            "sourceOrderItemId",
+            "order_item_id",
+            "orderItemId",
+            "id",
+        ],
+    )
+    .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+}
+
 pub(crate) fn items(value: &Value) -> Result<Vec<Value>, String> {
+    let rows = value.as_array().ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+    for item in rows {
+        canonical_line_id(item).ok_or("EDIT_ORIGINAL_ITEMS_UNAVAILABLE")?;
+    }
+    let result = line_signatures(value)?;
+    if result.windows(2).any(|pair| pair[0]["id"] == pair[1]["id"]) {
+        return Err("EDIT_CANONICAL_SNAPSHOT_INVALID".into());
+    }
+    Ok(result)
+}
+
+/// The compared shape of every line, sorted by its canonical id; a line
+/// without one (a till's own cart id) keeps `id: null`.
+fn line_signatures(value: &Value) -> Result<Vec<Value>, String> {
     let rows = value.as_array().ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
     let mut result = Vec::new();
     for item in rows {
-        let id = text_alias(
-            item,
-            &[
-                "source_order_item_id",
-                "sourceOrderItemId",
-                "order_item_id",
-                "orderItemId",
-                "id",
-            ],
-        )
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .ok_or("EDIT_ORIGINAL_ITEMS_UNAVAILABLE")?;
+        let id = canonical_line_id(item);
         let quantity = item
             .get("quantity")
             .and_then(Value::as_f64)
@@ -153,9 +171,6 @@ pub(crate) fn items(value: &Value) -> Result<Vec<Value>, String> {
             "overridden":item.get("is_price_overridden").or_else(||item.get("isPriceOverridden")).and_then(Value::as_bool).unwrap_or(false)}));
     }
     result.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    if result.windows(2).any(|pair| pair[0]["id"] == pair[1]["id"]) {
-        return Err("EDIT_CANONICAL_SNAPSHOT_INVALID".into());
-    }
     Ok(result)
 }
 
@@ -195,23 +210,396 @@ pub(crate) fn capture_order_headers(conn: &Connection, order: &str) -> Result<Va
         .map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
-fn same_header_value(left: &Value, right: &Value) -> bool {
-    if left.is_null() || left.as_str() == Some("") {
-        right.is_null() || right.as_str() == Some("")
-    } else {
-        left == right
+/// The till's header equals the server's canonical one. Null and blank text
+/// are the same, text compares trimmed, and numbers compare to 1e-9: a
+/// coordinate can have different JSON renderings while retaining the same
+/// stored meaning. Coordinate rounding was ruled out for the reported incident.
+pub(crate) fn same_canonical_header(left: &Value, right: &Value) -> bool {
+    let blank = |value: &Value| {
+        value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty())
+    };
+    if blank(left) || blank(right) {
+        return blank(left) && blank(right);
     }
+    let number = |value: &Value| {
+        value.as_f64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+        })
+    };
+    if left.is_number() || right.is_number() {
+        return match (number(left), number(right)) {
+            (Some(a), Some(b)) => a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-9,
+            _ => false,
+        };
+    }
+    let text = |value: &Value| match value {
+        Value::String(text) => text.trim().to_string(),
+        other => other.to_string(),
+    };
+    text(left) == text(right)
+}
+
+// ---------------------------------------------------------------------------
+// Canonical drift (Tomikro 25–26/10/2026, ORD-26102026-00072)
+// ---------------------------------------------------------------------------
+//
+// A delivery paid cash at creation could take a customer correction, but every
+// attempt to add products was refused with "Order details need a refresh" and
+// pressing refresh changed nothing. The till's lines still carried the
+// renderer's cart ids: the create acknowledgement never projected the
+// server's line UUIDs, and the payment acknowledgement stamps the order newer
+// than the server so the pull skips it. The header preflight ignores line ids;
+// the paid-edit preflight requires them and refused with
+// EDIT_ORIGINAL_ITEMS_UNAVAILABLE. Nothing was logged.
+//
+// While nothing of the order waits to be sent, the server's canonical order is
+// the truth: a non-money difference (headers, notes, line identities and
+// display names) is adopted and the edit continues; any other difference
+// refreshes the order from the server and asks the cashier to reopen it.
+// Money already recorded (payments, returns) is never rewritten here.
+
+/// One refusal of an order edit or its preflight: a fixed code and, when a
+/// comparison refused it, the name of the first differing field.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EditRefusal {
+    pub code: String,
+    pub field: Option<&'static str>,
+}
+
+impl EditRefusal {
+    pub(crate) fn at(code: &str, field: Option<&'static str>) -> Self {
+        Self {
+            code: code.to_string(),
+            field,
+        }
+    }
+}
+
+impl From<String> for EditRefusal {
+    fn from(code: String) -> Self {
+        Self { code, field: None }
+    }
+}
+
+impl From<&str> for EditRefusal {
+    fn from(code: &str) -> Self {
+        Self::at(code, None)
+    }
+}
+
+/// The new refusal: the order was refreshed from the server; reopen it.
+pub(crate) const EDIT_ORDER_REFRESHED: &str = "EDIT_ORDER_REFRESHED";
+
+/// Field names a refusal may name in the support log (names only, never values).
+pub(crate) const EDIT_REFUSAL_FIELDS: &[&str] = &[
+    "adjustments",
+    "canonical_version",
+    "currency",
+    "customer_email",
+    "customer_id",
+    "customer_name",
+    "customer_phone",
+    "delivery_address",
+    "delivery_address_fingerprint",
+    "delivery_address_id",
+    "delivery_city",
+    "delivery_fee",
+    "delivery_floor",
+    "delivery_latitude",
+    "delivery_longitude",
+    "delivery_notes",
+    "delivery_postal_code",
+    "delivery_zone_id",
+    "discount_amount",
+    "driver_id",
+    "driver_name",
+    "items",
+    "items.identity",
+    "items.name",
+    "items.notes",
+    "local_version",
+    "name_on_ringer",
+    "notes",
+    "order_type",
+    "paid_cents",
+    "payment_status",
+    "payments",
+    "quote_financials",
+    "quote_input",
+    "special_instructions",
+    "status",
+    "subtotal",
+    "sync_status",
+    "table_number",
+    "tax_amount",
+    "tip_amount",
+    "total_amount",
+];
+
+fn refusal_field(name: &str) -> Option<&'static str> {
+    EDIT_REFUSAL_FIELDS
+        .iter()
+        .copied()
+        .find(|known| *known == name)
+}
+
+/// The fixed code at the head of a refusal (`EDIT_X: detail` → `EDIT_X`).
+pub(crate) fn refusal_code(error: &str) -> &str {
+    let end = error
+        .find(|ch: char| !(ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'))
+        .unwrap_or(error.len());
+    let code = &error[..end];
+    if crate::diagnostics::is_runtime_error_code(code) {
+        code
+    } else {
+        "EDIT_REFUSAL_UNCLASSIFIED"
+    }
+}
+
+/// One fixed-code support-log event per refusal: the refusal code and the
+/// name of the first differing field. The line carries no value, cart or
+/// customer detail; the bundle projection keeps only allow-listed tokens.
+pub(crate) fn log_edit_refusal(stage: &'static str, refusal: &EditRefusal) {
+    let field = refusal.field.and_then(refusal_field).unwrap_or("none");
+    tracing::warn!(
+        target: "checkout::order_edit",
+        event_code = "checkout_edit_refused",
+        edit_stage = stage,
+        edit_field = field,
+        refusal = refusal_code(&refusal.code),
+        "Order edit refused"
+    );
+}
+
+/// The first field two snapshots of the same order differ in.
+pub(crate) fn snapshot_difference(left: &Value, right: &Value) -> Option<&'static str> {
+    for (key, field) in [
+        ("localVersion", "local_version"),
+        ("remoteVersion", "canonical_version"),
+        ("sync_status", "sync_status"),
+        ("status", "status"),
+        ("order_type", "order_type"),
+        ("items", "items"),
+        ("total_amount", "total_amount"),
+        ("subtotal", "subtotal"),
+        ("discount_amount", "discount_amount"),
+        ("tax_amount", "tax_amount"),
+        ("delivery_fee", "delivery_fee"),
+        ("tip_amount", "tip_amount"),
+        ("currency", "currency"),
+        ("payment_status", "payment_status"),
+        ("paidCents", "paid_cents"),
+        ("payments", "payments"),
+        ("notes", "notes"),
+        ("special_instructions", "special_instructions"),
+    ] {
+        if left.get(key) != right.get(key) {
+            return Some(field);
+        }
+    }
+    for (_, column) in EDIT_HEADER_FIELDS {
+        if left["headers"].get(*column) != right["headers"].get(*column) {
+            return refusal_field(column);
+        }
+    }
+    None
+}
+
+/// A retry may advance revisions and display/header data, but must keep the
+/// sale the cashier's complete cart was built on. Compare line multisets so
+/// canonical identity, display and ordering changes do not invent a new sale.
+pub(crate) fn economic_snapshot_difference(
+    left: &Value,
+    right: &Value,
+) -> Result<Option<&'static str>, String> {
+    let sale_lines = |snapshot: &Value| -> Result<Vec<String>, String> {
+        let mut lines = line_signatures(&snapshot["items"])?
+            .iter()
+            .map(|line| content_signature(line).to_string())
+            .collect::<Vec<_>>();
+        lines.sort();
+        Ok(lines)
+    };
+    if sale_lines(left)? != sale_lines(right)? {
+        return Ok(Some("items"));
+    }
+    for field in [
+        "total_amount",
+        "subtotal",
+        "discount_amount",
+        "delivery_fee",
+        "tip_amount",
+    ] {
+        if amount(left, field)? != amount(right, field)? {
+            return Ok(refusal_field(field));
+        }
+    }
+    for (key, field) in [
+        ("status", "status"),
+        ("order_type", "order_type"),
+        ("currency", "currency"),
+        ("payment_status", "payment_status"),
+        ("paidCents", "paid_cents"),
+        ("payments", "payments"),
+    ] {
+        if left.get(key) != right.get(key) {
+            return Ok(Some(field));
+        }
+    }
+    Ok(None)
+}
+
+/// One difference between the till's original and the server's order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Drift {
+    pub field: &'static str,
+    /// A non-money field the server's snapshot may replace on this till.
+    pub adoptable: bool,
+}
+
+fn drift(field: &'static str, adoptable: bool) -> Drift {
+    Drift { field, adoptable }
+}
+
+/// Lines with their identity and display removed: what makes them the same sale.
+fn content_signature(line: &Value) -> Value {
+    let mut line = line.clone();
+    if let Some(object) = line.as_object_mut() {
+        for key in ["id", "name", "notes"] {
+            object.remove(key);
+        }
+    }
+    line
+}
+
+/// Each line of the till's original matched to exactly one canonical line of
+/// the same sale (product, quantity, prices, recipe), canonical ids first.
+/// `None` when the lines are not the same sale.
+fn match_lines(local: &[Value], canonical: &[Value]) -> Option<Vec<(usize, usize)>> {
+    if local.len() != canonical.len() {
+        return None;
+    }
+    let mut used = vec![false; canonical.len()];
+    let mut pairs = Vec::new();
+    // Retained canonical ids keep their own line.
+    for (index, line) in local.iter().enumerate() {
+        if let Some(id) = line["id"].as_str() {
+            let found = canonical
+                .iter()
+                .position(|row| row["id"].as_str() == Some(id))?;
+            if used[found] || content_signature(&canonical[found]) != content_signature(line) {
+                return None;
+            }
+            used[found] = true;
+            pairs.push((index, found));
+        }
+    }
+    for (index, line) in local.iter().enumerate() {
+        if line["id"].is_string() {
+            continue;
+        }
+        let signature = content_signature(line);
+        let found = (0..canonical.len()).find(|candidate| {
+            !used[*candidate] && content_signature(&canonical[*candidate]) == signature
+        })?;
+        used[found] = true;
+        pairs.push((index, found));
+    }
+    Some(pairs)
+}
+
+/// Every difference between the till's original and the server's canonical
+/// order. Scope, provider and currency refusals stay errors.
+pub(crate) fn canonical_drift(before: &Value, remote: &Value) -> Result<Vec<Drift>, EditRefusal> {
+    let canonical = &remote["order"];
+    let mut drifts = Vec::new();
+    for (_, column) in EDIT_HEADER_FIELDS {
+        if !same_canonical_header(&before["headers"][*column], &canonical[*column]) {
+            drifts.push(drift(
+                refusal_field(column).unwrap_or("items"),
+                *column != "order_type",
+            ));
+        }
+    }
+    for field in ["notes", "special_instructions"] {
+        if text_alias(canonical, &[field]) != text_alias(before, &[field]) {
+            drifts.push(drift(refusal_field(field).unwrap(), true));
+        }
+    }
+    if canonical["status"] != before["status"] {
+        drifts.push(drift("status", false));
+    }
+    if canonical["order_type"] != before["order_type"]
+        && !drifts.iter().any(|known| known.field == "order_type")
+    {
+        drifts.push(drift("order_type", false));
+    }
+    let canonical_lines =
+        items(&canonical["items"]).map_err(|code| EditRefusal::at(&code, Some("items")))?;
+    let local_lines =
+        line_signatures(&before["items"]).map_err(|code| EditRefusal::at(&code, Some("items")))?;
+    if canonical_lines != local_lines {
+        match match_lines(&local_lines, &canonical_lines) {
+            Some(pairs) => {
+                if pairs.iter().any(|(local, canonical)| {
+                    local_lines[*local]["id"] != canonical_lines[*canonical]["id"]
+                }) {
+                    drifts.push(drift("items.identity", true));
+                }
+                for (key, field) in [("name", "items.name"), ("notes", "items.notes")] {
+                    if pairs.iter().any(|(local, canonical)| {
+                        local_lines[*local][key] != canonical_lines[*canonical][key]
+                    }) {
+                        drifts.push(drift(field, true));
+                    }
+                }
+            }
+            None => drifts.push(drift("items", false)),
+        }
+    }
+    // Tax is not compared: the server derives it from the lines and totals
+    // checked here, and a till may hold a different or missing figure for it.
+    // 06/10/2026 (1.4.123): a delivery order made from the dashboard was kept
+    // with tax 0 while the server computed 4.37 of VAT, and every paid
+    // correction of it was refused as "changed" before the refund question.
+    for field in [
+        "total_amount",
+        "subtotal",
+        "discount_amount",
+        "delivery_fee",
+        "tip_amount",
+    ] {
+        if amount(canonical, field)? != amount(before, field)? {
+            drifts.push(drift(refusal_field(field).unwrap(), false));
+        }
+    }
+    if canonical["currency"]
+        .as_str()
+        .zip(before["currency"].as_str())
+        .is_some_and(|(a, b)| a != b)
+    {
+        return Err(EditRefusal::at(
+            "PAYMENT_CURRENCY_MISMATCH",
+            Some("currency"),
+        ));
+    }
+    if remote["retained_paid_cents"].as_i64() != before["paidCents"].as_i64() {
+        drifts.push(drift("paid_cents", false));
+    }
+    Ok(drifts)
 }
 
 /// The local revision and canonical wire revision are independent. Capture the
 /// complete original before waiting on the fresh remote snapshot, never the cart.
 pub(crate) fn capture_preflight(conn: &Connection, order: &str) -> Result<Value, String> {
-    let mut original:Value=conn.query_row("SELECT supabase_id,organization_id,branch_id,COALESCE(version,1),status,order_type,currency,total_amount,subtotal,discount_amount,tax_amount,delivery_fee,tip_amount,items,special_instructions,sync_status,notes,table_id,table_session_id,folio_charged,order_context,payment_status FROM orders WHERE id=?1",[order],|row|
+    let mut original:Value=conn.query_row("SELECT supabase_id,organization_id,branch_id,COALESCE(version,1),status,order_type,currency,total_amount,subtotal,discount_amount,tax_amount,delivery_fee,tip_amount,items,special_instructions,sync_status,notes,table_id,table_session_id,folio_charged,order_context,payment_status,remote_version FROM orders WHERE id=?1",[order],|row|
         Ok(json!({"id":row.get::<_,Option<String>>(0)?,"organization_id":row.get::<_,Option<String>>(1)?,"branch_id":row.get::<_,Option<String>>(2)?,
             "localVersion":row.get::<_,i64>(3)?,"status":row.get::<_,String>(4)?,"order_type":row.get::<_,Option<String>>(5)?,"currency":row.get::<_,Option<String>>(6)?,
             "total_amount":row.get::<_,f64>(7)?,"subtotal":row.get::<_,Option<f64>>(8)?,"discount_amount":row.get::<_,Option<f64>>(9)?,
             "tax_amount":row.get::<_,Option<f64>>(10)?,"delivery_fee":row.get::<_,Option<f64>>(11)?,"tip_amount":row.get::<_,Option<f64>>(12)?,
-            "itemsRaw":row.get::<_,String>(13)?,"special_instructions":row.get::<_,Option<String>>(14)?,"sync_status":row.get::<_,String>(15)?,"notes":row.get::<_,Option<String>>(16)?,"table_id":row.get::<_,Option<String>>(17)?,"table_session_id":row.get::<_,Option<String>>(18)?,"folio_charged":row.get::<_,Option<bool>>(19)?,"order_context":row.get::<_,Option<String>>(20)?,"payment_status":row.get::<_,Option<String>>(21)?})))
+            "itemsRaw":row.get::<_,String>(13)?,"special_instructions":row.get::<_,Option<String>>(14)?,"sync_status":row.get::<_,String>(15)?,"notes":row.get::<_,Option<String>>(16)?,"table_id":row.get::<_,Option<String>>(17)?,"table_session_id":row.get::<_,Option<String>>(18)?,"folio_charged":row.get::<_,Option<bool>>(19)?,"order_context":row.get::<_,Option<String>>(20)?,"payment_status":row.get::<_,Option<String>>(21)?,"remoteVersion":row.get::<_,Option<i64>>(22)?})))
         .map_err(|error|error.to_string())?;
     // A 1.4.122 edit the server refused is not "still syncing": waiting will
     // not heal it, a manager must review it (fix 1).
@@ -233,19 +621,92 @@ pub(crate) fn capture_preflight(conn: &Connection, order: &str) -> Result<Value,
     original["items"] = serde_json::from_str(original["itemsRaw"].as_str().unwrap())
         .map_err(|_| "EDIT_ORIGINAL_ITEMS_UNAVAILABLE")?;
     original.as_object_mut().unwrap().remove("itemsRaw");
-    let mut statement=conn.prepare("SELECT remote_payment_id,method,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),currency,status,COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER))) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type IN ('refund','void')),0) FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') ORDER BY remote_payment_id").map_err(|error|error.to_string())?;
-    let rows=statement.query_map([order],|row|Ok(json!({"id":row.get::<_,Option<String>>(0)?,"method":row.get::<_,String>(1)?,"amountCents":row.get::<_,i64>(2)?,"tipCents":row.get::<_,i64>(3)?,"currency":row.get::<_,String>(4)?,"returnedCents":row.get::<_,i64>(6)?}))).map_err(|error|error.to_string())?;
-    original["payments"] = Value::Array(
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?,
-    );
-    original["paidCents"] = json!(crate::money::Cents::round_half_even(
-        crate::payments::load_principal_paid_for_order(conn, order)?
-    )
-    .as_i64());
+    let (payments, paid) = local_payment_snapshot(conn, order)?;
+    original["payments"] = payments;
+    original["paidCents"] = json!(paid);
     Ok(original)
 }
 
+/// The till's recorded money of an order: its receipts as the preflight
+/// compares them, and the principal it holds as paid.
+fn local_payment_snapshot(conn: &Connection, order: &str) -> Result<(Value, i64), String> {
+    let mut statement=conn.prepare("SELECT remote_payment_id,method,COALESCE(amount_cents,CAST(ROUND(amount*100) AS INTEGER)),COALESCE(tip_amount_cents,CAST(ROUND(tip_amount*100) AS INTEGER),0),currency,status,COALESCE((SELECT SUM(COALESCE(a.amount_cents,CAST(ROUND(a.amount*100) AS INTEGER))) FROM payment_adjustments a WHERE a.payment_id=p.id AND a.adjustment_type IN ('refund','void')),0) FROM order_payments p WHERE order_id=?1 AND status IN ('completed','refunded') ORDER BY remote_payment_id").map_err(|error|error.to_string())?;
+    let rows=statement.query_map([order],|row|Ok(json!({"id":row.get::<_,Option<String>>(0)?,"method":row.get::<_,String>(1)?,"amountCents":row.get::<_,i64>(2)?,"tipCents":row.get::<_,i64>(3)?,"currency":row.get::<_,String>(4)?,"status":row.get::<_,String>(5)?,"returnedCents":row.get::<_,i64>(6)?}))).map_err(|error|error.to_string())?;
+    let payments = Value::Array(
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?,
+    );
+    let paid = crate::money::Cents::round_half_even(
+        crate::payments::load_principal_paid_for_order(conn, order)?,
+    )
+    .as_i64();
+    Ok((payments, paid))
+}
+
+/// "Refresh the order from the server": the server's canonical snapshot
+/// (`GET /api/pos/orders/edit-capabilities?order_id=`) replaces the till's
+/// mirror of the order, so the cashier can retry the edit. Only while nothing
+/// of the order waits to be sent, and only when the till already holds
+/// exactly the server's payments and returns: recorded money is never
+/// rewritten here (the ledger restore runs before).
+pub(crate) fn refresh_order_from_canonical(
+    conn: &Connection,
+    order: &str,
+    remote: &Value,
+) -> Result<Vec<&'static str>, EditRefusal> {
+    let scope = table_session_cache::current_scope(conn)?;
+    let canonical = &remote["order"];
+    let (supabase, organization, branch): (Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT NULLIF(TRIM(COALESCE(supabase_id,'')),''),organization_id,branch_id FROM orders WHERE id=?1",
+            [order],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if organization.as_deref() != Some(scope.organization.as_str())
+        || branch.as_deref() != Some(scope.branch.as_str())
+        || supabase.is_none()
+        || canonical["id"].as_str() != supabase.as_deref()
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    if text_alias(canonical, &["table_id", "table_session_id"]).is_some()
+        || canonical["has_table_service_history"].as_bool() == Some(true)
+        || canonical["order_context"] == "repair_settlement"
+    {
+        return Err("TABLE_EDIT_SCOPED_SETTLEMENT_REQUIRED".into());
+    }
+    if order_has_local_queue(conn, order)? {
+        return Err(EditRefusal::at(
+            "EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED",
+            Some("sync_status"),
+        ));
+    }
+    items(&canonical["items"]).map_err(|code| EditRefusal::at(&code, Some("items")))?;
+    let (payments, paid) = local_payment_snapshot(conn, order)?;
+    let own = json!({"payments": payments, "paidCents": paid});
+    if let Some(first) = payment_drift(&own, remote, &scope)?.first() {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some(first.field),
+        ));
+    }
+    if remote["retained_paid_cents"].as_i64() != Some(paid) {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some("paid_cents"),
+        ));
+    }
+    let changed = adopt_canonical_order(conn, order, canonical, AdoptMode::Full)?;
+    conn.execute(
+        "UPDATE orders SET sync_status='synced',last_synced_at=?1 WHERE id=?2 AND organization_id=?3",
+        params![chrono::Utc::now().to_rfc3339(), order, scope.organization],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(changed)
+}
+
+#[cfg(test)]
 pub(crate) fn remember_canonical_preflight(
     conn: &Connection,
     order: &str,
@@ -253,22 +714,44 @@ pub(crate) fn remember_canonical_preflight(
     before: &Value,
     remote: &Value,
 ) -> Result<(i64, i64), String> {
+    remember_canonical_preflight_detailed(conn, order, event, before, remote)
+        .map_err(|refusal| refusal.code)
+}
+
+/// [`remember_canonical_preflight`] naming the first differing field.
+pub(crate) fn remember_canonical_preflight_detailed(
+    conn: &Connection,
+    order: &str,
+    event: &str,
+    before: &Value,
+    remote: &Value,
+) -> Result<(i64, i64), EditRefusal> {
     let scope = table_session_cache::current_scope(conn)?;
-    if capture_preflight(conn, order)? != *before {
-        return Err("EDIT_SETTLEMENT_VERSION_CHANGED".into());
+    let now = capture_preflight(conn, order)?;
+    if now != *before {
+        return Err(EditRefusal::at(
+            "EDIT_SETTLEMENT_VERSION_CHANGED",
+            snapshot_difference(before, &now),
+        ));
     }
     if matches!(
         before["payment_status"].as_str(),
         Some("paid" | "completed")
     ) && before["paidCents"].as_i64().unwrap_or(0) < amount(before, "total_amount")?
     {
-        return Err("EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED".into());
+        return Err(EditRefusal::at(
+            "EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED",
+            Some("paid_cents"),
+        ));
     }
     let canonical = &remote["order"];
     let version = canonical["version"]
         .as_i64()
         .filter(|v| *v > 0)
-        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+        .ok_or(EditRefusal::at(
+            "EDIT_CANONICAL_SNAPSHOT_INVALID",
+            Some("canonical_version"),
+        ))?;
     if canonical["id"] != before["id"]
         || canonical["organization_id"] != scope.organization
         || canonical["branch_id"] != scope.branch
@@ -276,6 +759,15 @@ pub(crate) fn remember_canonical_preflight(
         || before["branch_id"] != scope.branch
     {
         return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    if before["remoteVersion"]
+        .as_i64()
+        .is_some_and(|known| version < known)
+    {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some("canonical_version"),
+        ));
     }
     if text_alias(canonical, &["table_id", "table_session_id"]).is_some()
         || canonical["has_table_service_history"].as_bool() == Some(true)
@@ -288,52 +780,37 @@ pub(crate) fn remember_canonical_preflight(
     {
         return Err("TABLE_EDIT_SCOPED_SETTLEMENT_REQUIRED".into());
     }
-    if EDIT_HEADER_FIELDS
-        .iter()
-        .any(|(_, column)| !same_header_value(&before["headers"][*column], &canonical[*column]))
-    {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+    let mut drifts = canonical_drift(before, remote)?;
+    drifts.extend(payment_drift(before, remote, &scope)?);
+    if let Some(first) = drifts.first() {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some(first.field),
+        ));
     }
-    if text_alias(canonical, &["notes"]) != text_alias(before, &["notes"]) {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-    }
-    if canonical["status"] != before["status"]
-        || canonical["order_type"] != before["order_type"]
-        || text_alias(canonical, &["special_instructions"])
-            != text_alias(before, &["special_instructions"])
-        || items(&canonical["items"])? != items(&before["items"])?
-    {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-    }
-    // Tax is not compared: the server derives it from the lines and totals
-    // checked here, and a till may hold a different or missing figure for it.
-    // 06/10/2026 (1.4.123): a delivery order made from the dashboard was kept
-    // with tax 0 while the server computed 4.37 of VAT, and every paid
-    // correction of it was refused as "changed" before the refund question.
-    for field in [
-        "total_amount",
-        "subtotal",
-        "discount_amount",
-        "delivery_fee",
-        "tip_amount",
-    ] {
-        if amount(canonical, field)? != amount(before, field)? {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-        }
-    }
-    if canonical["currency"]
-        .as_str()
-        .zip(before["currency"].as_str())
-        .is_some_and(|(a, b)| a != b)
-    {
-        return Err("PAYMENT_CURRENCY_MISMATCH".into());
-    }
-    if remote["retained_paid_cents"].as_i64() != before["paidCents"].as_i64() {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
-    }
-    let adjustments = remote["adjustments"]
-        .as_array()
-        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+    let local = before["localVersion"].as_i64().ok_or(EditRefusal::at(
+        "EDIT_CANONICAL_SNAPSHOT_INVALID",
+        Some("local_version"),
+    ))?;
+    db::set_setting(conn,"edit_settlement_preflight_v1",&format!("{}:{}:{}:{event}",scope.organization,scope.branch,scope.terminal),
+        &json!({"orderId":order,"canonicalVersion":version,"localVersion":local,"original":before,"canonicalOrderId":canonical["id"],"fulfillmentRepricing":remote["fulfillment_repricing"],
+            "methodPolicy":edit_method_policy(conn, remote)}).to_string())?;
+    Ok((version, local))
+}
+
+/// The server's payments and returns against the till's own: a difference is
+/// money and is never adopted here. Scope, provider and currency refusals
+/// stay errors.
+fn payment_drift(
+    before: &Value,
+    remote: &Value,
+    scope: &table_session_cache::Scope,
+) -> Result<Vec<Drift>, EditRefusal> {
+    let canonical = &remote["order"];
+    let invalid = || EditRefusal::at("EDIT_CANONICAL_SNAPSHOT_INVALID", Some("payments"));
+    let mut drifts = Vec::new();
+    let adjustments = remote["adjustments"].as_array().ok_or_else(invalid)?;
+    let server_payments = remote["payments"].as_array().ok_or_else(invalid)?;
     for adjustment in adjustments {
         if adjustment["organization_id"] != scope.organization
             || adjustment["branch_id"] != scope.branch
@@ -344,31 +821,30 @@ pub(crate) fn remember_canonical_preflight(
         if !matches!(
             adjustment["adjustment_type"].as_str(),
             Some("refund" | "void")
-        ) || !remote["payments"]
-            .as_array()
-            .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?
+        ) || !server_payments
             .iter()
             .any(|p| p["id"] == adjustment["payment_id"])
         {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+            drifts.push(drift("adjustments", false));
         }
     }
     let mut payments = Vec::new();
-    for payment in remote["payments"]
-        .as_array()
-        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?
-    {
+    for payment in server_payments {
         if payment["status"] == "voided" {
             continue;
         }
         if !matches!(payment["status"].as_str(), Some("completed" | "refunded")) {
-            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+            drifts.push(drift("payments", false));
+            continue;
         }
         if canonical["currency"]
             .as_str()
             .is_some_and(|unit| payment["currency"].as_str() != Some(unit))
         {
-            return Err("PAYMENT_CURRENCY_MISMATCH".into());
+            return Err(EditRefusal::at(
+                "PAYMENT_CURRENCY_MISMATCH",
+                Some("payments"),
+            ));
         }
         let metadata = &payment["metadata"];
         let origin = text_alias(metadata, &["payment_origin", "paymentOrigin"])
@@ -402,7 +878,10 @@ pub(crate) fn remember_canonical_preflight(
             &reference,
         ) || protected
         {
-            return Err("EDIT_ORIGINAL_PROVIDER_REFUND_REQUIRED".into());
+            return Err(EditRefusal::at(
+                "EDIT_ORIGINAL_PROVIDER_REFUND_REQUIRED",
+                Some("payments"),
+            ));
         }
         if payment["organization_id"] != scope.organization
             || payment["branch_id"] != scope.branch
@@ -415,12 +894,6 @@ pub(crate) fn remember_canonical_preflight(
             a["payment_id"] == payment["id"]
                 && matches!(a["adjustment_type"].as_str(), Some("refund" | "void"))
         }) {
-            if adjustment["organization_id"] != scope.organization
-                || adjustment["branch_id"] != scope.branch
-                || adjustment["order_id"] != canonical["id"]
-            {
-                return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
-            }
             returned += adjustment["amount_cents"]
                 .as_i64()
                 .map(Ok)
@@ -429,19 +902,405 @@ pub(crate) fn remember_canonical_preflight(
         payments.push(json!({"id":payment["id"],"method":payment["payment_method"],
             "amountCents":payment["amount_cents"].as_i64().map(Ok).unwrap_or_else(||amount(payment,"amount"))?,
             "tipCents":payment["tip_amount_cents"].as_i64().map(Ok).unwrap_or_else(||amount(payment,"tip_amount"))?,
-            "currency":payment["currency"],"returnedCents":returned}));
+            "currency":payment["currency"],"status":payment["status"],"returnedCents":returned}));
     }
     payments.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     if Value::Array(payments) != before["payments"] {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+        drifts.push(drift("payments", false));
     }
-    let local = before["localVersion"]
-        .as_i64()
-        .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
-    db::set_setting(conn,"edit_settlement_preflight_v1",&format!("{}:{}:{}:{event}",scope.organization,scope.branch,scope.terminal),
-        &json!({"orderId":order,"canonicalVersion":version,"localVersion":local,"original":before,"canonicalOrderId":canonical["id"],"fulfillmentRepricing":remote["fulfillment_repricing"],
-            "methodPolicy":edit_method_policy(conn, remote)}).to_string())?;
-    Ok((version, local))
+    Ok(drifts)
+}
+
+/// What the preview does after a canonical difference.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DriftResolution {
+    /// Only non-money fields differed; the server's are now the till's.
+    /// Capture and quote again.
+    Adopted(Vec<&'static str>),
+    /// The order itself differed and was refreshed from the server: the
+    /// cart was built on the old order, so the cashier reopens it.
+    Refreshed(Vec<&'static str>),
+    /// Something of the order still waits to be sent: the difference may be
+    /// this till's own unsent change. Wait for the sync.
+    Queued,
+    /// Recorded money differs (payments, returns), or nothing explains the
+    /// refusal: never rewritten here.
+    Kept,
+}
+
+/// Anything of the order not yet on the server: its own rows, its payments,
+/// returns and edit children, or an unresolved confirmed edit.
+pub(crate) fn order_has_local_queue(conn: &Connection, order: &str) -> Result<bool, String> {
+    let queued: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue q WHERE q.status NOT IN ('completed','synced') AND (
+                (q.table_name='orders' AND q.record_id=?1)
+                OR (q.table_name='payments' AND q.record_id IN (SELECT id FROM order_payments WHERE order_id=?1))
+                OR (q.table_name='payment_adjustments' AND q.record_id IN (SELECT id FROM payment_adjustments WHERE order_id=?1))
+                OR (json_valid(q.data) AND COALESCE(json_extract(q.data,'$.parentEditOrderId'),'')=?1)))",
+            [order],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(queued
+        || crate::sync::has_outstanding_local_order_queue(conn, order)
+        || pending_financial_edits(conn, "")?
+            .iter()
+            .any(|id| id == order))
+}
+
+/// After a canonical difference in a paid-edit preview: adopt the server's
+/// non-money fields, refresh the order, or keep the refusal.
+pub(crate) fn reconcile_canonical_drift(
+    conn: &Connection,
+    order: &str,
+    before: &Value,
+    remote: &Value,
+) -> Result<DriftResolution, EditRefusal> {
+    let scope = table_session_cache::current_scope(conn)?;
+    let mut drifts = canonical_drift(before, remote)?;
+    drifts.extend(payment_drift(before, remote, &scope)?);
+    if drifts.is_empty() {
+        return Ok(DriftResolution::Kept);
+    }
+    if order_has_local_queue(conn, order)? {
+        return Ok(DriftResolution::Queued);
+    }
+    if drifts
+        .iter()
+        .any(|known| matches!(known.field, "payments" | "adjustments" | "paid_cents"))
+    {
+        return Ok(DriftResolution::Kept);
+    }
+    let canonical = &remote["order"];
+    if drifts.iter().all(|known| known.adoptable) {
+        return Ok(DriftResolution::Adopted(adopt_canonical_order(
+            conn,
+            order,
+            canonical,
+            AdoptMode::NonMoney,
+        )?));
+    }
+    Ok(DriftResolution::Refreshed(adopt_canonical_order(
+        conn,
+        order,
+        canonical,
+        AdoptMode::Full,
+    )?))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AdoptMode {
+    /// Headers (not the fulfillment) and notes only.
+    Headers,
+    /// Headers (not the fulfillment), notes, line identities and display.
+    NonMoney,
+    /// The whole order row: also lines, money, status and fulfillment. Its
+    /// payment status is then derived again from the till's own ledger.
+    Full,
+}
+
+/// SQLite value of one canonical column.
+pub(crate) fn bind_canonical_value(value: &Value) -> rusqlite::types::Value {
+    match value {
+        Value::Null => rusqlite::types::Value::Null,
+        Value::Bool(flag) => rusqlite::types::Value::Integer(i64::from(*flag)),
+        Value::Number(number) => number
+            .as_i64()
+            .map(rusqlite::types::Value::Integer)
+            .or_else(|| number.as_f64().map(rusqlite::types::Value::Real))
+            .unwrap_or(rusqlite::types::Value::Null),
+        Value::String(text) => rusqlite::types::Value::Text(text.clone()),
+        other => rusqlite::types::Value::Text(other.to_string()),
+    }
+}
+
+/// The compared shape of each raw line, in raw order.
+fn raw_line_signatures(rows: &[Value]) -> Result<Vec<Value>, String> {
+    rows.iter()
+        .map(|row| {
+            line_signatures(&json!([row.clone()]))?
+                .pop()
+                .ok_or_else(|| "EDIT_CANONICAL_SNAPSHOT_INVALID".to_string())
+        })
+        .collect()
+}
+
+/// The server's lines, each keeping the till's former id of the same sale
+/// as `client_line_id` (a cart built on the old mirror still names it).
+/// `None` when the lines are not the same sale.
+pub(crate) fn lines_with_client_ids(
+    local_rows: &[Value],
+    canonical_rows: &[Value],
+) -> Option<Vec<Value>> {
+    if canonical_rows
+        .iter()
+        .any(|row| canonical_line_id(row).is_none())
+    {
+        return None;
+    }
+    let local = raw_line_signatures(local_rows).ok()?;
+    let canonical = raw_line_signatures(canonical_rows).ok()?;
+    let pairs = match_lines(&local, &canonical)?;
+    let mut adopted = canonical_rows.to_vec();
+    for (local_index, canonical_index) in pairs {
+        let row = &local_rows[local_index];
+        let former = if canonical_line_id(row).is_none() {
+            text_alias(row, &["id"])
+        } else {
+            text_alias(row, &["client_line_id"])
+        };
+        if let Some(former) = former {
+            adopted[canonical_index]["client_line_id"] = json!(former);
+        }
+    }
+    Some(adopted)
+}
+
+/// Write the server's canonical order onto the till's mirror. Only columns
+/// the snapshot carries are written; a missing key is never a NULL.
+pub(crate) fn adopt_canonical_order(
+    conn: &Connection,
+    order: &str,
+    canonical: &Value,
+    mode: AdoptMode,
+) -> Result<Vec<&'static str>, String> {
+    // Keep a durable preimage and one automatic adoption per canonical
+    // revision/mode. The savepoint makes both the guard and the complete
+    // projection atomic, including when a later column cannot be written.
+    conn.execute_batch("SAVEPOINT edit_canonical_adoption")
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        let scope = table_session_cache::current_scope(conn)?;
+        let local = capture_order_headers(conn, order)?;
+        let original: String = conn.query_row(
+            "SELECT json_object('id',supabase_id,'organization_id',organization_id,'branch_id',branch_id,
+                'items',items,'notes',notes,'special_instructions',special_instructions,'total_amount',total_amount,
+                'subtotal',subtotal,'discount_amount',discount_amount,'delivery_fee',delivery_fee,'tip_amount',tip_amount,
+                'tax_amount',tax_amount,'tax_breakdown',tax_breakdown,'status',status,'payment_status',payment_status,
+                'version',version,'remote_version',remote_version,'updated_at',updated_at,'sync_status',sync_status)
+             FROM orders WHERE id=?1", [order], |row| row.get(0)).map_err(|error| error.to_string())?;
+        let original: Value = serde_json::from_str(&original).map_err(|error| error.to_string())?;
+        if original["id"] != canonical["id"]
+            || original["organization_id"] != scope.organization
+            || original["branch_id"] != scope.branch
+        {
+            return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+        }
+        let version = canonical["version"]
+            .as_i64()
+            .filter(|version| *version > 0)
+            .ok_or("EDIT_CANONICAL_SNAPSHOT_INVALID")?;
+        if original["remote_version"]
+            .as_i64()
+            .is_some_and(|known| version < known)
+        {
+            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+        }
+        let key = format!(
+            "{}:{}:{}:{order}:{version}:{mode:?}",
+            scope.organization, scope.branch, scope.terminal
+        );
+        // A repeated canonical snapshot is idempotent. A later, different
+        // local state at this same revision needs explicit server refresh.
+        let repeated = db::get_setting(conn, "edit_canonical_adoption_v1", &key);
+        let changed = adopt_canonical_order_inner(conn, order, canonical, mode)?;
+        if repeated.is_some() && !changed.is_empty() {
+            return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+        }
+        if !changed.is_empty() {
+            db::set_setting(
+                conn,
+                "edit_canonical_adoption_v1",
+                &key,
+                &json!({"original":original,"headers":local,
+                "canonical":canonical,"at":chrono::Utc::now().to_rfc3339()})
+                .to_string(),
+            )?;
+        }
+        Ok(changed)
+    })();
+    match result {
+        Ok(changed) => {
+            conn.execute_batch("RELEASE edit_canonical_adoption")
+                .map_err(|error| error.to_string())?;
+            if !changed.is_empty() {
+                tracing::info!(target: "checkout::order_edit", event_code = "checkout_edit_adopted",
+                    adopted_fields = changed.len(), adopt_mode = ?mode,
+                    "Order adopted from the server's canonical snapshot");
+            }
+            Ok(changed)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO edit_canonical_adoption; RELEASE edit_canonical_adoption",
+            );
+            Err(error)
+        }
+    }
+}
+
+fn adopt_canonical_order_inner(
+    conn: &Connection,
+    order: &str,
+    canonical: &Value,
+    mode: AdoptMode,
+) -> Result<Vec<&'static str>, String> {
+    let scope = table_session_cache::current_scope(conn)?;
+    if canonical["organization_id"] != scope.organization || canonical["branch_id"] != scope.branch
+    {
+        return Err("EDIT_SETTLEMENT_SCOPE_MISMATCH".into());
+    }
+    let mut changed: Vec<&'static str> = Vec::new();
+    let local_headers = capture_order_headers(conn, order)?;
+    for (_, column) in EDIT_HEADER_FIELDS {
+        if *column == "order_type" && mode != AdoptMode::Full {
+            continue;
+        }
+        let Some(value) = canonical.get(*column) else {
+            continue;
+        };
+        if same_canonical_header(&local_headers[*column], value) {
+            continue;
+        }
+        conn.execute(
+            &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
+            params![bind_canonical_value(value), order, scope.organization],
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(field) = refusal_field(column) {
+            changed.push(field);
+        }
+    }
+    let (notes, kitchen, raw_items): (Option<String>, Option<String>, String) = conn
+        .query_row(
+            "SELECT notes,special_instructions,COALESCE(items,'[]') FROM orders WHERE id=?1",
+            [order],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    for (column, local) in [("notes", notes), ("special_instructions", kitchen)] {
+        let Some(value) = canonical.get(column) else {
+            continue;
+        };
+        let wanted = value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if local
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            == wanted
+        {
+            continue;
+        }
+        conn.execute(
+            &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
+            params![value.as_str(), order, scope.organization],
+        )
+        .map_err(|error| error.to_string())?;
+        changed.push(refusal_field(column).unwrap_or("notes"));
+    }
+    if let Some(canonical_rows) = canonical["items"].as_array().filter(|rows| {
+        mode != AdoptMode::Headers && !rows.is_empty() && items(&canonical["items"]).is_ok()
+    }) {
+        let local_rows: Vec<Value> = serde_json::from_str(&raw_items).unwrap_or_default();
+        let (next, field) = match lines_with_client_ids(&local_rows, canonical_rows) {
+            Some(adopted) => (Some(Value::Array(adopted)), "items.identity"),
+            None if mode == AdoptMode::Full => {
+                (Some(Value::Array(canonical_rows.clone())), "items")
+            }
+            None => (None, "items"),
+        };
+        if let Some(next) = next
+            .filter(|next| serde_json::from_str::<Value>(&raw_items).ok().as_ref() != Some(next))
+        {
+            conn.execute(
+                "UPDATE orders SET items=?1 WHERE id=?2 AND organization_id=?3",
+                params![next.to_string(), order, scope.organization],
+            )
+            .map_err(|error| error.to_string())?;
+            changed.push(field);
+        }
+    }
+    if mode == AdoptMode::Full {
+        for column in [
+            "total_amount",
+            "subtotal",
+            "discount_amount",
+            "delivery_fee",
+            "tip_amount",
+        ] {
+            let Some(value) = canonical[column].as_f64().filter(|value| value.is_finite()) else {
+                continue;
+            };
+            let local: Option<f64> = conn
+                .query_row(
+                    &format!("SELECT {column} FROM orders WHERE id=?1"),
+                    [order],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if local.is_some_and(|local| {
+                crate::money::Cents::round_half_even(local)
+                    == crate::money::Cents::round_half_even(value)
+            }) {
+                continue;
+            }
+            conn.execute(
+                &format!(
+                    "UPDATE orders SET {column}=?1,{column}_cents=?2 WHERE id=?3 AND organization_id=?4"
+                ),
+                params![
+                    value,
+                    crate::money::Cents::round_half_even(value).as_i64(),
+                    order,
+                    scope.organization
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+            changed.push(refusal_field(column).unwrap_or("total_amount"));
+        }
+        if let Some(status) = canonical["status"]
+            .as_str()
+            .filter(|status| !status.trim().is_empty())
+        {
+            let updated = conn
+                .execute(
+                    "UPDATE orders SET status=?1 WHERE id=?2 AND organization_id=?3 AND status<>?1",
+                    params![status, order, scope.organization],
+                )
+                .map_err(|error| error.to_string())?;
+            if updated > 0 {
+                changed.push("status");
+            }
+        }
+        if let Some(version) = canonical["version"].as_i64().filter(|version| *version > 0) {
+            conn.execute(
+                "UPDATE orders SET remote_version=?1 WHERE id=?2 AND organization_id=?3
+                 AND (remote_version IS NULL OR remote_version<?1)",
+                params![version, order, scope.organization],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    if !changed.is_empty() {
+        conn.execute(
+            "UPDATE orders SET sync_status='synced',last_synced_at=?1 WHERE id=?2 AND organization_id=?3",
+            params![chrono::Utc::now().to_rfc3339(), order, scope.organization],
+        )
+        .map_err(|error| error.to_string())?;
+        crate::fiscal::greece_vat::adopt_server_order_vat(conn, order, canonical);
+        if mode == AdoptMode::Full {
+            crate::sync::recompute_local_order_payment_snapshot(
+                conn,
+                order,
+                &chrono::Utc::now().to_rfc3339(),
+            )?;
+        }
+    }
+    Ok(changed)
 }
 
 /// The order PATCH accepts at most this many lines (`UpdateOrderStatusSchema`
@@ -580,6 +1439,18 @@ pub(crate) fn require_canonical_preflight(
     version: i64,
     local: i64,
 ) -> Result<(), String> {
+    require_canonical_preflight_detailed(conn, order, event, version, local)
+        .map_err(|refusal| refusal.code)
+}
+
+/// [`require_canonical_preflight`] naming what changed since the preview.
+pub(crate) fn require_canonical_preflight_detailed(
+    conn: &Connection,
+    order: &str,
+    event: &str,
+    version: i64,
+    local: i64,
+) -> Result<(), EditRefusal> {
     let scope = table_session_cache::current_scope(conn)?;
     let raw = db::get_setting(
         conn,
@@ -592,12 +1463,21 @@ pub(crate) fn require_canonical_preflight(
     .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
     let proof: Value =
         serde_json::from_str(&raw).map_err(|_| "EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
-    if proof["orderId"] != order
-        || proof["canonicalVersion"] != version
-        || proof["localVersion"] != local
-        || proof["original"] != capture_preflight(conn, order)?
-    {
-        return Err("EDIT_CANONICAL_ORIGINAL_CHANGED".into());
+    let changed = |field| {
+        Err(EditRefusal::at(
+            "EDIT_CANONICAL_ORIGINAL_CHANGED",
+            Some(field),
+        ))
+    };
+    if proof["orderId"] != order || proof["canonicalVersion"] != version {
+        return changed("canonical_version");
+    }
+    if proof["localVersion"] != local {
+        return changed("local_version");
+    }
+    let now = capture_preflight(conn, order)?;
+    if proof["original"] != now {
+        return changed(snapshot_difference(&proof["original"], &now).unwrap_or("items"));
     }
     Ok(())
 }

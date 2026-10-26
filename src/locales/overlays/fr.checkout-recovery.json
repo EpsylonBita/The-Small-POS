@@ -31,7 +31,7 @@
       "editServerUpdate": "Les corrections sont temporairement indisponibles. Vérifiez la connexion et réessayez après la mise à jour du serveur.",
       "editSyncRequired": "La modification du paiement ou de la commande n’est pas encore synchronisée. Votre panier est conservé. Réessayez dans un instant.",
       "emptyEditHint": "Pour retirer tous les articles, fermez l’éditeur et annulez la commande.",
-      "editCanonicalChanged": "Les détails de la commande doivent être actualisés. Actualisez la commande avant de confirmer un encaissement ou un remboursement.",
+      "editCanonicalChanged": "La commande a changé sur le serveur. Appuyez sur « Actualiser la commande », rouvrez la commande et refaites votre modification. Rien n’a été encaissé.",
       "cardRecoveryQuestion": "La carte a-t-elle été débitée ? Vérifiez ce montant sur le terminal bancaire avant de répondre. Rien n’est débité ici.",
       "cardRecoveryRegisterNote": "Cette caisse enregistre les débits par carte via sa caisse enregistreuse ou son terminal, et rien n’y montre un débit de cette carte. Si le terminal bancaire affiche un débit, appelez un responsable.",
       "cardRecoveryCharged": "La carte a été débitée – l’enregistrer",
@@ -43,7 +43,11 @@
       "freezeNotSaved": "Le panier n’a pas pu être enregistré pour le paiement : aucun paiement n’a été lancé. Appuyez sur Payer pour réessayer.",
       "orderNotSavedCartKept": "La commande n’a pas été enregistrée et aucun paiement n’a été enregistré. Le panier est conservé : appuyez de nouveau sur Payer. Si vous avez déjà encaissé l’argent, ne l’encaissez pas une seconde fois.",
       "freezeReadbackChanged": "Aucun paiement n’a été lancé : la caisse n’a pas pu enregistrer ce panier pour le paiement exactement tel qu’il a été saisi. Sélectionnez de nouveau le client ou l’adresse, puis appuyez sur Payer. Si cela se reproduit, contactez le support.",
-      "orderConfirmationRefused": "La commande n’a pas été enregistrée : l’encaissement enregistré ne correspondait pas à ce paiement, donc appuyer de nouveau sur Payer sans rien changer n’aidera pas. Aucun paiement n’a été enregistré et le panier est conservé. Si vous avez encaissé l’argent, ne l’encaissez pas une seconde fois. Sélectionnez de nouveau le client ou l’adresse, puis appuyez sur Payer. Si cela se reproduit, contactez le support."
+      "orderConfirmationRefused": "La commande n’a pas été enregistrée : l’encaissement enregistré ne correspondait pas à ce paiement, donc appuyer de nouveau sur Payer sans rien changer n’aidera pas. Aucun paiement n’a été enregistré et le panier est conservé. Si vous avez encaissé l’argent, ne l’encaissez pas une seconde fois. Sélectionnez de nouveau le client ou l’adresse, puis appuyez sur Payer. Si cela se reproduit, contactez le support.",
+      "editRefreshOrder": "Actualiser la commande",
+      "editRefreshing": "Actualisation de la commande…",
+      "editOrderRefreshed": "La commande a été mise à jour depuis le serveur. Rouvrez-la et refaites votre modification. Rien n’a été encaissé.",
+      "editRefreshFailed": "La commande n’a pas pu être actualisée : un paiement ou une modification n’est pas encore arrivé sur le serveur, ou ses paiements diffèrent de ceux du serveur. Attendez une minute et appuyez de nouveau sur « Actualiser la commande ». Si cela continue, prévenez un responsable. Rien n’a été encaissé."
     }
   },
   "checkoutRecovery": {

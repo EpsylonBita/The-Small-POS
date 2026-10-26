@@ -2,6 +2,19 @@ import type { EditSettlementOrderUpdates, OrderFinancialsUpdateParams, OrderEdit
 import { getEditSettlementItemsSubtotal } from '../utils/editSettlementFinancials';
 import { roundMoney } from '@shared/utils/money';
 
+/**
+ * A refusal the renderer decides itself (a second preview's quote or version
+ * differs). Native logs its own refusals; these are reported once through
+ * `orders.reportEditRefusal` so the support bundle names them too. The message
+ * stays the fixed code the menu maps.
+ */
+export class RendererEditRefusal extends Error {
+  constructor(code: string, readonly field?: string) {
+    super(code);
+    this.name = 'RendererEditRefusal';
+  }
+}
+
 export interface MenuEditHeaders {
   orderUpdates?: Partial<EditSettlementOrderUpdates>;
   deliveryFee?: number;
@@ -176,7 +189,7 @@ async function previewMenuOrderEditOnce(
   if (preview.metadataOnly === true) {
     // Verify the original header revision before the menu freezes its cart.
     const scoped = await orders.previewEditSettlement({ ...request, expectedLocalVersion: data.renderer_local_version });
-    if (scoped.success !== true || scoped.metadataOnly !== true) throw new Error('EDIT_CANONICAL_ORIGINAL_CHANGED');
+    if (scoped.success !== true || scoped.metadataOnly !== true) throw new RendererEditRefusal('EDIT_CANONICAL_ORIGINAL_CHANGED', 'items');
     return { preflight: { kind: 'metadata' }, preview: scoped };
   }
   const paid = preview.paidTotal > 0 || preview.completedPayments.length > 0 ||
@@ -187,14 +200,17 @@ async function previewMenuOrderEditOnce(
   if (scoped.success !== true) throw new Error('EDIT_SETTLEMENT_PREVIEW_FAILED');
   if (!Number.isInteger(scoped.canonicalExpectedVersion) || Number(scoped.canonicalExpectedVersion) < 1 ||
       !Number.isInteger(scoped.localExpectedVersion) || Number(scoped.localExpectedVersion) < 1) {
-    throw new Error('EDIT_CANONICAL_PREFLIGHT_REQUIRED');
+    throw new RendererEditRefusal('EDIT_CANONICAL_PREFLIGHT_REQUIRED', 'canonical_version');
   }
-  if (!scoped.quotedFinancials?.quote || typeof scoped.quotedFinancials.totalAmount !== 'number') throw new Error('EDIT_CANONICAL_QUOTE_REQUIRED');
-  if (data.financials?.quote && JSON.stringify(data.financials) !== JSON.stringify(scoped.quotedFinancials)) throw new Error('EDIT_CANONICAL_QUOTE_CHANGED');
+  if (!scoped.quotedFinancials?.quote || typeof scoped.quotedFinancials.totalAmount !== 'number') throw new RendererEditRefusal('EDIT_CANONICAL_QUOTE_REQUIRED', 'quote_financials');
+  if (data.financials?.quote && JSON.stringify(data.financials) !== JSON.stringify(scoped.quotedFinancials)) throw new RendererEditRefusal('EDIT_CANONICAL_QUOTE_CHANGED', 'quote_financials');
   // A second preview may refresh the proof, but cannot silently change an
   // already approved cart revision. This still happens before its picker.
   if (data.expected_local_version !== undefined && (data.expected_local_version !== scoped.localExpectedVersion ||
-      data.expected_version !== scoped.canonicalExpectedVersion)) throw new Error('EDIT_SETTLEMENT_VERSION_CHANGED');
+      data.expected_version !== scoped.canonicalExpectedVersion)) {
+    throw new RendererEditRefusal('EDIT_SETTLEMENT_VERSION_CHANGED',
+      data.expected_version !== scoped.canonicalExpectedVersion ? 'canonical_version' : 'local_version');
+  }
   return { preflight: { kind: 'settlement', financials: scoped.quotedFinancials, requiredAction: scoped.requiredAction,
     canonicalExpectedVersion: scoped.canonicalExpectedVersion, localExpectedVersion: scoped.localExpectedVersion,
     ...settlementPolicy(scoped) }, preview: scoped };

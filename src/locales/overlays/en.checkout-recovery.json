@@ -31,7 +31,7 @@
       "editServerUpdate": "Order corrections are temporarily unavailable. Check your connection and retry after the server update.",
       "editSyncRequired": "The payment or order change has not synced yet. Your cart is saved. Try again shortly.",
       "emptyEditHint": "To remove every item, close the editor and cancel the order.",
-      "editCanonicalChanged": "The order details need refreshing. Refresh the order before confirming a payment or refund.",
+      "editCanonicalChanged": "This order changed on the server. Press “Refresh the order”, then open the order again and make your change. Nothing was charged.",
       "cardRecoveryQuestion": "Was the card charged? Check the bank POS for this amount before you answer. Nothing is charged here.",
       "cardRecoveryRegisterNote": "This till records card charges through its cash register or terminal, and nothing there shows this card was charged. If the bank POS shows a charge, ask a manager.",
       "cardRecoveryCharged": "The card was charged – record it",
@@ -43,7 +43,11 @@
       "freezeNotSaved": "The cart could not be saved for payment, so no payment was started. Press Pay to try again.",
       "orderNotSavedCartKept": "The order was not saved and no payment was recorded. The cart is kept: press Pay again. If you already took the money, do not take it again.",
       "freezeReadbackChanged": "No payment was started: the till could not save this cart for payment exactly as entered. Select the customer or address again, then press Pay. If it happens again, contact support.",
-      "orderConfirmationRefused": "The order was not saved: its saved checkout did not match this payment, so pressing Pay again as it is will not help. No payment was recorded and the cart is kept. If you took the money, do not take it again. Select the customer or address again, then press Pay. If it happens again, contact support."
+      "orderConfirmationRefused": "The order was not saved: its saved checkout did not match this payment, so pressing Pay again as it is will not help. No payment was recorded and the cart is kept. If you took the money, do not take it again. Select the customer or address again, then press Pay. If it happens again, contact support.",
+      "editRefreshOrder": "Refresh the order",
+      "editRefreshing": "Refreshing the order…",
+      "editOrderRefreshed": "The order was updated from the server. Open it again and make your change. Nothing was charged.",
+      "editRefreshFailed": "The order could not be refreshed: a payment or change of it has not reached the server yet, or its payments differ from the server’s. Wait a minute and press “Refresh the order” again. If it keeps failing, ask a manager. Nothing was charged."
     }
   },
   "checkoutRecovery": {

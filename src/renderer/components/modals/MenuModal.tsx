@@ -24,7 +24,7 @@ import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersistence';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
-import { deriveMenuEditChanges, MENU_EDIT_MAX_LINES, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
+import { deriveMenuEditChanges, MENU_EDIT_MAX_LINES, RendererEditRefusal, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
 import { LegacyShiftCurrencyConfirmationRequired } from '../../services/CheckoutDraftStore';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
@@ -578,6 +578,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // prepared again under a new event that replaces it, or closed by a manager
   // without recording money. Neither collects or returns anything again.
   const [refusedEdit, setRefusedEdit] = useState<{ event: string; orderId: string } | null>(null);
+  // Tomikro 25-26/10/2026: "Refresh the order" never re-read the server. A
+  // refused correction now offers a real refresh of the order from the
+  // server; the cashier then opens it again. Nothing was charged.
+  const [staleEdit, setStaleEdit] = useState(false);
+  const [staleRefreshBusy, setStaleRefreshBusy] = useState(false);
+  const staleRefreshGeneration = useRef(0);
+  useEffect(() => {
+    staleRefreshGeneration.current += 1;
+    setStaleRefreshBusy(false);
+  }, [isOpen, editOrderId]);
   // Tomikro 21/10/2026: a card admitted before the till closed, with no order,
   // terminal row or held payment anywhere, used to end in "needs
   // reconciliation" for good. The cashier now answers what the bank POS shows
@@ -1129,6 +1139,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       repricedForOrderTypeRef.current = null;
       supersedesEditEventRef.current = undefined;
       setRefusedEdit(null);
+      setStaleEdit(false);
       // Reset cart when modal closes to ensure clean state for next open
       setCartItems([]);
       // Clear locally fetched delivery zone info and default minimum
@@ -2825,6 +2836,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     } finally { setDraftRecoveryBusy(false); }
   };
 
+  // Refresh the refused order from the server, then reopen it: its cart was
+  // built on the old order. The draft is let go (nothing was charged).
+  const refreshStaleEdit = async () => {
+    if (!editOrderId || staleRefreshBusy) return;
+    const generation = staleRefreshGeneration.current;
+    setStaleRefreshBusy(true);
+    try {
+      const result = await bridge.orders.refreshFromServer(editOrderId);
+      if (generation !== staleRefreshGeneration.current) return;
+      if (result?.success !== true) throw new Error('EDIT_REFRESH_FAILED');
+      setStaleEdit(false);
+      await draftPersistence.clear(true);
+      if (generation !== staleRefreshGeneration.current) return;
+      toast.success(t('modals.menu.editOrderRefreshed'));
+      onClose();
+    } catch {
+      if (generation === staleRefreshGeneration.current) toast.error(t('modals.menu.editRefreshFailed'));
+    } finally {
+      if (generation === staleRefreshGeneration.current) setStaleRefreshBusy(false);
+    }
+  };
+
   const handleCheckout = async () => {
     if (!checkAppliedCoupon()) return;
     if (draftPersistence.status !== 'ready' || draftPersistence.isPending() || editSubmissionInFlight.current ||
@@ -2923,6 +2956,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         if (!draftPersistence.isPending() && (error instanceof Error ? error.message : String(error)) === 'EDIT_SETTLEMENT_CANCELLED') return;
         console.error('Error saving order edit:', error);
         const code = error instanceof Error ? error.message : String(error);
+        if (error instanceof RendererEditRefusal) {
+          void Promise.resolve(bridge.orders.reportEditRefusal?.({ refusal: error.message, field: error.field })).catch(() => undefined);
+        }
+        // The till already refreshed the order from the server: its cart was
+        // built on the old one, so the cashier opens it again.
+        if (!draftPersistence.isPending() && code.includes('EDIT_ORDER_REFRESHED')) {
+          await draftPersistence.clear(true).catch(() => undefined);
+          toast.error(t('modals.menu.editOrderRefreshed'));
+          onClose();
+          return;
+        }
         // Fix 1/5: refusals that waiting cannot heal get their own message,
         // decided before any money is confirmed.
         const specific = code.includes('LEGACY_EDIT_REVIEW_REQUIRED') ? 'legacyEditReview'
@@ -2937,8 +2981,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           return;
         }
         const message = code.includes('POS_ORDER_SETTLEMENT_UNAVAILABLE') ? 'editServerUpdate'
-          : !draftPersistence.isPending() && /(?:ORDER_HEADER_SYNC_REQUIRED|EDIT_(?:CANONICAL_ORIGINAL_CHANGED|CANONICAL_QUOTE_CHANGED|CANONICAL_QUOTE_REQUIRED|SETTLEMENT_VERSION_CHANGED|ORIGINAL_ITEMS_UNAVAILABLE|CANONICAL_SNAPSHOT_INVALID))/.test(code) ? 'editCanonicalChanged'
+          : !draftPersistence.isPending() && /(?:ORDER_HEADER_SYNC_REQUIRED|ORDER_VERSION_CONFLICT|EDIT_(?:CANONICAL_ORIGINAL_CHANGED|CANONICAL_QUOTE_CHANGED|CANONICAL_QUOTE_REQUIRED|SETTLEMENT_VERSION_CHANGED|ORIGINAL_ITEMS_UNAVAILABLE|CANONICAL_SNAPSHOT_INVALID))/.test(code) ? 'editCanonicalChanged'
           : /EDIT_(?:PREVIOUS_SETTLEMENT|ORIGINAL_PAYMENT)_SYNC_REQUIRED/.test(code) ? 'editSyncRequired' : 'editFailed';
+        if (message === 'editCanonicalChanged') setStaleEdit(true);
         toast.error(t(`modals.menu.${message}`) || 'Failed to save changes');
       }
       return;
@@ -3574,6 +3619,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             >
               {t('modals.menu.draftReturnToOrders', { defaultValue: 'Return to orders' })}
             </button>}
+          </div>
+        )}
+        {staleEdit && editMode && editOrderId && !draftPersistence.isPending() && (
+          <div role="alert" data-testid="menu-edit-stale" className="px-4 py-3 border-b border-amber-500 text-amber-800 dark:text-amber-100 space-y-2">
+            <p>{t('modals.menu.editCanonicalChanged')}</p>
+            <button type="button" disabled={staleRefreshBusy} onClick={() => void refreshStaleEdit()}
+              className="min-h-11 rounded-lg border border-amber-600 px-3 py-2 font-semibold disabled:opacity-50" data-testid="menu-edit-refresh-order">
+              {staleRefreshBusy ? t('modals.menu.editRefreshing') : t('modals.menu.editRefreshOrder')}
+            </button>
           </div>
         )}
         {refusedEdit && draftPersistence.isPending() && (

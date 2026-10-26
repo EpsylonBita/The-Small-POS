@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 use crate::database_lock::run_blocking_command;
+use crate::edit_settlement_recovery::EditRefusal;
 use crate::money::Cents;
 use crate::{
     can_transition_locally, db, fetch_supabase_rows, normalize_status_for_storage, order_ownership,
@@ -2501,14 +2502,53 @@ fn merge_existing_order_item_customizations(
     merge_order_item_customizations(&current_items, incoming_items)
 }
 
+/// A cart built before the till learned its lines' canonical UUIDs names each
+/// line by its former cart id. The mirror keeps that id as `client_line_id`
+/// (Tomikro 25–26/10/2026); the line is then edited under its UUID, never
+/// sent to the server as a new line.
+fn adopt_client_line_identities(current_items: &[Value], incoming_items: &[Value]) -> Vec<Value> {
+    let mut claimed = HashSet::new();
+    incoming_items
+        .iter()
+        .map(|incoming| {
+            if crate::edit_settlement_recovery::canonical_line_id(incoming).is_some() {
+                return incoming.clone();
+            }
+            let identities = order_item_line_identity(incoming);
+            let found = current_items
+                .iter()
+                .find(|existing| {
+                    existing
+                        .get("client_line_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|former| {
+                            identities
+                                .iter()
+                                .any(|identity| identity.eq_ignore_ascii_case(former.trim()))
+                        })
+                })
+                .and_then(crate::edit_settlement_recovery::canonical_line_id);
+            match found {
+                Some(id) if claimed.insert(id.clone()) => {
+                    let mut next = incoming.clone();
+                    next["source_order_item_id"] = Value::String(id);
+                    next
+                }
+                _ => incoming.clone(),
+            }
+        })
+        .collect()
+}
+
 fn merge_order_item_customizations(
     current_items: &[Value],
     incoming_items: &[Value],
 ) -> Result<Vec<Value>, String> {
     let mut used_existing = vec![false; current_items.len()];
     let mut merged = Vec::with_capacity(incoming_items.len());
+    let incoming_items = adopt_client_line_identities(current_items, incoming_items);
 
-    for incoming in incoming_items {
+    for incoming in &incoming_items {
         if !item_omits_customizations(incoming) {
             merged.push(incoming.clone());
             continue;
@@ -4630,7 +4670,7 @@ fn require_no_pending_header_edit(conn: &rusqlite::Connection, order: &str) -> R
     Ok(())
 }
 
-fn update_customer_headers_in_connection(
+pub(crate) fn update_customer_headers_in_connection(
     conn: &rusqlite::Connection,
     raw: Value,
     preflight: Option<&Value>,
@@ -4768,11 +4808,15 @@ fn header_edit_wire_version(
     Ok(local)
 }
 
-async fn prepare_header_edit_preflight(
+/// The fresh canonical revision for a header correction. A difference the
+/// server's snapshot explains without money (other headers, notes) is adopted
+/// while nothing of the order waits to be sent, and the original is captured
+/// again (Tomikro 25–26/10/2026: "refresh" never re-read the server).
+async fn prepare_header_edit_preflight_detailed(
     db: &db::DbState,
     order: &str,
     request: &Value,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, EditRefusal> {
     let original = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         crate::order_header_preflight::capture(&conn, order, request)?
@@ -4788,13 +4832,35 @@ async fn prepare_header_edit_preflight(
     )
     .await;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    match answer {
-        Ok(answer) => {
-            crate::order_header_preflight::verify(&conn, order, &original, &answer).map(Some)
-        }
+    let answer = match answer {
+        Ok(answer) => answer,
         Err(error) => {
-            crate::order_header_preflight::offline(&conn, order, &original, &error).map(Some)
+            return Ok(Some(crate::order_header_preflight::offline(
+                &conn, order, &original, &error,
+            )?))
         }
+    };
+    match crate::order_header_preflight::verify_detailed(&conn, order, &original, &answer) {
+        Err(refusal) if refusal.code == "EDIT_CANONICAL_ORIGINAL_CHANGED" => {
+            let canonical = crate::order_header_preflight::exact_order(&answer)?;
+            let drifts = crate::order_header_preflight::drift(&original, canonical)?;
+            if drifts.is_empty()
+                || !drifts.iter().all(|(_, adoptable)| *adoptable)
+                || crate::edit_settlement_recovery::order_has_local_queue(&conn, order)?
+            {
+                return Err(refusal);
+            }
+            crate::edit_settlement_recovery::adopt_canonical_order(
+                &conn,
+                order,
+                canonical,
+                crate::edit_settlement_recovery::AdoptMode::NonMoney,
+            )?;
+            let recaptured = crate::order_header_preflight::capture(&conn, order, &Value::Null)?;
+            crate::order_header_preflight::verify_detailed(&conn, order, &recaptured, &answer)
+                .map(Some)
+        }
+        other => other.map(Some),
     }
 }
 
@@ -4804,24 +4870,33 @@ pub async fn order_update_customer_info(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let raw = arg0.unwrap_or_else(|| serde_json::json!({}));
-    let actual = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_renderer_order_id(
-            &conn,
-            &parse_order_update_customer_info_payload(Some(raw.clone()))?.order_id,
-        )?
-    };
-    let preflight = prepare_header_edit_preflight(&db, &actual, &raw).await?;
-    let actual = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        update_customer_headers_in_connection(&conn, raw, preflight.as_ref())?
-    };
-    if let Ok(order) = sync::get_order_by_id(&db, &actual) {
-        let _ = app.emit("order_realtime_update", order);
+    let db: &db::DbState = &db;
+    let app: &tauri::AppHandle = &app;
+    let result: Result<Value, EditRefusal> = async move {
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let raw = arg0.unwrap_or_else(|| serde_json::json!({}));
+        let actual = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            resolve_renderer_order_id(
+                &conn,
+                &parse_order_update_customer_info_payload(Some(raw.clone()))?.order_id,
+            )?
+        };
+        let preflight = prepare_header_edit_preflight_detailed(&db, &actual, &raw).await?;
+        let actual = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            update_customer_headers_in_connection(&conn, raw, preflight.as_ref())?
+        };
+        if let Ok(order) = sync::get_order_by_id(&db, &actual) {
+            let _ = app.emit("order_realtime_update", order);
+        }
+        Ok(serde_json::json!({"success":true,"orderId":actual}))
     }
-    Ok(serde_json::json!({"success":true,"orderId":actual}))
+    .await;
+    if let Err(refusal) = &result {
+        crate::edit_settlement_recovery::log_edit_refusal("customer_details", refusal);
+    }
+    result.map_err(|refusal| refusal.code)
 }
 
 #[tauri::command]
@@ -5268,269 +5343,278 @@ pub async fn order_update_items(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let request = merge_order_update_items_payload(arg0, arg1);
-    let payload = parse_order_update_items_payload(Some(request.clone()), None)?;
-    let header_candidate = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        metadata_item_edit_candidate(&conn, &payload)?
-    };
-    let header_preflight = if let Some(order) = header_candidate {
-        let cached = {
+    let db: &db::DbState = &db;
+    let app: &tauri::AppHandle = &app;
+    let result: Result<serde_json::Value, EditRefusal> = async move {
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let request = merge_order_update_items_payload(arg0, arg1);
+        let payload = parse_order_update_items_payload(Some(request.clone()), None)?;
+        let header_candidate = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            crate::order_header_preflight::remembered(
-                &conn,
-                &order,
-                payload.client_event_id.as_deref().unwrap(),
-                &request,
-            )?
+            metadata_item_edit_candidate(&conn, &payload)?
         };
-        if cached.is_some() {
-            cached
-        } else {
-            prepare_header_edit_preflight(&db, &order, &request).await?
-        }
-    } else {
-        None
-    };
-    let metadata = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        try_metadata_only_item_edit(&conn, &payload, &request, header_preflight.as_ref())?
-    };
-    if let Some(order) = metadata {
-        if let Ok(snapshot) = sync::get_order_by_id(&db, &order) {
-            let _ = app.emit("order_realtime_update", snapshot);
-        }
-        return Ok(serde_json::json!({"success":true,"orderId":order}));
-    }
-    let order_id_raw = payload.order_id;
-    let items = payload.items;
-    let notes = payload.order_notes;
-    let order_updates = payload.order_updates;
-    let financials = payload.financials;
-    let header_fields = edit_header_wire_fields(order_updates.as_ref())?;
-    let expected_version = payload.expected_version;
-    let table_session_id = payload.table_session_id;
-    let requested_table_id = value_str(&request, &["tableId", "table_id"]);
-    let client_event_id = payload
-        .client_event_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let now = Utc::now().to_rfc3339();
-
-    let (resolved_order_id, remote_edit_request) = {
-        let conn = db.conn.lock().map_err(|error| error.to_string())?;
-        let actual = resolve_renderer_order_id(&conn, &order_id_raw)?;
-        let has_remote: bool = conn
-            .query_row(
-                "SELECT NULLIF(TRIM(supabase_id),'') IS NOT NULL FROM orders WHERE id=?1",
-                [&actual],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        let original = if has_remote {
-            crate::table_session_cache::existing_item_edit_attempt(
-                &conn,
-                &actual,
-                &client_event_id,
-            )?
+        let header_preflight = if let Some(order) = header_candidate {
+            let cached = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                crate::order_header_preflight::remembered(
+                    &conn,
+                    &order,
+                    payload.client_event_id.as_deref().unwrap(),
+                    &request,
+                )?
+            };
+            if cached.is_some() {
+                cached
+            } else {
+                prepare_header_edit_preflight_detailed(&db, &order, &request).await?
+            }
         } else {
             None
         };
-        if let Some(original) = original {
-            ensure_original_item_edit_intent(
-                &original,
-                &items,
-                notes.as_deref(),
-                expected_version,
-                table_session_id.as_deref(),
-            )?;
-            for (_, key) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
-                if original.get(*key) != header_fields.get(*key) {
-                    return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
-                }
+        let metadata = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            try_metadata_only_item_edit(&conn, &payload, &request, header_preflight.as_ref())?
+        };
+        if let Some(order) = metadata {
+            if let Ok(snapshot) = sync::get_order_by_id(&db, &order) {
+                let _ = app.emit("order_realtime_update", snapshot);
             }
-            for (key, value) in [
-                (
-                    "total_amount",
-                    financials.as_ref().and_then(|f| f.total_amount),
-                ),
-                ("subtotal", financials.as_ref().and_then(|f| f.subtotal)),
-                (
-                    "delivery_fee",
-                    financials.as_ref().and_then(|f| f.delivery_fee),
-                ),
-            ] {
-                if original.get(key).and_then(Value::as_f64) != value {
-                    return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
-                }
-            }
-            crate::table_attempt_recovery::remember_item(&conn, &actual, &original)?;
-            (actual, Some(original))
-        } else {
-            ensure_full_order_item_replacement_safe(
-                &conn,
-                &actual,
-                expected_version,
-                table_session_id.as_deref(),
-                Some(&items),
-                requested_table_id.as_deref(),
-            )?;
-            let (remote,status,table,guests):(Option<String>,String,Option<String>,Option<i64>)=conn.query_row(
-            "SELECT NULLIF(TRIM(supabase_id),''),status,table_id,guest_count FROM orders WHERE id=?1",
-            rusqlite::params![actual],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))
-            .map_err(|error|format!("Read canonical order edit identity: {error}"))?;
-            let request = if let Some(remote) = remote {
-                let merged = merge_existing_order_item_customizations(&conn, &actual, &items)?;
-                let canonical_items: Vec<Value> =
-                    merged.iter().map(canonical_item_edit_payload).collect();
-                let mut body = serde_json::json!({"id":remote,"status":status,"items":canonical_items,
-                "expected_version":expected_version,"table_id":requested_table_id.as_ref().or(table.as_ref()),"table_session_id":table_session_id,
-                "guest_count":guests,"client_event_id":client_event_id});
-                if let Some(notes) = &notes {
-                    body["special_instructions"] = serde_json::json!(notes);
-                }
-                body.as_object_mut().unwrap().extend(header_fields.clone());
-                if let Some(financials) = &financials {
-                    for (key, value) in [
-                        ("total_amount", financials.total_amount),
-                        ("subtotal", financials.subtotal),
-                        ("delivery_fee", financials.delivery_fee),
-                    ] {
-                        if let Some(value) = value {
-                            body[key] = serde_json::json!(value);
-                        }
-                    }
-                }
-                crate::table_session_cache::item_edit_attempt(&conn, &actual, &mut body)?;
-                Some(body)
+            return Ok(serde_json::json!({"success":true,"orderId":order}));
+        }
+        let order_id_raw = payload.order_id;
+        let items = payload.items;
+        let notes = payload.order_notes;
+        let order_updates = payload.order_updates;
+        let financials = payload.financials;
+        let header_fields = edit_header_wire_fields(order_updates.as_ref())?;
+        let expected_version = payload.expected_version;
+        let table_session_id = payload.table_session_id;
+        let requested_table_id = value_str(&request, &["tableId", "table_id"]);
+        let client_event_id = payload
+            .client_event_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let now = Utc::now().to_rfc3339();
+
+        let (resolved_order_id, remote_edit_request) = {
+            let conn = db.conn.lock().map_err(|error| error.to_string())?;
+            let actual = resolve_renderer_order_id(&conn, &order_id_raw)?;
+            let has_remote: bool = conn
+                .query_row(
+                    "SELECT NULLIF(TRIM(supabase_id),'') IS NOT NULL FROM orders WHERE id=?1",
+                    [&actual],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let original = if has_remote {
+                crate::table_session_cache::existing_item_edit_attempt(
+                    &conn,
+                    &actual,
+                    &client_event_id,
+                )?
             } else {
                 None
             };
-            (actual, request)
-        }
-    };
-    if let Some(request) = remote_edit_request {
-        // A remote denial or uncertain transport leaves the old local totals
-        // intact. The durable immutable attempt permits exact replay later.
-        let answer = crate::admin_fetch_detailed(
-            Some(&db),
-            "/api/pos/orders",
-            "PATCH",
-            Some(request.clone()),
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "Order edit was not confirmed. Reconnect and retry the original change: {error}"
+            if let Some(original) = original {
+                ensure_original_item_edit_intent(
+                    &original,
+                    &items,
+                    notes.as_deref(),
+                    expected_version,
+                    table_session_id.as_deref(),
+                )?;
+                for (_, key) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
+                    if original.get(*key) != header_fields.get(*key) {
+                        return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
+                    }
+                }
+                for (key, value) in [
+                    (
+                        "total_amount",
+                        financials.as_ref().and_then(|f| f.total_amount),
+                    ),
+                    ("subtotal", financials.as_ref().and_then(|f| f.subtotal)),
+                    (
+                        "delivery_fee",
+                        financials.as_ref().and_then(|f| f.delivery_fee),
+                    ),
+                ] {
+                    if original.get(key).and_then(Value::as_f64) != value {
+                        return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
+                    }
+                }
+                crate::table_attempt_recovery::remember_item(&conn, &actual, &original)?;
+                (actual, Some(original))
+            } else {
+                ensure_full_order_item_replacement_safe(
+                    &conn,
+                    &actual,
+                    expected_version,
+                    table_session_id.as_deref(),
+                    Some(&items),
+                    requested_table_id.as_deref(),
+                )?;
+                let (remote,status,table,guests):(Option<String>,String,Option<String>,Option<i64>)=conn.query_row(
+                "SELECT NULLIF(TRIM(supabase_id),''),status,table_id,guest_count FROM orders WHERE id=?1",
+                rusqlite::params![actual],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))
+                .map_err(|error|format!("Read canonical order edit identity: {error}"))?;
+                let request = if let Some(remote) = remote {
+                    let merged = merge_existing_order_item_customizations(&conn, &actual, &items)?;
+                    let canonical_items: Vec<Value> =
+                        merged.iter().map(canonical_item_edit_payload).collect();
+                    let mut body = serde_json::json!({"id":remote,"status":status,"items":canonical_items,
+                    "expected_version":expected_version,"table_id":requested_table_id.as_ref().or(table.as_ref()),"table_session_id":table_session_id,
+                    "guest_count":guests,"client_event_id":client_event_id});
+                    if let Some(notes) = &notes {
+                        body["special_instructions"] = serde_json::json!(notes);
+                    }
+                    body.as_object_mut().unwrap().extend(header_fields.clone());
+                    if let Some(financials) = &financials {
+                        for (key, value) in [
+                            ("total_amount", financials.total_amount),
+                            ("subtotal", financials.subtotal),
+                            ("delivery_fee", financials.delivery_fee),
+                        ] {
+                            if let Some(value) = value {
+                                body[key] = serde_json::json!(value);
+                            }
+                        }
+                    }
+                    crate::table_session_cache::item_edit_attempt(&conn, &actual, &mut body)?;
+                    Some(body)
+                } else {
+                    None
+                };
+                (actual, request)
+            }
+        };
+        if let Some(request) = remote_edit_request {
+            // A remote denial or uncertain transport leaves the old local totals
+            // intact. The durable immutable attempt permits exact replay later.
+            let answer = crate::admin_fetch_detailed(
+                Some(&db),
+                "/api/pos/orders",
+                "PATCH",
+                Some(request.clone()),
             )
-        })?;
-        validate_item_edit_ack(&answer, &request, expected_version)?;
-        let scoped_session = crate::table_attempt_recovery::confirm_foreground_item(
-            &db,
-            &resolved_order_id,
-            &request,
-        )
-        .await?;
-        if let Ok(order_json) = sync::get_order_by_id(&db, &resolved_order_id) {
+            .await
+            .map_err(|error| {
+                format!(
+                    "Order edit was not confirmed. Reconnect and retry the original change: {error}"
+                )
+            })?;
+            validate_item_edit_ack(&answer, &request, expected_version)?;
+            let scoped_session = crate::table_attempt_recovery::confirm_foreground_item(
+                &db,
+                &resolved_order_id,
+                &request,
+            )
+            .await?;
+            if let Ok(order_json) = sync::get_order_by_id(&db, &resolved_order_id) {
+                let _ = app.emit("order_realtime_update", order_json);
+            }
+            return Ok(
+                serde_json::json!({"success":true,"orderId":resolved_order_id,"data":answer,"session":scoped_session}),
+            );
+        }
+
+        let actual_order_id = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let transaction = conn
+                .unchecked_transaction()
+                .map_err(|error| format!("Begin durable order item edit: {error}"))?;
+            let actual_order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
+            payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
+            ensure_full_order_item_replacement_safe(
+                &conn,
+                &actual_order_id,
+                expected_version,
+                table_session_id.as_deref(),
+                None,
+                None,
+            )?;
+            let queued_base_version: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(version,1) FROM orders WHERE id=?1",
+                    rusqlite::params![actual_order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let merged_items =
+                merge_existing_order_item_customizations(&conn, &actual_order_id, &items)?;
+            let (derived_total, derived_subtotal) =
+                derive_next_order_totals(&conn, &actual_order_id, &merged_items)?;
+            let total = financials
+                .as_ref()
+                .and_then(|f| f.total_amount)
+                .unwrap_or(derived_total);
+            let subtotal = financials
+                .as_ref()
+                .and_then(|f| f.subtotal)
+                .unwrap_or(derived_subtotal);
+            if let Some(updates) = &order_updates {
+                apply_edit_settlement_order_updates(&conn, &actual_order_id, updates, &now)?;
+            }
+            update_order_items_in_connection(
+                &conn,
+                &actual_order_id,
+                &merged_items,
+                notes.as_deref(),
+                total,
+                subtotal,
+                &now,
+            )?;
+            apply_edit_settlement_financial_adjustments(
+                &conn,
+                &actual_order_id,
+                financials.as_ref(),
+                &now,
+            )?;
+            refresh_edited_order_vat(&conn, &actual_order_id, financials.as_ref());
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM orders WHERE id=?1",
+                    [&actual_order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let mut sync_payload = serde_json::json!({
+                "status":status, "totalAmount":total, "subtotal":subtotal,
+                "orderId": actual_order_id,
+                "items": merged_items,
+                "orderNotes": notes,
+                "expected_version": expected_version.unwrap_or(queued_base_version),
+                "table_session_id": table_session_id,
+                "client_event_id": client_event_id
+            });
+            sync_payload.as_object_mut().unwrap().extend(header_fields);
+            sync_payload
+                .as_object_mut()
+                .unwrap()
+                .extend(edit_settlement_financial_sync_fields(
+                    financials.as_ref(),
+                    subtotal,
+                ));
+            enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
+            transaction
+                .commit()
+                .map_err(|error| format!("Commit durable order item edit: {error}"))?;
+            actual_order_id
+        };
+
+        if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
             let _ = app.emit("order_realtime_update", order_json);
         }
-        return Ok(
-            serde_json::json!({"success":true,"orderId":resolved_order_id,"data":answer,"session":scoped_session}),
-        );
+
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id
+        }))
     }
-
-    let actual_order_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let transaction = conn
-            .unchecked_transaction()
-            .map_err(|error| format!("Begin durable order item edit: {error}"))?;
-        let actual_order_id = resolve_renderer_order_id(&conn, &order_id_raw)?;
-        payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
-        ensure_full_order_item_replacement_safe(
-            &conn,
-            &actual_order_id,
-            expected_version,
-            table_session_id.as_deref(),
-            None,
-            None,
-        )?;
-        let queued_base_version: i64 = conn
-            .query_row(
-                "SELECT COALESCE(version,1) FROM orders WHERE id=?1",
-                rusqlite::params![actual_order_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        let merged_items =
-            merge_existing_order_item_customizations(&conn, &actual_order_id, &items)?;
-        let (derived_total, derived_subtotal) =
-            derive_next_order_totals(&conn, &actual_order_id, &merged_items)?;
-        let total = financials
-            .as_ref()
-            .and_then(|f| f.total_amount)
-            .unwrap_or(derived_total);
-        let subtotal = financials
-            .as_ref()
-            .and_then(|f| f.subtotal)
-            .unwrap_or(derived_subtotal);
-        if let Some(updates) = &order_updates {
-            apply_edit_settlement_order_updates(&conn, &actual_order_id, updates, &now)?;
-        }
-        update_order_items_in_connection(
-            &conn,
-            &actual_order_id,
-            &merged_items,
-            notes.as_deref(),
-            total,
-            subtotal,
-            &now,
-        )?;
-        apply_edit_settlement_financial_adjustments(
-            &conn,
-            &actual_order_id,
-            financials.as_ref(),
-            &now,
-        )?;
-        refresh_edited_order_vat(&conn, &actual_order_id, financials.as_ref());
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM orders WHERE id=?1",
-                [&actual_order_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        let mut sync_payload = serde_json::json!({
-            "status":status, "totalAmount":total, "subtotal":subtotal,
-            "orderId": actual_order_id,
-            "items": merged_items,
-            "orderNotes": notes,
-            "expected_version": expected_version.unwrap_or(queued_base_version),
-            "table_session_id": table_session_id,
-            "client_event_id": client_event_id
-        });
-        sync_payload.as_object_mut().unwrap().extend(header_fields);
-        sync_payload
-            .as_object_mut()
-            .unwrap()
-            .extend(edit_settlement_financial_sync_fields(
-                financials.as_ref(),
-                subtotal,
-            ));
-        enqueue_order_sync_payload(&conn, &actual_order_id, &sync_payload)?;
-        transaction
-            .commit()
-            .map_err(|error| format!("Commit durable order item edit: {error}"))?;
-        actual_order_id
-    };
-
-    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
-        let _ = app.emit("order_realtime_update", order_json);
+    .await;
+    if let Err(refusal) = &result {
+        crate::edit_settlement_recovery::log_edit_refusal("items", refusal);
     }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "orderId": actual_order_id
-    }))
+    result.map_err(|refusal| refusal.code)
 }
 
 fn ensure_original_item_edit_intent(
@@ -5951,12 +6035,312 @@ fn quoted_edit_input(
         "delivery_fee":payload.financials.as_ref().and_then(|f|f.delivery_fee).unwrap_or(fee)}),
     )
 }
+
+#[cfg(test)]
+mod canonical_edit_flow_tests {
+    use super::*;
+    use crate::sync_queue::edit_canonical_drift_tests as fixture;
+    use serde_json::json;
+
+    #[test]
+    fn preview_retry_names_each_changed_economic_field() {
+        let original = json!({"items":[{"menu_item_id":"product","retail_product_id":null,
+            "name":"Display","notes":null,"quantity":1,"unit_price":10,"total_price":10,
+            "customizations":null}],"total_amount":10,"subtotal":10,"discount_amount":0,
+            "delivery_fee":0,"tip_amount":0,"status":"pending","order_type":"delivery",
+            "currency":"EUR","payment_status":"paid","paidCents":1000,"payments":[]});
+        for (pointer, value, field) in [
+            ("/items/0/menu_item_id", json!("other-product"), "items"),
+            (
+                "/items/0/retail_product_id",
+                json!("retail-product"),
+                "items",
+            ),
+            ("/items/0/quantity", json!(2), "items"),
+            ("/items/0/unit_price", json!(11), "items"),
+            ("/items/0/total_price", json!(11), "items"),
+            ("/items/0/customizations", json!({"extra":1}), "items"),
+            ("/total_amount", json!(11), "total_amount"),
+            ("/subtotal", json!(11), "subtotal"),
+            ("/discount_amount", json!(1), "discount_amount"),
+            ("/delivery_fee", json!(1), "delivery_fee"),
+            ("/tip_amount", json!(1), "tip_amount"),
+            ("/status", json!("completed"), "status"),
+            ("/order_type", json!("pickup"), "order_type"),
+            ("/currency", json!("USD"), "currency"),
+            ("/payment_status", json!("pending"), "payment_status"),
+            ("/paidCents", json!(900), "paid_cents"),
+            ("/payments", json!([{"id":"different-payment"}]), "payments"),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(
+                crate::edit_settlement_recovery::economic_snapshot_difference(&original, &changed)
+                    .unwrap(),
+                Some(field),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn preview_retry_refuses_an_intervening_product_without_rebasing_cart_or_versions() {
+        use fixture::{BRANCH, ORDER, ORG, TERMINAL};
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", TERMINAL),
+            ("organization_id", ORG),
+            ("branch_id", BRANCH),
+        ]);
+        let conn = fixture::connection();
+        fixture::seed_paid_delivery(&conn);
+        let remote = fixture::capability(fixture::server_order(5, "2"));
+        let before = crate::edit_settlement_recovery::capture_preflight(&conn, ORDER).unwrap();
+        crate::edit_settlement_recovery::reconcile_canonical_drift(&conn, ORDER, &before, &remote)
+            .unwrap();
+        let mut initial = None;
+        let original = capture_edit_preview_original(&conn, ORDER, &mut initial).unwrap();
+        let request =
+            json!({"orderId":ORDER,"client_event_id":"racing-preview","items":original["items"]});
+        let mut payload = parse_order_edit_settlement_preview_payload(Some(request)).unwrap();
+        assert_eq!(payload.expected_version, None);
+        assert_eq!(payload.expected_local_version, None);
+        let cart = serde_json::to_value(&payload.items).unwrap();
+
+        // While the canonical answer is in flight a background pull installs
+        // another terminal's added product (a complimentary line isolates the
+        // item race from totals/ledger coverage).
+        let mut changed = original["items"].clone();
+        changed.as_array_mut().unwrap().push(json!({
+            "id":"30000000-0000-4000-8000-000000000003",
+            "menu_item_id":"40000000-0000-4000-8000-000000000004",
+            "name":"Added by another terminal","quantity":1,"unit_price":0,"total_price":0
+        }));
+        conn.execute(
+            "UPDATE orders SET items=?1,version=version+1,remote_version=6 WHERE id=?2",
+            rusqlite::params![changed.to_string(), ORDER],
+        )
+        .unwrap();
+        let refusal = crate::edit_settlement_recovery::remember_canonical_preflight_detailed(
+            &conn,
+            ORDER,
+            "racing-preview",
+            &original,
+            &remote,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "EDIT_SETTLEMENT_VERSION_CHANGED");
+
+        // This is the retry capture used by the command, before fetching a
+        // second quote or assigning either expected revision to the payload.
+        let retry = (|| -> Result<(), EditRefusal> {
+            let recaptured = capture_edit_preview_original(&conn, ORDER, &mut initial)?;
+            let mut next_remote = remote.clone();
+            next_remote["order"]["items"] = changed.clone();
+            next_remote["order"]["version"] = json!(6);
+            let (wire, local) =
+                crate::edit_settlement_recovery::remember_canonical_preflight_detailed(
+                    &conn,
+                    ORDER,
+                    "racing-preview",
+                    &recaptured,
+                    &next_remote,
+                )?;
+            payload.expected_version = Some(wire);
+            payload.expected_local_version = Some(local);
+            Ok(())
+        })();
+        assert_eq!(
+            retry.unwrap_err(),
+            EditRefusal::at("EDIT_CANONICAL_ORIGINAL_CHANGED", Some("items"))
+        );
+        assert_eq!(serde_json::to_value(&payload.items).unwrap(), cart);
+        assert_eq!(payload.expected_version, None);
+        assert_eq!(payload.expected_local_version, None);
+        assert_eq!(initial, Some(original));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn preview_retry_accepts_only_header_note_and_display_drift() {
+        use fixture::{BRANCH, ORDER, ORG, TERMINAL};
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", TERMINAL),
+            ("organization_id", ORG),
+            ("branch_id", BRANCH),
+        ]);
+        let conn = fixture::connection();
+        fixture::seed_paid_delivery(&conn);
+        let mut remote = fixture::capability(fixture::server_order(5, "2"));
+        let before = crate::edit_settlement_recovery::capture_preflight(&conn, ORDER).unwrap();
+        crate::edit_settlement_recovery::reconcile_canonical_drift(&conn, ORDER, &before, &remote)
+            .unwrap();
+        let mut initial = None;
+        let original = capture_edit_preview_original(&conn, ORDER, &mut initial).unwrap();
+        let mut lines = original["items"].clone();
+        lines[0]["name"] = json!("Updated display name");
+        lines[0]["notes"] = json!("Kitchen note");
+        conn.execute("UPDATE orders SET customer_name='Corrected customer',notes='Corrected note',items=?1,version=version+1,remote_version=6 WHERE id=?2",
+            rusqlite::params![lines.to_string(), ORDER]).unwrap();
+        assert_eq!(
+            crate::edit_settlement_recovery::remember_canonical_preflight_detailed(
+                &conn,
+                ORDER,
+                "header-preview",
+                &original,
+                &remote,
+            )
+            .unwrap_err()
+            .code,
+            "EDIT_SETTLEMENT_VERSION_CHANGED"
+        );
+        let recaptured = capture_edit_preview_original(&conn, ORDER, &mut initial).unwrap();
+        remote["order"]["version"] = json!(6);
+        remote["order"]["customer_name"] = json!("Corrected customer");
+        remote["order"]["notes"] = json!("Corrected note");
+        remote["order"]["items"] = lines;
+        assert_eq!(
+            crate::edit_settlement_recovery::remember_canonical_preflight_detailed(
+                &conn,
+                ORDER,
+                "header-preview",
+                &recaptured,
+                &remote,
+            )
+            .unwrap(),
+            (6, recaptured["localVersion"].as_i64().unwrap())
+        );
+        assert_eq!(initial, Some(original));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tomikro_header_ack_then_add_product_previews_and_commits_without_replacing_original_money() {
+        use fixture::{BRANCH, ORDER, ORG, TERMINAL};
+        let _keyring = crate::tests::fake_keyring::install_seeded([
+            ("terminal_id", TERMINAL),
+            ("organization_id", ORG),
+            ("branch_id", BRANCH),
+        ]);
+        let conn = fixture::connection();
+        fixture::seed_paid_delivery(&conn);
+        fixture::header_edit_and_ack(&conn);
+        // A second non-money edit follows the first canonical ACK through
+        // the same header proof and command body, then is ACKed itself.
+        let header = json!({"orderId":ORDER,"expectedVersion":6,"expectedLocalVersion":1,
+            "customerName":"Customer","customerPhone":"6900000000","deliveryAddress":"Address",
+            "deliveryFloor":"4","clientEventId":"second-header"});
+        let original = crate::order_header_preflight::capture(&conn, ORDER, &header).unwrap();
+        let answer = json!({"success":true,"exact_order_lookup":true,"orders":[fixture::server_order(6,"3")]});
+        let proof =
+            crate::order_header_preflight::verify(&conn, ORDER, &original, &answer).unwrap();
+        update_customer_headers_in_connection(&conn, header, Some(&proof)).unwrap();
+        crate::sync_queue::apply_ack_for_test(
+            &conn,
+            "orders",
+            ORDER,
+            &json!({"success":true,"data":fixture::server_order(7,"4")}),
+        )
+        .unwrap();
+        let remote = fixture::capability(fixture::server_order(7, "4"));
+        let before = crate::edit_settlement_recovery::capture_preflight(&conn, ORDER).unwrap();
+        crate::edit_settlement_recovery::reconcile_canonical_drift(&conn, ORDER, &before, &remote)
+            .unwrap();
+        for (key, value) in [
+            ("currency", "EUR"),
+            ("store_currency_available", "true"),
+            ("store_currency_source", "branch_country"),
+            ("store_currency_branch_id", BRANCH),
+        ] {
+            db::set_setting(&conn, "restaurant", key, value).unwrap();
+        }
+        conn.execute("INSERT INTO staff_shifts(id,staff_id,role_type,branch_id,terminal_id,check_in_time,status,currency,created_at,updated_at) VALUES('edit-shift','cashier','cashier',?1,?2,'now','active','EUR','now','now')", rusqlite::params![BRANCH, TERMINAL]).unwrap();
+        conn.execute("INSERT INTO cash_drawer_sessions(id,staff_shift_id,cashier_id,branch_id,terminal_id,opening_amount,opening_amount_cents,currency,opened_at,created_at,updated_at) VALUES('edit-drawer','edit-shift','cashier',?1,?2,0,0,'EUR','now','now','now')", rusqlite::params![BRANCH, TERMINAL]).unwrap();
+        let mut lines = fixture::till_items();
+        lines
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"Added","quantity":1,"unit_price":3.4,"total_price":3.4}));
+        let quote = json!({"total_amount":18.0,"subtotal":18.0,"tax_amount":2.07,"discount_amount":0,"delivery_fee":0,"tip_amount":0,"tax_breakdown":[]});
+        let financials = financials_from_server_quote(&quote).unwrap();
+        let mut request = json!({"orderId":ORDER,"client_event_id":"add-product-flow","items":lines,
+            "financials":financials_for_renderer(&financials),"action":{"type":"collect","payments":[{"method":"cash","amount":3.4,"paymentOrigin":"manual","collectedBy":"cashier_drawer"}]}});
+        let before = crate::edit_settlement_recovery::capture_preflight(&conn, ORDER).unwrap();
+        let (wire, local) = crate::edit_settlement_recovery::remember_canonical_preflight_detailed(
+            &conn,
+            ORDER,
+            "add-product-flow",
+            &before,
+            &remote,
+        )
+        .unwrap();
+        request["expected_version"] = json!(wire);
+        request["expected_local_version"] = json!(local);
+        let (payload, action) =
+            parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+        let proposed = quoted_edit_input(&conn, ORDER, &payload).unwrap();
+        assert_eq!(proposed["items"][0]["id"], fixture::LINE_SAVORY);
+        assert_eq!(proposed["items"][1]["id"], fixture::LINE_SWEET);
+        db::set_setting(&conn, "edit_settlement_quote_v1", &format!("{ORG}:{BRANCH}:{TERMINAL}:add-product-flow"),
+            &json!({"orderId":ORDER,"input":proposed,"financials":financials_for_renderer(&financials)}).to_string()).unwrap();
+        let preview = preview_edit_settlement_in_connection(&conn, &payload).unwrap();
+        assert_eq!(preview["requiredAction"], "collect");
+        assert!((preview["delta"].as_f64().unwrap() - 3.4).abs() < 1e-9);
+        let result = apply_journaled_edit_settlement_admitted(
+            &conn,
+            ORDER,
+            &payload,
+            action,
+            &request,
+            "2026-10-26T00:40:00Z",
+            |conn| {
+                crate::edit_settlement_recovery::require_canonical_preflight(
+                    conn,
+                    ORDER,
+                    "add-product-flow",
+                    wire,
+                    local,
+                )?;
+                require_original_edit_quote(conn, ORDER, "add-product-flow", &payload)
+            },
+        )
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        let (count, sum): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),SUM(amount_cents) FROM order_payments WHERE order_id=?1",
+                [ORDER],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((count, sum), (2, 1800));
+        let original: i64 = conn
+            .query_row(
+                "SELECT amount_cents FROM order_payments WHERE remote_payment_id=?1",
+                ["90000000-0000-4000-8000-000000000001"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(original, 1460);
+    }
+}
+#[cfg(test)]
 fn require_original_edit_quote(
     conn: &rusqlite::Connection,
     order: &str,
     event: &str,
     payload: &OrderEditSettlementPayload,
 ) -> Result<(), String> {
+    require_original_edit_quote_detailed(conn, order, event, payload)
+        .map_err(|refusal| refusal.code)
+}
+
+fn require_original_edit_quote_detailed(
+    conn: &rusqlite::Connection,
+    order: &str,
+    event: &str,
+    payload: &OrderEditSettlementPayload,
+) -> Result<(), EditRefusal> {
     let scope = crate::table_session_cache::current_scope(conn)?;
     let raw = db::get_setting(
         conn,
@@ -5972,11 +6356,17 @@ fn require_original_edit_quote(
         .financials
         .as_ref()
         .ok_or("EDIT_CANONICAL_QUOTE_REQUIRED")?;
-    if proof["orderId"] != order
-        || proof["input"] != quoted_edit_input(conn, order, payload)?
-        || proof["financials"] != financials_for_renderer(financials)
-    {
-        return Err("EDIT_CANONICAL_QUOTE_CHANGED".into());
+    if proof["orderId"] != order || proof["input"] != quoted_edit_input(conn, order, payload)? {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_QUOTE_CHANGED",
+            Some("quote_input"),
+        ));
+    }
+    if proof["financials"] != financials_for_renderer(financials) {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_QUOTE_CHANGED",
+            Some("quote_financials"),
+        ));
     }
     Ok(())
 }
@@ -5994,178 +6384,255 @@ fn validate_fulfillment_repricing_capability(
     Ok(())
 }
 
+fn capture_edit_preview_original(
+    conn: &rusqlite::Connection,
+    order: &str,
+    initial: &mut Option<Value>,
+) -> Result<Value, EditRefusal> {
+    let original = crate::edit_settlement_recovery::capture_preflight(conn, order)?;
+    if let Some(initial) = initial.as_ref() {
+        if let Some(field) =
+            crate::edit_settlement_recovery::economic_snapshot_difference(initial, &original)?
+        {
+            return Err(EditRefusal::at(
+                "EDIT_CANONICAL_ORIGINAL_CHANGED",
+                Some(field),
+            ));
+        }
+    } else {
+        *initial = Some(original.clone());
+    }
+    Ok(original)
+}
+
 #[tauri::command]
 pub async fn orders_preview_edit_settlement(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
-    let raw_request = arg0.clone().unwrap_or_else(|| serde_json::json!({}));
-    let supersedes = crate::edit_settlement_recovery::superseded_events(&raw_request);
-    let mut payload = parse_order_edit_settlement_preview_payload(arg0)?;
-    // The collect/refund prompt must be computed against the whole ledger,
-    // not a local mirror that lost rows (29/09/2026).
-    restore_payment_ledger_before_payment_decision(
-        &db,
-        &payload.order_id,
-        LedgerRestoreStep::Preview,
-    )
-    .await;
-    // Harmless header edits still need a fresh original before the renderer
-    // freezes its cart. They do not need manual-tender or settlement admission.
-    let metadata_order = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let actual = resolve_renderer_order_id(&conn, &payload.order_id)?;
-        if payload.client_event_id.is_some()
-            && is_metadata_only_item_edit(
-                &conn,
-                &actual,
-                &payload.items,
-                payload.order_updates.as_ref(),
-                payload.financials.as_ref(),
-            )?
-        {
-            Some(actual)
-        } else {
-            None
+    let db: &db::DbState = &db;
+    // Every refusal leaves one fixed-code support event (Tomikro 25-26/10/2026:
+    // the refusal left no trace).
+    let result: Result<serde_json::Value, EditRefusal> = async move {
+        let raw_request = arg0.clone().unwrap_or_else(|| serde_json::json!({}));
+        let supersedes = crate::edit_settlement_recovery::superseded_events(&raw_request);
+        let mut payload = parse_order_edit_settlement_preview_payload(arg0)?;
+        // The collect/refund prompt must be computed against the whole ledger,
+        // not a local mirror that lost rows (29/09/2026).
+        restore_payment_ledger_before_payment_decision(
+            db,
+            &payload.order_id,
+            LedgerRestoreStep::Preview,
+        )
+        .await;
+        // Harmless header edits still need a fresh original before the renderer
+        // freezes its cart. They do not need manual-tender or settlement admission.
+        let metadata_order = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let actual = resolve_renderer_order_id(&conn, &payload.order_id)?;
+            if payload.client_event_id.is_some()
+                && is_metadata_only_item_edit(
+                    &conn,
+                    &actual,
+                    &payload.items,
+                    payload.order_updates.as_ref(),
+                    payload.financials.as_ref(),
+                )?
+            {
+                Some(actual)
+            } else {
+                None
+            }
+        };
+        if let Some(order) = metadata_order {
+            let proof = prepare_header_edit_preflight_detailed(db, &order, &raw_request).await?;
+            let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            if let Some(proof) = proof.as_ref() {
+                crate::order_header_preflight::remember(
+                    &conn,
+                    &order,
+                    payload.client_event_id.as_deref().unwrap(),
+                    proof,
+                    &raw_request,
+                )?;
+            }
+            payload.client_event_id = None;
+            payload.expected_version = None;
+            payload.expected_local_version = None;
+            return Ok(preview_edit_settlement_in_connection(&conn, &payload)?);
         }
-    };
-    if let Some(order) = metadata_order {
-        let proof = prepare_header_edit_preflight(&db, &order, &raw_request).await?;
+        let mut canonical_snapshot = None;
+        if let Some(event) = payload.client_event_id.clone() {
+            // Tomikro 25–26/10/2026: a difference the server's snapshot explains
+            // without money (headers, notes, line identities) is adopted and the
+            // preview runs again once; a local change during the request is
+            // captured again once only if its economics still match the base
+            // of the cashier's cart. Anything else is refused before any picker.
+            let mut round = 0;
+            let mut initial_original = None;
+            loop {
+                round += 1;
+                let (verified, order, original, proposed) = {
+                    let conn = db.conn.lock().map_err(|error| error.to_string())?;
+                    let order = resolve_renderer_order_id(&conn, &payload.order_id)?;
+                    if crate::edit_settlement_recovery::inspect(&conn, &event, &order)?.is_some() {
+                        return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
+                    }
+                    (
+                        crate::table_session_cache::current_scope(&conn)?,
+                        order.clone(),
+                        capture_edit_preview_original(&conn, &order, &mut initial_original)?,
+                        quoted_edit_input(&conn, &order, &payload)?,
+                    )
+                };
+                let capability = fetch_edit_capability(db, &original, &proposed).await?;
+                validate_fulfillment_repricing_capability(
+                    &original,
+                    payload
+                        .order_updates
+                        .as_ref()
+                        .and_then(|updates| updates.order_type.as_deref()),
+                    &capability,
+                )?;
+                let financials = financials_from_server_quote(&capability["quote"])?;
+                let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                let current = crate::table_session_cache::current_scope(&conn)?;
+                if verified.organization != current.organization
+                    || verified.branch != current.branch
+                    || verified.terminal != current.terminal
+                {
+                    return Err("CHECKOUT_DRAFT_SCOPE_CHANGED".into());
+                }
+                db::set_setting(&conn,"local","edit_settlement_capability_v1",&serde_json::json!({
+                    "organizationId":current.organization,"branchId":current.branch,"terminalId":current.terminal,
+                    "verifiedAt":Utc::now().timestamp()}).to_string())?;
+                match crate::edit_settlement_recovery::remember_canonical_preflight_detailed(
+                    &conn,
+                    &order,
+                    &event,
+                    &original,
+                    &capability,
+                ) {
+                    Ok((wire, local)) => {
+                        db::set_setting(&conn,"edit_settlement_quote_v1",&format!("{}:{}:{}:{}",current.organization,current.branch,current.terminal,event),
+                            &serde_json::json!({"orderId":order,"input":proposed,"financials":financials_for_renderer(&financials)}).to_string())?;
+                        payload.financials = Some(financials);
+                        payload.expected_version = Some(wire);
+                        payload.expected_local_version = Some(local);
+                        canonical_snapshot = Some(capability);
+                        break;
+                    }
+                    Err(refusal)
+                        if round == 1 && (refusal.code == "EDIT_SETTLEMENT_VERSION_CHANGED" ||
+                            (refusal.code == "EDIT_CANONICAL_ORIGINAL_CHANGED" && refusal.field == Some("canonical_version"))) =>
+                    {
+                        continue;
+                    }
+                    Err(refusal) if refusal.code == "EDIT_CANONICAL_ORIGINAL_CHANGED" => {
+                        use crate::edit_settlement_recovery::DriftResolution;
+                        match crate::edit_settlement_recovery::reconcile_canonical_drift(
+                            &conn,
+                            &order,
+                            &original,
+                            &capability,
+                        )? {
+                            DriftResolution::Adopted(_) if round == 1 => continue,
+                            DriftResolution::Refreshed(_) => {
+                                return Err(EditRefusal::at(
+                                    crate::edit_settlement_recovery::EDIT_ORDER_REFRESHED,
+                                    refusal.field,
+                                ))
+                            }
+                            DriftResolution::Queued => {
+                                return Err(EditRefusal::at(
+                                    "EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED",
+                                    refusal.field,
+                                ))
+                            }
+                            _ => return Err(refusal),
+                        }
+                    }
+                    Err(refusal) => return Err(refusal),
+                }
+            }
+        }
         let _lease = crate::repairs::acquire_terminal_binding_lease()?;
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        if let Some(proof) = proof.as_ref() {
-            crate::order_header_preflight::remember(
-                &conn,
-                &order,
-                payload.client_event_id.as_deref().unwrap(),
-                proof,
-                &raw_request,
-            )?;
+        // Fix 5 (06/10/2026): the tender policy and PATCH line limit gate the
+        // picker; the server refuses both with 403 / 400 only after the cashier
+        // confirmed money. Read the policy the capability answer carried.
+        let policy = canonical_snapshot
+            .as_ref()
+            .map(|capability| crate::edit_settlement_recovery::edit_method_policy(&conn, capability));
+        if let Some(policy) = policy.as_ref() {
+            if payload.items.len() as i64
+                > policy["maxLines"]
+                    .as_i64()
+                    .unwrap_or(crate::edit_settlement_recovery::EDIT_PATCH_MAX_LINES)
+            {
+                return Err("EDIT_TOO_MANY_LINES".into());
+            }
         }
-        payload.client_event_id = None;
-        payload.expected_version = None;
-        payload.expected_local_version = None;
-        return preview_edit_settlement_in_connection(&conn, &payload);
+        let mut result = preview_edit_settlement_superseding(&conn, &payload, &supersedes)?;
+        if let Some(local) = payload.expected_local_version {
+            result["canonicalExpectedVersion"] = serde_json::json!(payload.expected_version);
+            result["localExpectedVersion"] = serde_json::json!(local);
+            result["quotedFinancials"] = financials_for_renderer(payload.financials.as_ref().unwrap());
+        }
+        if let Some(policy) = policy {
+            if matches!(
+                result["requiredAction"].as_str(),
+                Some("collect" | "refund")
+            ) && policy["allowedMethods"]
+                .as_array()
+                .is_none_or(|methods| methods.is_empty())
+            {
+                return Err("EDIT_SETTLEMENT_METHOD_UNAVAILABLE".into());
+            }
+            result["allowedMethods"] = policy["allowedMethods"].clone();
+            result["maxLines"] = policy["maxLines"].clone();
+            result["methodPolicy"] = policy;
+        }
+        Ok(result)
     }
-    let capability_scope = if payload.client_event_id.is_some() {
-        let conn = db.conn.lock().map_err(|error| error.to_string())?;
-        let order = resolve_renderer_order_id(&conn, &payload.order_id)?;
-        if crate::edit_settlement_recovery::inspect(
-            &conn,
-            payload.client_event_id.as_deref().unwrap(),
-            &order,
-        )?
-        .is_some()
-        {
-            return Err("RECOVERY_ORIGINAL_REQUEST_REQUIRED".into());
-        }
-        Some((
-            crate::table_session_cache::current_scope(&conn)?,
-            order.clone(),
-            crate::edit_settlement_recovery::capture_preflight(&conn, &order)?,
-            quoted_edit_input(&conn, &order, &payload)?,
-        ))
-    } else {
-        None
-    };
-    let mut canonical_snapshot = None;
-    if let Some((_, _, original, proposed)) = &capability_scope {
-        let mut body = proposed.clone();
-        body["order_id"] = original["id"].clone();
-        let capabilities = crate::admin_fetch_detailed(
-            Some(&db),
-            "/api/pos/orders/edit-capabilities",
-            "POST",
-            Some(body),
-        )
-        .await
-        .map_err(|_| "POS_ORDER_SETTLEMENT_UNAVAILABLE")?;
-        if capabilities
-            .pointer("/data/settlement_version")
-            .or_else(|| capabilities.get("settlement_version"))
-            .and_then(Value::as_i64)
-            != Some(1)
-        {
-            return Err("POS_ORDER_SETTLEMENT_UNAVAILABLE".into());
-        }
-        let capability = capabilities.get("data").cloned().unwrap_or(capabilities);
-        if capability["quote_version"] != 1 {
-            return Err("POS_ORDER_SETTLEMENT_UNAVAILABLE".into());
-        }
-        validate_fulfillment_repricing_capability(
-            original,
-            payload
-                .order_updates
-                .as_ref()
-                .and_then(|updates| updates.order_type.as_deref()),
-            &capability,
-        )?;
-        payload.financials = Some(financials_from_server_quote(&capability["quote"])?);
-        canonical_snapshot = Some(capability);
+    .await;
+    if let Err(refusal) = &result {
+        crate::edit_settlement_recovery::log_edit_refusal("preview", refusal);
     }
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    if let Some((verified, order, original, proposed)) = capability_scope {
-        let current = crate::table_session_cache::current_scope(&conn)?;
-        if verified.organization != current.organization
-            || verified.branch != current.branch
-            || verified.terminal != current.terminal
-        {
-            return Err("CHECKOUT_DRAFT_SCOPE_CHANGED".into());
-        }
-        db::set_setting(&conn,"local","edit_settlement_capability_v1",&serde_json::json!({
-            "organizationId":current.organization,"branchId":current.branch,"terminalId":current.terminal,
-            "verifiedAt":Utc::now().timestamp()}).to_string())?;
-        let (wire, local) = crate::edit_settlement_recovery::remember_canonical_preflight(
-            &conn,
-            &order,
-            payload.client_event_id.as_deref().unwrap(),
-            &original,
-            canonical_snapshot
-                .as_ref()
-                .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?,
-        )?;
-        db::set_setting(&conn,"edit_settlement_quote_v1",&format!("{}:{}:{}:{}",current.organization,current.branch,current.terminal,payload.client_event_id.as_deref().unwrap()),
-            &serde_json::json!({"orderId":order,"input":proposed,"financials":financials_for_renderer(payload.financials.as_ref().unwrap())}).to_string())?;
-        payload.expected_version = Some(wire);
-        payload.expected_local_version = Some(local);
+    result.map_err(|refusal| refusal.code)
+}
+
+/// The server's capability answer for this proposed edit, with its quote.
+async fn fetch_edit_capability(
+    db: &db::DbState,
+    original: &Value,
+    proposed: &Value,
+) -> Result<Value, EditRefusal> {
+    let mut body = proposed.clone();
+    body["order_id"] = original["id"].clone();
+    let capabilities = crate::admin_fetch_detailed(
+        Some(db),
+        "/api/pos/orders/edit-capabilities",
+        "POST",
+        Some(body),
+    )
+    .await
+    .map_err(|_| "POS_ORDER_SETTLEMENT_UNAVAILABLE")?;
+    if capabilities
+        .pointer("/data/settlement_version")
+        .or_else(|| capabilities.get("settlement_version"))
+        .and_then(Value::as_i64)
+        != Some(1)
+    {
+        return Err("POS_ORDER_SETTLEMENT_UNAVAILABLE".into());
     }
-    // Fix 5 (06/10/2026): the tender policy and PATCH line limit gate the
-    // picker; the server refuses both with 403 / 400 only after the cashier
-    // confirmed money. Read the policy the capability answer carried.
-    let policy = canonical_snapshot
-        .as_ref()
-        .map(|capability| crate::edit_settlement_recovery::edit_method_policy(&conn, capability));
-    if let Some(policy) = policy.as_ref() {
-        if payload.items.len() as i64
-            > policy["maxLines"]
-                .as_i64()
-                .unwrap_or(crate::edit_settlement_recovery::EDIT_PATCH_MAX_LINES)
-        {
-            return Err("EDIT_TOO_MANY_LINES".into());
-        }
+    let capability = capabilities.get("data").cloned().unwrap_or(capabilities);
+    if capability["quote_version"] != 1 {
+        return Err("POS_ORDER_SETTLEMENT_UNAVAILABLE".into());
     }
-    let mut result = preview_edit_settlement_superseding(&conn, &payload, &supersedes)?;
-    if let Some(local) = payload.expected_local_version {
-        result["canonicalExpectedVersion"] = serde_json::json!(payload.expected_version);
-        result["localExpectedVersion"] = serde_json::json!(local);
-        result["quotedFinancials"] = financials_for_renderer(payload.financials.as_ref().unwrap());
-    }
-    if let Some(policy) = policy {
-        if matches!(
-            result["requiredAction"].as_str(),
-            Some("collect" | "refund")
-        ) && policy["allowedMethods"]
-            .as_array()
-            .is_none_or(|methods| methods.is_empty())
-        {
-            return Err("EDIT_SETTLEMENT_METHOD_UNAVAILABLE".into());
-        }
-        result["allowedMethods"] = policy["allowedMethods"].clone();
-        result["maxLines"] = policy["maxLines"].clone();
-        result["methodPolicy"] = policy;
-    }
-    Ok(result)
+    Ok(capability)
 }
 
 fn preview_edit_settlement_in_connection(
@@ -6305,131 +6772,169 @@ pub async fn orders_apply_edit_settlement(
     auth_state: tauri::State<'_, crate::auth::AuthState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let original_request = arg0.clone().unwrap_or_default();
-    if original_request.get("reconcile").is_some() {
-        let response = reconcile_unapplied_edit_settlement(&db, &auth_state, &original_request)?;
-        if let Some(order) = response["orderId"].as_str() {
-            if let Ok(order_json) = sync::get_order_by_id(&db, order) {
-                let _ = app.emit("order_realtime_update", order_json);
+    let (db, auth_state, app): (&db::DbState, &crate::auth::AuthState, &tauri::AppHandle) =
+        (&db, &auth_state, &app);
+    let refusal_detail = std::sync::Mutex::<Option<EditRefusal>>::new(None);
+    let refusal_slot = &refusal_detail;
+    let result: Result<serde_json::Value, String> = async move {
+        let original_request = arg0.clone().unwrap_or_default();
+        if original_request.get("reconcile").is_some() {
+            let response =
+                reconcile_unapplied_edit_settlement(&db, &auth_state, &original_request)?;
+            if let Some(order) = response["orderId"].as_str() {
+                if let Ok(order_json) = sync::get_order_by_id(&db, order) {
+                    let _ = app.emit("order_realtime_update", order_json);
+                }
             }
+            return Ok(response);
         }
-        return Ok(response);
-    }
-    let (payload, action) = parse_order_edit_settlement_apply_payload(arg0)?;
-    // A paid order whose local mirror lost rows is restored from the server
-    // ledger first, so the edit decides on the whole ledger (29/09/2026).
-    restore_payment_ledger_before_payment_decision(
-        &db,
-        &payload.order_id,
-        LedgerRestoreStep::Write,
-    )
-    .await;
-    let now = Utc::now().to_rfc3339();
-    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
-    let response = if payload.client_event_id.is_some() {
-        let event = payload.client_event_id.as_deref().unwrap();
-        let methods = edit_settlement_action_methods(&action);
-        // Fix 4 (06/10/2026): these first-attempt checks run AFTER `run` has
-        // journaled the confirmed action, so a server-side change while the
-        // picker was open leaves a traced, not-applied attempt (Z blocker,
-        // re-quote or manager reconciliation), never untraced declared money.
-        // Freshness is checked by the uncached canonical preview before the
-        // picker; a physically confirmed delta is never expired by time.
-        let admission = |conn: &rusqlite::Connection| -> Result<(), String> {
-            payments::ensure_ecommerce_order_mutation_allowed(conn, &actual_order_id, None)?;
-            let local = payload
-                .expected_local_version
-                .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
-            crate::edit_settlement_recovery::require_canonical_preflight(
-                conn,
+        let (payload, action) = parse_order_edit_settlement_apply_payload(arg0)?;
+        // A paid order whose local mirror lost rows is restored from the server
+        // ledger first, so the edit decides on the whole ledger (29/09/2026).
+        restore_payment_ledger_before_payment_decision(
+            &db,
+            &payload.order_id,
+            LedgerRestoreStep::Write,
+        )
+        .await;
+        let now = Utc::now().to_rfc3339();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let actual_order_id = resolve_renderer_order_id(&conn, &payload.order_id)?;
+        let response = if payload.client_event_id.is_some() {
+            let event = payload.client_event_id.as_deref().unwrap();
+            let methods = edit_settlement_action_methods(&action);
+            // Fix 4 (06/10/2026): these first-attempt checks run AFTER `run` has
+            // journaled the confirmed action, so a server-side change while the
+            // picker was open leaves a traced, not-applied attempt (Z blocker,
+            // re-quote or manager reconciliation), never untraced declared money.
+            // Freshness is checked by the uncached canonical preview before the
+            // picker; a physically confirmed delta is never expired by time.
+            let admission = |conn: &rusqlite::Connection| -> Result<(), String> {
+                let checked = (|| -> Result<(), EditRefusal> {
+                    payments::ensure_ecommerce_order_mutation_allowed(
+                        conn,
+                        &actual_order_id,
+                        None,
+                    )?;
+                    let local = payload
+                        .expected_local_version
+                        .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+                    crate::edit_settlement_recovery::require_canonical_preflight_detailed(
+                        conn,
+                        &actual_order_id,
+                        event,
+                        payload
+                            .expected_version
+                            .ok_or("EDIT_SETTLEMENT_VERSION_REQUIRED")?,
+                        local,
+                    )?;
+                    crate::edit_settlement_recovery::require_fulfillment_capability(
+                        conn,
+                        &actual_order_id,
+                        event,
+                        payload
+                            .order_updates
+                            .as_ref()
+                            .and_then(|updates| updates.order_type.as_deref()),
+                    )?;
+                    require_original_edit_quote_detailed(conn, &actual_order_id, event, &payload)?;
+                    Ok(crate::edit_settlement_recovery::require_edit_policy(
+                        conn,
+                        &actual_order_id,
+                        event,
+                        &methods,
+                        payload.items.len(),
+                    )?)
+                })();
+                if let Err(refusal) = &checked {
+                    *refusal_slot
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(refusal.clone());
+                }
+                checked.map_err(|refusal| refusal.code)
+            };
+            apply_journaled_edit_settlement_admitted(
+                &conn,
                 &actual_order_id,
-                event,
-                payload
-                    .expected_version
-                    .ok_or("EDIT_SETTLEMENT_VERSION_REQUIRED")?,
-                local,
-            )?;
-            crate::edit_settlement_recovery::require_fulfillment_capability(
-                conn,
+                &payload,
+                action,
+                &original_request,
+                &now,
+                admission,
+            )?
+        } else {
+            refuse_identity_less_item_edit(&payload)?;
+            payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
+            let prepared = prepare_edit_settlement(&conn, &actual_order_id, &payload)?;
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| format!("begin transaction: {e}"))?;
+            match apply_edit_settlement_changes(
+                &conn,
                 &actual_order_id,
-                event,
-                payload
-                    .order_updates
-                    .as_ref()
-                    .and_then(|updates| updates.order_type.as_deref()),
-            )?;
-            require_original_edit_quote(conn, &actual_order_id, event, &payload)?;
-            crate::edit_settlement_recovery::require_edit_policy(
-                conn,
-                &actual_order_id,
-                event,
-                &methods,
-                payload.items.len(),
-            )
+                &payload,
+                &prepared,
+                action,
+                &now,
+            ) {
+                Ok(value) => {
+                    conn.execute_batch("COMMIT")
+                        .map_err(|e| format!("commit: {e}"))?;
+                    value
+                }
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
         };
-        apply_journaled_edit_settlement_admitted(
-            &conn,
-            &actual_order_id,
-            &payload,
-            action,
-            &original_request,
-            &now,
-            admission,
-        )?
-    } else {
-        refuse_identity_less_item_edit(&payload)?;
-        payments::ensure_ecommerce_order_mutation_allowed(&conn, &actual_order_id, None)?;
-        let prepared = prepare_edit_settlement(&conn, &actual_order_id, &payload)?;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| format!("begin transaction: {e}"))?;
-        match apply_edit_settlement_changes(
-            &conn,
-            &actual_order_id,
-            &payload,
-            &prepared,
-            action,
-            &now,
-        ) {
-            Ok(value) => {
-                conn.execute_batch("COMMIT")
-                    .map_err(|e| format!("commit: {e}"))?;
-                value
-            }
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(error);
-            }
+        drop(conn);
+
+        if response.get("success").and_then(Value::as_bool) == Some(false) {
+            return Ok(response);
         }
+
+        if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+            let order_type = order_json
+                .get("orderType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pickup")
+                .to_string();
+            let is_ghost = order_json
+                .get("is_ghost")
+                .or_else(|| order_json.get("isGhost"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let _ = app.emit("order_realtime_update", order_json);
+            // Auto-reprint the edited order: the receipt document renders at
+            // dispatch time, so it reflects the just-committed items AND the
+            // full payment breakdown — including an edit-settlement delta
+            // recorded in this same transaction with a different method than
+            // the original (e.g. cash order, card-settled edit delta).
+            print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost, app);
+        }
+
+        Ok(response)
+    }
+    .await;
+    let refused = match &result {
+        Err(error) => Some(error.as_str()),
+        Ok(response) if response["success"] == false => response["error"]
+            .as_str()
+            .or_else(|| response["code"].as_str()),
+        _ => None,
     };
-    drop(conn);
-
-    if response.get("success").and_then(Value::as_bool) == Some(false) {
-        return Ok(response);
+    if let Some(error) = refused {
+        crate::edit_settlement_recovery::log_edit_refusal(
+            "commit",
+            &refusal_detail
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+                .unwrap_or_else(|| EditRefusal::from(error)),
+        );
     }
-
-    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
-        let order_type = order_json
-            .get("orderType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pickup")
-            .to_string();
-        let is_ghost = order_json
-            .get("is_ghost")
-            .or_else(|| order_json.get("isGhost"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let _ = app.emit("order_realtime_update", order_json);
-        // Auto-reprint the edited order: the receipt document renders at
-        // dispatch time, so it reflects the just-committed items AND the
-        // full payment breakdown — including an edit-settlement delta
-        // recorded in this same transaction with a different method than
-        // the original (e.g. cash order, card-settled edit delta).
-        print::enqueue_after_edit_auto_print(&db, &actual_order_id, &order_type, is_ghost, &app);
-    }
-
-    Ok(response)
+    result
 }
 
 /// A manager closes a confirmed edit attempt that is proven never applied,
@@ -6595,8 +7100,14 @@ fn validate_journaled_edit_target_superseding(
                 .map(canonical_item_edit_payload)
                 .find(|old| old.get("id").and_then(Value::as_str) == Some(id))
             {
-                if old.get("menu_item_id") != next.get("menu_item_id")
-                    || old.get("retail_product_id") != next.get("retail_product_id")
+                if old.get("menu_item_id").filter(|value| !value.is_null())
+                    != next.get("menu_item_id").filter(|value| !value.is_null())
+                    || old
+                        .get("retail_product_id")
+                        .filter(|value| !value.is_null())
+                        != next
+                            .get("retail_product_id")
+                            .filter(|value| !value.is_null())
                 {
                     return Err("EDIT_CANONICAL_PRODUCT_CHANGED".into());
                 }
@@ -7171,6 +7682,147 @@ fn apply_edit_settlement_changes(
             "frozenItems": merged_items,
         }))
     }
+}
+
+/// "Refresh the order from the server" (Tomikro 25–26/10/2026: the refusal
+/// asked for a refresh, and no refresh re-read the server). The server's
+/// canonical snapshot replaces the till's mirror of one order while nothing
+/// of it waits to be sent; recorded money is never rewritten (the ledger
+/// restore runs first, and a payment difference refuses). The cashier then
+/// opens the order again and retries the edit.
+#[tauri::command]
+pub async fn orders_refresh_from_server(
+    arg0: Option<serde_json::Value>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let request = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let result = match value_str(&request, &["orderId", "order_id"]) {
+        Some(order) => refresh_order_from_server(order, app.clone()).await,
+        None => Err(EditRefusal::from("Missing orderId")),
+    };
+    match &result {
+        Ok(response) => {
+            if let Some(order) = response["orderId"].as_str() {
+                let db = app.state::<db::DbState>();
+                if let Ok(order_json) = sync::get_order_by_id(&db, order) {
+                    let _ = app.emit("order_realtime_update", order_json);
+                }
+            }
+        }
+        Err(refusal) => crate::edit_settlement_recovery::log_edit_refusal("refresh", refusal),
+    }
+    result.map_err(|refusal| refusal.code)
+}
+
+/// Refusals the renderer decides itself (a second preview's quote or version
+/// differs, no quote) leave the same fixed-code support event. Only listed
+/// codes and field names cross; anything else is unclassified.
+#[tauri::command]
+pub async fn orders_report_edit_refusal(
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let request = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let code = match request["refusal"].as_str().unwrap_or("") {
+        code @ ("EDIT_CANONICAL_QUOTE_CHANGED"
+        | "EDIT_CANONICAL_QUOTE_REQUIRED"
+        | "EDIT_CANONICAL_PREFLIGHT_REQUIRED"
+        | "EDIT_CANONICAL_ORIGINAL_CHANGED"
+        | "EDIT_CANONICAL_SNAPSHOT_INVALID"
+        | "EDIT_SETTLEMENT_VERSION_CHANGED") => code,
+        _ => "EDIT_REFUSAL_UNCLASSIFIED",
+    };
+    let field = request["field"].as_str().and_then(|field| {
+        crate::edit_settlement_recovery::EDIT_REFUSAL_FIELDS
+            .iter()
+            .copied()
+            .find(|known| *known == field)
+    });
+    crate::edit_settlement_recovery::log_edit_refusal("renderer", &EditRefusal::at(code, field));
+    Ok(serde_json::json!({"success": true}))
+}
+
+async fn refresh_order_from_server(
+    order_raw: String,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, EditRefusal> {
+    {
+        let db = app.state::<db::DbState>();
+        restore_payment_ledger_before_payment_decision(&db, &order_raw, LedgerRestoreStep::Write)
+            .await;
+    }
+    let lookup = app.clone();
+    let (order, remote, verified) = run_blocking_command(
+        "orders_refresh_from_server",
+        move || -> Result<(String, String, crate::table_session_cache::Scope), EditRefusal> {
+            let db = lookup.state::<db::DbState>();
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let order = resolve_renderer_order_id(&conn, &order_raw)?;
+            let remote: Option<String> = conn
+                .query_row(
+                    "SELECT NULLIF(TRIM(COALESCE(supabase_id,'')),'') FROM orders WHERE id=?1",
+                    [&order],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let remote = remote
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                .ok_or(EditRefusal::at(
+                    "EDIT_ORIGINAL_PAYMENT_SYNC_REQUIRED",
+                    Some("sync_status"),
+                ))?;
+            if crate::edit_settlement_recovery::order_has_local_queue(&conn, &order)? {
+                return Err(EditRefusal::at(
+                    "EDIT_PREVIOUS_SETTLEMENT_SYNC_REQUIRED",
+                    Some("sync_status"),
+                ));
+            }
+            Ok((
+                order,
+                remote,
+                crate::table_session_cache::current_scope(&conn)?,
+            ))
+        },
+    )
+    .await?;
+    let answer = {
+        let db = app.state::<db::DbState>();
+        crate::admin_fetch_detailed(
+            Some(&db),
+            &format!("/api/pos/orders/edit-capabilities?order_id={remote}"),
+            "GET",
+            None,
+        )
+        .await
+        .map_err(|_| "POS_ORDER_EDIT_SNAPSHOT_UNAVAILABLE")?
+    };
+    let snapshot = answer.get("data").cloned().unwrap_or(answer);
+    if !snapshot["order"].is_object() {
+        return Err(EditRefusal::at(
+            "EDIT_CANONICAL_SNAPSHOT_INVALID",
+            Some("items"),
+        ));
+    }
+    let apply = app.clone();
+    run_blocking_command(
+        "orders_refresh_from_server",
+        move || -> Result<serde_json::Value, EditRefusal> {
+            let db = apply.state::<db::DbState>();
+            let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let current = crate::table_session_cache::current_scope(&conn)?;
+            if current.organization != verified.organization
+                || current.branch != verified.branch
+                || current.terminal != verified.terminal
+            {
+                return Err("CHECKOUT_DRAFT_SCOPE_CHANGED".into());
+            }
+            let refreshed = crate::edit_settlement_recovery::refresh_order_from_canonical(
+                &conn, &order, &snapshot,
+            )?;
+            Ok(serde_json::json!({"success":true,"orderId":order,"refreshed":refreshed}))
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -10116,6 +10768,699 @@ pub(crate) fn assign_driver_locally(
     });
     enqueue_order_sync_payload(conn, &order_id, &order_sync_payload)?;
     Ok((order_id, driver_name, assigned_status))
+}
+
+// ---------------------------------------------------------------------------
+// Change the driver of a delivery (founder request, Tomikro 26/10/2026)
+// ---------------------------------------------------------------------------
+//
+// Symptom: the cashier picked the wrong driver; the order went to the
+// delivered list and another driver carried it. Nothing could correct it:
+// the delivered tab lost its "change driver" action in 1.4.40 (replaced by
+// RESET) and the order's Edit options offered customer, items, payment and
+// order type only.
+//
+// "Change driver" in the Edit options moves the order and everything tied to
+// its driver to the driver who carried it: the driver earning (fee, tip, cash
+// collected, cash to return), the receipts' courier custody and a delivery
+// tip's recipient. The driver checkout, the shift summary and the Z read
+// those, so they show the order under the new driver.
+//
+// Rules (Android `OrderService.changeOrderDriverAsync` holds the same):
+// - Delivery orders only; never a cancelled or refunded order, never one the
+//   platform's own rider carries.
+// - The new driver is checked in: an active driver shift in the order's branch.
+// - Both shifts are open: the earning's (and the order's) shift is active and
+//   the earning is neither settled nor handed over. A closed shift's cash is
+//   never rewritten; the cashier is told why.
+// - An order with a refund, a void, a payment set aside or cash handed back
+//   keeps its driver: who handed back what cannot be moved.
+// - Same money: the earning row moves as it is (only `driver_id` and
+//   `staff_shift_id` change) and is checked unchanged before the commit.
+// - A correction (the order already has a driver) needs the void-payments
+//   approval, the approval of a payment tender correction on Android (the
+//   operator's own store right, else a manager's PIN). Giving a driver to an
+//   order that has none is an ordinary assignment.
+// - Audited in `recovery_action_log`: who, from whom, to whom, the money.
+// - Synced through the existing queues: the earning (same id, new driver and
+//   shift) and the order's driver.
+
+pub(crate) const DRIVER_CHANGE_CANCELLED: &str = "DRIVER_CHANGE_CANCELLED";
+pub(crate) const DRIVER_CHANGE_NOT_DELIVERY: &str = "DRIVER_CHANGE_NOT_DELIVERY";
+pub(crate) const DRIVER_CHANGE_PLATFORM_FLEET: &str = "DRIVER_CHANGE_PLATFORM_FLEET";
+pub(crate) const DRIVER_CHANGE_SAME_DRIVER: &str = "DRIVER_CHANGE_SAME_DRIVER";
+pub(crate) const DRIVER_CHANGE_NEW_DRIVER_OFF_SHIFT: &str = "DRIVER_CHANGE_NEW_DRIVER_OFF_SHIFT";
+pub(crate) const DRIVER_CHANGE_SHIFT_CLOSED: &str = "DRIVER_CHANGE_SHIFT_CLOSED";
+pub(crate) const DRIVER_CHANGE_ADJUSTED_ORDER: &str = "DRIVER_CHANGE_ADJUSTED_ORDER";
+pub(crate) const DRIVER_CHANGE_SYNC_IN_PROGRESS: &str = "DRIVER_CHANGE_SYNC_IN_PROGRESS";
+pub(crate) const DRIVER_CHANGE_CURRENCY_MISMATCH: &str = "DRIVER_CHANGE_CURRENCY_MISMATCH";
+pub(crate) const DRIVER_CHANGE_MONEY_CHANGED: &str = "DRIVER_CHANGE_MONEY_CHANGED";
+
+fn driver_change_refusal(code: &str, detail: &str) -> String {
+    format!("{code}: {detail}")
+}
+
+/// What a driver change will do, read before anyone's PIN is asked and read
+/// again inside the write.
+#[derive(Debug, Clone)]
+pub(crate) struct DriverChangePlan {
+    pub order_id: String,
+    pub previous_driver_id: Option<String>,
+    pub previous_driver_name: Option<String>,
+    pub previous_shift_id: Option<String>,
+    pub earning_id: Option<String>,
+    pub new_driver_id: String,
+    pub new_driver_name: Option<String>,
+    pub new_shift_id: String,
+}
+
+impl DriverChangePlan {
+    /// The order already has a driver: changing it is a money correction.
+    pub(crate) fn is_correction(&self) -> bool {
+        self.previous_driver_id.is_some()
+    }
+}
+
+/// Who changed the driver, and who approved it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DriverChangeActor {
+    pub staff_id: Option<String>,
+    pub approved_by: Option<String>,
+    pub approval_via: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DriverChangeOutcome {
+    pub order_id: String,
+    pub status: String,
+    pub previous_driver_id: Option<String>,
+    pub previous_driver_name: Option<String>,
+    pub driver_id: String,
+    pub driver_name: Option<String>,
+    pub earning_id: Option<String>,
+    /// True when an earlier driver was replaced (not a first assignment).
+    pub corrected: bool,
+}
+
+/// The driver earning's money, in cents: fee, tip, total, cash collected,
+/// card, cash to return.
+fn driver_change_earning_money(
+    conn: &rusqlite::Connection,
+    earning_id: &str,
+) -> Result<[i64; 6], String> {
+    conn.query_row(
+        "SELECT COALESCE(delivery_fee_cents, CAST(ROUND(delivery_fee * 100) AS INTEGER), 0),
+                COALESCE(tip_amount_cents, CAST(ROUND(tip_amount * 100) AS INTEGER), 0),
+                COALESCE(total_earning_cents, CAST(ROUND(total_earning * 100) AS INTEGER), 0),
+                COALESCE(cash_collected_cents, CAST(ROUND(cash_collected * 100) AS INTEGER), 0),
+                COALESCE(card_amount_cents, CAST(ROUND(card_amount * 100) AS INTEGER), 0),
+                COALESCE(cash_to_return_cents, CAST(ROUND(cash_to_return * 100) AS INTEGER), 0)
+         FROM driver_earnings
+         WHERE id = ?1",
+        rusqlite::params![earning_id],
+        |row| {
+            Ok([
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ])
+        },
+    )
+    .map_err(|e| format!("read the driver earning's money: {e}"))
+}
+
+fn driver_change_shift_is_open(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT LOWER(TRIM(COALESCE(status, ''))) = 'active'
+                AND NULLIF(TRIM(COALESCE(check_out_time, '')), '') IS NULL
+         FROM staff_shifts
+         WHERE id = ?1",
+        rusqlite::params![shift_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .optional()
+    .map(|open| open.unwrap_or(false))
+    .map_err(|e| format!("read the shift of a driver change: {e}"))
+}
+
+/// A refund, a void, a payment set aside or cash handed back: money already
+/// left someone's hands for this order.
+fn driver_change_order_has_money_adjustments(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<bool, String> {
+    let adjusted: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM payment_adjustments WHERE order_id = ?1)
+                 OR EXISTS(
+                     SELECT 1 FROM order_payments
+                     WHERE order_id = ?1
+                       AND LOWER(TRIM(COALESCE(status, ''))) IN
+                           ('refunded', 'partially_refunded', 'voided', 'duplicate_review')
+                 )",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read the order's refunds before a driver change: {e}"))?;
+    Ok(adjusted || crate::staff_cash_returns::sum(conn, Some(order_id), None)? > 0)
+}
+
+/// Read every rule of a driver change; nothing is written.
+pub(crate) fn plan_driver_change(
+    conn: &rusqlite::Connection,
+    order_id_raw: &str,
+    new_driver_id: &str,
+) -> Result<DriverChangePlan, String> {
+    let order_id = resolve_renderer_order_id(conn, order_id_raw.trim())?;
+    ensure_box_order_mutation_allowed(conn, &order_id, "delivered", BoxOrderMutation::Generic)?;
+    let new_driver_id = new_driver_id.trim().to_string();
+    if new_driver_id.is_empty() {
+        return Err("Missing driverId".into());
+    }
+    #[allow(clippy::type_complexity)]
+    let (status, order_type, order_driver_id, order_driver_name, order_shift_id, branch_id): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(status, 'pending'))),
+                    LOWER(TRIM(COALESCE(order_type, ''))),
+                    NULLIF(TRIM(COALESCE(driver_id, '')), ''),
+                    NULLIF(TRIM(COALESCE(driver_name, '')), ''),
+                    NULLIF(TRIM(COALESCE(staff_shift_id, '')), ''),
+                    TRIM(COALESCE(branch_id, ''))
+             FROM orders
+             WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load the order of a driver change: {e}"))?;
+
+    if matches!(status.as_str(), "cancelled" | "canceled" | "refunded") {
+        return Err(driver_change_refusal(
+            DRIVER_CHANGE_CANCELLED,
+            "A cancelled or refunded order has no driver to change",
+        ));
+    }
+    if order_type != "delivery" {
+        return Err(driver_change_refusal(
+            DRIVER_CHANGE_NOT_DELIVERY,
+            "Only a delivery order has a driver",
+        ));
+    }
+    if order_is_platform_fleet(conn, &order_id) {
+        return Err(driver_change_refusal(
+            DRIVER_CHANGE_PLATFORM_FLEET,
+            "The delivery platform's own rider carries this order",
+        ));
+    }
+
+    #[allow(clippy::type_complexity)]
+    let earning: Option<(String, String, Option<String>, i64, i64)> = conn
+        .query_row(
+            "SELECT id,
+                    TRIM(COALESCE(driver_id, '')),
+                    NULLIF(TRIM(COALESCE(staff_shift_id, '')), ''),
+                    COALESCE(settled, 0),
+                    COALESCE(is_transferred, 0)
+             FROM driver_earnings
+             WHERE order_id = ?1
+             ORDER BY created_at ASC
+             LIMIT 1",
+            rusqlite::params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load the driver earning of a driver change: {e}"))?;
+
+    let previous_driver_id = earning
+        .as_ref()
+        .map(|(_, driver, ..)| driver.clone())
+        .filter(|driver| !driver.is_empty())
+        .or_else(|| order_driver_id.clone());
+    if previous_driver_id.as_deref() == Some(new_driver_id.as_str()) {
+        return Err(driver_change_refusal(
+            DRIVER_CHANGE_SAME_DRIVER,
+            "The order already has this driver",
+        ));
+    }
+
+    let new_shift_id = order_ownership::resolve_driver_shift_id(conn, &new_driver_id, None)?
+        .ok_or_else(|| {
+            driver_change_refusal(
+                DRIVER_CHANGE_NEW_DRIVER_OFF_SHIFT,
+                "The new driver is not checked in",
+            )
+        })?;
+    let new_shift_branch: String = conn
+        .query_row(
+            "SELECT TRIM(COALESCE(branch_id, '')) FROM staff_shifts WHERE id = ?1",
+            rusqlite::params![new_shift_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load the new driver's shift: {e}"))?;
+    if !branch_id.is_empty() && !new_shift_branch.is_empty() && new_shift_branch != branch_id {
+        return Err(driver_change_refusal(
+            DRIVER_CHANGE_NEW_DRIVER_OFF_SHIFT,
+            "The new driver is checked in at another store",
+        ));
+    }
+
+    let previous_shift_id = earning
+        .as_ref()
+        .and_then(|(_, _, shift, ..)| shift.clone())
+        .or_else(|| order_shift_id.clone());
+
+    if previous_driver_id.is_some() {
+        let closed = || {
+            driver_change_refusal(
+                DRIVER_CHANGE_SHIFT_CLOSED,
+                "The driver's shift this order belongs to is closed or settled",
+            )
+        };
+        if earning
+            .as_ref()
+            .is_some_and(|(_, _, _, settled, transferred)| *settled != 0 || *transferred != 0)
+        {
+            return Err(closed());
+        }
+        let Some(previous_shift) = previous_shift_id.as_deref() else {
+            return Err(closed());
+        };
+        if !driver_change_shift_is_open(conn, previous_shift)? {
+            return Err(closed());
+        }
+        if let Some(order_shift) = order_shift_id.as_deref() {
+            if order_shift != previous_shift && !driver_change_shift_is_open(conn, order_shift)? {
+                return Err(closed());
+            }
+        }
+        if driver_change_order_has_money_adjustments(conn, &order_id)? {
+            return Err(driver_change_refusal(
+                DRIVER_CHANGE_ADJUSTED_ORDER,
+                "The order has a refund, a void or money handed back",
+            ));
+        }
+        if let Some((earning_id, ..)) = earning.as_ref() {
+            let syncing: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM parity_sync_queue
+                         WHERE table_name = 'driver_earnings'
+                           AND record_id = ?1
+                           AND LOWER(TRIM(status)) = 'processing'
+                     )",
+                    rusqlite::params![earning_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("read the driver earning's sync: {e}"))?;
+            if syncing {
+                return Err(driver_change_refusal(
+                    DRIVER_CHANGE_SYNC_IN_PROGRESS,
+                    "The driver earning is being sent right now",
+                ));
+            }
+            let earning_currency =
+                crate::shifts::recorded_operating_currency(conn, "driver_earnings", earning_id)?;
+            let shift_currency =
+                crate::shifts::recorded_operating_currency(conn, "staff_shifts", &new_shift_id)?;
+            if let (Some(earning_currency), Some(shift_currency)) =
+                (earning_currency.as_deref(), shift_currency.as_deref())
+            {
+                if earning_currency != shift_currency {
+                    return Err(driver_change_refusal(
+                        DRIVER_CHANGE_CURRENCY_MISMATCH,
+                        "The new driver's shift runs in another currency",
+                    ));
+                }
+            }
+        }
+        // The courier's money must be readable before anything moves.
+        order_ownership::load_order_attribution_snapshot(conn, &order_id)?;
+    } else if order_ownership::is_final_order_status(&status) {
+        // A delivered order without a driver: its money sits in the shift
+        // that delivered it, which must still be open to hand it over.
+        if let Some(order_shift) = order_shift_id.as_deref() {
+            if !driver_change_shift_is_open(conn, order_shift)? {
+                return Err(driver_change_refusal(
+                    DRIVER_CHANGE_SHIFT_CLOSED,
+                    "The shift this order belongs to is closed",
+                ));
+            }
+        }
+    }
+
+    let previous_driver_name = previous_driver_id.as_deref().and_then(|driver| {
+        let recorded = order_driver_name
+            .clone()
+            .filter(|_| order_driver_id.as_deref() == Some(driver));
+        recorded.or_else(|| resolve_driver_display_name(conn, driver))
+    });
+
+    Ok(DriverChangePlan {
+        order_id,
+        new_driver_name: resolve_driver_display_name(conn, &new_driver_id),
+        previous_driver_id,
+        previous_driver_name,
+        previous_shift_id,
+        earning_id: earning.map(|(id, ..)| id),
+        new_driver_id,
+        new_shift_id,
+    })
+}
+
+/// Change (or give) the driver of a delivery order, in one transaction. The
+/// caller has authorized a correction ([`DriverChangePlan::is_correction`]).
+pub(crate) fn change_order_driver_locally(
+    conn: &mut rusqlite::Connection,
+    order_id_raw: &str,
+    new_driver_id: &str,
+    actor: &DriverChangeActor,
+    now: &str,
+) -> Result<DriverChangeOutcome, String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin the driver change: {e}"))?;
+    let plan = plan_driver_change(&tx, order_id_raw, new_driver_id)?;
+    let outcome = if plan.is_correction() {
+        move_order_to_driver(&tx, &plan, now)?
+    } else {
+        let (order_id, driver_name, status) =
+            assign_driver_locally(&tx, &plan.order_id, &plan.new_driver_id, None, now)?;
+        let earning_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM driver_earnings WHERE order_id = ?1 LIMIT 1",
+                rusqlite::params![order_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("read the new driver earning: {e}"))?;
+        DriverChangeOutcome {
+            order_id,
+            status,
+            previous_driver_id: None,
+            previous_driver_name: None,
+            driver_id: plan.new_driver_id.clone(),
+            driver_name,
+            earning_id,
+            corrected: false,
+        }
+    };
+    record_driver_change_audit(&tx, &plan, &outcome, actor, now)?;
+    tx.commit()
+        .map_err(|e| format!("commit the driver change: {e}"))?;
+    Ok(outcome)
+}
+
+/// The correction itself: the order, its receipts' custody, the earning and a
+/// delivery tip's recipient move from the old driver's shift to the new one.
+fn move_order_to_driver(
+    tx: &rusqlite::Connection,
+    plan: &DriverChangePlan,
+    now: &str,
+) -> Result<DriverChangeOutcome, String> {
+    // The earning, the order update and a tip receipt are queued; a full
+    // queue refuses before anything moves.
+    crate::sync_queue::ensure_enqueue_capacity(tx, 3)?;
+    let money_before = plan
+        .earning_id
+        .as_deref()
+        .map(|earning_id| driver_change_earning_money(tx, earning_id))
+        .transpose()?;
+
+    let earning_id = match plan.earning_id.as_deref() {
+        Some(earning_id) => {
+            // Status unchanged; the receipts' custody follows the order.
+            order_ownership::apply_order_attribution(
+                tx,
+                &plan.order_id,
+                Some(&plan.new_shift_id),
+                Some(&plan.new_driver_id),
+                Some(&plan.new_driver_id),
+                plan.new_driver_name.as_deref(),
+                Some("delivery"),
+                None,
+                true,
+                now,
+            )?;
+            tx.execute(
+                "UPDATE driver_earnings
+                 SET driver_id = ?1,
+                     staff_shift_id = ?2,
+                     updated_at = ?3
+                 WHERE id = ?4",
+                rusqlite::params![plan.new_driver_id, plan.new_shift_id, now, earning_id],
+            )
+            .map_err(|e| format!("move the driver earning: {e}"))?;
+            earning_id.to_string()
+        }
+        None => {
+            // An older order with a driver and no earning: the earning is
+            // written as an assignment writes it, from the payment rows.
+            let assignment = order_ownership::assign_order_to_driver_shift(
+                tx,
+                &plan.order_id,
+                &plan.new_driver_id,
+                plan.new_driver_name.as_deref(),
+                &plan.new_shift_id,
+                now,
+            )?;
+            order_ownership::upsert_driver_earning(
+                tx,
+                &plan.order_id,
+                &plan.new_driver_id,
+                &assignment,
+                now,
+            )?
+        }
+    };
+
+    resolve_delivery_tip_recipients_for_assignment(
+        tx,
+        &plan.order_id,
+        &plan.new_driver_id,
+        &plan.new_shift_id,
+        now,
+    )?;
+
+    if let Some(before) = money_before {
+        if driver_change_earning_money(tx, &earning_id)? != before {
+            return Err(driver_change_refusal(
+                DRIVER_CHANGE_MONEY_CHANGED,
+                "The driver earning's money would change; nothing was moved",
+            ));
+        }
+    }
+
+    let earning_payload = order_ownership::build_driver_earning_sync_payload(tx, &earning_id)?;
+    order_ownership::enqueue_or_refresh_driver_earning_sync_row(tx, &earning_id, &earning_payload)?;
+
+    let status: String = tx
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            rusqlite::params![plan.order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("read the order after a driver change: {e}"))?;
+    // `driverReassigned` lets the order update carry the new driver's id
+    // (`sync_queue::prepare_order_request`); its name always goes.
+    enqueue_order_sync_payload(
+        tx,
+        &plan.order_id,
+        &serde_json::json!({
+            "orderId": plan.order_id,
+            "orderType": "delivery",
+            "status": status,
+            "driverId": plan.new_driver_id,
+            "driverName": plan.new_driver_name,
+            "driverReassigned": true,
+            "previousDriverId": plan.previous_driver_id,
+        }),
+    )?;
+
+    Ok(DriverChangeOutcome {
+        order_id: plan.order_id.clone(),
+        status,
+        previous_driver_id: plan.previous_driver_id.clone(),
+        previous_driver_name: plan.previous_driver_name.clone(),
+        driver_id: plan.new_driver_id.clone(),
+        driver_name: plan.new_driver_name.clone(),
+        earning_id: Some(earning_id),
+        corrected: true,
+    })
+}
+
+fn record_driver_change_audit(
+    tx: &rusqlite::Connection,
+    plan: &DriverChangePlan,
+    outcome: &DriverChangeOutcome,
+    actor: &DriverChangeActor,
+    now: &str,
+) -> Result<(), String> {
+    let order_number: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE(NULLIF(TRIM(display_order_number), ''), order_number)
+             FROM orders WHERE id = ?1",
+            rusqlite::params![plan.order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read the order number for the driver change audit: {e}"))?
+        .flatten();
+    let money = outcome
+        .earning_id
+        .as_deref()
+        .map(|earning_id| driver_change_earning_money(tx, earning_id))
+        .transpose()?;
+    let evidence = serde_json::json!({
+        "fromDriverId": plan.previous_driver_id,
+        "fromDriverName": plan.previous_driver_name,
+        "fromShiftId": plan.previous_shift_id,
+        "toDriverId": outcome.driver_id,
+        "toDriverName": outcome.driver_name,
+        "toShiftId": plan.new_shift_id,
+        "earningId": outcome.earning_id,
+        "money": money.map(|[fee, tip, total, cash, card, to_return]| serde_json::json!({
+            "deliveryFeeCents": fee,
+            "tipCents": tip,
+            "totalEarningCents": total,
+            "cashCollectedCents": cash,
+            "cardCents": card,
+            "cashToReturnCents": to_return,
+        })),
+        "corrected": outcome.corrected,
+        "changedBy": actor.staff_id,
+        "approvedBy": actor.approved_by,
+        "approvalVia": actor.approval_via,
+        "changedAt": now,
+    });
+    let message = format!(
+        "Driver changed from {} to {}",
+        plan.previous_driver_name
+            .as_deref()
+            .or(plan.previous_driver_id.as_deref())
+            .unwrap_or("-"),
+        outcome
+            .driver_name
+            .as_deref()
+            .unwrap_or(outcome.driver_id.as_str())
+    );
+    tx.execute(
+        "INSERT INTO recovery_action_log (
+             id, action_id, issue_code, entity_type, entity_id, order_id, order_number,
+             success, message, actor_staff_id, payload_json, created_at
+         ) VALUES (?1, 'order_driver_change', 'ORDER_DRIVER_CORRECTION', 'order', ?2, ?2, ?3,
+                   1, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            uuid::Uuid::new_v4().to_string(),
+            plan.order_id,
+            order_number,
+            message,
+            actor.approved_by.as_deref().or(actor.staff_id.as_deref()),
+            evidence.to_string(),
+            now,
+        ],
+    )
+    .map_err(|e| format!("write the driver change audit: {e}"))?;
+    Ok(())
+}
+
+/// "Change driver" from the order's Edit options. Payload
+/// `{ orderId, driverId }`. A correction asks for the void-payments approval
+/// (`REAUTH_REQUIRED`, which the renderer answers with a PIN and retries).
+#[tauri::command]
+pub async fn order_change_driver(
+    arg0: Option<serde_json::Value>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, crate::auth::GuardedCommandError> {
+    run_blocking_command("order_change_driver", move || {
+        let db = app.state::<db::DbState>();
+        let auth_state = app.state::<crate::auth::AuthState>();
+        let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+        let payload = arg0.ok_or("Missing driver change payload")?;
+        let order_id_raw =
+            value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
+        let driver_id =
+            value_str(&payload, &["driverId", "driver_id"]).ok_or("Missing driverId")?;
+
+        // Refuse before anyone's PIN is asked.
+        let plan = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            plan_driver_change(&conn, &order_id_raw, &driver_id)?
+        };
+        let session = crate::auth::get_session_json(&auth_state);
+        let session_staff = ["databaseStaffId", "staffId"].iter().find_map(|key| {
+            session
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        });
+        let mut actor = DriverChangeActor {
+            staff_id: session_staff,
+            ..DriverChangeActor::default()
+        };
+        if plan.is_correction() {
+            let approver = crate::auth::authorize_permitted_money_action(
+                crate::auth::MoneyApproval::VoidPayments,
+                &db,
+                &auth_state,
+            )?;
+            actor.approved_by = approver.manager_staff_id.clone();
+            actor.approval_via = Some(approver.via.to_string());
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let outcome = {
+            let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+            change_order_driver_locally(&mut conn, &order_id_raw, &driver_id, &actor, &now)?
+        };
+
+        let event = serde_json::json!({
+            "orderId": order_id_raw,
+            "status": outcome.status,
+            "driverId": outcome.driver_id,
+            "driverName": outcome.driver_name,
+            "previousDriverId": outcome.previous_driver_id,
+            "driverChanged": true,
+        });
+        let _ = app.emit(
+            "order_status_updated",
+            serde_json::json!({ "orderId": order_id_raw, "status": outcome.status }),
+        );
+        let _ = app.emit("order_realtime_update", event);
+        Ok(serde_json::json!({ "success": true, "data": outcome }))
+    })
+    .await
 }
 
 fn clear_delivery_tip_recipients_for_reset(

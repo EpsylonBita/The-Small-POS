@@ -31,7 +31,7 @@
       "editServerUpdate": "Le correzioni non sono temporaneamente disponibili. Verifica la connessione e riprova dopo l’aggiornamento del server.",
       "editSyncRequired": "La modifica del pagamento o dell’ordine non è ancora sincronizzata. Il carrello è salvato. Riprova tra poco.",
       "emptyEditHint": "Per rimuovere tutti gli articoli, chiudi l’editor e annulla l’ordine.",
-      "editCanonicalChanged": "I dati dell’ordine devono essere aggiornati. Aggiorna l’ordine prima di confermare un incasso o un rimborso.",
+      "editCanonicalChanged": "L’ordine è cambiato sul server. Premi «Aggiorna l’ordine», riapri l’ordine e rifai la modifica. Non è stato addebitato nulla.",
       "cardRecoveryQuestion": "La carta è stata addebitata? Controlla questo importo sul POS della banca prima di rispondere. Qui non viene addebitato nulla.",
       "cardRecoveryRegisterNote": "Questa cassa registra gli addebiti con carta tramite il registratore di cassa o il terminale, e lì non risulta alcun addebito di questa carta. Se il POS della banca mostra un addebito, chiama un responsabile.",
       "cardRecoveryCharged": "La carta è stata addebitata – registrala",
@@ -43,7 +43,11 @@
       "freezeNotSaved": "Non è stato possibile salvare il carrello per il pagamento, quindi nessun pagamento è stato avviato. Premi Paga per riprovare.",
       "orderNotSavedCartKept": "L’ordine non è stato salvato e non è stato registrato alcun pagamento. Il carrello resta: premi di nuovo Paga. Se hai già incassato il denaro, non incassarlo di nuovo.",
       "freezeReadbackChanged": "Nessun pagamento è stato avviato: la cassa non è riuscita a salvare il carrello per il pagamento esattamente come inserito. Seleziona di nuovo il cliente o l’indirizzo, poi premi Paga. Se succede di nuovo, contatta l’assistenza.",
-      "orderConfirmationRefused": "L’ordine non è stato salvato: il pagamento salvato nella cassa non corrispondeva a questo incasso, quindi premere di nuovo Paga senza modifiche non servirà. Non è stato registrato alcun pagamento e il carrello resta. Se hai incassato il denaro, non incassarlo di nuovo. Seleziona di nuovo il cliente o l’indirizzo, poi premi Paga. Se succede di nuovo, contatta l’assistenza."
+      "orderConfirmationRefused": "L’ordine non è stato salvato: il pagamento salvato nella cassa non corrispondeva a questo incasso, quindi premere di nuovo Paga senza modifiche non servirà. Non è stato registrato alcun pagamento e il carrello resta. Se hai incassato il denaro, non incassarlo di nuovo. Seleziona di nuovo il cliente o l’indirizzo, poi premi Paga. Se succede di nuovo, contatta l’assistenza.",
+      "editRefreshOrder": "Aggiorna l’ordine",
+      "editRefreshing": "Aggiornamento dell’ordine…",
+      "editOrderRefreshed": "L’ordine è stato aggiornato dal server. Riaprilo e rifai la modifica. Non è stato addebitato nulla.",
+      "editRefreshFailed": "Non è stato possibile aggiornare l’ordine: un pagamento o una modifica non è ancora arrivato al server, oppure i suoi pagamenti sono diversi da quelli del server. Aspetta un minuto e premi di nuovo «Aggiorna l’ordine». Se continua, chiama un responsabile. Non è stato addebitato nulla."
     }
   },
   "checkoutRecovery": {

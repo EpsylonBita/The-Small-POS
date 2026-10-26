@@ -31,7 +31,7 @@
       "editServerUpdate": "Korrigjimet nuk janë përkohësisht të disponueshme. Kontrolloni lidhjen dhe riprovoni pas përditësimit të serverit.",
       "editSyncRequired": "Ndryshimi i pagesës ose i porosisë nuk është sinkronizuar ende. Shporta është ruajtur. Provoni përsëri pas pak.",
       "emptyEditHint": "Për të hequr të gjithë artikujt, mbyllni redaktuesin dhe anuloni porosinë.",
-      "editCanonicalChanged": "Të dhënat e porosisë duhen rifreskuar. Rifreskoni porosinë përpara se të konfirmoni një arkëtim ose kthim parash.",
+      "editCanonicalChanged": "Porosia ndryshoi në server. Shtypni «Rifresko porosinë», hapeni përsëri porosinë dhe bëni ndryshimin tuaj. Nuk u arkëtua asgjë.",
       "cardRecoveryQuestion": "A u tërhoq pagesa nga karta? Kontrolloni këtë shumë në POS-in e bankës para se të përgjigjeni. Këtu nuk tërhiqet asgjë.",
       "cardRecoveryRegisterNote": "Kjo arkë i regjistron tërheqjet me kartë përmes arkës fiskale ose terminalit, dhe aty nuk duket asnjë tërheqje e kësaj karte. Nëse POS-i i bankës tregon një tërheqje, thërrisni menaxherin.",
       "cardRecoveryCharged": "Karta u tërhoq – regjistroje",
@@ -43,7 +43,11 @@
       "freezeNotSaved": "Shporta nuk u ruajt dot për pagesë, ndaj nuk nisi asnjë pagesë. Shtypni Paguaj për ta provuar përsëri.",
       "orderNotSavedCartKept": "Porosia nuk u ruajt dhe nuk u regjistrua asnjë pagesë. Shporta mbetet: shtypni përsëri Paguaj. Nëse i keni marrë tashmë paratë, mos i merrni përsëri.",
       "freezeReadbackChanged": "Nuk nisi asnjë pagesë: arka nuk e ruajti dot këtë shportë për pagesë saktësisht siç u fut. Zgjidhni përsëri klientin ose adresën, pastaj shtypni Paguaj. Nëse ndodh përsëri, kontaktoni mbështetjen.",
-      "orderConfirmationRefused": "Porosia nuk u ruajt: pagesa e ruajtur në arkë nuk përputhej me këtë arkëtim, ndaj shtypja përsëri e Paguaj pa ndryshim nuk ndihmon. Nuk u regjistrua asnjë pagesë dhe shporta mbetet. Nëse i keni marrë paratë, mos i merrni përsëri. Zgjidhni përsëri klientin ose adresën, pastaj shtypni Paguaj. Nëse ndodh përsëri, kontaktoni mbështetjen."
+      "orderConfirmationRefused": "Porosia nuk u ruajt: pagesa e ruajtur në arkë nuk përputhej me këtë arkëtim, ndaj shtypja përsëri e Paguaj pa ndryshim nuk ndihmon. Nuk u regjistrua asnjë pagesë dhe shporta mbetet. Nëse i keni marrë paratë, mos i merrni përsëri. Zgjidhni përsëri klientin ose adresën, pastaj shtypni Paguaj. Nëse ndodh përsëri, kontaktoni mbështetjen.",
+      "editRefreshOrder": "Rifresko porosinë",
+      "editRefreshing": "Po rifreskohet porosia…",
+      "editOrderRefreshed": "Porosia u përditësua nga serveri. Hapeni përsëri dhe bëni ndryshimin tuaj. Nuk u arkëtua asgjë.",
+      "editRefreshFailed": "Porosia nuk u rifreskua: një pagesë ose ndryshim i saj nuk ka arritur ende në server, ose pagesat e saj ndryshojnë nga ato të serverit. Prisni një minutë dhe shtypni përsëri «Rifresko porosinë». Nëse vazhdon, njoftoni një përgjegjës. Nuk u arkëtua asgjë."
     }
   },
   "checkoutRecovery": {

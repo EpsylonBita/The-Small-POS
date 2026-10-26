@@ -147,7 +147,7 @@ test('new checkout requires readable tax settings and canonical edits preserve s
     'unconfirmed canonical edits must retain the frozen draft');
 
   const editService = rendererSource('services', 'MenuOrderEdit.ts');
-  assert.match(editService, /if \(!scoped\.quotedFinancials\?\.quote[\s\S]*?throw new Error\('EDIT_CANONICAL_QUOTE_REQUIRED'\)/,
+  assert.match(editService, /if \(!scoped\.quotedFinancials\?\.quote[\s\S]*?throw new (?:Error|RendererEditRefusal)\('EDIT_CANONICAL_QUOTE_REQUIRED'/,
     'paid corrections require the complete authoritative quote before confirmation');
   assert.match(editService, /financials: scoped\.quotedFinancials/);
   const commit = editService.slice(editService.indexOf('export async function commitMenuOrderEdit('));
@@ -169,7 +169,7 @@ test('new checkout requires readable tax settings and canonical edits preserve s
     'the atomic edit keeps encrypted server-computed fiscal fields together with its exact settlement and items');
 
   const native = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'commands', 'orders.rs'), 'utf8');
-  const remoteEdit = sliceBetween(native, 'if let Some(request) = remote_edit_request {', '\n    let actual_order_id = {');
+  const remoteEdit = sliceBetween(native, 'if let Some(request) = remote_edit_request {', 'let actual_order_id = {');
   assert.match(remoteEdit, /confirm_foreground_item\([\s\S]*?\.await\?;[\s\S]*?return Ok\(/,
     'success requires the full canonical financial mirror, rather than a local total-only update');
   const recovery = readFileSync(path.join(process.cwd(), 'src-tauri', 'src', 'table_attempt_recovery.rs'), 'utf8');

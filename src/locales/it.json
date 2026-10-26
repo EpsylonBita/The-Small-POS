@@ -5557,7 +5557,10 @@
       "editPaymentMethodDesc": "Cambia tra contanti e carta",
       "changeOrderType": "Cambia tipo di ordine",
       "changeOrderTypeDesc": "Ricalcola l'ordine con i prezzi per asporto, consegna o in loco",
-      "cancel": "Annulla"
+      "cancel": "Annulla",
+      "changeDriver": "Cambia fattorino",
+      "changeDriverCurrent": "Fattorino attuale: {{name}}",
+      "changeDriverNone": "Ancora nessun fattorino. Scegli il fattorino che la consegna."
     },
     "editPaymentMethod": {
       "title": "Modifica metodo di pagamento",
@@ -5587,7 +5590,12 @@
         "busy": "Occupato",
         "offline": "Non in linea"
       },
-      "cancel": "Annulla"
+      "cancel": "Annulla",
+      "changeTitle": "Cambia fattorino",
+      "currentDriver": "Fattorino attuale: {{name}}",
+      "noCurrentDriver": "Questo ordine non ha ancora un fattorino.",
+      "changeMessage": "Scegli il fattorino che ha effettivamente consegnato l'ordine. Costo di consegna, mancia e contanti da versare passano a questo fattorino.",
+      "currentLabel": "(attuale)"
     },
     "addressSelection": {
       "title": "Seleziona indirizzo {{type}}",
@@ -6318,7 +6326,25 @@
     "refundNoEligiblePayment": "Nessun pagamento completato con saldo sufficiente per un rimborso.",
     "tableOrderNotLoaded": "Il conto del tavolo è aperto, ma l'ordine collegato non è ancora caricato su questa cassa. Aggiorna gli ordini e riprova.",
     "tableSessionQueued": "Tavolo salvato in locale; sincronizzazione della sessione in coda.",
-    "tableSessionSyncFailed": "Ordine salvato, ma la sincronizzazione della sessione del tavolo va ripetuta."
+    "tableSessionSyncFailed": "Ordine salvato, ma la sincronizzazione della sessione del tavolo va ripetuta.",
+    "driverChange": {
+      "success": "Fattorino cambiato in {{name}}",
+      "approvalTitle": "Approva il cambio di fattorino",
+      "approvalSubtitle": "Cambiare fattorino sposta i contanti del fattorino. Un membro del personale autorizzato ad annullare i pagamenti inserisce il proprio PIN.",
+      "errors": {
+        "cancelled": "Un ordine annullato o rimborsato non ha un fattorino da cambiare.",
+        "notDelivery": "Solo un ordine con consegna ha un fattorino.",
+        "platformFleet": "Questo ordine lo porta il fattorino della piattaforma di consegna. Non ha un fattorino del negozio.",
+        "sameDriver": "L'ordine ha già questo fattorino.",
+        "newDriverOffShift": "Il fattorino scelto non ha fatto il check-in in questo negozio. Fai prima il suo check-in.",
+        "shiftClosed": "Il turno del fattorino per questo ordine è già chiuso o liquidato. I suoi contanti sono definitivi, quindi il fattorino non può essere cambiato.",
+        "adjustedOrder": "Questo ordine ha un rimborso, un annullamento o denaro restituito. Il suo fattorino non può essere cambiato.",
+        "syncInProgress": "Il compenso del fattorino è in fase di invio. Riprova tra un momento.",
+        "currencyMismatch": "Il turno del fattorino scelto usa un'altra valuta.",
+        "moneyChanged": "Il denaro del fattorino sarebbe cambiato, quindi non è stato spostato nulla. Riprova.",
+        "failed": "Non è stato possibile cambiare il fattorino."
+      }
+    }
   },
   "bulkActions": {
     "driver": "Fattorino",

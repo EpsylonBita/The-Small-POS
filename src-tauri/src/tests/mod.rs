@@ -57,6 +57,10 @@ mod direct_sale_payment_records;
 // Item C (fix review 30/09/2026): a courier's cash comes only from payment rows.
 mod driver_cash_from_payment_rows;
 
+// Founder request (Tomikro 26/10/2026): a delivery's driver is changed, with
+// its earning and courier cash, while both shifts are open.
+mod driver_change;
+
 // Item E (fix review 30/09/2026): a card charged at new-order checkout that
 // the till could not save, end to end.
 mod unsaved_checkout;

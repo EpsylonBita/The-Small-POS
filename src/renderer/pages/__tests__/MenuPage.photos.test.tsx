@@ -63,6 +63,9 @@ describe('mounted Windows ordering screen after durable photo sync', () => {
     mocks.fiscalActive.mockResolvedValue(true);
     render(<MenuPage />);
     await waitFor(() => expect(mocks.cart.slipsPrintVat).toBe(true));
+    // The mocked grid renders "Choose item" before the menu loads; clicking it
+    // then opens no item and "Add item" never appears (CI flake, PR #380).
+    await screen.findByText('Coffee');
     fireEvent.click(screen.getByRole('button', { name: 'Choose item' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Add item' }));
     expect(mocks.cart.cartItems[0]).toMatchObject({

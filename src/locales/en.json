@@ -5557,7 +5557,10 @@
       "editPaymentMethodDesc": "Switch between cash and card",
       "changeOrderType": "Change Order Type",
       "changeOrderTypeDesc": "Reprice the order using pickup, delivery, or dine-in tiers",
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "changeDriver": "Change driver",
+      "changeDriverCurrent": "Current driver: {{name}}",
+      "changeDriverNone": "No driver yet. Choose the driver who delivers it."
     },
     "editPaymentMethod": {
       "title": "Edit Payment Method",
@@ -5587,7 +5590,12 @@
         "busy": "Busy",
         "offline": "Offline"
       },
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "changeTitle": "Change driver",
+      "currentDriver": "Current driver: {{name}}",
+      "noCurrentDriver": "This order has no driver yet.",
+      "changeMessage": "Choose the driver who actually delivered the order. The delivery fee, the tip and the cash to hand in move to that driver.",
+      "currentLabel": "(current)"
     },
     "addressSelection": {
       "title": "Select {{type}} Address",
@@ -6318,7 +6326,25 @@
     "refundNoEligiblePayment": "No completed payment with enough remaining balance to refund against.",
     "tableOrderNotLoaded": "This table check is open, but the linked order is not loaded locally yet. Refresh orders and try again.",
     "tableSessionQueued": "Table saved locally; session sync queued.",
-    "tableSessionSyncFailed": "Order saved, but table-session sync needs retry."
+    "tableSessionSyncFailed": "Order saved, but table-session sync needs retry.",
+    "driverChange": {
+      "success": "Driver changed to {{name}}",
+      "approvalTitle": "Approve the driver change",
+      "approvalSubtitle": "Changing the driver moves the courier's cash. A staff member who can void payments enters their own PIN.",
+      "errors": {
+        "cancelled": "A cancelled or refunded order has no driver to change.",
+        "notDelivery": "Only a delivery order has a driver.",
+        "platformFleet": "The delivery platform's own rider carries this order. It has no store driver.",
+        "sameDriver": "The order already has this driver.",
+        "newDriverOffShift": "The chosen driver is not checked in at this store. Check them in first.",
+        "shiftClosed": "The driver's shift for this order is already closed or settled. Its cash is final, so the driver cannot be changed.",
+        "adjustedOrder": "This order has a refund, a void or money handed back. Its driver cannot be changed.",
+        "syncInProgress": "The driver's earning is being sent right now. Try again in a moment.",
+        "currencyMismatch": "The chosen driver's shift runs in another currency.",
+        "moneyChanged": "The driver's money would have changed, so nothing was moved. Try again.",
+        "failed": "The driver could not be changed."
+      }
+    }
   },
   "bulkActions": {
     "driver": "Driver",

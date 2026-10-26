@@ -12614,6 +12614,35 @@ fn prepare_order_request(
             "driver_name",
             false,
         );
+        // A driver change (`commands::orders::order_change_driver`) names the
+        // driver who carried the order, so the server's order follows its
+        // earning. It goes with the driver's name on a delivered order: the
+        // server keeps the update and ignores only an id it cannot verify
+        // (`isRecoverableStaleDriverReplay`), so a replay after checkout
+        // never refuses the whole update.
+        let driver_changed = payload
+            .get("driverReassigned")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let delivered = body
+            .get("status")
+            .and_then(Value::as_str)
+            .map(|status| {
+                matches!(
+                    status.trim().to_ascii_lowercase().as_str(),
+                    "delivered" | "completed" | "out_for_delivery"
+                )
+            })
+            .unwrap_or(false);
+        if driver_changed && delivered && body.contains_key("driver_name") {
+            copy_payload_field(
+                &mut body,
+                payload,
+                &["driverId", "driver_id"],
+                "driver_id",
+                false,
+            );
+        }
     }
     for (camel, snake) in [
         ("totalAmount", "total_amount"),
@@ -14358,13 +14387,10 @@ fn apply_header_edit_ack(
     local["notes"] = serde_json::json!(notes);
     local["special_instructions"] = serde_json::json!(kitchen);
     local["status"] = serde_json::json!(status);
-    let equal = |a: &Value, b: &Value| {
-        a == b
-            || (a.as_str().unwrap_or("").is_empty()
-                && b.as_str().unwrap_or("").is_empty()
-                && (a.is_null() || a.is_string())
-                && (b.is_null() || b.is_string()))
-    };
+    // A coordinate is rendered with 15 significant digits by `json_object`
+    // while the queued value keeps all 17; an exact compare made this ACK
+    // treat its own edit as a newer local change and skip the projection.
+    let equal = crate::edit_settlement_recovery::same_canonical_header;
     // Fix 2 (06/10/2026): the server may link a customer the request named
     // only by name/phone (`customer_id: null`), resolve the address identity
     // or normalize a contact field. That is the canonical header of the same
@@ -14388,7 +14414,20 @@ fn apply_header_edit_ack(
                 if matches!(snake, "status" | "order_type") {
                     return Err("ORDER_HEADER_ACK_SNAPSHOT_REQUIRED".into());
                 }
-                adopted.push((snake, canonical.get(snake).cloned().unwrap_or(Value::Null)));
+                // A key the answer does not carry is not a NULL.
+                if let Some(value) = canonical.get(snake) {
+                    adopted.push((snake, value.clone()));
+                }
+            }
+        } else if snake != "status" && snake != "order_type" {
+            // The server's customer/address resolution may rewrite headers
+            // this edit did not name (Tomikro 25-26/10/2026); nothing newer
+            // is queued, so its canonical values are the order's.
+            if let Some(value) = canonical
+                .get(snake)
+                .filter(|value| !equal(&local[snake], value))
+            {
+                adopted.push((snake, value.clone()));
             }
         }
     }
@@ -14566,23 +14605,33 @@ fn apply_edit_settlement_ack(
     }
     let local_headers =
         crate::edit_settlement_recovery::capture_order_headers(conn, &item.record_id)?;
+    let same = crate::edit_settlement_recovery::same_canonical_header;
     let mut adopted_headers: Vec<(&str, Value)> = Vec::new();
     for (camel, snake) in crate::edit_settlement_recovery::EDIT_HEADER_FIELDS {
         if let Some(expected) = payload.get(*camel).or_else(|| payload.get(*snake)) {
-            if local_headers[*snake] != *expected {
+            if !same(&local_headers[*snake], expected) {
                 return Ok(true);
             }
-            if canonical[*snake] != *expected {
+            if !same(&canonical[*snake], expected) {
                 // A changed fulfillment is a different outcome; a linked
                 // customer, a normalized phone or a resolved address is the
                 // server's canonical header for the same edit.
                 if *snake == "order_type" {
                     return Err(invalid());
                 }
-                adopted_headers.push((
-                    *snake,
-                    canonical.get(*snake).cloned().unwrap_or(Value::Null),
-                ));
+                // A key the answer does not carry is not a NULL.
+                if let Some(value) = canonical.get(*snake) {
+                    adopted_headers.push((*snake, value.clone()));
+                }
+            }
+        } else if *snake != "order_type" {
+            // Headers this edit did not name but the server resolved
+            // (Tomikro 25-26/10/2026); nothing newer is queued.
+            if let Some(value) = canonical
+                .get(*snake)
+                .filter(|value| !same(&local_headers[*snake], value))
+            {
+                adopted_headers.push((*snake, value.clone()));
             }
         }
     }
@@ -14611,12 +14660,70 @@ fn apply_edit_settlement_ack(
         sync_status='synced',last_synced_at=?13,notes=?17,special_instructions=?18 WHERE id=?14 AND organization_id=?15 AND items=?16",
         params![canonical["items"].to_string(),version,subtotal,tax,discount,delivery,tip,
             Cents::round_half_even(subtotal).as_i64(),Cents::round_half_even(tax).as_i64(),Cents::round_half_even(discount).as_i64(),Cents::round_half_even(delivery).as_i64(),Cents::round_half_even(tip).as_i64(),
-            now,item.record_id,scope.organization,local_items,canonical["notes"].as_str(),canonical["special_instructions"].as_str()]).map_err(|error|error.to_string())?;
+            now,item.record_id,scope.organization,local_items,
+            if canonical.get("notes").is_some() { canonical["notes"].as_str().map(str::to_string) } else { local_order_notes.clone() },
+            if canonical.get("special_instructions").is_some() { canonical["special_instructions"].as_str().map(str::to_string) } else { local_notes.clone() }]).map_err(|error|error.to_string())?;
     if projected == 1 {
         crate::fiscal::greece_vat::adopt_server_order_vat(conn, &item.record_id, canonical);
         adopt_edit_ack_headers(conn, &item.record_id, &scope.organization, &adopted_headers)?;
     }
     Ok(true)
+}
+
+/// The create acknowledgement carries the server's canonical lines. Their
+/// UUIDs replace the renderer's cart ids, each former id kept as
+/// `client_line_id` (Tomikro 25-26/10/2026: a paid order's lines never
+/// learned their UUIDs; the payment acknowledgement then stamps the order
+/// newer than the server, the pull skips it, and every paid correction was
+/// refused). Only the same sale is projected, and never over a newer queued
+/// change of the order.
+fn project_insert_ack_lines(
+    conn: &Connection,
+    item: &SyncQueueItem,
+    response: Option<&Value>,
+) -> Result<(), String> {
+    let Some(canonical) = response
+        .and_then(|answer| answer.pointer("/data/items"))
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+    else {
+        return Ok(());
+    };
+    let newer: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM parity_sync_queue WHERE table_name='orders' AND record_id=?1 AND id<>?2
+             AND status NOT IN ('completed','synced'))",
+            params![item.record_id, item.id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if newer {
+        return Ok(());
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT items FROM orders WHERE id=?1",
+            [&item.record_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .flatten();
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let Ok(local) = serde_json::from_str::<Vec<Value>>(&raw) else {
+        return Ok(());
+    };
+    if let Some(adopted) = crate::edit_settlement_recovery::lines_with_client_ids(&local, canonical)
+    {
+        conn.execute(
+            "UPDATE orders SET items=?1 WHERE id=?2 AND items=?3",
+            params![Value::Array(adopted).to_string(), item.record_id, raw],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// A canonical line's own UUID (never a renderer transient or menu id).
@@ -14745,17 +14852,7 @@ fn adopt_edit_ack_headers(
         {
             continue;
         }
-        let bound = match value {
-            Value::Null => rusqlite::types::Value::Null,
-            Value::Bool(flag) => rusqlite::types::Value::Integer(i64::from(*flag)),
-            Value::Number(number) => number
-                .as_i64()
-                .map(rusqlite::types::Value::Integer)
-                .or_else(|| number.as_f64().map(rusqlite::types::Value::Real))
-                .unwrap_or(rusqlite::types::Value::Null),
-            Value::String(text) => rusqlite::types::Value::Text(text.clone()),
-            other => rusqlite::types::Value::Text(other.to_string()),
-        };
+        let bound = crate::edit_settlement_recovery::bind_canonical_value(value);
         conn.execute(
             &format!("UPDATE orders SET {column}=?1 WHERE id=?2 AND organization_id=?3"),
             params![bound, order, organization],
@@ -15166,6 +15263,7 @@ fn apply_success(
                     sync::persist_room_charge_response(conn, &item.record_id, response)?;
                 }
                 adopt_insert_ack_vat(conn, item, response);
+                project_insert_ack_lines(conn, item, response)?;
                 sync::promote_payments_for_order(conn, item.record_id.as_str());
                 wake_rows_waiting_for_order_create(conn, item.record_id.as_str())?;
             } else {
@@ -26354,6 +26452,65 @@ mod tests {
             body.get("driver_name").and_then(Value::as_str),
             Some("Driver Name")
         );
+    }
+
+    /// Founder request (Tomikro 26/10/2026): a driver change sends the driver
+    /// who carried the order, id and name, so the server's order follows its
+    /// earning. Only the change does; a plain status replay still omits it.
+    #[test]
+    fn prepare_order_request_sends_the_new_driver_of_a_driver_change() {
+        let conn = test_connection();
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, total_amount_cents,
+                order_type, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'order-driver-change', 'remote-order-driver-change',
+                '[]', 9.20, 920, 'delivery', 'delivered', 'pending',
+                datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("seed delivered order");
+
+        let item = queue_item(
+            "orders",
+            "UPDATE",
+            "order-driver-change",
+            json!({
+                "orderId": "order-driver-change",
+                "orderType": "delivery",
+                "status": "delivered",
+                "driverId": "b96b6236-8164-4881-b45f-b75c1c79859c",
+                "driverName": "Driver Who Carried It",
+                "driverReassigned": true,
+                "previousDriverId": "0b5c9a0e-2d3f-4c55-8f1e-1c2d3e4f5a6b",
+            }),
+        );
+        let payload = serde_json::from_str::<Value>(&item.data).expect("parse payload");
+        let request = match prepare_order_request(&conn, &item, &payload, TEST_TERMINAL_ID)
+            .expect("prepare request")
+        {
+            RequestPreparation::Ready(spec) => spec,
+            other => panic!("expected ready request, got {other:?}"),
+        };
+        let body = serde_json::from_str::<Value>(request.body.as_deref().expect("request body"))
+            .expect("parse request body");
+
+        assert_eq!(
+            body.get("driver_id").and_then(Value::as_str),
+            Some("b96b6236-8164-4881-b45f-b75c1c79859c")
+        );
+        assert_eq!(
+            body.get("driver_name").and_then(Value::as_str),
+            Some("Driver Who Carried It")
+        );
+        for local_marker in ["driverReassigned", "previousDriverId"] {
+            assert!(
+                body.get(local_marker).is_none(),
+                "{local_marker} must not leak into the API schema"
+            );
+        }
     }
 
     #[test]
@@ -43610,3 +43767,7 @@ mod health_make_due_tests {
         assert!(renderer_items_by_id(&conn, &[]).expect("empty").is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "edit_canonical_drift_tests.rs"]
+pub(crate) mod edit_canonical_drift_tests;

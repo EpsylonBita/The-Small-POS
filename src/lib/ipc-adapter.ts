@@ -1377,6 +1377,17 @@ export interface CancelOrderWithApprovalParams {
   manualCancellation?: { generation: string; returnChannel: "cash_drawer" | "bank" };
 }
 
+/**
+ * "Change driver" from an order's Edit options (founder request, Tomikro
+ * 26/10/2026): the order, its driver earning and the courier's cash move to
+ * the driver who carried it. A correction asks for the void-payments approval
+ * (REAUTH_REQUIRED); a refusal names its DRIVER_CHANGE_* code.
+ */
+export interface ChangeOrderDriverParams {
+  orderId: string;
+  driverId: string;
+}
+
 export interface ResolvePaymentBlockerParams {
   orderId: string;
   method: "cash" | "card";
@@ -1913,6 +1924,14 @@ export interface PlatformBridge {
       orderUpdates?: Partial<EditSettlementOrderUpdates>;
       action: OrderEditSettlementAction;
     }): Promise<IpcResult>;
+    /**
+     * Replace the till's copy of one order with the server's canonical order
+     * (the refusal's "Refresh the order"). Refused while something of the
+     * order waits to be sent or when the recorded money differs.
+     */
+    refreshFromServer(orderId: string): Promise<{ success: boolean; orderId?: string; refreshed?: string[] }>;
+    /** One fixed-code support event for an edit refusal the renderer decided. */
+    reportEditRefusal(payload: { refusal: string; field?: string }): Promise<unknown>;
     updateCustomerInfo(
       payload: OrderCustomerInfoUpdateParams,
     ): Promise<IpcResult>;
@@ -1937,6 +1956,8 @@ export interface PlatformBridge {
      * 30/09/2026): needs the cash-drawer approval (cashier or manager shift
      * + fresh PIN) and writes an audit entry. Nothing is charged.
      */
+    /** Change the driver of a delivery order (driver earning and courier cash follow). */
+    changeDriver(params: ChangeOrderDriverParams): Promise<IpcResult>;
     cancelWithApproval(params: CancelOrderWithApprovalParams): Promise<IpcResult>;
     resetToActive(orderId: string): Promise<IpcResult>;
     notifyPlatformReady(orderId: string): Promise<PlatformReadyResult>;
@@ -2934,6 +2955,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "order:approve": "orders.approve",
   "order:decline": "orders.decline",
   "order:assign-driver": "orders.assignDriver",
+  "order:change-driver": "orders.changeDriver",
   "order:cancel-with-approval": "orders.cancelWithApproval",
   "order:reset-to-active": "orders.resetToActive",
   "order:notify-platform-ready": "orders.notifyPlatformReady",
@@ -2949,6 +2971,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "orders:clear-all": "orders.clearAll",
   "orders:preview-edit-settlement": "orders.previewEditSettlement",
   "orders:apply-edit-settlement": "orders.applyEditSettlement",
+  "orders:refresh-from-server": "orders.refreshFromServer",
+  "orders:report-edit-refusal": "orders.reportEditRefusal",
 
   // Payments
   "payment:update-payment-status": "payments.updatePaymentStatus",
@@ -3715,6 +3739,10 @@ export class TauriBridge implements PlatformBridge {
       orderUpdates?: Partial<EditSettlementOrderUpdates>;
       action: OrderEditSettlementAction;
     }) => this.inv("orders:apply-edit-settlement", payload),
+    refreshFromServer: (orderId: string) =>
+      this.inv("orders:refresh-from-server", { orderId }),
+    reportEditRefusal: (payload: { refusal: string; field?: string }) =>
+      this.inv("orders:report-edit-refusal", payload),
     updateCustomerInfo: (payload: OrderCustomerInfoUpdateParams) =>
       this.inv("order:update-customer-info", payload),
     convertPickupToDelivery: (payload: PickupToDeliveryConversionParams) =>
@@ -3730,6 +3758,8 @@ export class TauriBridge implements PlatformBridge {
     decline: (id: string, r: string) => this.inv("order:decline", id, r),
     assignDriver: (id: string, d: string, n?: string) =>
       this.inv("order:assign-driver", id, d, n),
+    changeDriver: (params: ChangeOrderDriverParams) =>
+      this.inv("order:change-driver", params),
     cancelWithApproval: (params: CancelOrderWithApprovalParams) =>
       this.inv("order:cancel-with-approval", params),
     resetToActive: (id: string) => this.inv("order:reset-to-active", id),

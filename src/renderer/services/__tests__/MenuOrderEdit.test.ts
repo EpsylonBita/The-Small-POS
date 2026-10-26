@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { commitMenuOrderEdit, deriveMenuEditChanges, menuEditRequest, menuEditRefundAction, previewMenuOrderEdit, type MenuOrderEditData } from '../MenuOrderEdit';
+import { commitMenuOrderEdit, deriveMenuEditChanges, menuEditRequest, menuEditRefundAction, previewMenuOrderEdit, RendererEditRefusal, type MenuOrderEditData } from '../MenuOrderEdit';
 import type { PlatformBridge } from '../../../lib/ipc-adapter';
 
 const data: MenuOrderEditData = { orderId: 'original-six', client_event_id: 'stable-edit', expected_version: 3, expected_local_version: 1,
@@ -197,6 +197,18 @@ describe('menu paid edit settlement', () => {
     vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, canonicalExpectedVersion: 4 } as any);
     await expect(previewMenuOrderEdit(bridge, data)).rejects.toThrow('EDIT_SETTLEMENT_VERSION_CHANGED');
     expect(bridge.applyEditSettlement).not.toHaveBeenCalled();
+  });
+  it('names the field of every refusal it decides itself, for the support log', async () => {
+    const bridge = orders();
+    const refusal = async () => previewMenuOrderEdit(bridge, data).then(() => null, (error: unknown) => error);
+    vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, canonicalExpectedVersion: 4 } as any);
+    expect(await refusal()).toMatchObject({ message: 'EDIT_SETTLEMENT_VERSION_CHANGED', field: 'canonical_version' });
+    vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, localExpectedVersion: 2 } as any);
+    expect(await refusal()).toMatchObject({ message: 'EDIT_SETTLEMENT_VERSION_CHANGED', field: 'local_version' });
+    vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, quotedFinancials: { ...quotedFinancials, quote: undefined } } as any);
+    const missing = await refusal();
+    expect(missing).toBeInstanceOf(RendererEditRefusal);
+    expect(missing).toMatchObject({ message: 'EDIT_CANONICAL_QUOTE_REQUIRED', field: 'quote_financials' });
   });
   it('routes proven unchanged-item metadata edits without manual provider settlement', async () => {
     const bridge=orders();vi.mocked(bridge.previewEditSettlement).mockResolvedValue({ ...preview, metadataOnly:true } as any);

@@ -5557,7 +5557,10 @@
       "editPaymentMethodDesc": "Zwischen Bar und Karte wechseln",
       "changeOrderType": "Bestelltyp ändern",
       "changeOrderTypeDesc": "Bestellung neu berechnen mit Abhol-, Liefer- oder Vor-Ort-Tarif",
-      "cancel": "Abbrechen"
+      "cancel": "Abbrechen",
+      "changeDriver": "Fahrer ändern",
+      "changeDriverCurrent": "Aktueller Fahrer: {{name}}",
+      "changeDriverNone": "Noch kein Fahrer. Wählen Sie den Fahrer, der sie ausliefert."
     },
     "editPaymentMethod": {
       "title": "Zahlungsmethode bearbeiten",
@@ -5587,7 +5590,12 @@
         "busy": "Beschäftigt",
         "offline": "Offline"
       },
-      "cancel": "Abbrechen"
+      "cancel": "Abbrechen",
+      "changeTitle": "Fahrer ändern",
+      "currentDriver": "Aktueller Fahrer: {{name}}",
+      "noCurrentDriver": "Diese Bestellung hat noch keinen Fahrer.",
+      "changeMessage": "Wählen Sie den Fahrer, der die Bestellung tatsächlich ausgeliefert hat. Liefergebühr, Trinkgeld und abzugebendes Bargeld gehen an diesen Fahrer.",
+      "currentLabel": "(aktuell)"
     },
     "addressSelection": {
       "title": "{{type}}-Adresse auswählen",
@@ -6318,7 +6326,25 @@
     "refundNoEligiblePayment": "Keine abgeschlossene Zahlung mit ausreichendem Restbetrag für eine Erstattung.",
     "tableOrderNotLoaded": "Diese Tischrechnung ist offen, aber die zugehörige Bestellung ist hier noch nicht geladen. Aktualisieren Sie die Bestellungen und versuchen Sie es erneut.",
     "tableSessionQueued": "Tisch lokal gespeichert; Synchronisierung der Sitzung eingereiht.",
-    "tableSessionSyncFailed": "Bestellung gespeichert, aber die Synchronisierung der Tischsitzung muss wiederholt werden."
+    "tableSessionSyncFailed": "Bestellung gespeichert, aber die Synchronisierung der Tischsitzung muss wiederholt werden.",
+    "driverChange": {
+      "success": "Fahrer geändert zu {{name}}",
+      "approvalTitle": "Fahrerwechsel freigeben",
+      "approvalSubtitle": "Ein Fahrerwechsel verschiebt das Bargeld des Fahrers. Eine Person mit dem Recht, Zahlungen zu stornieren, gibt ihre eigene PIN ein.",
+      "errors": {
+        "cancelled": "Eine stornierte oder erstattete Bestellung hat keinen Fahrer zum Ändern.",
+        "notDelivery": "Nur eine Lieferbestellung hat einen Fahrer.",
+        "platformFleet": "Der eigene Fahrer der Lieferplattform bringt diese Bestellung. Sie hat keinen Fahrer des Geschäfts.",
+        "sameDriver": "Die Bestellung hat bereits diesen Fahrer.",
+        "newDriverOffShift": "Der gewählte Fahrer ist in diesem Geschäft nicht eingecheckt. Checken Sie ihn zuerst ein.",
+        "shiftClosed": "Die Schicht des Fahrers für diese Bestellung ist bereits geschlossen oder abgerechnet. Ihr Bargeld ist endgültig, daher kann der Fahrer nicht geändert werden.",
+        "adjustedOrder": "Diese Bestellung hat eine Erstattung, eine Stornierung oder zurückgegebenes Geld. Ihr Fahrer kann nicht geändert werden.",
+        "syncInProgress": "Der Verdienst des Fahrers wird gerade gesendet. Versuchen Sie es gleich noch einmal.",
+        "currencyMismatch": "Die Schicht des gewählten Fahrers läuft in einer anderen Währung.",
+        "moneyChanged": "Das Geld des Fahrers hätte sich geändert, daher wurde nichts verschoben. Versuchen Sie es erneut.",
+        "failed": "Der Fahrer konnte nicht geändert werden."
+      }
+    }
   },
   "bulkActions": {
     "driver": "Fahrer",

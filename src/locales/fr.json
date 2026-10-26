@@ -5557,7 +5557,10 @@
       "editPaymentMethodDesc": "Basculer entre espèces et carte",
       "changeOrderType": "Changer le type de commande",
       "changeOrderTypeDesc": "Recalculer la commande selon les tarifs emporter, livraison ou sur place",
-      "cancel": "Annuler"
+      "cancel": "Annuler",
+      "changeDriver": "Changer de livreur",
+      "changeDriverCurrent": "Livreur actuel : {{name}}",
+      "changeDriverNone": "Pas encore de livreur. Choisissez le livreur qui la livre."
     },
     "editPaymentMethod": {
       "title": "Modifier le mode de paiement",
@@ -5587,7 +5590,12 @@
         "busy": "Occupé",
         "offline": "Hors ligne"
       },
-      "cancel": "Annuler"
+      "cancel": "Annuler",
+      "changeTitle": "Changer de livreur",
+      "currentDriver": "Livreur actuel : {{name}}",
+      "noCurrentDriver": "Cette commande n'a pas encore de livreur.",
+      "changeMessage": "Choisissez le livreur qui a réellement livré la commande. Les frais de livraison, le pourboire et l'argent liquide à remettre passent à ce livreur.",
+      "currentLabel": "(actuel)"
     },
     "addressSelection": {
       "title": "Sélectionner l'adresse {{type}}",
@@ -6318,7 +6326,25 @@
     "refundNoEligiblePayment": "Aucun paiement terminé avec un solde suffisant pour un remboursement.",
     "tableOrderNotLoaded": "Cette addition de table est ouverte, mais la commande liée n'est pas encore chargée sur cette caisse. Actualisez les commandes et réessayez.",
     "tableSessionQueued": "Table enregistrée localement ; synchronisation de la session mise en file d'attente.",
-    "tableSessionSyncFailed": "Commande enregistrée, mais la synchronisation de la session de table doit être relancée."
+    "tableSessionSyncFailed": "Commande enregistrée, mais la synchronisation de la session de table doit être relancée.",
+    "driverChange": {
+      "success": "Livreur changé pour {{name}}",
+      "approvalTitle": "Approuver le changement de livreur",
+      "approvalSubtitle": "Changer de livreur déplace l'argent liquide du livreur. Un membre du personnel autorisé à annuler des paiements saisit son propre PIN.",
+      "errors": {
+        "cancelled": "Une commande annulée ou remboursée n'a pas de livreur à changer.",
+        "notDelivery": "Seule une commande en livraison a un livreur.",
+        "platformFleet": "Le livreur de la plateforme de livraison transporte cette commande. Elle n'a pas de livreur du magasin.",
+        "sameDriver": "La commande a déjà ce livreur.",
+        "newDriverOffShift": "Le livreur choisi n'a pas pointé dans ce magasin. Faites d'abord son pointage.",
+        "shiftClosed": "Le service du livreur pour cette commande est déjà clôturé ou réglé. Son argent liquide est définitif, le livreur ne peut donc pas être changé.",
+        "adjustedOrder": "Cette commande a un remboursement, une annulation ou de l'argent rendu. Son livreur ne peut pas être changé.",
+        "syncInProgress": "La rémunération du livreur est en cours d'envoi. Réessayez dans un instant.",
+        "currencyMismatch": "Le service du livreur choisi utilise une autre devise.",
+        "moneyChanged": "L'argent du livreur aurait changé, donc rien n'a été déplacé. Réessayez.",
+        "failed": "Le livreur n'a pas pu être changé."
+      }
+    }
   },
   "bulkActions": {
     "driver": "Livreur",
