@@ -1,6 +1,7 @@
 import { getStoreCurrency } from '../../utils/store-currency';
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { useCashierPortalProps } from '../../contexts/cashier-gate-context';
 import { X, Gift, Award, Star, Minus, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
@@ -34,6 +35,7 @@ export function LoyaltyRedeemModal({
   minRedemptionPoints,
   maxRedeemablePoints,
 }: LoyaltyRedeemModalProps) {
+  const cashierPortalProps = useCashierPortalProps();
   const { t } = useTranslation();
 
   const [pointsToRedeem, setPointsToRedeem] = useState(minRedemptionPoints);
@@ -143,7 +145,7 @@ export function LoyaltyRedeemModal({
     }`;
 
   const modal = (
-    <div className="fixed inset-0 z-[2147483000] flex items-center justify-center p-4">
+    <div {...cashierPortalProps} className="fixed inset-0 z-[2147483000] flex items-center justify-center p-4">
       <div className="liquid-glass-modal-backdrop !fixed !inset-0" aria-hidden="true" />
       <div className="liquid-glass-modal-shell relative w-full max-w-md overflow-hidden">
         {/* Header */}

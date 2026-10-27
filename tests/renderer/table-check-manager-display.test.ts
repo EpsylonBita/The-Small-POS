@@ -366,7 +366,8 @@ test('table-account modal has labelled dialog semantics and closes on Escape (to
   assert.doesNotMatch(modalSource, /aria-label=\{tr\('aria\.tableCheck'/);
 
   const escEffect = modalSource.match(
-    /useEffect\(\(\) => \{\s*if \(!isOpen\) \{\s*return;\s*\}\s*const handleEscape = \(event: KeyboardEvent\)[\s\S]*?\}, \[isOpen, onClose\]\);/,
+    // It stands down while a locked cashier day hides the portal (Tomikro 26/10/2026).
+    /useEffect\(\(\) => \{\s*if \(!isOpen \|\| cashierPortalProps\.inert\) \{\s*return;\s*\}\s*const handleEscape = \(event: KeyboardEvent\)[\s\S]*?\}, \[isOpen, onClose, cashierPortalProps\.inert\]\);/,
   );
   assert.ok(escEffect, 'main modal isOpen-gated Escape effect must exist');
   assert.match(escEffect[0], /if \(event\.key !== 'Escape'\) \{\s*return;\s*\}/);
@@ -384,7 +385,7 @@ test('nested secondary sheet is a labelled dialog and closes only itself on Esca
 
   // The sheet's own Escape effect (no isOpen gate - mounted only while open), topmost
   // gated against its own ref, routes through onClose (closeSecondaryModal).
-  const sheetEsc = modalSource.match(/const sheetRef = useRef<HTMLDivElement>\(null\);[\s\S]*?\}, \[onClose\]\);/);
+  const sheetEsc = modalSource.match(/const sheetRef = useRef<HTMLDivElement>\(null\);[\s\S]*?\}, \[onClose, cashierPortalProps\.inert\]\);/);
   assert.ok(sheetEsc, 'secondary sheet Escape effect must exist');
   assert.match(sheetEsc[0], /dialogs\[dialogs\.length - 1\] !== sheetRef\.current/);
   assert.match(sheetEsc[0], /event\.preventDefault\(\);\s*onClose\(\);/);

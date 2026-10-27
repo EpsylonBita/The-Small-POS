@@ -1,7 +1,7 @@
-import React, { createContext, lazy, useContext, useEffect, useRef, useState } from 'react';
+import React, { lazy, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowRight, LogOut, Settings, Store } from 'lucide-react';
-import { CashierGateContext, CashierRecovery, CashierWaiterContext, useCashierOperationsLocked } from '../contexts/cashier-gate-context';
+import { CashierGateContext, CashierRecovery, CashierWaiterContext, RecoveryActionsContext, useCashierOperationsLocked } from '../contexts/cashier-gate-context';
 import { useCashierDayGate } from '../hooks/useCashierDayGate';
 import { useFeatures } from '../hooks/useFeatures';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
@@ -10,25 +10,12 @@ import { ShiftManager, type ShiftManagerRef } from './ShiftManager';
 import { DeferredModal } from './ui/DeferredModal';
 const ZReportModal = lazy(() => import('./modals/ZReportModal'));
 
-type CashierRecoveryActions = {
-  resolving: boolean;
-  waiter: boolean;
-  pendingZ: boolean;
-  checkIn: () => void;
-  completeZ: () => void;
-  settings: () => void;
-  logout: () => void;
-};
-const RecoveryActionsContext = createContext<CashierRecoveryActions | null>(null);
-
 /**
  * The locked cashier day's recovery actions, or null outside the gate. While the
  * day is locked, the layout's own Z modal is fenced and hidden; `completeZ` opens
  * the gate's recovery Z modal instead (founder rule R6, 13/10/2026).
  */
-export function useCashierRecoveryActions(): Pick<CashierRecoveryActions, 'completeZ'> | null {
-  return useContext(RecoveryActionsContext);
-}
+export { useCashierRecoveryActions } from '../contexts/cashier-gate-context';
 
 /**
  * The only surfaces a locked cashier day leaves interactive: recovery dialogs

@@ -6377,6 +6377,8 @@
     "platformPaymentA11y": "Payment settled by platform; the store does not collect"
   },
   "incomingOrderAlert": {
+    "checkInToAccept": "Check in a cashier",
+    "lockedExplain": "No cashier is on shift. Check in a cashier to accept this order.",
     "title": "New {{platform}} order",
     "titleCustomer": "New order to accept",
     "explain": "Open it to accept or decline.",

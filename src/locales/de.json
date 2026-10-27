@@ -6377,6 +6377,8 @@
     "platformPaymentA11y": "Zahlung durch die Plattform abgerechnet; das Geschäft kassiert nicht"
   },
   "incomingOrderAlert": {
+    "checkInToAccept": "Kassenkraft anmelden",
+    "lockedExplain": "Es ist keine Kassenkraft im Dienst. Melden Sie eine Kassenkraft an, um diese Bestellung anzunehmen.",
     "title": "Neue {{platform}}-Bestellung",
     "titleCustomer": "Neue Bestellung zum Annehmen",
     "explain": "Öffnen Sie sie, um sie anzunehmen oder abzulehnen.",

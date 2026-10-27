@@ -348,6 +348,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
 
   return ReactDOM.createPortal(
     <div
+      data-cashier-recovery="true"
       className="fixed inset-0 z-[10020] px-4 py-6 sm:px-6 sm:py-8"
       style={{ isolation: 'isolate' }}
     >

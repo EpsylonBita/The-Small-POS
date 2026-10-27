@@ -27,14 +27,15 @@
  * A watchdog escalates when an order waits INCOMING_ORDER_WATCHDOG_MS without
  * its approval panel really on screen — even on the Orders screen, even
  * under another dialog: the sound restarts, this dialog rises above every
- * other one, and the entry is logged («missed» when staff never had the
+ * operational dialog, and the entry is logged («missed» when staff never had the
  * dialog or the panel in front of them, «escalated» otherwise). Incident,
  * rules and log format: services/incomingOrderAlert.ts.
  *
  * Scope: exactly the orders the Orders screen would ask this register to
  * approve (the loop applies the dashboard's order filter; nothing on a waiter
- * terminal). The dashboard has no shift gate on approvals and neither does
- * this. The sound follows the app's audio setting; the dialog shows either way.
+ * terminal). While the cashier day is locked it offers the gate's check-in;
+ * it always yields to other recovery dialogs, including during escalation.
+ * The sound follows the app's audio setting and continues during recovery.
  */
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -42,6 +43,7 @@ import { useTranslation } from 'react-i18next';
 import { BellRing } from 'lucide-react';
 
 import type { Order } from '../../types/orders';
+import { useCashierOperationsLocked, useCashierRecoveryActions } from '../../contexts/cashier-gate-context';
 import { MODAL_VIEWPORT_ATTR, useBackgroundAccessibilityIsolation } from '../ui/pos-glass-components';
 import { liquidGlassModalButton } from '../../styles/designSystem';
 import {
@@ -122,6 +124,8 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
   skipOrderIds = NO_SKIPPED_ORDERS,
 }) => {
   const { t } = useTranslation();
+  const cashierLocked = useCashierOperationsLocked();
+  const recoveryActions = useCashierRecoveryActions();
   const queue = useIncomingOrderAlertQueue();
   const head = queue[0] ?? null;
   const shownOrder = useMemo(() => selectIncomingOrderToShow(queue, skipOrderIds), [queue, skipOrderIds]);
@@ -138,6 +142,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
 
   const [watch, setWatch] = useState<WatchState>(IDLE_WATCH);
   const [hidden, setHidden] = useState(false);
+  const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const hideTimerRef = useRef<number | null>(null);
 
   const titleId = useId();
@@ -186,6 +191,10 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
   }, [onOrdersScreen, currentView]);
 
   const evaluate = useCallback(() => {
+    // Tomikro 26/10/2026: the alert's own recovery marker must not hide itself.
+    // Recovery wins even when the watchdog has escalated the incoming order.
+    setRecoveryDialogOpen(Array.from(document.querySelectorAll('[data-cashier-recovery="true"] [role="dialog"]'))
+      .some((dialog) => !overlayRef.current?.contains(dialog)));
     const current = queueRef.current;
     if (current.length === 0) {
       setWatch((previous) => (previous === IDLE_WATCH ? previous : IDLE_WATCH));
@@ -225,13 +234,28 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
   // gets the dialog flashed over it; it runs again whenever staff change page.
   useLayoutEffect(() => {
     evaluate();
-  }, [evaluate, queue, onOrdersScreen, currentView]);
+  }, [evaluate, queue, onOrdersScreen, currentView, cashierLocked]);
 
   const hasQueue = queue.length > 0;
   useEffect(() => {
     if (!hasQueue) return undefined;
     const timer = window.setInterval(evaluate, INCOMING_ORDER_WATCHDOG_TICK_MS);
-    return () => window.clearInterval(timer);
+    // A recovery portal may mount independently of the queue or the gate.
+    // Notice it promptly; the existing watchdog remains the periodic fallback.
+    let frame: number | null = null;
+    const observer = new MutationObserver(() => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        evaluate();
+      });
+    });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-cashier-recovery', 'role'] });
+    return () => {
+      window.clearInterval(timer);
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
   }, [evaluate, hasQueue]);
 
   // --- Escalation: log it and ring again right away. -----------------------
@@ -261,6 +285,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
   // At once off the Orders screen; on it, once its own panel is overdue.
   const overlayVisible =
     head !== null &&
+    !recoveryDialogOpen &&
     !watch.approvalOnScreen &&
     !hidden &&
     (!onOrdersScreen || watch.panelOverdue || watch.escalated);
@@ -327,13 +352,17 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
 
   const handleOpen = useCallback(() => {
     if (isTapInFlight()) return;
+    if (cashierLocked) {
+      recoveryActions?.checkIn();
+      return;
+    }
     const current = queueRef.current;
     const target = selectIncomingOrderToShow(current, skipOrderIds) ?? current[0];
     if (!target) return;
     hideFor(INCOMING_ORDER_HANDOFF_MS);
     onOpenOrders();
     requestIncomingOrderApprovalFocus(target.id);
-  }, [hideFor, isTapInFlight, onOpenOrders, skipOrderIds]);
+  }, [cashierLocked, recoveryActions, hideFor, isTapInFlight, onOpenOrders, skipOrderIds]);
 
   const handleLater = useCallback(() => {
     if (isTapInFlight()) return;
@@ -396,6 +425,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
       className="liquid-glass-modal-viewport"
       style={{ zIndex: INCOMING_ORDER_ALERT_Z_INDEX }}
       data-testid="incoming-order-alert-viewport"
+      data-cashier-recovery={cashierLocked ? 'true' : undefined}
     >
       <div className="liquid-glass-modal-backdrop" aria-hidden="true" />
       <div
@@ -442,7 +472,9 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
 
         <div id={descriptionId} className="space-y-2 px-6 pt-4 text-sm liquid-glass-modal-text">
           <p>
-            {t('incomingOrderAlert.explain', { defaultValue: 'Open it to accept or decline.' })}
+            {cashierLocked
+              ? t('incomingOrderAlert.lockedExplain', { defaultValue: 'No cashier is on shift. Check in a cashier to accept this order.' })
+              : t('incomingOrderAlert.explain', { defaultValue: 'Open it to accept or decline.' })}
           </p>
           {watch.escalated && (
             <p className="font-semibold text-amber-700 dark:text-amber-300" data-testid="incoming-order-alert-escalated">
@@ -469,7 +501,9 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
             data-testid="incoming-order-alert-open"
             className={`${liquidGlassModalButton('primary', 'lg')} min-h-[56px] flex-1 text-lg font-bold`}
           >
-            {t('incomingOrderAlert.open', { defaultValue: 'Open the order' })}
+            {cashierLocked
+              ? t('incomingOrderAlert.checkInToAccept', { defaultValue: 'Check in a cashier' })
+              : t('incomingOrderAlert.open', { defaultValue: 'Open the order' })}
           </button>
           <button
             type="button"

@@ -6377,6 +6377,8 @@
     "platformPaymentA11y": "Pagamento regolato dalla piattaforma; il negozio non incassa"
   },
   "incomingOrderAlert": {
+    "checkInToAccept": "Avvia turno cassiere",
+    "lockedExplain": "Nessun cassiere è in turno. Avvia il turno di un cassiere per accettare questo ordine.",
     "title": "Nuovo ordine {{platform}}",
     "titleCustomer": "Nuovo ordine da accettare",
     "explain": "Aprilo per accettarlo o rifiutarlo.",

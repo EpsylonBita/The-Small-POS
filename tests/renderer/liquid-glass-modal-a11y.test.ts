@@ -31,7 +31,8 @@ test('both glass modal viewport roots are marked with data-liquid-glass-modal-vi
   assert.match(source, /const MODAL_VIEWPORT_ATTR = 'data-liquid-glass-modal-viewport'/);
 
   // Both modal components opt into the shared isolation hook.
-  assert.match(source, /export const POSGlassModal[\s\S]*?useBackgroundAccessibilityIsolation\(isOpen\)/);
+  // The legacy modal releases it while a locked cashier day hides it (Tomikro 26/10/2026).
+  assert.match(source, /export const POSGlassModal[\s\S]*?useBackgroundAccessibilityIsolation\(isOpen && !cashierPortalProps\.inert\)/);
   // A retained operational dialog must release background isolation while the
   // cashier gate hides it, so settings and recovery dialogs remain reachable.
   assert.match(source, /export const LiquidGlassModal[\s\S]*?useBackgroundAccessibilityIsolation\(mounted && !isServerRender && \(!cashierLocked \|\| isRecovery\)\)/);

@@ -139,8 +139,9 @@ test('week preview modal closes on Escape via the same topmost-dialog close-only
   assert.match(viewSource, /<h3 id=\{previewTitleId\}[^>]*>\s*\{t\('staffSchedule\.previewWeek\.title', 'Week preview'\)\}/);
 
   // Escape effect: gated on previewWeekOpen, topmost-gated against the preview panel,
-  // routed to the close-only setPreviewWeekOpen(false).
-  assert.match(viewSource, /if \(!previewWeekOpen\) \{\s*return;\s*\}/);
+  // routed to the close-only setPreviewWeekOpen(false). It stands down while a
+  // locked cashier day hides the portal (Tomikro 26/10/2026).
+  assert.match(viewSource, /if \(!previewWeekOpen \|\| cashierPortalProps\.inert\) \{\s*return;\s*\}/);
   assert.match(viewSource, /dialogs\.length > 0 && dialogs\[dialogs\.length - 1\] !== previewDialogRef\.current/);
   assert.match(viewSource, /event\.preventDefault\(\);\s*setPreviewWeekOpen\(false\);/);
 

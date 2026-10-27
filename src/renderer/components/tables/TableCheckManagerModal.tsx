@@ -27,6 +27,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { emitCompatEvent, getBridge, type RecordPaymentParams } from '../../../lib';
 import { useI18n } from '../../contexts/i18n-context';
+import { useCashierPortalProps } from '../../contexts/cashier-gate-context';
 import { serviceResponsibilityNames } from '../../../../../shared/pos/tables/service-responsibility';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
@@ -978,12 +979,14 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
 }) => {
   const sheetRef = useRef<HTMLDivElement>(null);
   const sheetTitleId = useId();
+  const cashierPortalProps = useCashierPortalProps();
 
   // Escape closes ONLY this nested sheet - it is the topmost [role="dialog"] while
   // open, so the parent table-account modal self-suppresses and stays open. Routes
   // through onClose (closeSecondaryModal); it never submits a payment or clicks
   // Cash/Card (those are buttons inside the sheet body).
   useEffect(() => {
+    if (cashierPortalProps.inert) return;
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') {
         return;
@@ -997,13 +1000,14 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
     };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [onClose]);
+  }, [onClose, cashierPortalProps.inert]);
 
   return renderModalPortal(
     // Secondary sheets mount at document.body (above the main table-check modal,
     // z 20000) with a full-viewport blurred backdrop, per the founder rule that
     // every modal opens outside the container and blurs the rest of the screen.
     <motion.div
+      {...cashierPortalProps}
       className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/35 p-4 backdrop-blur-md dark:bg-black/55"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -1085,6 +1089,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   localOrders = EMPTY_LOCAL_ORDERS,
 }) => {
   const { t } = useI18n();
+  const cashierPortalProps = useCashierPortalProps();
   const tr = useCallback(
     (key: string, defaultValue: string, options: Record<string, unknown> = {}) =>
       String(t(`tableCheckManager.${key}`, { defaultValue, ...options })),
@@ -1168,7 +1173,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
   // (e.g. the payment sheet) is open this self-suppresses and the sheet closes
   // first. Routes through the close-only onClose prop and never settles/pays.
   useEffect(() => {
-    if (!isOpen) {
+    if (!isOpen || cashierPortalProps.inert) {
       return;
     }
     const handleEscape = (event: KeyboardEvent) => {
@@ -1184,7 +1189,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
     };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, cashierPortalProps.inert]);
 
   const outstanding = Number(session?.balance?.outstanding_balance || 0);
   const paidTotal = Number(session?.balance?.paid_total || 0);
@@ -2659,6 +2664,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
 
   const modalContent = (
     <motion.div
+      {...cashierPortalProps}
       className="liquid-glass-modal-viewport"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}

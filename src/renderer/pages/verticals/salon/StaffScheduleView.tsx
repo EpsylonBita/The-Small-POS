@@ -1,5 +1,6 @@
 import React, { memo, useState, useMemo, useEffect, useCallback, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
+import { useCashierPortalProps } from '../../../contexts/cashier-gate-context';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { useTheme } from '../../../contexts/theme-context';
@@ -266,6 +267,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   const [erganiPublishStatus, setErganiPublishStatus] = useState<string | null>(null);
   const [importingSchedule, setImportingSchedule] = useState(false);
   const [previewWeekOpen, setPreviewWeekOpen] = useState(false);
+  const cashierPortalProps = useCashierPortalProps();
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   // Refs + stable title ids so the portaled modals declare labelled dialog semantics and
   // join the topmost-[role="dialog"] Escape stack used across the POS modals.
@@ -642,7 +644,7 @@ export const StaffScheduleView: React.FC = memo(() => {
   // never creating a shift). Only the frontmost [role="dialog"] reacts, so a nested dialog
   // above it closes first instead of this one being dismissed out of order.
   useEffect(() => {
-    if (!createModalOpen) {
+    if (!createModalOpen || cashierPortalProps.inert) {
       return;
     }
     const handleEscape = (event: KeyboardEvent) => {
@@ -659,11 +661,11 @@ export const StaffScheduleView: React.FC = memo(() => {
     };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [createModalOpen, creatingShift]);
+  }, [createModalOpen, creatingShift, cashierPortalProps.inert]);
 
   // Escape dismisses the Week Preview modal (close-only), using the same topmost-dialog gate.
   useEffect(() => {
-    if (!previewWeekOpen) {
+    if (!previewWeekOpen || cashierPortalProps.inert) {
       return;
     }
     const handleEscape = (event: KeyboardEvent) => {
@@ -679,7 +681,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [previewWeekOpen]);
+  }, [previewWeekOpen, cashierPortalProps.inert]);
 
   const applyTimePreset = (preset: typeof TIME_PRESETS[number]) => {
     if (createStartDate) {
@@ -1409,7 +1411,7 @@ export const StaffScheduleView: React.FC = memo(() => {
       </motion.div>
 
       {previewWeekOpen && renderModalPortal(
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div {...cashierPortalProps} className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button
             type="button"
             aria-label={t('staffSchedule.actions.close', 'Close')}
@@ -1533,7 +1535,7 @@ export const StaffScheduleView: React.FC = memo(() => {
       )}
 
       {createModalOpen && createModalDate && renderModalPortal(
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 pb-4 pt-10">
+        <div {...cashierPortalProps} className="fixed inset-0 z-50 flex items-center justify-center px-4 pb-4 pt-10">
           <button
             type="button"
             aria-label={t('staffSchedule.actions.close', 'Close')}

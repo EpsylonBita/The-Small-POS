@@ -6377,6 +6377,8 @@
     "platformPaymentA11y": "Pagesë e shlyer nga platforma; dyqani nuk arkëton"
   },
   "incomingOrderAlert": {
+    "checkInToAccept": "Fillo turnin e arkëtarit",
+    "lockedExplain": "Asnjë arkëtar nuk është në turn. Fillo turnin e një arkëtari për të pranuar këtë porosi.",
     "title": "Porosi e re nga {{platform}}",
     "titleCustomer": "Porosi e re për t'u pranuar",
     "explain": "Hapeni për ta pranuar ose refuzuar.",

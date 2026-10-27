@@ -4,7 +4,7 @@ import React from 'react'
 import ReactDOM from 'react-dom'
 import { cn } from '../../utils/cn'
 import { useI18n } from '../../contexts/i18n-context'
-import { CashierRecoveryContext, useCashierOperationsLocked } from '../../contexts/cashier-gate-context'
+import { CashierRecoveryContext, useCashierOperationsLocked, useCashierPortalProps } from '../../contexts/cashier-gate-context'
 import { useBlockerRegistration } from '../../hooks/useBlockerRegistration'
 
 // Import the glassmorphism CSS
@@ -396,6 +396,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
   closeOnBackdrop = true
 }) => {
   const { t } = useI18n();
+  const cashierPortalProps = useCashierPortalProps();
   const previousOverflowRef = React.useRef<string>('');
   const blockerId = React.useId();
   const titleId = React.useId();
@@ -418,6 +419,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
 
   // Handle escape key
   React.useEffect(() => {
+    if (!isOpen || cashierPortalProps.inert) return;
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen && webviewHasFocus()) {
         onClose()
@@ -436,10 +438,10 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
       // Restore previous overflow value
       document.body.style.overflow = previousOverflowRef.current
     }
-  }, [isOpen, onClose])
+  }, [isOpen, onClose, cashierPortalProps.inert])
 
   // While open, hide the background POS app from assistive tech + focus (shared, ref-counted).
-  useBackgroundAccessibilityIsolation(isOpen)
+  useBackgroundAccessibilityIsolation(isOpen && !cashierPortalProps.inert)
 
   if (!isOpen || typeof document === 'undefined') return null
 
@@ -452,7 +454,7 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
   }
 
   const modalContent = (
-    <div className="liquid-glass-modal-viewport" data-liquid-glass-modal-viewport>
+    <div {...cashierPortalProps} className="liquid-glass-modal-viewport" data-liquid-glass-modal-viewport>
       <div
         className="liquid-glass-modal-backdrop"
         onClick={closeOnBackdrop ? onClose : undefined}

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useCashierPortalProps } from '../../contexts/cashier-gate-context';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { MenuItemCard } from './MenuItemCard';
@@ -81,6 +82,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [preview, setPreview] = useState<MenuItemPreviewState | null>(null);
+  const cashierPortalProps = useCashierPortalProps();
 
   const previewPosition = useMemo(() => {
     if (!preview) return null;
@@ -100,7 +102,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   }, [preview]);
 
   useEffect(() => {
-    if (!preview) return;
+    if (!preview || cashierPortalProps.inert) return;
 
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -118,7 +120,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
       window.removeEventListener('resize', closeOnViewportChange);
       window.removeEventListener('scroll', closeOnViewportChange, true);
     };
-  }, [preview]);
+  }, [preview, cashierPortalProps.inert]);
 
   const featuredMenuItems = useMemo(() => {
     const ranking = topSellers.length > 0
@@ -314,7 +316,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   return (
     <div className="flex-1 p-2 sm:p-3 overflow-y-auto touch-scroll scrollbar-hide">
       {preview && previewPosition && createPortal(
-        <div className="fixed inset-0 z-[2147483001]" onPointerDown={() => setPreview(null)}>
+        <div {...cashierPortalProps} className="fixed inset-0 z-[2147483001]" onPointerDown={() => setPreview(null)}>
           <div
             className={`absolute max-h-[min(70vh,22rem)] overflow-hidden rounded-2xl border p-4 shadow-2xl backdrop-blur-2xl ${
               resolvedTheme === 'dark'

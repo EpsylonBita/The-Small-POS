@@ -6377,6 +6377,8 @@
     "platformPaymentA11y": "Paiement réglé par la plateforme ; le magasin ne l’encaisse pas"
   },
   "incomingOrderAlert": {
+    "checkInToAccept": "Prise de service d’un caissier",
+    "lockedExplain": "Aucun caissier n’est en service. Faites la prise de service d’un caissier pour accepter cette commande.",
     "title": "Nouvelle commande {{platform}}",
     "titleCustomer": "Nouvelle commande à accepter",
     "explain": "Ouvrez-la pour l'accepter ou la refuser.",

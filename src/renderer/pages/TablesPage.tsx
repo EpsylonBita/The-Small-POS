@@ -14,6 +14,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { createPortal } from 'react-dom';
+import { useCashierPortalProps } from '../contexts/cashier-gate-context';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -407,6 +408,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
   orderCreationDisabledMessage,
 }) => {
   const { t } = useTranslation();
+  const cashierPortalProps = useCashierPortalProps();
 
   if (!isOpen || !table) return null;
 
@@ -439,7 +441,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
     // z-[1200] = POS app-modal layer: above the sidebar (z-50), FAB (z-[900]) and
     // content, below the custom titlebar. Combined with the portal below so the
     // backdrop/blur covers the full app shell, not just the table page/grid container.
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
+    <div {...cashierPortalProps} className="fixed inset-0 z-[1200] flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
