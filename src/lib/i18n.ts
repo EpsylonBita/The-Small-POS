@@ -56,7 +56,7 @@ if (!i18n.isInitialized) {
         useSuspense: false,
       },
       debug: false,
-      initImmediate: false,
+      initAsync: false,
     });
 }
 

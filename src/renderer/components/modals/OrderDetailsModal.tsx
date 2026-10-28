@@ -1079,7 +1079,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const shellPanelClass =
     'rounded-[30px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-[rgba(12,14,20,0.88)]';
   const insetPanelClass =
-    'rounded-2xl border border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/[0.04]';
+    'rounded-2xl border border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/4';
   const mutedEyebrowClass =
     'text-[11px] font-semibold liquid-glass-modal-text-muted';
 
@@ -1439,12 +1439,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   };
 
   const modalFooter = (
-    <div className="flex-shrink-0 border-t liquid-glass-modal-border bg-white/85 px-6 py-4 backdrop-blur-xl dark:bg-black/30">
+    <div className="shrink-0 border-t liquid-glass-modal-border bg-white/85 px-6 py-4 backdrop-blur-xl dark:bg-black/30">
       <div className={`grid gap-3 ${footerGridCols}`}>
         {onPrintReceipt && (
           <button
             onClick={onPrintReceipt}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200/70 bg-white/90 px-4 text-sm font-semibold text-zinc-900 transition active:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-100 dark:active:bg-white/[0.08]"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200/70 bg-white/90 px-4 text-sm font-semibold text-zinc-900 transition active:bg-white dark:border-white/10 dark:bg-white/5 dark:text-zinc-100 dark:active:bg-white/8"
           >
             <Printer className="h-4 w-4" />
             {t('modals.orderDetails.printReceipt') || 'Print Receipt'}
@@ -1490,15 +1490,15 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       size="lg"
-      className="!w-[92vw] !max-w-6xl !max-h-[96vh]"
-      contentClassName="p-0 !pt-0 overflow-hidden"
+      className="w-[92vw]! max-w-6xl! max-h-[96vh]!"
+      contentClassName="p-0 pt-0! overflow-hidden"
       ariaLabel={t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
       footer={modalFooter}
     >
       <div className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 pt-16 pb-24 scroll-pb-24 scrollbar-hide">
         <button
           onClick={onClose}
-          className="absolute right-4 top-3 z-20 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-sm transition-colors active:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-200 dark:active:bg-white/[0.08]"
+          className="absolute right-4 top-3 z-20 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-xs transition-colors active:bg-white dark:border-white/10 dark:bg-white/5 dark:text-zinc-200 dark:active:bg-white/8"
           aria-label={t('common.actions.close')}
         >
           <X className="h-6 w-6" />
@@ -1627,7 +1627,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             type="button"
                             data-testid="order-details-gift-refresh-retry"
                             onClick={() => void refreshAfterGiftReturn(orderId)}
-                            className="min-h-[44px] rounded-xl border border-red-300/70 bg-red-50 px-3 font-semibold text-red-700 active:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200"
+                            className="min-h-touch rounded-xl border border-red-300/70 bg-red-50 px-3 font-semibold text-red-700 active:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200"
                           >
                             {t('modals.refund.gift.retry')}
                           </button>
@@ -1679,7 +1679,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             event.stopPropagation();
                             void copyCustomerDetails(orderCustomerFallback);
                           }}
-                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200"
+                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/6 dark:text-zinc-200"
                         >
                           <Copy className="h-3.5 w-3.5" />
                           {t('modals.orderDetails.copyCustomer', { defaultValue: 'Copy' })}
@@ -1737,7 +1737,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                               t('modals.orderDetails.addressCopied', { defaultValue: 'Address copied' }),
                             );
                           }}
-                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200"
+                          className="inline-flex h-9 items-center gap-2 rounded-xl border border-zinc-200/70 bg-white/70 px-3 text-xs font-semibold text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/6 dark:text-zinc-200"
                         >
                           <Copy className="h-3.5 w-3.5" />
                           {t('modals.orderDetails.copyAddress', { defaultValue: 'Copy' })}
@@ -1805,7 +1805,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       <Package className="w-4 h-4" />
                       {t('modals.orderDetails.orderItems') || 'Items'}
                     </h4>
-                    <span className="rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 text-xs font-semibold liquid-glass-modal-text dark:border-white/10 dark:bg-white/[0.04]">
+                    <span className="rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 text-xs font-semibold liquid-glass-modal-text dark:border-white/10 dark:bg-white/4">
                       {totalItemCount}
                     </span>
                   </div>
@@ -1835,7 +1835,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             className={`rounded-[24px] border px-4 py-4 transition-colors ${
                               shouldShowItemPaymentState && isItemPaid
                                 ? 'border-green-500/20 bg-green-500/8'
-                                : 'border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/[0.04]'
+                                : 'border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/4'
                             }`}
                           >
                             {/* Item Header */}
@@ -1918,7 +1918,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                               <div className="ml-11 mt-3 space-y-2">
                                 {/* Added ingredients */}
                                 {customizations.filter(c => !c.isWithout).length > 0 && (
-                                  <div className="space-y-1 rounded-2xl border border-emerald-200/70 bg-emerald-50/70 px-3 py-3 dark:border-emerald-500/15 dark:bg-emerald-500/[0.06]">
+                                  <div className="space-y-1 rounded-2xl border border-emerald-200/70 bg-emerald-50/70 px-3 py-3 dark:border-emerald-500/15 dark:bg-emerald-500/6">
                                     {customizations.filter(c => !c.isWithout).map((c, idx) => (
                                       <div key={`add-${idx}`} className="flex justify-between text-xs">
                                         <span className="flex items-center gap-1 liquid-glass-modal-text-muted">
@@ -1933,7 +1933,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 )}
                                 {/* Without ingredients */}
                                 {customizations.filter(c => c.isWithout).length > 0 && (
-                                  <div className="mt-1 space-y-1 rounded-2xl border border-red-200/70 bg-red-50/70 px-3 py-3 dark:border-red-500/15 dark:bg-red-500/[0.06]">
+                                  <div className="mt-1 space-y-1 rounded-2xl border border-red-200/70 bg-red-50/70 px-3 py-3 dark:border-red-500/15 dark:bg-red-500/6">
                                     <div className="text-[11px] font-semibold text-red-700 dark:text-red-300">{withoutLabel}</div>
                                     {customizations.filter(c => c.isWithout).map((c, idx) => (
                                       <div key={`without-${idx}`} className="flex justify-between text-xs text-red-600 dark:text-red-300">
@@ -1963,7 +1963,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                           <div
                             key={`box-line-${index}`}
                             data-testid="order-details-box-display-line"
-                            className="rounded-[24px] border border-zinc-200/70 bg-white/70 px-4 py-4 dark:border-white/10 dark:bg-white/[0.04]"
+                            className="rounded-[24px] border border-zinc-200/70 bg-white/70 px-4 py-4 dark:border-white/10 dark:bg-white/4"
                           >
                             <div className="flex items-start justify-between mb-2">
                               <div className="flex items-start gap-3 flex-1">
@@ -2263,7 +2263,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 );
                               }}
                               aria-label={t('modals.orderDetails.copyAddress', { defaultValue: 'Copy address' })}
-                              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200/70 bg-white/70 text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-200"
+                              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200/70 bg-white/70 text-zinc-700 active:bg-white dark:border-white/10 dark:bg-white/6 dark:text-zinc-200"
                             >
                               <Copy className="h-4 w-4" />
                             </button>

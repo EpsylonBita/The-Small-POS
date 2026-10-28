@@ -1,9 +1,10 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { getBridge } from '../../lib'
 import type { MoneyApproval, PrivilegedActionScope } from '../../lib/ipc-contracts'
 import PINLoginModal from '../components/auth/PINLoginModal'
 import { extractPrivilegedActionError } from '../utils/privileged-actions'
+import { managerApprovalAvailable } from '../services/manager-approval'
 
 interface PrivilegedActionRequest<T> {
   scope: PrivilegedActionScope
@@ -32,6 +33,42 @@ export function usePrivilegedActionConfirmation() {
   const bridge = getBridge()
   const { t } = useTranslation()
   const [pendingAction, setPendingAction] = useState<PendingPrivilegedAction<unknown> | null>(null)
+  const [approvalState, setApprovalState] = useState<'checking' | 'ready' | 'noApprover' | 'paused'>('checking')
+  const [permission, setPermission] = useState('')
+  const [pinRefused, setPinRefused] = useState(false)
+  const [pausedUntil, setPausedUntil] = useState(0)
+  const [minutes, setMinutes] = useState(0)
+
+  useEffect(() => {
+    if (!pendingAction?.approval) return
+    let cancelled = false
+    setApprovalState('checking')
+    managerApprovalAvailable(pendingAction.approval).then(result => {
+      if (cancelled) return
+      setPermission(result.permission)
+      setApprovalState(result.available ? 'ready' : 'noApprover')
+    }, () => {
+      // Confirmation refreshes and checks the directory again. A failed
+      // preflight must not invent a missing right or retain a PIN.
+      if (!cancelled) setApprovalState('ready')
+    })
+    return () => { cancelled = true }
+  }, [pendingAction])
+
+  useEffect(() => {
+    if (approvalState !== 'paused' || !pendingAction) return
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((pausedUntil - Date.now()) / 60_000))
+      setMinutes(remaining)
+      if (!remaining) {
+        setPinRefused(false)
+        setApprovalState('ready')
+      }
+    }
+    update()
+    const timer = setInterval(update, 1000)
+    return () => clearInterval(timer)
+  }, [approvalState, pausedUntil, pendingAction])
 
   const runWithPrivilegedConfirmation = async <T,>({
     scope,
@@ -59,6 +96,9 @@ export function usePrivilegedActionConfirmation() {
       }
 
       return await new Promise<T>((resolve, reject) => {
+        setPinRefused(false)
+        setApprovalState('checking')
+        setPermission(privilegedError.approval === 'void_orders' ? 'pos.orders.cancel' : 'pos.refunds.process')
         setPendingAction({
           scope,
           action,
@@ -83,7 +123,7 @@ export function usePrivilegedActionConfirmation() {
   }
 
   const handleSubmit = async (pin: string): Promise<boolean> => {
-    if (!pendingAction) {
+    if (!pendingAction || (pendingAction.approval && approvalState !== 'ready')) {
       return false
     }
 
@@ -95,6 +135,25 @@ export function usePrivilegedActionConfirmation() {
       })
     } catch (error) {
       const privilegedError = extractPrivilegedActionError(error, pendingAction.scope)
+      if (pendingAction.approval) {
+        if (privilegedError?.permission) setPermission(privilegedError.permission)
+        if (privilegedError?.code === 'NO_APPROVER_IN_STORE') {
+          setApprovalState('noApprover')
+          return false
+        }
+        if (privilegedError?.code === 'APPROVALS_PAUSED') {
+          const remaining = privilegedError.minutes ?? 5
+          setMinutes(remaining)
+          setPausedUntil(Date.now() + remaining * 60_000)
+          setApprovalState('paused')
+          return false
+        }
+        if (privilegedError?.code === 'MANAGER_PIN_REFUSED' ||
+            (privilegedError?.code === 'UNAUTHORIZED' && privilegedError.reason === 'Invalid PIN')) {
+          setPinRefused(true)
+          return false
+        }
+      }
       if (privilegedError?.code === 'UNAUTHORIZED' && privilegedError.reason === 'Invalid PIN') {
         return false
       }
@@ -140,6 +199,16 @@ export function usePrivilegedActionConfirmation() {
       onSubmit={handleSubmit}
       title={pendingAction?.title}
       subtitle={subtitle}
+      blockedMessage={pendingAction?.approval && approvalState !== 'ready'
+        ? String(t(`auth.managerApproval.${approvalState === 'checking' ? 'checking' : approvalState === 'paused' ? 'paused' : 'noApprover'}`, {
+            right: t(permission === 'pos.orders.cancel' ? 'auth.managerApproval.rights.cancelOrders' : 'auth.managerApproval.rights.voidPayments'),
+            minutes,
+          }))
+        : undefined}
+      errorMessage={pendingAction?.approval && pinRefused
+        ? String(t('auth.managerApproval.pinRefused', {
+            right: t(permission === 'pos.orders.cancel' ? 'auth.managerApproval.rights.cancelOrders' : 'auth.managerApproval.rights.voidPayments'),
+          })) : undefined}
     />
   )
 

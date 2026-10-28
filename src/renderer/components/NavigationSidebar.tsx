@@ -73,7 +73,7 @@ const NAVIGATION_ORDER_STORAGE_PREFIX = 'pos-navigation-module-order';
 // The yellow keyboard ring is appended IN-COMPONENT only while keyboard modality is active (see
 // sidebarFocusRing below); `rounded-xl` just shapes that ring (the icon buttons have no background, so the
 // inactive/active icon appearance is unchanged). No hover.
-const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-none';
+const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-hidden';
 const SIDEBAR_FOCUS_RING_KEYBOARD = `${SIDEBAR_FOCUS_BASE} focus-visible:ring-2 focus-visible:ring-yellow-400/70`;
 
 interface NavigationDragSession {
@@ -854,7 +854,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
             {/* Top persistent action area: Check In stays reachable without scrolling the module list. */}
             <div data-navigation-top-actions className="flex shrink-0 flex-col gap-4">
               {/* Divider */}
-              <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
+              <div className="w-8 h-px mx-auto bg-linear-to-r from-transparent via-amber-400/60 to-transparent"></div>
 
               {/* Check In Button - Always shows staff list */}
               <button
@@ -867,7 +867,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               </button>
 
               {/* Divider */}
-              <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
+              <div className="w-8 h-px mx-auto bg-linear-to-r from-transparent via-amber-400/60 to-transparent"></div>
             </div>
 
             {/* Module scroll region: ONLY the module list scrolls/drags; the utility actions below stay
@@ -882,7 +882,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 <div
                   aria-hidden="true"
                   data-navigation-scroll-hint-top
-                  className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-7 rounded-t-2xl bg-gradient-to-b ${resolvedTheme === 'dark' ? 'from-black via-black/75 to-transparent' : 'from-white via-white/75 to-transparent'}`}
+                  className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-7 rounded-t-2xl bg-linear-to-b ${resolvedTheme === 'dark' ? 'from-black via-black/75 to-transparent' : 'from-white via-white/75 to-transparent'}`}
                 />
               )}
             <div
@@ -1021,7 +1021,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 <div
                   aria-hidden="true"
                   data-navigation-scroll-hint-bottom
-                  className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 h-7 rounded-b-2xl bg-gradient-to-t ${resolvedTheme === 'dark' ? 'from-black via-black/75 to-transparent' : 'from-white via-white/75 to-transparent'}`}
+                  className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 h-7 rounded-b-2xl bg-linear-to-t ${resolvedTheme === 'dark' ? 'from-black via-black/75 to-transparent' : 'from-white via-white/75 to-transparent'}`}
                 />
               )}
             </div>
@@ -1051,7 +1051,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           </button>
 
           {/* Divider */}
-          <div className="w-8 h-px mx-auto bg-gradient-to-r from-transparent via-amber-400/60 to-transparent"></div>
+          <div className="w-8 h-px mx-auto bg-linear-to-r from-transparent via-amber-400/60 to-transparent"></div>
 
           {/* Logout Button */}
           <button
@@ -1075,7 +1075,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return (
           <div
             aria-hidden="true"
-            className={`navigation-dragging-icon pointer-events-none fixed z-[2147483000] flex h-12 w-12 items-center justify-center rounded-2xl border transition-none ${getNeonClass(color, isActive, resolvedTheme)} ${resolvedTheme === 'dark'
+            className={`navigation-dragging-icon pointer-events-none fixed z-2147483000 flex h-12 w-12 items-center justify-center rounded-2xl border transition-none ${getNeonClass(color, isActive, resolvedTheme)} ${resolvedTheme === 'dark'
               ? 'border-amber-300/45 bg-black/95 shadow-[0_0_24px_rgba(250,204,21,0.45)]'
               : 'border-amber-300/70 bg-white/95 shadow-[0_0_24px_rgba(250,204,21,0.34)]'
             }`}

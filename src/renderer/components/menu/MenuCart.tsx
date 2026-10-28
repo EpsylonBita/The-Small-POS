@@ -881,7 +881,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       : cartActionCount === 2
         ? 'grid-cols-2'
         : 'grid-cols-1';
-  const cartActionIconButtonBaseClass = 'font-semibold antialiased transition-colors flex items-center justify-center rounded-lg bg-transparent border-0 p-0 shadow-none focus:outline-none focus:ring-2';
+  const cartActionIconButtonBaseClass = 'font-semibold antialiased transition-colors flex items-center justify-center rounded-lg bg-transparent border-0 p-0 shadow-none focus:outline-hidden focus:ring-2';
   const safeLoyaltyRedeemablePoints = Math.max(0, Math.trunc(loyaltyRedeemablePoints || 0));
   const safeLoyaltyRedeemableAmount = Math.max(0, loyaltyRedeemableAmount || 0);
   const loyaltyActionTitle = loyaltyRedeemDisabledReason || (
@@ -1023,10 +1023,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     <div
       className="flex h-full w-full flex-col overflow-hidden rounded-[28px] border border-black/15 bg-transparent shadow-[0_10px_28px_rgba(15,23,42,0.06)] dark:border-white/60 dark:shadow-[0_12px_32px_rgba(0,0,0,0.08)]"
     >
-      {/* Header - flex-shrink-0 keeps it fixed size */}
-      <div className="flex-shrink-0 border-b border-black/10 dark:border-white/10">
+      {/* Header - shrink-0 keeps it fixed size */}
+      <div className="shrink-0 border-b border-black/10 dark:border-white/10">
         <div className="flex items-center justify-between px-4 py-3">
-          <h3 className="text-lg font-semibold liquid-glass-modal-title !text-base">
+          <h3 className="text-lg font-semibold liquid-glass-modal-title text-base!">
             {t('menu.cart.header', { count: uniqueCartItems.length })}
           </h3>
           <div className="flex items-center gap-2">
@@ -1130,7 +1130,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 value={manualName}
                 onChange={(e) => setManualName(e.target.value)}
                 placeholder={t('menu.cart.manualNamePlaceholder', 'Item name (optional)')}
-                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
+                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
               />
             </div>
             <div className="flex gap-2">
@@ -1145,7 +1145,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }
                 }}
                 placeholder={`${t('menu.cart.manualPricePlaceholder', 'Price')} (0,00)`}
-                className="flex-1 min-w-0 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
+                className="flex-1 min-w-0 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400"
                 autoFocus
               />
               <button
@@ -1198,7 +1198,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 className={`p-3 rounded-xl border transition-all duration-200 ${
                   isSelectionMode && isSelectedLine
                     ? 'bg-yellow-400/15 border-yellow-500/60 shadow-[0_0_0_1px_rgba(234,179,8,0.35)]'
-                    : 'bg-black/[0.03] dark:bg-white/[0.06] border-black/8 dark:border-white/10 active:bg-black/[0.05] dark:active:bg-white/[0.09]'
+                    : 'bg-black/3 dark:bg-white/6 border-black/8 dark:border-white/10 active:bg-black/5 dark:active:bg-white/9'
                 } ${isSelectionMode && canSelectLine ? 'cursor-pointer' : onEditItem && !isRewardLine ? 'cursor-pointer' : ''}`}
                 onPointerDown={(event) => {
                   if (!isSelectionMode && canSelectLine) {
@@ -1233,7 +1233,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   <div className="flex min-w-0 flex-1 items-start gap-2">
                     {isSelectionMode && canSelectLine && (
                       <span
-                        className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border ${
+                        className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
                           isSelectedLine
                             ? 'border-amber-400 bg-amber-500 text-black'
                             : 'border-black/15 bg-black/5 text-black/45 dark:border-white/20 dark:bg-white/10 dark:text-white/55'
@@ -1436,7 +1436,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           : 'liquid-glass-modal-text active:bg-black/8 dark:active:bg-white/10'
                       }`}
                     >
-                      <span className="relative z-[1]">× {formatCurrency(itemUnitPrice || 0)}</span>
+                      <span className="relative z-1">× {formatCurrency(itemUnitPrice || 0)}</span>
                       {isHoldingLinePrice && (
                         <span
                           className="absolute left-0 bottom-0 h-[2px] bg-amber-500/70 rounded-full"
@@ -1549,8 +1549,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         )}
       </div>
 
-      {/* Cart Footer - flex-shrink-0 keeps it fixed at bottom */}
-      <div className="flex-shrink-0 p-3 border-t border-black/10 dark:border-white/10 bg-transparent space-y-3">
+      {/* Cart Footer - shrink-0 keeps it fixed at bottom */}
+      <div className="shrink-0 p-3 border-t border-black/10 dark:border-white/10 bg-transparent space-y-3">
         {/* Coupon + Discount Controls */}
         {!editMode && (onApplyCoupon || discountControlEnabled || loyaltyControlEnabled) && (
           <div className="space-y-2">
@@ -1565,9 +1565,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   className={`${cartActionIconButtonBaseClass} text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300`}
                 >
                   {isValidatingCoupon ? (
-                    <Loader2 className="h-8 w-8 animate-spin flex-shrink-0" />
+                    <Loader2 className="h-8 w-8 animate-spin shrink-0" />
                   ) : (
-                    <Ticket className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
+                    <Ticket className="h-8 w-8 shrink-0" aria-hidden="true" />
                   )}
                   <span className="sr-only">{t('menu.cart.couponButton', 'Coupon')}</span>
                 </button>
@@ -1586,9 +1586,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }`}
                 >
                   {loyaltyRedeemLoading ? (
-                    <Loader2 className="h-8 w-8 animate-spin flex-shrink-0" />
+                    <Loader2 className="h-8 w-8 animate-spin shrink-0" />
                   ) : (
-                    <Award className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
+                    <Award className="h-8 w-8 shrink-0" aria-hidden="true" />
                   )}
                   <span className="sr-only">{t('menu.cart.loyaltyButton', 'Loyalty')}</span>
                 </button>
@@ -1601,7 +1601,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   aria-label={discountActionTitle}
                   className={`${cartActionIconButtonBaseClass} text-yellow-500 focus:ring-yellow-400 dark:text-yellow-300`}
                 >
-                  <Percent className="h-8 w-8 flex-shrink-0" aria-hidden="true" />
+                  <Percent className="h-8 w-8 shrink-0" aria-hidden="true" />
                   <span className="sr-only">{t('menu.cart.discountAmount', 'Discount')}</span>
                 </button>
               )}
@@ -1753,7 +1753,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   onManualDeliveryFeeChange?.(amount);
                 }}
                 placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
-                className="w-24 rounded-lg border bg-black/5 px-2.5 py-1.5 text-right text-sm antialiased dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                className="w-24 rounded-lg border bg-black/5 px-2.5 py-1.5 text-right text-sm antialiased dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
               />
             ) : (
               <span className="liquid-glass-modal-text">
@@ -1790,7 +1790,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             data-testid="menu-cart-zone-not-checked"
             className="flex items-start gap-2 p-3 rounded-lg mb-3 bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 dark:border-amber-400/30"
           >
-            <MapPin className="w-5 h-5 flex-shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
+            <MapPin className="w-5 h-5 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium antialiased text-amber-800 dark:text-amber-200">
                 {t('menu.cart.deliveryZoneNotCheckedNotice')}
@@ -1812,7 +1812,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {/* Minimum Order Warning for Delivery */}
         {isBelowMinimum && !editMode && (
           <div className="flex items-center gap-2 p-3 rounded-lg mb-3 bg-orange-500/10 dark:bg-orange-500/20 border border-orange-500/20 dark:border-orange-500/30">
-            <AlertTriangle className="w-5 h-5 flex-shrink-0 text-orange-500 dark:text-orange-400" />
+            <AlertTriangle className="w-5 h-5 shrink-0 text-orange-500 dark:text-orange-400" />
             <div className="flex-1">
               <p className="text-sm font-medium antialiased text-orange-600 dark:text-orange-400">
                 {t('menu.cart.minimumNotMet', 'Minimum order not met')}
@@ -1854,17 +1854,17 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       </div>
 
       {isLineDiscountModalOpen && (
-        <div className="fixed inset-0 z-[1198] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-1198 flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <button
             type="button"
             aria-label={t('common.close', 'Close')}
             onClick={() => setIsLineDiscountModalOpen(false)}
             className="absolute inset-0 bg-black/50 backdrop-blur-md"
           />
-          <div className="relative w-full max-w-xl liquid-glass-modal-shell !fixed !top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !max-w-xl !max-h-fit !animate-none">
+          <div className="relative w-full max-w-xl liquid-glass-modal-shell fixed! top-1/2! left-1/2! -translate-x-1/2! -translate-y-1/2! max-w-xl! max-h-fit! animate-none!">
             <div className="liquid-glass-modal-header">
               <div>
-                <h4 className="liquid-glass-modal-title !text-xl">
+                <h4 className="liquid-glass-modal-title text-xl!">
                   {t('menu.cart.lineDiscountTitle', 'Selected Item Discount')}
                 </h4>
                 <p className="text-sm antialiased liquid-glass-modal-text-muted">
@@ -1977,7 +1977,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                       }}
                       placeholder={t('menu.cart.discountAmount', 'Discount amount')}
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                       autoFocus
                     />
                   ) : (
@@ -2000,7 +2000,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           ? t('menu.cart.discountLabel')
                           : t('menu.cart.discountAmount', 'Discount amount')
                       }
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                       autoFocus
                     />
                   )}
@@ -2051,7 +2051,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       )}
 
       {editingLineItem && (
-        <div className="fixed inset-0 z-[1190] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-1190 flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <button
             type="button"
             aria-label={t('common.close', 'Close')}
@@ -2087,7 +2087,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }
                 }}
                 placeholder="0,00"
-                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
               />
               {!isLinePriceDraftValid && linePriceDraft.trim().length > 0 && (
                 <p className="text-xs text-red-500 font-medium antialiased">
@@ -2122,7 +2122,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       )}
 
       {isCouponModalOpen && onApplyCoupon && !editMode && (
-        <div className="fixed inset-0 z-[1195] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-1195 flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <button
             type="button"
             aria-label={t('common.close', 'Close')}
@@ -2162,7 +2162,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   }
                 }}
                 placeholder={t('menu.cart.couponPlaceholder', 'Coupon code')}
-                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
               />
               {couponError && (
                 <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
@@ -2210,17 +2210,17 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       )}
 
       {discountControlEnabled && isDiscountModalOpen && (
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <button
             type="button"
             aria-label={t('common.close', 'Close')}
             onClick={() => setIsDiscountModalOpen(false)}
             className="absolute inset-0 bg-black/50 backdrop-blur-md"
           />
-          <div className="relative w-full max-w-xl liquid-glass-modal-shell !fixed !top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !max-w-xl !max-h-fit !animate-none">
+          <div className="relative w-full max-w-xl liquid-glass-modal-shell fixed! top-1/2! left-1/2! -translate-x-1/2! -translate-y-1/2! max-w-xl! max-h-fit! animate-none!">
             <div className="liquid-glass-modal-header">
               <div>
-                <h4 className="liquid-glass-modal-title !text-xl">
+                <h4 className="liquid-glass-modal-title text-xl!">
                   {t('menu.cart.discountPickerTitle', 'Apply Discount')}
                 </h4>
                 <p className="text-sm antialiased liquid-glass-modal-text-muted">
@@ -2327,7 +2327,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                       }}
                       placeholder={t('menu.cart.discountAmount', 'Discount amount')}
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                       autoFocus
                     />
                   ) : (
@@ -2350,7 +2350,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           ? t('menu.cart.discountLabel')
                           : t('menu.cart.discountAmount', 'Discount amount')
                       }
-                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
                     />
                   )}
                   <span className="text-base font-semibold liquid-glass-modal-text">

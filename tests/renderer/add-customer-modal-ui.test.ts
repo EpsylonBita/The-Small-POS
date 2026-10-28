@@ -39,7 +39,7 @@ test('Round 423: field icons use a solid high-contrast yellow in both themes, su
     /\.dark \.liquid-glass-modal-field-icon\s*\{[\s\S]*?color:\s*#facc15\s*!important;[\s\S]*?stroke:\s*#facc15\s*!important;[\s\S]*?\}/,
     'dark-theme field icons should explicitly paint a solid yellow-400 stroke',
   );
-  assert.match(source, /text-amber-500 dark:text-amber-300 mt-1 flex-shrink-0/);
+  assert.match(source, /text-amber-500 dark:text-amber-300 mt-1 shrink-0/);
   assert.match(source, /flex items-center gap-2 text-yellow-600 dark:text-yellow-300/);
 });
 

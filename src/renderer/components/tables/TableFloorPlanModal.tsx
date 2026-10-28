@@ -123,11 +123,11 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
       : t('tablesDashboard.floorNumber', { defaultValue: 'Floor {{floor}}', floor });
 
   const chipClass = (active: boolean) =>
-    `whitespace-nowrap min-h-[44px] rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+    `whitespace-nowrap min-h-touch rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
       active
         ? 'bg-yellow-400 text-black'
         : isDark
-          ? 'text-slate-200 active:bg-white/[0.08]'
+          ? 'text-slate-200 active:bg-white/8'
           : 'text-slate-700 active:bg-[#fffaf1]'
     }`;
 
@@ -155,7 +155,7 @@ export const TableFloorPlanModal: React.FC<TableFloorPlanModalProps> = ({
 
           <div
             className={`flex flex-1 flex-wrap items-center gap-1 rounded-xl border p-1 ${
-              isDark ? 'border-white/10 bg-white/[0.06]' : 'border-amber-100/80 bg-white'
+              isDark ? 'border-white/10 bg-white/6' : 'border-amber-100/80 bg-white'
             }`}
           >
             <button

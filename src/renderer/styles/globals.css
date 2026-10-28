@@ -1,28 +1,702 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
-/* NEUTRAL BACKGROUND - NO FORCED COLORS */
-html, body, #root {
-  background: #f8fafc;
-  min-height: 100vh;
-  min-height: 100dvh; /* Dynamic viewport height for mobile */
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --breakpoint-*: initial;
+  --breakpoint-xs: 375px;
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
+
+  --min-height-touch: 44px;
+  --min-height-touch-lg: 56px;
+  --min-height-touch-xl: 64px;
+
+  --min-width-touch: 44px;
+  --min-width-touch-lg: 56px;
+  --min-width-touch-xl: 64px;
+
+  --color-blue-50: #fafafa;
+  --color-blue-100: #f4f4f5;
+  --color-blue-200: #e4e4e7;
+  --color-blue-300: #d4d4d8;
+  --color-blue-400: #a1a1aa;
+  --color-blue-500: #71717a;
+  --color-blue-600: #52525b;
+  --color-blue-700: #3f3f46;
+  --color-blue-800: #27272a;
+  --color-blue-900: #18181b;
+  --color-blue-950: #09090b;
+
+  --color-indigo-50: #fafafa;
+  --color-indigo-100: #f4f4f5;
+  --color-indigo-200: #e4e4e7;
+  --color-indigo-300: #d4d4d8;
+  --color-indigo-400: #a1a1aa;
+  --color-indigo-500: #71717a;
+  --color-indigo-600: #52525b;
+  --color-indigo-700: #3f3f46;
+  --color-indigo-800: #27272a;
+  --color-indigo-900: #18181b;
+  --color-indigo-950: #09090b;
+
+  --color-sky-50: #fafafa;
+  --color-sky-100: #f4f4f5;
+  --color-sky-200: #e4e4e7;
+  --color-sky-300: #d4d4d8;
+  --color-sky-400: #a1a1aa;
+  --color-sky-500: #71717a;
+  --color-sky-600: #52525b;
+  --color-sky-700: #3f3f46;
+  --color-sky-800: #27272a;
+  --color-sky-900: #18181b;
+  --color-sky-950: #09090b;
+
+  --color-cyan-50: #fafafa;
+  --color-cyan-100: #f4f4f5;
+  --color-cyan-200: #e4e4e7;
+  --color-cyan-300: #d4d4d8;
+  --color-cyan-400: #a1a1aa;
+  --color-cyan-500: #71717a;
+  --color-cyan-600: #52525b;
+  --color-cyan-700: #3f3f46;
+  --color-cyan-800: #27272a;
+  --color-cyan-900: #18181b;
+  --color-cyan-950: #09090b;
+
+  --color-violet-50: #fafafa;
+  --color-violet-100: #f4f4f5;
+  --color-violet-200: #e4e4e7;
+  --color-violet-300: #d4d4d8;
+  --color-violet-400: #a1a1aa;
+  --color-violet-500: #71717a;
+  --color-violet-600: #52525b;
+  --color-violet-700: #3f3f46;
+  --color-violet-800: #27272a;
+  --color-violet-900: #18181b;
+  --color-violet-950: #09090b;
+
+  --color-purple-50: #fafafa;
+  --color-purple-100: #f4f4f5;
+  --color-purple-200: #e4e4e7;
+  --color-purple-300: #d4d4d8;
+  --color-purple-400: #a1a1aa;
+  --color-purple-500: #71717a;
+  --color-purple-600: #52525b;
+  --color-purple-700: #3f3f46;
+  --color-purple-800: #27272a;
+  --color-purple-900: #18181b;
+  --color-purple-950: #09090b;
+
+  --color-fuchsia-50: #fafafa;
+  --color-fuchsia-100: #f4f4f5;
+  --color-fuchsia-200: #e4e4e7;
+  --color-fuchsia-300: #d4d4d8;
+  --color-fuchsia-400: #a1a1aa;
+  --color-fuchsia-500: #71717a;
+  --color-fuchsia-600: #52525b;
+  --color-fuchsia-700: #3f3f46;
+  --color-fuchsia-800: #27272a;
+  --color-fuchsia-900: #18181b;
+  --color-fuchsia-950: #09090b;
+
+  --color-teal-50: #fafafa;
+  --color-teal-100: #f4f4f5;
+  --color-teal-200: #e4e4e7;
+  --color-teal-300: #d4d4d8;
+  --color-teal-400: #a1a1aa;
+  --color-teal-500: #71717a;
+  --color-teal-600: #52525b;
+  --color-teal-700: #3f3f46;
+  --color-teal-800: #27272a;
+  --color-teal-900: #18181b;
+  --color-teal-950: #09090b;
+
+  --color-pink-50: #fafafa;
+  --color-pink-100: #f4f4f5;
+  --color-pink-200: #e4e4e7;
+  --color-pink-300: #d4d4d8;
+  --color-pink-400: #a1a1aa;
+  --color-pink-500: #71717a;
+  --color-pink-600: #52525b;
+  --color-pink-700: #3f3f46;
+  --color-pink-800: #27272a;
+  --color-pink-900: #18181b;
+  --color-pink-950: #09090b;
+
+  --color-orange-50: #fffbeb;
+  --color-orange-100: #fef3c7;
+  --color-orange-200: #fde68a;
+  --color-orange-300: #fcd34d;
+  --color-orange-400: #fbbf24;
+  --color-orange-500: #f59e0b;
+  --color-orange-600: #d97706;
+  --color-orange-700: #b45309;
+  --color-orange-800: #92400e;
+  --color-orange-900: #78350f;
+  --color-orange-950: #451a03;
+
+  --color-pos-primary: #3f3f46;
+  --color-pos-secondary: #64748b;
+  --color-pos-success: #10b981;
+  --color-pos-warning: #f59e0b;
+  --color-pos-error: #ef4444;
+  --color-pos-pending: #f59e0b;
+  --color-pos-preparing: #52525b;
+  --color-pos-ready: #10b981;
+  --color-pos-completed: #6b7280;
+
+  --color-glass-primary: rgba(255, 255, 255, 0.8);
+  --color-glass-secondary: rgba(228, 228, 231, 0.8);
+  --color-glass-text: rgba(255, 255, 255, 0.9);
+  --color-glass-bg-primary: rgba(255, 255, 255, 0.18);
+  --color-glass-bg-secondary: rgba(255, 255, 255, 0.12);
+  --color-glass-bg-interactive: rgba(255, 255, 255, 0.15);
+  --color-glass-bg-hover: rgba(255, 255, 255, 0.25);
+  --color-glass-border-primary: rgba(255, 255, 255, 0.25);
+  --color-glass-border-secondary: rgba(255, 255, 255, 0.18);
+  --color-glass-border-interactive: rgba(255, 255, 255, 0.22);
+  --color-glass-border-hover: rgba(255, 255, 255, 0.35);
+
+  --text-touch-sm: 14px;
+  --text-touch-sm--line-height: 20px;
+  --text-touch-base: 16px;
+  --text-touch-base--line-height: 24px;
+  --text-touch-lg: 18px;
+  --text-touch-lg--line-height: 28px;
+  --text-touch-xl: 20px;
+  --text-touch-xl--line-height: 32px;
+
+  --animate-touch-feedback: scale 0.1s ease-in-out;
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-glass-float: glass-float 6s ease-in-out infinite;
+  --animate-glass-shimmer: glass-shimmer 2s linear infinite;
+  --animate-modal-enter: modal-enter 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --animate-backdrop-enter: backdrop-enter 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  --backdrop-blur-xs: 2px;
+  --backdrop-blur-glass: 10px;
+  --backdrop-blur-glass-lg: 12px;
+  --backdrop-blur-glass-xl: 16px;
+
+  --shadow-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.18);
+  --shadow-glass-lg: 0 12px 40px 0 rgba(0, 0, 0, 0.22);
+  --shadow-glass-xl: 0 15px 45px 0 rgba(0, 0, 0, 0.28);
+  --shadow-glass-glow:
+    0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
+
+  @keyframes scale {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(0.95);
+    }
+  }
+  @keyframes glass-float {
+    0%,
+    100% {
+      transform: translateY(0px);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+  @keyframes glass-shimmer {
+    0% {
+      background-position: -200px 0;
+    }
+    100% {
+      background-position: calc(200px + 100%) 0;
+    }
+  }
+  @keyframes modal-enter {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+  }
+  @keyframes backdrop-enter {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
 }
 
-/* Dark theme background */
-html.dark, html.dark body, html.dark #root {
-  background: #000000;
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+  /* Preserve Tailwind 3 control defaults; explicit component/utility colors still win. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
 }
 
-/* Dark theme background */
-html.dark, html.dark body, html.dark #root {
-  background: #000000;
+/* Component styles */
+
+@layer components {
+  .btn-touch,
+  .btn-primary,
+  .btn-secondary,
+  .btn-success,
+  .btn-warning,
+  .btn-error {
+    /* Touch-friendly button base */
+    @apply min-h-touch min-w-touch px-4 py-3 rounded-2xl font-medium transition-all duration-150 ease-in-out;
+    @apply active:scale-95 focus:outline-hidden focus:ring-2 focus:ring-offset-2;
+    touch-action: manipulation;
+  }
+
+  .btn-primary {
+    /* Primary button */
+    @apply bg-gray-600 text-white hover:bg-gray-700 focus:ring-gray-500;
+  }
+
+  .btn-secondary {
+    /* Secondary button */
+    @apply bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500;
+  }
+
+  .btn-success {
+    /* Success button */
+    @apply bg-pos-success text-white hover:bg-green-700 focus:ring-green-500;
+  }
+
+  .btn-warning {
+    /* Warning button */
+    @apply bg-pos-warning text-white hover:bg-yellow-600 focus:ring-yellow-500;
+  }
+
+  .btn-error {
+    /* Error button */
+    @apply bg-pos-error text-white hover:bg-red-700 focus:ring-red-500;
+  }
+
+  .input-touch {
+    /* Touch-friendly input */
+    @apply min-h-touch px-4 py-3 border border-gray-300 rounded-2xl;
+    @apply focus:outline-hidden focus:ring-2 focus:ring-pos-primary focus:border-transparent;
+    @apply transition-all duration-150 ease-in-out;
+    font-size: 16px !important; /* Prevent iOS zoom */
+  }
+
+  .card {
+    /* Card component */
+    @apply bg-white rounded-3xl shadow-xs border border-gray-200 p-4 sm:p-6;
+  }
+
+  .status-pending {
+    /* Order status badges */
+    @apply bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .status-preparing {
+    @apply bg-gray-100 text-gray-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .status-ready {
+    @apply bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .status-completed {
+    @apply bg-gray-100 text-gray-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .grid-touch {
+    /* Grid layouts for touch - responsive */
+    @apply grid gap-2 sm:gap-4;
+  }
+
+  .grid-touch-sm {
+    @apply grid gap-1 sm:gap-2;
+  }
+
+  .scroll-touch {
+    /* Scrollable areas with touch-friendly scrollbars */
+    @apply overflow-auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--pos-scroll-thumb) transparent;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+
+    &::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
+      border-radius: 6px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background-color: var(--pos-scroll-thumb);
+      border-radius: 9999px;
+    }
+
+    &::-webkit-scrollbar-thumb:hover {
+      background-color: var(--pos-scroll-thumb-active);
+    }
+  }
+
+  .pos-container {
+    /* Mobile-first responsive container */
+    @apply w-full px-2 sm:px-4 md:px-6;
+    max-width: 100%;
+  }
+
+  .modal-touch {
+    /* Touch-friendly modal */
+    @apply fixed inset-0 z-50 flex items-end sm:items-center justify-center;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .modal-touch-content {
+    @apply w-full sm:max-w-lg md:max-w-2xl lg:max-w-4xl;
+    @apply rounded-t-3xl sm:rounded-3xl;
+    @apply max-h-[90vh] sm:max-h-[85vh];
+    @apply overflow-hidden;
+  }
+
+  .tabs-touch {
+    /* Touch-friendly tabs */
+    @apply flex overflow-x-auto gap-1 sm:gap-2 pb-2;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  .tab-touch {
+    @apply flex-shrink-0 px-4 py-3 rounded-lg font-medium;
+    @apply min-w-[80px] text-center;
+    touch-action: manipulation;
+  }
+
+  .liquid-glass-modal-input {
+    /* Liquid glass modal input — in @layer components so Tailwind utilities
+     (pl-10, pr-10, etc.) can override the default padding for icon inputs */
+    background: var(--modal-control-bg);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--modal-border);
+    border-radius: var(--pos-glass-radius-small);
+    padding: 0.75rem 1rem;
+    color: var(--modal-c-content);
+    opacity: 1;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    min-height: 44px;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
+
+    &:focus {
+      outline: none;
+      background: var(--modal-control-bg-active);
+      border-color: var(--modal-c-action);
+      box-shadow:
+        0 0 0 2px color-mix(in srgb, var(--modal-c-action) 30%, transparent),
+        inset 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .dark & {
+      background: var(--modal-control-bg);
+      border-color: var(--modal-border);
+    }
+
+    .dark &:focus {
+      background: var(--modal-control-bg-active);
+    }
+  }
+
+  .dark {
+    & .liquid-glass-modal-input {
+      background: var(--modal-control-bg);
+      border-color: var(--modal-border);
+    }
+
+    & .liquid-glass-modal-input:focus {
+      background: var(--modal-control-bg-active);
+    }
+  }
+
+  .customer-search-yellow-input:focus {
+    border-color: rgb(250, 204, 21);
+    box-shadow:
+      0 0 0 2px rgba(250, 204, 21, 0.45),
+      inset 0 2px 4px rgba(0, 0, 0, 0.05);
+  }
 }
 
-/* Base styles for touch interface */
+@utility touch-feedback {
+  /* Touch feedback animation */
+  @apply transition-transform duration-100 ease-in-out active:scale-95;
+  touch-action: manipulation;
+}
+
+@utility no-select {
+  /* Prevent text selection */
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+@layer utilities {
+  .select-text {
+    /* Enable text selection */
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+    user-select: text;
+  }
+}
+
+@utility hide-scrollbar {
+  /* Hide scrollbars */
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@layer utilities {
+  /* Touchscreen-first: the 2D floor plan still pans and scrolls, but the native
+     scrollbar rails are fully hidden in every engine -- no thin rail, no track, and
+     critically no Chromium/WebView2 arrow-button rails. Pairs with the scrollbar-hide
+     utility on the container. No pointer-only styling lives here. */
+  .floor-plan-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .floor-plan-scrollbar::-webkit-scrollbar,
+  .floor-plan-scrollbar::-webkit-scrollbar-button,
+  .floor-plan-scrollbar::-webkit-scrollbar-track,
+  .floor-plan-scrollbar::-webkit-scrollbar-corner,
+  .floor-plan-scrollbar::-webkit-scrollbar-thumb {
+    width: 0;
+    height: 0;
+    display: none;
+    background: transparent;
+  }
+}
+
+@utility modern-scrollbar {
+  /* Explicit utility shares the app-wide scrollbar appearance. */
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--pos-scroll-thumb) transparent;
+
+  &::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--pos-scroll-thumb);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background-color: var(--pos-scroll-thumb-active);
+  }
+
+  &::-webkit-scrollbar-button {
+    width: 0;
+    height: 0;
+    display: none;
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-corner {
+    width: 0;
+    height: 0;
+    display: none;
+    background: transparent;
+  }
+}
+
+@utility h-screen-header {
+  /* Full height minus header - with safe area support */
+  height: calc(100vh - 4rem);
+  height: calc(100dvh - 4rem);
+}
+
+@utility safe-area-top {
+  /* Safe area padding for notched devices */
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility safe-area-left {
+  padding-left: env(safe-area-inset-left);
+}
+
+@utility safe-area-right {
+  padding-right: env(safe-area-inset-right);
+}
+
+@utility safe-area-all {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+@utility z-modal {
+  /* Touch-safe z-index values */
+  z-index: 1000;
+}
+
+@utility z-dropdown {
+  z-index: 100;
+}
+
+@utility z-header {
+  z-index: 50;
+}
+
+@utility touch-scroll {
+  /* Touch-optimized scrolling */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
+@utility touch-scroll-x {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
+}
+
+@layer utilities {
+  .navigation-dragging-icon {
+    animation: navigation-drag-float 900ms ease-in-out infinite;
+
+    @media (prefers-reduced-motion: reduce) {
+      animation: none;
+    }
+  }
+
+  .navigation-drop-slot {
+    animation: navigation-drop-slot-pulse 900ms ease-in-out infinite;
+
+    @media (prefers-reduced-motion: reduce) {
+      animation: none;
+    }
+  }
+}
+
+@utility no-zoom {
+  /* Prevent accidental zoom */
+  touch-action: manipulation;
+}
+
+@utility text-mobile-sm {
+  /* Mobile-friendly text sizes */
+  @apply text-xs sm:text-sm;
+}
+
+@utility text-mobile-base {
+  @apply text-sm sm:text-base;
+}
+
+@utility text-mobile-lg {
+  @apply text-base sm:text-lg;
+}
+
+@utility text-mobile-xl {
+  @apply text-lg sm:text-xl;
+}
+
+@utility p-mobile {
+  /* Responsive spacing */
+  @apply p-2 sm:p-4 md:p-6;
+}
+
+@utility gap-mobile {
+  @apply gap-2 sm:gap-3 md:gap-4;
+}
+
+@layer utilities {
+  /* NEUTRAL BACKGROUND - NO FORCED COLORS */
+  html,
+  body,
+  #root {
+    background: #f8fafc;
+    min-height: 100vh;
+    min-height: 100dvh; /* Dynamic viewport height for mobile */
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  /* Dark theme background */
+  html.dark,
+  html.dark body,
+  html.dark #root {
+    background: #000000;
+  }
+
+  /* Dark theme background */
+  html.dark,
+  html.dark body,
+  html.dark #root {
+    background: #000000;
+  }
+
+  /* Base styles for touch interface */
+}
 @layer base {
   * {
     box-sizing: border-box;
@@ -54,22 +728,36 @@ html.dark, html.dark body, html.dark #root {
     scrollbar-color: var(--pos-scroll-thumb) transparent;
   }
 
-  *::-webkit-scrollbar { width: 8px; height: 8px; }
-  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
   *::-webkit-scrollbar-thumb {
     background-color: var(--pos-scroll-thumb);
     border: 2px solid transparent;
     border-radius: 9999px;
     background-clip: padding-box;
   }
-  *::-webkit-scrollbar-thumb:hover { background-color: var(--pos-scroll-thumb-active); }
-  *::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-  *::-webkit-scrollbar-corner { background: transparent; }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--pos-scroll-thumb-active);
+  }
+  *::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 
   body {
     margin: 0;
     padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
       'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
       sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -84,17 +772,23 @@ html.dark, html.dark body, html.dark #root {
   html.dark body {
     background-color: #000000;
   }
-  
+
   /* Disable text selection for touch interface */
-  body, button, input {
+  body,
+  button,
+  input {
     -webkit-user-select: none;
     -moz-user-select: none;
     -ms-user-select: none;
     user-select: none;
   }
-  
+
   /* Allow text selection for input fields */
-  input[type="text"], input[type="number"], input[type="tel"], input[type="email"], textarea {
+  input[type='text'],
+  input[type='number'],
+  input[type='tel'],
+  input[type='email'],
+  textarea {
     -webkit-user-select: text;
     -moz-user-select: text;
     -ms-user-select: text;
@@ -102,22 +796,22 @@ html.dark, html.dark body, html.dark #root {
     /* Minimum font size to prevent iOS zoom */
     font-size: 16px !important;
   }
-  
+
   /* Remove tap highlight */
   * {
     -webkit-tap-highlight-color: transparent;
   }
-  
+
   /* Touch-friendly minimum sizes for interactive elements */
-  button, 
-  [role="button"],
+  button,
+  [role='button'],
   a,
-  input[type="checkbox"],
-  input[type="radio"] {
+  input[type='checkbox'],
+  input[type='radio'] {
     min-height: 44px;
     min-width: 44px;
   }
-  
+
   /* Exception for inline/small buttons that explicitly opt out */
   .btn-inline,
   .btn-sm {
@@ -126,339 +820,8 @@ html.dark, html.dark body, html.dark #root {
   }
 }
 
-/* Component styles */
-@layer components {
-  /* Touch-friendly button base */
-  .btn-touch {
-    @apply min-h-touch min-w-touch px-4 py-3 rounded-2xl font-medium transition-all duration-150 ease-in-out;
-    @apply active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2;
-    touch-action: manipulation;
-  }
-  
-  /* Primary button */
-  .btn-primary {
-    @apply btn-touch bg-gray-600 text-white hover:bg-gray-700 focus:ring-gray-500;
-  }
-  
-  /* Secondary button */
-  .btn-secondary {
-    @apply btn-touch bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500;
-  }
-  
-  /* Success button */
-  .btn-success {
-    @apply btn-touch bg-pos-success text-white hover:bg-green-700 focus:ring-green-500;
-  }
-  
-  /* Warning button */
-  .btn-warning {
-    @apply btn-touch bg-pos-warning text-white hover:bg-yellow-600 focus:ring-yellow-500;
-  }
-  
-  /* Error button */
-  .btn-error {
-    @apply btn-touch bg-pos-error text-white hover:bg-red-700 focus:ring-red-500;
-  }
-  
-  /* Touch-friendly input */
-  .input-touch {
-    @apply min-h-touch px-4 py-3 border border-gray-300 rounded-2xl;
-    @apply focus:outline-none focus:ring-2 focus:ring-pos-primary focus:border-transparent;
-    @apply transition-all duration-150 ease-in-out;
-    font-size: 16px !important; /* Prevent iOS zoom */
-  }
-  
-  /* Card component */
-  .card {
-    @apply bg-white rounded-3xl shadow-sm border border-gray-200 p-4 sm:p-6;
-  }
-  
-  /* Order status badges */
-  .status-pending {
-    @apply bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm font-medium;
-  }
-  
-  .status-preparing {
-    @apply bg-gray-100 text-gray-800 px-3 py-1 rounded-full text-sm font-medium;
-  }
-  
-  .status-ready {
-    @apply bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm font-medium;
-  }
-  
-  .status-completed {
-    @apply bg-gray-100 text-gray-800 px-3 py-1 rounded-full text-sm font-medium;
-  }
-  
-  /* Grid layouts for touch - responsive */
-  .grid-touch {
-    @apply grid gap-2 sm:gap-4;
-  }
-  
-  .grid-touch-sm {
-    @apply grid gap-1 sm:gap-2;
-  }
-  
-  /* Scrollable areas with touch-friendly scrollbars */
-  .scroll-touch {
-    @apply overflow-auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--pos-scroll-thumb) transparent;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-  }
-  
-  .scroll-touch::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-  
-  .scroll-touch::-webkit-scrollbar-track {
-    background: transparent;
-    border-radius: 6px;
-  }
-  
-  .scroll-touch::-webkit-scrollbar-thumb {
-    background-color: var(--pos-scroll-thumb);
-    border-radius: 9999px;
-  }
-  
-  .scroll-touch::-webkit-scrollbar-thumb:hover {
-    background-color: var(--pos-scroll-thumb-active);
-  }
-  
-  /* Mobile-first responsive container */
-  .pos-container {
-    @apply w-full px-2 sm:px-4 md:px-6;
-    max-width: 100%;
-  }
-  
-  /* Touch-friendly modal */
-  .modal-touch {
-    @apply fixed inset-0 z-50 flex items-end sm:items-center justify-center;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  
-  .modal-touch-content {
-    @apply w-full sm:max-w-lg md:max-w-2xl lg:max-w-4xl;
-    @apply rounded-t-3xl sm:rounded-3xl;
-    @apply max-h-[90vh] sm:max-h-[85vh];
-    @apply overflow-hidden;
-  }
-  
-  /* Touch-friendly tabs */
-  .tabs-touch {
-    @apply flex overflow-x-auto gap-1 sm:gap-2 pb-2;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-  }
-  
-  .tabs-touch::-webkit-scrollbar {
-    display: none;
-  }
-  
-  .tab-touch {
-    @apply flex-shrink-0 px-4 py-3 rounded-lg font-medium;
-    @apply min-w-[80px] text-center;
-    touch-action: manipulation;
-  }
-
-  /* Liquid glass modal input — in @layer components so Tailwind utilities
-     (pl-10, pr-10, etc.) can override the default padding for icon inputs */
-    .liquid-glass-modal-input {
-      background: var(--modal-control-bg);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      border: 1px solid var(--modal-border);
-    border-radius: var(--pos-glass-radius-small);
-    padding: 0.75rem 1rem;
-    color: var(--modal-c-content);
-    opacity: 1;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    min-height: 44px;
-    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
-  }
-
-    .liquid-glass-modal-input:focus {
-      outline: none;
-      background: var(--modal-control-bg-active);
-    border-color: var(--modal-c-action);
-    box-shadow:
-      0 0 0 2px color-mix(in srgb, var(--modal-c-action) 30%, transparent),
-      inset 0 2px 4px rgba(0, 0, 0, 0.05);
-  }
-
-  .dark .liquid-glass-modal-input {
-    background: var(--modal-control-bg);
-    border-color: var(--modal-border);
-  }
-
-  .dark .liquid-glass-modal-input:focus {
-    background: var(--modal-control-bg-active);
-  }
-
-  .customer-search-yellow-input:focus {
-    border-color: rgb(250, 204, 21);
-    box-shadow:
-      0 0 0 2px rgba(250, 204, 21, 0.45),
-      inset 0 2px 4px rgba(0, 0, 0, 0.05);
-  }
-}
-
 /* Utility classes */
 @layer utilities {
-  /* Touch feedback animation */
-  .touch-feedback {
-    @apply transition-transform duration-100 ease-in-out active:scale-95;
-    touch-action: manipulation;
-  }
-  
-  /* Prevent text selection */
-  .no-select {
-    -webkit-user-select: none;
-    -moz-user-select: none;
-    -ms-user-select: none;
-    user-select: none;
-  }
-  
-  /* Enable text selection */
-  .select-text {
-    -webkit-user-select: text;
-    -moz-user-select: text;
-    -ms-user-select: text;
-    user-select: text;
-  }
-  
-  /* Hide scrollbars */
-  .hide-scrollbar,
-  .scrollbar-hide {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
-  }
-
-  .hide-scrollbar::-webkit-scrollbar,
-  .scrollbar-hide::-webkit-scrollbar {
-    display: none;
-  }
-
-  /* Touchscreen-first: the 2D floor plan still pans and scrolls, but the native
-     scrollbar rails are fully hidden in every engine -- no thin rail, no track, and
-     critically no Chromium/WebView2 arrow-button rails. Pairs with the scrollbar-hide
-     utility on the container. No pointer-only styling lives here. */
-  .floor-plan-scrollbar {
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-  }
-
-  .floor-plan-scrollbar::-webkit-scrollbar,
-  .floor-plan-scrollbar::-webkit-scrollbar-button,
-  .floor-plan-scrollbar::-webkit-scrollbar-track,
-  .floor-plan-scrollbar::-webkit-scrollbar-corner,
-  .floor-plan-scrollbar::-webkit-scrollbar-thumb {
-    width: 0;
-    height: 0;
-    display: none;
-    background: transparent;
-  }
-
-  /* Explicit utility shares the app-wide scrollbar appearance. */
-  .modern-scrollbar {
-    scrollbar-width: thin;                                   /* Firefox */
-    scrollbar-color: var(--pos-scroll-thumb) transparent;
-  }
-
-  .modern-scrollbar::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
-  .modern-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .modern-scrollbar::-webkit-scrollbar-thumb {
-    background-color: var(--pos-scroll-thumb);
-    border-radius: 9999px;
-    border: 2px solid transparent;
-    background-clip: padding-box;
-  }
-
-  .modern-scrollbar::-webkit-scrollbar-thumb:hover {
-    background-color: var(--pos-scroll-thumb-active);
-  }
-
-  .modern-scrollbar::-webkit-scrollbar-button,
-  .modern-scrollbar::-webkit-scrollbar-corner {
-    width: 0;
-    height: 0;
-    display: none;
-    background: transparent;
-  }
-
-  /* Full height minus header - with safe area support */
-  .h-screen-header {
-    height: calc(100vh - 4rem);
-    height: calc(100dvh - 4rem);
-  }
-  
-  /* Safe area padding for notched devices */
-  .safe-area-top {
-    padding-top: env(safe-area-inset-top);
-  }
-  
-  .safe-area-bottom {
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  
-  .safe-area-left {
-    padding-left: env(safe-area-inset-left);
-  }
-  
-  .safe-area-right {
-    padding-right: env(safe-area-inset-right);
-  }
-  
-  .safe-area-all {
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-  }
-  
-  /* Touch-safe z-index values */
-  .z-modal {
-    z-index: 1000;
-  }
-  
-  .z-dropdown {
-    z-index: 100;
-  }
-  
-  .z-header {
-    z-index: 50;
-  }
-  
-  /* Touch-optimized scrolling */
-  .touch-scroll {
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-    touch-action: pan-y;
-  }
-  
-  .touch-scroll-x {
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    touch-action: pan-x;
-  }
-
-  .navigation-dragging-icon {
-    animation: navigation-drag-float 900ms ease-in-out infinite;
-  }
-
-  .navigation-drop-slot {
-    animation: navigation-drop-slot-pulse 900ms ease-in-out infinite;
-  }
-
   @keyframes navigation-drag-float {
     0%,
     100% {
@@ -482,50 +845,13 @@ html.dark, html.dark body, html.dark #root {
       transform: scaleX(1);
     }
   }
-
-  @media (prefers-reduced-motion: reduce) {
-    .navigation-dragging-icon,
-    .navigation-drop-slot {
-      animation: none;
-    }
-  }
-  
-  /* Prevent accidental zoom */
-  .no-zoom {
-    touch-action: manipulation;
-  }
-  
-  /* Mobile-friendly text sizes */
-  .text-mobile-sm {
-    @apply text-xs sm:text-sm;
-  }
-  
-  .text-mobile-base {
-    @apply text-sm sm:text-base;
-  }
-  
-  .text-mobile-lg {
-    @apply text-base sm:text-lg;
-  }
-  
-  .text-mobile-xl {
-    @apply text-lg sm:text-xl;
-  }
-  
-  /* Responsive spacing */
-  .p-mobile {
-    @apply p-2 sm:p-4 md:p-6;
-  }
-  
-  .gap-mobile {
-    @apply gap-2 sm:gap-3 md:gap-4;
-  }
 }
 
 /* Round 328 (live QA, Greek/dark, 1282x802): the Settings > Data > RecoveryPanel selected detail card
    still leaked a slim native vertical scrollbar rail in the nested Tauri/WebView glass card, even with the
    generic .scrollbar-hide utility. Hide every WebKit/Chromium scrollbar part robustly for THIS pane only
    (scoped to its dedicated marker + class) while keeping touch/wheel scrolling fully functional. */
+@layer utilities {
 .recovery-detail-scrollbar-hidden,
 [data-recovery-detail-scroll] {
   scrollbar-width: none; /* Firefox */
@@ -550,4 +876,5 @@ html.dark, html.dark body, html.dark #root {
   height: 0 !important;
   display: none !important;
   background: transparent !important;
+}
 }

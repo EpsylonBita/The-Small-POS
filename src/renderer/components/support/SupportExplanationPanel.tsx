@@ -87,7 +87,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex min-h-[44px] items-center rounded-2xl px-3 text-xs font-semibold text-slate-600 transition-transform active:scale-95 active:bg-black/5 dark:text-slate-300 dark:active:bg-white/10"
+            className="inline-flex min-h-touch items-center rounded-2xl px-3 text-xs font-semibold text-slate-600 transition-transform active:scale-95 active:bg-black/5 dark:text-slate-300 dark:active:bg-white/10"
           >
             {t('common.actions.close')}
           </button>
@@ -115,7 +115,7 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
                 <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                   {t(item.labelKey, { defaultValue: item.fallbackLabel })}
                 </div>
-                <div className="mt-1 text-xs font-medium text-black dark:text-white break-words">
+                <div className="mt-1 text-xs font-medium text-black dark:text-white wrap-break-word">
                   {item.value}
                 </div>
               </div>
@@ -154,10 +154,10 @@ export const SupportExplanationPanel: React.FC<SupportExplanationPanelProps> = (
               type="button"
               onClick={() => onAction(action.id)}
               disabled={busyActionId === action.id}
-              className={`inline-flex min-h-[44px] items-center justify-center rounded-2xl px-3 py-2 text-xs font-semibold transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 ${
+              className={`inline-flex min-h-touch items-center justify-center rounded-2xl px-3 py-2 text-xs font-semibold transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100 ${
                 action.variant === 'primary'
                   ? 'border border-amber-500/35 bg-amber-400 text-black active:bg-amber-300 dark:border-amber-300/40 dark:bg-amber-400 dark:text-black'
-                  : 'border border-white/10 bg-white/[0.08] text-slate-700 active:bg-white/[0.14] dark:text-slate-200'
+                  : 'border border-white/10 bg-white/8 text-slate-700 active:bg-white/[0.14] dark:text-slate-200'
               }`}
             >
               {busyActionId === action.id ? t('support.actions.running') : action.label}

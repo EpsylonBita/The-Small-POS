@@ -89,7 +89,7 @@ export const TerminalCard: React.FC<Props> = ({
     <div
       className={`
         relative rounded-xl p-4
-        bg-gradient-to-br from-gray-800/80 to-gray-900/80
+        bg-linear-to-br from-gray-800/80 to-gray-900/80
         backdrop-blur-sm border border-gray-700/50
         transition-all duration-200
         ${!device.enabled ? 'opacity-60' : ''}

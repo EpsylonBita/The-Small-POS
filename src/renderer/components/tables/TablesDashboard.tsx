@@ -209,7 +209,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
         className={`flex items-center backdrop-blur-sm rounded-xl p-1.5 sm:p-2 border overflow-x-auto scrollbar-hide touch-pan-x mb-4 ${
           isDark
             ? 'bg-white/10 border-white/20'
-            : 'bg-gray-100/80 border-gray-200/50 shadow-sm'
+            : 'bg-gray-100/80 border-gray-200/50 shadow-xs'
         }`} 
         style={{ WebkitOverflowScrolling: 'touch' }}
       >
@@ -234,7 +234,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
               activeTab === tab.id
                 ? isDark
                   ? 'bg-white/20 shadow-lg'
-                  : 'bg-white backdrop-blur-sm shadow-sm border border-gray-200/30'
+                  : 'bg-white backdrop-blur-sm shadow-xs border border-gray-200/30'
                 : isDark
                   ? 'active:bg-white/20'
                   : 'active:bg-white/80'
@@ -307,7 +307,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
       {/* Floating Action Button for Add Order */}
       <FloatingActionButton
         onClick={onAddOrder}
-        className="!bottom-6 !right-6"
+        className="bottom-6! right-6!"
         aria-label={t('tablesDashboard.addOrder', { defaultValue: 'Add Order' })}
       />
     </div>
@@ -419,7 +419,7 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
             className={`rounded-xl p-4 border transition-all duration-200 active:scale-[0.99] cursor-pointer ${
               isDark
                 ? 'bg-white/5 border-white/10 active:bg-white/10'
-                : 'bg-white border-gray-200 active:bg-gray-50 shadow-sm'
+                : 'bg-white border-gray-200 active:bg-gray-50 shadow-xs'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -563,7 +563,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
             className={`rounded-xl p-4 border transition-all duration-200 ${
               isDark
                 ? 'bg-green-500/5 border-green-500/20 active:bg-green-500/10'
-                : 'bg-green-50 border-green-200 active:bg-green-100 shadow-sm'
+                : 'bg-green-50 border-green-200 active:bg-green-100 shadow-xs'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -712,7 +712,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
             className={`rounded-xl p-4 border transition-all duration-200 ${
               isDark
                 ? 'bg-red-500/5 border-red-500/20 active:bg-red-500/10'
-                : 'bg-red-50 border-red-200 active:bg-red-100 shadow-sm'
+                : 'bg-red-50 border-red-200 active:bg-red-100 shadow-xs'
             }`}
           >
             <div className="flex items-center justify-between">
@@ -828,7 +828,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     ? 'border-white/10 bg-slate-950/55 shadow-[0_18px_45px_rgba(0,0,0,0.35)]'
     : 'border-slate-200/80 bg-white/85 shadow-[0_18px_45px_rgba(15,23,42,0.08)]';
   const subtleClass = isDark
-    ? 'border-white/10 bg-white/[0.045]'
+    ? 'border-white/10 bg-white/4.5'
     : 'border-slate-200/90 bg-slate-50/90';
 
   const getFloorValue = useCallback((table: RestaurantTable) => {
@@ -932,7 +932,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
     cleaning: {
       label: t('tablesDashboard.tableStatus.cleaning', { defaultValue: 'Cleaning' }),
       cardClass: isDark
-        ? 'border-slate-400/25 bg-white/[0.045]'
+        ? 'border-slate-400/25 bg-white/4.5'
         : 'border-slate-300 bg-slate-50',
       badgeClass: isDark
         ? 'border-slate-400/25 bg-slate-400/10 text-slate-200'
@@ -1107,7 +1107,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                     tableViewMode === 'list'
                       ? 'bg-yellow-400 text-black'
                       : isDark
-                        ? 'text-slate-200 active:bg-white/[0.08]'
+                        ? 'text-slate-200 active:bg-white/8'
                         : 'text-slate-700 active:bg-white'
                   }`}
                 >
@@ -1121,7 +1121,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                     floorPlanModalOpen
                       ? 'bg-yellow-400 text-black'
                       : isDark
-                        ? 'text-slate-200 active:bg-white/[0.08]'
+                        ? 'text-slate-200 active:bg-white/8'
                         : 'text-slate-700 active:bg-white'
                   }`}
                 >
@@ -1138,8 +1138,8 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                     filter === status
                       ? 'bg-yellow-400 text-black shadow-lg shadow-yellow-500/20'
                       : isDark
-                        ? 'bg-white/[0.06] text-slate-200 active:bg-white/[0.1]'
-                        : 'bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 active:bg-slate-50'
+                        ? 'bg-white/6 text-slate-200 active:bg-white/10'
+                        : 'bg-white text-slate-700 shadow-xs ring-1 ring-slate-200 active:bg-slate-50'
                   }`}
                 >
                   {status === 'all' ? t('tablesDashboard.all', { defaultValue: 'All' }) : statusConfig[status].label}
@@ -1171,7 +1171,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 floorFilter === 'all'
                   ? 'bg-yellow-400 text-black'
                   : isDark
-                    ? 'text-slate-200 active:bg-white/[0.08]'
+                    ? 'text-slate-200 active:bg-white/8'
                     : 'text-slate-700 active:bg-white'
               }`}
             >
@@ -1186,7 +1186,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   floorFilter === floor
                     ? 'bg-yellow-400 text-black'
                     : isDark
-                      ? 'text-slate-200 active:bg-white/[0.08]'
+                      ? 'text-slate-200 active:bg-white/8'
                       : 'text-slate-700 active:bg-white'
                 }`}
               >
@@ -1260,7 +1260,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                   tabIndex={0}
                   onClick={() => handleTableClick(table)}
                   onKeyDown={(event) => handleTableKeyDown(event, table)}
-                  className={`group min-h-[205px] cursor-pointer rounded-2xl border p-4 backdrop-blur-xl transition-all duration-200 active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-yellow-400/45 ${
+                  className={`group min-h-[205px] cursor-pointer rounded-2xl border p-4 backdrop-blur-xl transition-all duration-200 active:scale-[0.99] focus:outline-hidden focus:ring-2 focus:ring-yellow-400/45 ${
                     visual.cardClass
                   } ${isSelected ? 'ring-2 ring-yellow-500/70' : ''}`}
                 >
@@ -1373,7 +1373,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                     </span>
                     <span className={`inline-flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-bold ${
                       isDark
-                        ? 'border-white/10 bg-white/[0.06] text-slate-200'
+                        ? 'border-white/10 bg-white/6 text-slate-200'
                         : 'border-slate-200 bg-white/75 text-slate-700'
                     }`}>
                       {hasOpenCheck ? <Banknote className="h-4 w-4" /> : <ArrowRightLeft className="h-4 w-4" />}
@@ -1417,7 +1417,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
                 type="button"
                 onClick={handleClosePanel}
                 className={`rounded-xl p-2 transition-colors ${
-                  isDark ? 'text-slate-300 active:bg-white/[0.08]' : 'text-slate-500 active:bg-slate-100'
+                  isDark ? 'text-slate-300 active:bg-white/8' : 'text-slate-500 active:bg-slate-100'
                 }`}
                 aria-label={t('common.close', { defaultValue: 'Close' })}
               >

@@ -174,7 +174,7 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
           : isDark
           ? 'border-white/10'
           : 'border-gray-200'
-      } ${isDark ? 'bg-white/[0.05]' : 'bg-white'}`}
+      } ${isDark ? 'bg-white/5' : 'bg-white'}`}
     >
       {/* Status Bar */}
       <div className="h-1" style={{ backgroundColor: statusColor }} />
@@ -207,7 +207,7 @@ const TableCard = memo<TableCardProps>(({ table, isSelected, onPress, isDark }) 
           {table.section && (
             <div className={`flex items-start gap-1 text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
               <MapPin className="w-3 h-3 shrink-0 mt-0.5" />
-              <span className="min-w-0 break-words leading-snug">{table.section}</span>
+              <span className="min-w-0 wrap-break-word leading-snug">{table.section}</span>
             </div>
           )}
         </div>
@@ -275,7 +275,7 @@ const FloorPlanTable = memo<FloorPlanTableProps>(({ table, scale, isSelected, on
       }}
       onClick={onPress}
     >
-      <span className="text-white font-bold text-sm drop-shadow">{table.tableNumber}</span>
+      <span className="text-white font-bold text-sm drop-shadow-sm">{table.tableNumber}</span>
       {table.status === 'occupied' && (
         <Users className="w-3 h-3 text-white/80 mt-0.5" />
       )}
@@ -441,7 +441,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
     // z-[1200] = POS app-modal layer: above the sidebar (z-50), FAB (z-[900]) and
     // content, below the custom titlebar. Combined with the portal below so the
     // backdrop/blur covers the full app shell, not just the table page/grid container.
-    <div {...cashierPortalProps} className="fixed inset-0 z-[1200] flex items-center justify-center">
+    <div {...cashierPortalProps} className="fixed inset-0 z-1200 flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
@@ -507,7 +507,7 @@ const StatusChangeModal = memo<StatusChangeModalProps>(({
                       : 'cursor-not-allowed bg-gray-100 border-gray-200 text-gray-400'
                     : isDark
                       ? 'bg-yellow-400/15 border-yellow-400/40 text-yellow-300 active:bg-yellow-400/25'
-                      : '!bg-yellow-400 border-yellow-500 text-black active:!bg-yellow-500 shadow-lg shadow-yellow-500/30'
+                      : 'bg-yellow-400! border-yellow-500 text-black active:bg-yellow-500! shadow-lg shadow-yellow-500/30'
                 }`}
               >
                 <Receipt className="w-4 h-4" />
@@ -879,7 +879,7 @@ const TablesPage: React.FC = () => {
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
               placeholder={t('tables.filters.search', 'Search tables...')}
-              className={`w-48 pl-9 pr-4 py-2 rounded-xl text-sm bg-transparent outline-none ${
+              className={`w-48 pl-9 pr-4 py-2 rounded-xl text-sm bg-transparent outline-hidden ${
                 isDark ? 'text-white placeholder:text-gray-500' : 'text-gray-900 placeholder:text-gray-400'
               }`}
             />
@@ -931,7 +931,7 @@ const TablesPage: React.FC = () => {
             onClick={handleRefresh}
             disabled={isRefreshing}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-xs ${
               isDark
                 ? 'border border-white/80 bg-white text-black active:bg-zinc-200'
                 : 'border border-black bg-black text-white active:bg-zinc-800'
@@ -992,7 +992,7 @@ const TablesPage: React.FC = () => {
               type="button"
               onClick={() => setFloorFilter('all')}
               aria-pressed={floorFilter === 'all'}
-              className={`inline-flex min-h-[44px] items-center justify-center rounded-xl border px-4 text-sm font-medium transition active:scale-95 ${
+              className={`inline-flex min-h-touch items-center justify-center rounded-xl border px-4 text-sm font-medium transition active:scale-95 ${
                 floorFilter === 'all'
                   ? 'border-yellow-500 bg-yellow-400 text-black'
                   : isDark
@@ -1008,7 +1008,7 @@ const TablesPage: React.FC = () => {
                 type="button"
                 onClick={() => setFloorFilter(floor)}
                 aria-pressed={floorFilter === floor}
-                className={`inline-flex min-h-[44px] items-center justify-center rounded-xl border px-4 text-sm font-medium transition active:scale-95 ${
+                className={`inline-flex min-h-touch items-center justify-center rounded-xl border px-4 text-sm font-medium transition active:scale-95 ${
                   floorFilter === floor
                     ? 'border-yellow-500 bg-yellow-400 text-black'
                     : isDark
@@ -1046,7 +1046,7 @@ const TablesPage: React.FC = () => {
             ))}
           </motion.div>
         ) : (
-          <motion.div variants={pageMotionItem} className={`h-full min-h-[360px] rounded-2xl border ${isDark ? 'bg-white/[0.05] backdrop-blur-xl border-white/10' : 'bg-white border-gray-200'}`}>
+          <motion.div variants={pageMotionItem} className={`h-full min-h-[360px] rounded-2xl border ${isDark ? 'bg-white/5 backdrop-blur-xl border-white/10' : 'bg-white border-gray-200'}`}>
             <div className={`floor-plan-scrollbar ${isDark ? 'floor-plan-scrollbar-dark' : 'floor-plan-scrollbar-light'} relative h-full min-h-[360px] w-full overflow-auto rounded-2xl`}>
               {filteredTables.map(table => (
                 <FloorPlanTable

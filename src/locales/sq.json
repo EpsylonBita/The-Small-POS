@@ -1,4 +1,10 @@
 {
+  "checkoutRecovery": {
+    "editRefused": "Ndryshimi nuk u zbatua sepse porosia ndryshoi ndërkohë. Hape përsëri dhe bëje ndryshimin nga fillimi.",
+    "editConflict": "Ndryshimi i ruajtur duhet kontrolluar. Hape përsëri porosinë para se të vazhdosh.",
+    "discardEdit": "Hidhe poshtë ndryshimin e vjetër",
+    "editReviewUnavailable": "Ndryshimi i ruajtur nuk mund të hapej ose të hidhej poshtë. Rilidhu dhe kontrolloje përsëri porosinë."
+  },
   "missedPlatformOrders": {
     "title_one": "{{count}} porosi nga platformat u refuzua kur POS-i ishte offline",
     "title_other": "{{count}} porosi nga platformat u refuzuan kur POS-i ishte offline",
@@ -623,7 +629,15 @@
   },
   "auth": {
     "managerApproval": {
-      "subtitle": "Askush nuk është në turn në këtë arkë. Një menaxher me të drejtë miratimi fut PIN-in e vet. Nuk tarifohet asgjë."
+      "subtitle": "Askush nuk është në turn në këtë arkë. Një menaxher me të drejtë miratimi fut PIN-in e vet. Nuk tarifohet asgjë.",
+      "checking": "Po kontrollojmë kush mund të miratojë në dyqan…",
+      "noApprover": "Askush në këtë dyqan nuk ka të drejtën «{{right}}». Pronari mund ta caktojë te admin → Rolet. Nuk nevojitet PIN.",
+      "pinRefused": "Ky PIN nuk i përket dikujt me të drejtën «{{right}}». Fut PIN-in personal të një përgjegjësi të autorizuar, jo PIN-in e hyrjes në arkë.",
+      "paused": "Shumë PIN-e të gabuara të përgjegjësit. Miratimet janë pezulluar për {{minutes}} minuta. Ti mund të hysh ende në arkë.",
+      "rights": {
+        "voidPayments": "anulim pagesash",
+        "cancelOrders": "anulim porosish"
+      }
     },
     "login": {
       "title": "Hyrja e stafit",
@@ -4282,7 +4296,13 @@
         "keepEditing": "Vazhdo porosinë",
         "discard": "Hidh poshtë porosinë"
       },
-      "editFailed": "Ndryshimet nuk u ruajtën. Provo përsëri.",
+      "editFailed": "Ndryshimi nuk u ruajt. Mbajeni shportën dhe provoni sërish ndryshimin e ruajtur. Nëse pagesa është marrë tashmë, mos e tarifoni përsëri; kërkoni nga një përgjegjës ta rakordojë te Gjendja e sistemit.",
+      "editCurrencyUnavailable": "Monedha e nevojshme për këtë ndryshim nuk është verifikuar. Mbajeni shportën dhe kërkoni nga një përgjegjës të kontrollojë monedhat e porosisë, pagesës dhe turnit para se të provoni sërish. Mos arkëtoni përsëri.",
+      "editCurrencyMismatch": "Monedhat e porosisë, pagesës dhe turnit të arkës nuk përputhen. Kërkoni t’i kontrollojnë para se të provoni sërish. Mos arkëtoni përsëri.",
+      "editCollectorUnavailable": "Turni i arkëtarit nuk mund të verifikohej. Kontrolloni që arkëtari të ketë hapur turnin në këtë arkë dhe provoni sërish ndryshimin e ruajtur. Mos arkëtoni përsëri.",
+      "editPaymentMismatch": "Diferenca e konfirmuar nuk përputhet me ndryshimin. Mbajeni shportën dhe kërkoni nga një përgjegjës të rakordojë pagesën te Gjendja e sistemit. Mos e tarifoni përsëri.",
+      "editLocalOperationFailed": "Arka nuk mundi ta lexonte ose ruante ndryshimin lokalisht. Mbajeni shportën dhe provoni sërish. Nëse dështon sërish, eksportoni të dhënat e mbështetjes nga Gjendja e sistemit. Mos arkëtoni përsëri.",
+      "editScopeChanged": "Lidhja e arkës ose dyqani ka ndryshuar. Rivendosni lidhjen dhe provoni sërish ndryshimin e ruajtur. Mbajeni shportën dhe mos arkëtoni përsëri.",
       "saveChanges": "Ruaj ndryshimet",
       "addCustomer": "Shto klient",
       "customerInfo": "Të dhënat e klientit (opsionale)",
@@ -5271,6 +5291,11 @@
       "unsavedAlreadyResolved": "Kjo pagesë është regjistruar tashmë si e kthyer.",
       "unsavedSavedAfterAll": "Kjo pagesë u ruajt në fund të fundit: s'ka asgjë për të kthyer.",
       "unsavedResolveFailed": "Nuk u regjistrua dot: {{error}}",
+      "heldEditCloseReason": "Porosia u anulua; korrigjimi u mbyll nga një menaxher te kontrollet e Z pa regjistruar para",
+      "heldEditApprovalTitle": "Mbyll korrigjimin pa para",
+      "heldEditApprovalSubtitle": "Kontrolloni fillimisht POS-in e bankës dhe sirtarin. Një anëtar i stafit me të drejtën për të anuluar pagesat fut PIN-in e vet. Nuk tarifohet dhe nuk kthehet asgjë.",
+      "heldEditClosed": "Korrigjimi u mbyll. Nuk u regjistruan para.",
+      "heldEditCloseFailed": "Korrigjimi nuk u mbyll dot. Mbetet në pritje; nuk u regjistrua asgjë.",
       "unsavedSaved": "Pagesa u ruajt.",
       "unsavedStillNotSaved": "Ende nuk është ruajtur në këtë arkë. Mos e debito përsëri. Provo sërish, ose ktheja paratë klientit dhe konfirmoje këtu."
     },
@@ -6136,7 +6161,8 @@
       "enterPin": "Shkruaj PIN-in",
       "invalidPin": "Kod i gabuar",
       "loginFailed": "Hyrja dështoi. Provo përsëri.",
-      "timeout": "Hyrja zgjati shumë. Provo përsëri."
+      "timeout": "Hyrja zgjati shumë. Provo përsëri.",
+      "lockedOut": "Shumë përpjekje me PIN të gabuar. Provo përsëri pas {{minutes}} minutash."
     },
     "backspace": "Fshi"
   },
@@ -10225,7 +10251,8 @@
       "payments_not_saved__new_order": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
       "payments_not_saved__new_order_cannot_save": "U debitua një pagesë me kartë prej {{paymentAmount}} për një porosi të re që ende nuk është ruajtur në këtë arkë: porosia dhe pagesa e saj mbahen derisa të ruhen. Klienti u debitua: mos e debito përsëri.",
       "cancelled_order_claims_payment": "Kjo porosi është anuluar, por shfaqet ende si e paguar, dhe ky terminal nuk ka asnjë regjistrim pagese për të. Nuk është në këtë Raport Z. Kjo nuk e bllokon mbylljen e ditës.",
-      "edit_settlement_not_saved": "Një korrigjim i konfirmuar nuk është ruajtur ende. Arkëtimi ose kthimi fillestar ruhet."
+      "edit_settlement_not_saved": "Një korrigjim i konfirmuar nuk është ruajtur ende. Arkëtimi ose kthimi fillestar ruhet.",
+      "edit_settlement_not_saved__order_cancelled": "Porosia u anulua, ndaj ky korrigjim i konfirmuar nuk mund të ruhet më kurrë. Arkëtimi ose rimbursimi fillestar mbahet."
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Rikuperoni anulimin fillestar të tavolinës. Mos i dorëzoni ose rimbursoni paratë përsëri.",
@@ -10238,7 +10265,8 @@
       "payments_not_saved__new_order": "Ruaje pagesën sërish: kjo ruan porosinë dhe pagesën e saj, pa debitim të ri. Nëse nuk ruhet dot, ktheja paratë klientit dhe konfirmoje këtu.",
       "payments_not_saved__new_order_cannot_save": "Kjo porosi dhe pagesa e saj nuk mund të ruhen në këtë arkë. Ktheja paratë klientit, pastaj konfirmoje këtu.",
       "cancelled_order_claims_payment": "Rikthe nga serveri («Sinkronizo tani»): një pagesë që ka serveri kopjohet këtu. Nëse nuk ka asnjë, pronari vendos çfarë duhet të tregojë porosia.",
-      "edit_settlement_not_saved": "Rihapni redaktimin e ruajtur dhe ruani të njëjtin korrigjim. Mos arkëtoni ose ktheni para përsëri."
+      "edit_settlement_not_saved": "Rihapni redaktimin e ruajtur dhe ruani të njëjtin korrigjim. Mos arkëtoni ose ktheni para përsëri.",
+      "edit_settlement_not_saved__order_cancelled": "Kontrolloni POS-in e bankës dhe sirtarin për paratë e këtij korrigjimi. Pastaj një menaxher e mbyll këtu pa regjistruar para."
     },
     "setAsidePaymentLabel": "Pagesë e lënë mënjanë",
     "takenAtLabel": "Marrë në",
@@ -10248,6 +10276,8 @@
     "chargedAtLabel": "Debituar në",
     "unsavedSaveAgainAction": "Ruaje pagesën sërish",
     "unsavedReturnedAction": "Paratë iu kthyen klientit",
+    "heldEditCloseAction": "Mbyll pa regjistruar para (menaxher)",
+    "heldEditClosing": "Duke u mbyllur...",
     "unsavedSaving": "Po ruhet...",
     "unsavedResolving": "Po regjistrohet..."
   },

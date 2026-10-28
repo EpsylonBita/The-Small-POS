@@ -207,7 +207,7 @@ const MenuItemCard: React.FC<MenuItemCardProps> = React.memo(({ item, onClick, o
       style={{ contain: 'content', willChange: 'transform' }}
     >
       {/* Item Image Placeholder */}
-      <div className="w-full h-32 bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg mb-3 flex items-center justify-center overflow-hidden">
+      <div className="w-full h-32 bg-linear-to-br from-gray-50 to-gray-100 rounded-lg mb-3 flex items-center justify-center overflow-hidden">
         {item.image ? (
           <OptimizedImg
             src={item.image}

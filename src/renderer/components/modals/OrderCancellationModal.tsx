@@ -167,13 +167,13 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
       onClose={handleClose}
       title={t('modals.orderCancellation.title')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={!submitting}
       closeOnEscape={!submitting}
       initialFocusRef={reasonInputRef}
       footer={(
         /* Fixed glass action bar: neutral safe close + red destructive confirm (disabled until a reason is given). */
-        <div className="flex gap-3 border-t border-white/15 bg-white/[0.05] px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.03]">
+        <div className="flex gap-3 border-t border-white/15 bg-white/5 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/3">
           <button
             type="button"
             onClick={handleClose}
@@ -188,7 +188,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             disabled={!canConfirm}
             className={`liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed ${
               canConfirm
-                ? '!bg-red-600 !text-white !border-red-600 active:!bg-red-700 shadow-md shadow-red-600/30'
+                ? 'bg-red-600! text-white! border-red-600! active:bg-red-700! shadow-md shadow-red-600/30'
                 : 'liquid-glass-modal-error'
             }`}
           >
@@ -216,7 +216,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             type="button"
             onClick={() => { void handleRelease(); }}
             disabled={submitting}
-            className="liquid-glass-modal-button liquid-glass-modal-secondary min-h-[44px] w-full rounded-xl disabled:opacity-50"
+            className="liquid-glass-modal-button liquid-glass-modal-secondary min-h-touch w-full rounded-xl disabled:opacity-50"
           >
             {t('modals.orderCancellation.clearRefusedAttempt')}
           </button>
@@ -233,7 +233,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
             {(['cash_drawer', 'bank'] as const).map((channel) => (
               <button key={channel} type="button" aria-pressed={returnChannel === channel}
                 onClick={() => setReturnChannel(channel)}
-                className={`rounded-xl border px-4 py-3 font-medium ${returnChannel === channel ? 'border-amber-400 bg-amber-400 text-black' : 'border-white/20 bg-white/[0.06] liquid-glass-modal-text'}`}>
+                className={`rounded-xl border px-4 py-3 font-medium ${returnChannel === channel ? 'border-amber-400 bg-amber-400 text-black' : 'border-white/20 bg-white/6 liquid-glass-modal-text'}`}>
                 {t(`modals.orderCancellation.${channel === 'cash_drawer' ? 'cashDrawer' : 'bank'}`)}
               </button>
             ))}
@@ -259,7 +259,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
                   className={`rounded-xl border px-3 py-2 text-left text-sm transition active:scale-[0.98] ${
                     selected
                       ? 'border-amber-400 bg-amber-400 text-black shadow-md shadow-amber-400/30'
-                      : 'border-white/20 bg-white/[0.06] liquid-glass-modal-text active:bg-white/[0.12]'
+                      : 'border-white/20 bg-white/6 liquid-glass-modal-text active:bg-white/12'
                   }`}
                 >
                   {t(platformReasonLabelKey(code))}

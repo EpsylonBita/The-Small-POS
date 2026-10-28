@@ -29,7 +29,7 @@ export const SkeletonLoader = memo<SkeletonLoaderProps>(({
       case 'circular':
         return 'rounded-full';
       case 'text':
-        return 'rounded';
+        return 'rounded-sm';
       case 'rectangular':
       default:
         return 'rounded-2xl';

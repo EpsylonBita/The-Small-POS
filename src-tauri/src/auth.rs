@@ -26,6 +26,10 @@ use crate::{api, business_day, db, offline_check_in, storage};
 
 const MAX_FAILED_ATTEMPTS: u32 = 5;
 const LOCKOUT_MINUTES: i64 = 15;
+const MAX_FAILED_APPROVALS: u32 = 5;
+const APPROVAL_LOCKOUT_MINUTES: i64 = 5;
+const APPROVAL_LOCKOUT_ATTEMPTS_KEY: &str = "approval_lockout_attempts";
+const APPROVAL_LOCKOUT_LAST_ATTEMPT_KEY: &str = "approval_lockout_last_attempt";
 const SESSION_INACTIVITY_MINUTES: i64 = 30;
 const SESSION_MAX_DURATION_HOURS: i64 = 2;
 pub(crate) const PRIVILEGED_ACTION_TTL_SECONDS: i64 = 300;
@@ -253,6 +257,10 @@ pub struct PrivilegedActionError {
     /// Set when a manager's own PIN can give this approval ([`MoneyApproval`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<i64>,
 }
 
 impl PrivilegedActionError {
@@ -266,6 +274,8 @@ impl PrivilegedActionError {
             reason: reason.into(),
             ttl_seconds: None,
             approval: None,
+            permission: None,
+            minutes: None,
         }
     }
 
@@ -276,6 +286,8 @@ impl PrivilegedActionError {
             reason: reason.into(),
             ttl_seconds: Some(PRIVILEGED_ACTION_TTL_SECONDS),
             approval: None,
+            permission: None,
+            minutes: None,
         }
     }
 
@@ -286,6 +298,8 @@ impl PrivilegedActionError {
             reason: MANAGER_APPROVAL_REQUIRED_REASON.to_string(),
             ttl_seconds: Some(PRIVILEGED_ACTION_TTL_SECONDS),
             approval: Some(approval.as_str()),
+            permission: None,
+            minutes: None,
         }
     }
 
@@ -300,6 +314,27 @@ impl PrivilegedActionError {
             reason: reason.into(),
             ttl_seconds: Some(PRIVILEGED_ACTION_TTL_SECONDS),
             approval: Some(approval.as_str()),
+            permission: None,
+            minutes: None,
+        }
+    }
+
+    fn manager_failure(
+        code: &'static str,
+        approval: MoneyApproval,
+        reason: &str,
+        minutes: Option<i64>,
+    ) -> Self {
+        Self {
+            code,
+            scope: PrivilegedActionScope::CashDrawerControl
+                .as_str()
+                .to_string(),
+            reason: reason.to_string(),
+            ttl_seconds: None,
+            approval: Some(approval.as_str()),
+            permission: approval.catalogue_permissions().first().copied(),
+            minutes,
         }
     }
 }
@@ -330,6 +365,9 @@ pub struct AuthState {
     sessions: Mutex<HashMap<String, StaffSession>>,
     current_session_id: Mutex<Option<String>>,
     lockout: Mutex<LockoutEntry>,
+    /// Lock order: login lockout -> approval lockout -> db.conn. The two
+    /// counters are independent and no current path holds both mutexes.
+    approval_lockout: Mutex<LockoutEntry>,
     privileged_grants: Mutex<HashMap<String, DateTime<Utc>>>,
     /// Single-use approvals a manager gave with their own PIN while nobody
     /// was on shift at this terminal, by session, scope and approval.
@@ -360,6 +398,10 @@ impl AuthState {
             sessions: Mutex::new(HashMap::new()),
             current_session_id: Mutex::new(None),
             lockout: Mutex::new(LockoutEntry {
+                attempts: 0,
+                last_attempt: Utc::now(),
+            }),
+            approval_lockout: Mutex::new(LockoutEntry {
                 attempts: 0,
                 last_attempt: Utc::now(),
             }),
@@ -1043,24 +1085,59 @@ fn approval_candidates(
 }
 
 /// Whether anyone in this branch's staff directory could approve `approval`
-/// with their own PIN on this till.
+/// with their own PIN on this till (false without a readable directory).
 pub(crate) fn manager_approval_available(
     conn: &rusqlite::Connection,
     branch_id: &str,
     approval: MoneyApproval,
 ) -> bool {
+    branch_approval_candidates(conn, branch_id, approval)
+        .is_some_and(|candidates| !candidates.is_empty())
+}
+
+/// For the PIN pad only: true when this branch's directory is known and
+/// nobody in it can approve. A directory the till does not have yet is not
+/// proof that nobody can (Android parity: managerApprovalKnownUnavailable).
+pub(crate) fn manager_approval_known_unavailable(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    approval: MoneyApproval,
+) -> bool {
+    branch_approval_candidates(conn, branch_id, approval)
+        .is_some_and(|candidates| candidates.is_empty())
+}
+
+/// The staff who could approve with their PIN, or `None` when this till has
+/// no readable staff directory for the branch.
+fn branch_approval_candidates(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    approval: MoneyApproval,
+) -> Option<Vec<(String, String)>> {
     let setting_key = staff_auth_cache_key(branch_id);
-    let Some(raw) = db::get_setting(conn, STAFF_AUTH_CACHE_CATEGORY, &setting_key) else {
-        return false;
-    };
+    let raw = db::get_setting(conn, STAFF_AUTH_CACHE_CATEGORY, &setting_key)?;
     let raw = adopt_legacy_pin_hashes(conn, &setting_key, raw);
-    let Ok(cache) = parse_staff_auth_cache(&raw) else {
-        return false;
-    };
+    let cache = parse_staff_auth_cache(&raw).ok()?;
     if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id.trim() {
-        return false;
+        return None;
     }
-    !approval_candidates(cache, branch_id.trim(), approval).is_empty()
+    Some(approval_candidates(cache, branch_id.trim(), approval))
+}
+
+pub fn manager_approval_availability(
+    arg0: Option<Value>,
+    db: &db::DbState,
+) -> Result<Value, String> {
+    let approval = arg0
+        .as_ref()
+        .and_then(extract_approval)
+        .ok_or("Invalid money approval")?;
+    let branch_id = resolve_current_branch_id(db)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "available": !manager_approval_known_unavailable(&conn, &branch_id, approval),
+        "permission": approval.catalogue_permissions()[0],
+    }))
 }
 
 fn record_privileged_grant_at(
@@ -1208,52 +1285,66 @@ fn verify_privileged_pin_with_lockout(
 /// log in to the POS and whose store permissions allow `approval` (fix review
 /// 30/09/2026). The PIN is checked on this till against the PIN hashes of the
 /// staff directory, the same data the shift check-in trusts; it never checks
-/// anyone in. Wrong PINs count toward the terminal's lockout like any other.
+/// anyone in. Wrong PINs pause only manager approvals, never terminal login.
 /// `Ok(None)`: no such staff member has this PIN.
 fn verify_manager_pin_with_lockout(
     pin: &str,
     approval: MoneyApproval,
     db: &db::DbState,
     auth: &AuthState,
-) -> Result<Option<String>, String> {
-    // Lock order as in `login`: `auth.lockout` before `db.conn`.
+) -> Result<Option<String>, PrivilegedActionError> {
+    let failure = |error: String| {
+        PrivilegedActionError::unauthorized(Some(PrivilegedActionScope::CashDrawerControl), error)
+    };
+    // Lock order: auth.lockout -> auth.approval_lockout -> db.conn.
+    // This path needs only approval_lockout; never acquire login's mutex here.
     let mut lockout = auth
-        .lockout
+        .approval_lockout
         .lock()
-        .map_err(|e| format!("mutex poisoned: {e}"))?;
-    let branch_id = resolve_current_branch_id(db)?;
+        .map_err(|e| failure(format!("mutex poisoned: {e}")))?;
+    let branch_id = resolve_current_branch_id(db).map_err(failure)?;
     let candidates: Vec<(String, String)> = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let conn = db.conn.lock().map_err(|e| failure(e.to_string()))?;
         conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| format!("begin manager approval lockout check: {e}"))?;
-        let persisted_lockout = load_lockout_from_db(&conn);
-        if let Err(e) = check_lockout(&persisted_lockout) {
+            .map_err(|e| failure(format!("begin manager approval lockout check: {e}")))?;
+        let mut persisted_lockout = load_approval_lockout_from_db(&conn);
+        let Some(candidates) = branch_approval_candidates(&conn, &branch_id, approval) else {
+            // No directory yet is not "nobody": ask for a staff sync, as before,
+            // and count nothing.
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(failure(
+                "Staff data unavailable offline. Please sync staff while online.".to_string(),
+            ));
+        };
+        if candidates.is_empty() {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(PrivilegedActionError::manager_failure(
+                "NO_APPROVER_IN_STORE",
+                approval,
+                "Nobody in this store can approve this action",
+                None,
+            ));
+        }
+        if let Some(minutes) = approval_pause_minutes(&persisted_lockout, Utc::now()) {
             let _ = conn.execute_batch("ROLLBACK");
             *lockout = persisted_lockout;
-            return Err(e);
+            return Err(PrivilegedActionError::manager_failure(
+                "APPROVALS_PAUSED",
+                approval,
+                "Too many wrong manager PINs",
+                Some(minutes),
+            ));
         }
-        let setting_key = staff_auth_cache_key(&branch_id);
-        let cache = db::get_setting(&conn, STAFF_AUTH_CACHE_CATEGORY, &setting_key)
-            .map(|raw| adopt_legacy_pin_hashes(&conn, &setting_key, raw));
+        // A finished pause starts a new five-attempt window, like Android.
+        if persisted_lockout.attempts >= MAX_FAILED_APPROVALS {
+            reset_lockout(&mut persisted_lockout);
+        }
         conn.execute_batch("COMMIT").map_err(|e| {
             let _ = conn.execute_batch("ROLLBACK");
-            format!("commit manager approval lockout check: {e}")
+            failure(format!("commit manager approval lockout check: {e}"))
         })?;
         *lockout = persisted_lockout;
-        let cache = match cache.as_deref().map(parse_staff_auth_cache) {
-            Some(Ok(cache)) => cache,
-            _ => {
-                return Err(
-                    "Staff data unavailable offline. Please sync staff while online.".to_string(),
-                )
-            }
-        };
-        if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id {
-            return Err(
-                "Staff data unavailable offline. Please sync staff while online.".to_string(),
-            );
-        }
-        approval_candidates(cache, &branch_id, approval)
+        candidates
     };
 
     // bcrypt without the database lock (see `login`).
@@ -1262,20 +1353,74 @@ fn verify_manager_pin_with_lockout(
         .find(|(_, hash)| bcrypt::verify(pin, hash).unwrap_or(false))
         .map(|(staff_id, _)| staff_id);
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db.conn.lock().map_err(|e| failure(e.to_string()))?;
     conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin manager approval lockout persist: {e}"))?;
+        .map_err(|e| failure(format!("begin manager approval lockout persist: {e}")))?;
     if approver.is_some() {
         reset_lockout(&mut lockout);
     } else {
-        record_failure(&mut lockout);
+        lockout.attempts += 1;
+        lockout.last_attempt = Utc::now();
+        warn!(
+            attempts = lockout.attempts,
+            "failed manager approval attempt"
+        );
     }
-    persist_lockout_to_db(&conn, &lockout);
+    if let Err(error) = persist_approval_lockout_to_db(&conn, &lockout) {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(failure(error));
+    }
     conn.execute_batch("COMMIT").map_err(|e| {
         let _ = conn.execute_batch("ROLLBACK");
-        format!("commit manager approval lockout persist: {e}")
+        failure(format!("commit manager approval lockout persist: {e}"))
     })?;
+    if let Some(minutes) = approval_pause_minutes(&lockout, Utc::now()) {
+        return Err(PrivilegedActionError::manager_failure(
+            "APPROVALS_PAUSED",
+            approval,
+            "Too many wrong manager PINs",
+            Some(minutes),
+        ));
+    }
     Ok(approver)
+}
+
+fn approval_pause_minutes(lockout: &LockoutEntry, now: DateTime<Utc>) -> Option<i64> {
+    if lockout.attempts < MAX_FAILED_APPROVALS {
+        return None;
+    }
+    let remaining = Duration::minutes(APPROVAL_LOCKOUT_MINUTES) - (now - lockout.last_attempt);
+    (remaining > Duration::zero()).then(|| (remaining.num_milliseconds() + 59_999) / 60_000)
+}
+
+fn load_approval_lockout_from_db(conn: &rusqlite::Connection) -> LockoutEntry {
+    LockoutEntry {
+        attempts: db::get_setting(conn, "staff", APPROVAL_LOCKOUT_ATTEMPTS_KEY)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        last_attempt: db::get_setting(conn, "staff", APPROVAL_LOCKOUT_LAST_ATTEMPT_KEY)
+            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+            .map(|time| time.with_timezone(&Utc))
+            .unwrap_or_else(|| DateTime::from_timestamp(0, 0).expect("valid epoch")),
+    }
+}
+
+fn persist_approval_lockout_to_db(
+    conn: &rusqlite::Connection,
+    lockout: &LockoutEntry,
+) -> Result<(), String> {
+    db::set_setting(
+        conn,
+        "staff",
+        APPROVAL_LOCKOUT_ATTEMPTS_KEY,
+        &lockout.attempts.to_string(),
+    )?;
+    db::set_setting(
+        conn,
+        "staff",
+        APPROVAL_LOCKOUT_LAST_ATTEMPT_KEY,
+        &lockout.last_attempt.to_rfc3339(),
+    )
 }
 
 /// The audit entry of a manager's approval given with their own PIN: who,
@@ -1332,9 +1477,13 @@ fn check_lockout(lockout: &LockoutEntry) -> Result<(), String> {
         let elapsed = Utc::now() - lockout.last_attempt;
         if elapsed < Duration::minutes(LOCKOUT_MINUTES) {
             let remaining = LOCKOUT_MINUTES - elapsed.num_minutes();
-            return Err(format!(
-                "Too many failed attempts. Try again in {remaining} minute(s)."
-            ));
+            // Preserve the String error ABI and human reason for existing callers.
+            return Err(serde_json::json!({
+                "code": "AUTH_LOCKED_OUT",
+                "minutes": remaining,
+                "reason": format!("Too many failed attempts. Try again in {remaining} minute(s)."),
+            })
+            .to_string());
         }
         // Lockout period has elapsed — will be reset on next successful login
     }
@@ -1491,8 +1640,9 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
     // decision on it. Holding both across the DB write is what makes the
     // lockout state + DB state consistent under concurrent logins.
     //
-    // Only `login()` (this function) acquires `auth.lockout`. If you
-    // introduce a second call site, it MUST take the locks in the same
+    // Terminal-PIN reauthentication also takes auth.lockout. Manager PINs
+    // use auth.approval_lockout; if all three are needed, the order is
+    // auth.lockout -> auth.approval_lockout -> db.conn. New callers take the same
     // order or you will deadlock. Grep for `lockout.lock()` before adding
     // any new critical section that also touches `db.conn`.
     // ======================================================================
@@ -2454,8 +2604,7 @@ fn confirm_manager_approval_at(
     now: DateTime<Utc>,
 ) -> Result<Value, PrivilegedActionError> {
     let scope = PrivilegedActionScope::CashDrawerControl;
-    let approver = verify_manager_pin_with_lockout(pin, approval, db, auth)
-        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    let approver = verify_manager_pin_with_lockout(pin, approval, db, auth)?;
     let Some(approver_staff_id) = approver else {
         // A PIN of no one who may approve it: the same answer as a wrong PIN.
         return Err(PrivilegedActionError::unauthorized(
@@ -2517,6 +2666,337 @@ mod tests {
         db::get_setting(&conn, "staff", LOCKOUT_ATTEMPTS_KEY)
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
+    }
+
+    fn seed_approval_staff(db_state: &db::DbState, permissions: &[&str]) {
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "branch_id", "branch-1").unwrap();
+        }
+        set_staff_auth_cache(
+            db_state,
+            "branch-1",
+            serde_json::json!([{
+                "id": "approver-1", "is_active": true, "can_login_pos": true,
+                "has_pin": true, "pin_hash": bcrypt::hash("9876", 4).unwrap(),
+                "permissions": permissions
+            }]),
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn manager_pin_failures_never_lock_terminal_login() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        set_pin_hash(&db_state, "admin_pin_hash", "123456");
+        seed_approval_staff(&db_state, &["pos.refunds.process"]);
+        for _ in 0..5 {
+            let _ = verify_manager_pin_with_lockout(
+                "123456",
+                MoneyApproval::VoidPayments,
+                &db_state,
+                &auth,
+            );
+        }
+        assert_eq!(
+            lockout_attempts(&db_state),
+            0,
+            "approval failures never count as login failures"
+        );
+        assert!(
+            login(
+                Some(serde_json::json!("123456")),
+                &db_state,
+                &AuthState::new()
+            )
+            .is_ok(),
+            "a restart must not turn approval failures into a login lockout"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_approver_counts_no_failure() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        seed_approval_staff(&db_state, &["pos.orders.cancel"]);
+        let error = confirm_manager_approval_at(
+            "123456",
+            MoneyApproval::VoidPayments,
+            None,
+            &db_state,
+            &auth,
+            Utc::now(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "NO_APPROVER_IN_STORE");
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["permission"],
+            "pos.refunds.process"
+        );
+        assert_eq!(lockout_attempts(&db_state), 0);
+        let conn = db_state.conn.lock().unwrap();
+        assert!(db::get_setting(&conn, "staff", "approval_lockout_attempts").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_missing_staff_directory_is_not_nobody() {
+        // No directory synced yet: the PIN pad stays offered and the PIN asks
+        // for a staff sync, never "nobody in this store", counting nothing.
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "branch_id", "branch-1").unwrap();
+        }
+        let branch = resolve_current_branch_id(&db_state).unwrap();
+        {
+            let conn = db_state.conn.lock().unwrap();
+            assert!(!manager_approval_known_unavailable(
+                &conn,
+                &branch,
+                MoneyApproval::VoidPayments
+            ));
+            assert!(!manager_approval_available(
+                &conn,
+                &branch,
+                MoneyApproval::VoidPayments
+            ));
+        }
+        let error = confirm_manager_approval_at(
+            "123456",
+            MoneyApproval::VoidPayments,
+            None,
+            &db_state,
+            &auth,
+            Utc::now(),
+        )
+        .unwrap_err();
+        assert_ne!(error.code, "NO_APPROVER_IN_STORE");
+        assert!(serde_json::to_string(&error)
+            .unwrap()
+            .contains("Staff data unavailable offline"));
+        assert_eq!(lockout_attempts(&db_state), 0);
+        let conn = db_state.conn.lock().unwrap();
+        assert!(db::get_setting(&conn, "staff", "approval_lockout_attempts").is_none());
+        // A known directory without a holder is "nobody".
+        drop(conn);
+        seed_approval_staff(&db_state, &["pos.orders.cancel"]);
+        let conn = db_state.conn.lock().unwrap();
+        assert!(manager_approval_known_unavailable(
+            &conn,
+            &branch,
+            MoneyApproval::VoidPayments
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn approvals_pause_after_five_and_recover_after_five_minutes() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        seed_approval_staff(&db_state, &["pos.refunds.process"]);
+        for _ in 0..4 {
+            assert_eq!(
+                verify_manager_pin_with_lockout(
+                    "000000",
+                    MoneyApproval::VoidPayments,
+                    &db_state,
+                    &auth
+                )
+                .unwrap(),
+                None
+            );
+        }
+        let error = verify_manager_pin_with_lockout(
+            "000000",
+            MoneyApproval::VoidPayments,
+            &db_state,
+            &auth,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "APPROVALS_PAUSED");
+        assert_eq!(error.minutes, Some(5));
+        assert_eq!(error.permission, Some("pos.refunds.process"));
+        let restarted = AuthState::new();
+        assert_eq!(
+            verify_manager_pin_with_lockout(
+                "9876",
+                MoneyApproval::VoidPayments,
+                &db_state,
+                &restarted
+            )
+            .unwrap_err()
+            .code,
+            "APPROVALS_PAUSED"
+        );
+        let entry = {
+            let conn = db_state.conn.lock().unwrap();
+            let entry = load_approval_lockout_from_db(&conn);
+            assert_eq!(entry.attempts, 5, "blocked attempts do not count");
+            entry
+        };
+        assert_eq!(
+            approval_pause_minutes(
+                &entry,
+                entry.last_attempt + Duration::minutes(5) - Duration::milliseconds(1)
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            approval_pause_minutes(&entry, entry.last_attempt + Duration::minutes(5)),
+            None
+        );
+        {
+            let conn = db_state.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "staff",
+                APPROVAL_LOCKOUT_LAST_ATTEMPT_KEY,
+                &(Utc::now() - Duration::minutes(5)).to_rfc3339(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            verify_manager_pin_with_lockout(
+                "000000",
+                MoneyApproval::VoidPayments,
+                &db_state,
+                &restarted
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            load_approval_lockout_from_db(&db_state.conn.lock().unwrap()).attempts,
+            1,
+            "a completed pause gives five fresh attempts"
+        );
+        assert_eq!(
+            verify_manager_pin_with_lockout(
+                "9876",
+                MoneyApproval::VoidPayments,
+                &db_state,
+                &restarted
+            )
+            .unwrap()
+            .as_deref(),
+            Some("approver-1")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn successful_approvals_and_logins_reset_only_their_own_counters() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        set_pin_hash(&db_state, "admin_pin_hash", "123456");
+        seed_approval_staff(&db_state, &["pos.refunds.process"]);
+        assert!(login(Some(serde_json::json!("000000")), &db_state, &auth).is_err());
+        verify_manager_pin_with_lockout("000000", MoneyApproval::VoidPayments, &db_state, &auth)
+            .unwrap();
+        verify_manager_pin_with_lockout("9876", MoneyApproval::VoidPayments, &db_state, &auth)
+            .unwrap();
+        assert_eq!(
+            lockout_attempts(&db_state),
+            1,
+            "approval must not reset login failures"
+        );
+        assert_eq!(
+            load_approval_lockout_from_db(&db_state.conn.lock().unwrap()).attempts,
+            0
+        );
+        verify_manager_pin_with_lockout("000000", MoneyApproval::VoidPayments, &db_state, &auth)
+            .unwrap();
+        login(Some(serde_json::json!("123456")), &db_state, &auth).unwrap();
+        assert_eq!(lockout_attempts(&db_state), 0);
+        assert_eq!(
+            load_approval_lockout_from_db(&db_state.conn.lock().unwrap()).attempts,
+            1,
+            "login must not reset approval failures"
+        );
+    }
+
+    #[test]
+    fn login_lockout_has_machine_code_and_remaining_minutes() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        set_pin_hash(&db_state, "admin_pin_hash", "123456");
+        for _ in 0..5 {
+            assert!(login(Some(serde_json::json!("000000")), &db_state, &auth).is_err());
+        }
+        let raw = login(
+            Some(serde_json::json!("123456")),
+            &db_state,
+            &AuthState::new(),
+        )
+        .unwrap_err();
+        let error: Value =
+            serde_json::from_str(&raw).expect("structured JSON in the existing String ABI");
+        assert_eq!(error["code"], "AUTH_LOCKED_OUT");
+        assert_eq!(error["minutes"], 15);
+        assert!(error["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Too many failed attempts"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn approval_availability_uses_the_branch_directory_and_eligible_staff_only() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db_state = test_db_state();
+        seed_approval_staff(&db_state, &["pos.orders.cancel"]);
+        let request = |approval| {
+            manager_approval_availability(
+                Some(serde_json::json!({"approval": approval})),
+                &db_state,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            request("void_orders"),
+            serde_json::json!({"available":true, "permission":"pos.orders.cancel"})
+        );
+        assert_eq!(
+            request("void_payments"),
+            serde_json::json!({"available":false, "permission":"pos.refunds.process"})
+        );
+        for (active, can_login, has_pin) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            set_staff_auth_cache(
+                &db_state,
+                "branch-1",
+                serde_json::json!([{
+                    "id":"approver-1", "is_active":active, "can_login_pos":can_login, "has_pin":has_pin,
+                    "permissions":["pos.refunds.process"]
+                }]),
+            );
+            assert_eq!(request("void_payments")["available"], false);
+            let error = verify_manager_pin_with_lockout(
+                "9876",
+                MoneyApproval::VoidPayments,
+                &db_state,
+                &AuthState::new(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "NO_APPROVER_IN_STORE");
+        }
+        assert_eq!(lockout_attempts(&db_state), 0);
+        assert_eq!(
+            load_approval_lockout_from_db(&db_state.conn.lock().unwrap()).attempts,
+            0
+        );
     }
 
     fn set_pin_hash(db_state: &db::DbState, key: &str, pin: &str) {

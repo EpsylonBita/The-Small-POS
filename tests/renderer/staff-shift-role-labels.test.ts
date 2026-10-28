@@ -123,7 +123,7 @@ test('Round 313: the PIN step has a touch numeric keypad wired to enteredPin, wi
   assert.match(footer, /renderCheckInBackButton\('select-staff'\)/, 'the PIN-step Back action is in the footer');
 
   // Touch-first + on-palette: >=44px keys, no hover, no native title, no blue/cyan/purple/indigo/violet/sky.
-  assert.match(pinStep, /min-h-\[44px\]/);
+  assert.match(pinStep, /min-h-touch(?![\w.-])/);
   assert.doesNotMatch(pinStep, /hover:/);
   assert.doesNotMatch(pinStep, /\btitle=/);
   assert.doesNotMatch(pinStep, /\b(?:bg|text|border|from|to|ring)-(?:blue|cyan|purple|indigo|violet|sky)-/);
@@ -151,7 +151,7 @@ test('Round 313 follow-up: the PIN step is compact (no tall py-5/text-4xl input,
 
   // Tighter keypad rhythm, but every key is still a >=44px touch target.
   assert.match(pinStep, /data-testid="staff-pin-keypad" className="mt-3 grid grid-cols-3 gap-1\.5"/);
-  assert.match(pinStep, /min-h-\[44px\]/);
+  assert.match(pinStep, /min-h-touch(?![\w.-])/);
 
   // Compact section wrapper (space-y-3, not the old space-y-6) so the full step fits without scrolling.
   assert.match(modalSource, /className="space-y-3" data-testid="staff-pin-section"/);
@@ -171,10 +171,10 @@ test('Round 313 (2nd follow-up): keypad keys are exactly-44px (no py-3 overshoot
 
   // Keypad keys keep the 44px touch floor but no longer stack py-3 on top of it (that overshoot pushed the
   // footer below the fold).
-  assert.match(pinStep, /min-h-\[44px\]/);
-  assert.doesNotMatch(pinStep, /min-h-\[44px\][^"]*\bpy-3\b/, 'keypad keys must not add py-3 over the 44px floor');
+  assert.match(pinStep, /min-h-touch(?![\w.-])/);
+  assert.doesNotMatch(pinStep, /min-h-touch(?![\w.-])[^"]*\bpy-3\b/, 'keypad keys must not add py-3 over the 44px floor');
   // The compact digit key is min-h-[44px] + text-xl with no vertical padding token.
-  assert.match(pinStep, /min-h-\[44px\] items-center justify-center rounded-xl border border-slate-200\/80 bg-white\/85 text-xl font-black/);
+  assert.match(pinStep, /min-h-touch items-center justify-center rounded-xl border border-slate-200\/80 bg-white\/85 text-xl font-black/);
 
   // The PIN heading is rendered once (the duplicate eyebrow + inset label are gone); the helper stays.
   const enterPinHeadings = (pinStep.match(/staffShift\.enterPIN'\)/g) ?? []).length;

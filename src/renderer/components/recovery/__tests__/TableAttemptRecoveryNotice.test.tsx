@@ -15,12 +15,59 @@ const snapshotConflict = { ...attempt, state: 'conflict', errorCode: 'CANONICAL_
 beforeEach(() => { mocks.invoke.mockReset(); mocks.callbacks.clear(); });
 afterEach(cleanup);
 describe('visible table recovery state', () => {
+  it('shows refused edit guidance and discards only the selected old edit', async () => {
+    const edit = { ...snapshotConflict, kind: 'item_edit', errorCode: 'CANONICAL_EDIT_REFUSED_409' };
+    mocks.invoke.mockImplementation((command: string) => command === 'table_attempt_recovery_status'
+      ? Promise.resolve({ success: true, attempts: [edit] }) : Promise.resolve({ state: 'retired' }));
+    render(<TableAttemptRecoveryNotice />);
+    await screen.findByText(/checkoutRecovery.editRefused/);
+    expect(screen.queryByText('checkoutRecovery.originalResultUnconfirmed')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'checkoutRecovery.confirmOriginalResult' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'checkoutRecovery.discardEdit' }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('table_attempt_recovery_discard_edit', { clientEventId: 'original' }));
+  });
+
+  it('edit review failure never uses the cancellation confirmation text', async () => {
+    mocks.invoke.mockResolvedValue({ success: true, attempts: [{ ...snapshotConflict, kind: 'item_edit' }] });
+    render(<TableAttemptRecoveryNotice onReviewEdit={vi.fn(async () => false)} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'modals.menu.draftRecover' }));
+    await screen.findByText('checkoutRecovery.editReviewUnavailable');
+    expect(screen.queryByText('checkoutRecovery.originalResultUnconfirmed')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'checkoutRecovery.discardEdit' })).toBeNull();
+  });
+
+  it('offers native verification for a legacy generic conflict without claiming non-application', async () => {
+    mocks.invoke.mockResolvedValue({ success: true, attempts: [{ ...snapshotConflict, kind: 'item_edit', errorCode: 'CANONICAL_CONFLICT_REVIEW_REQUIRED' }] });
+    render(<TableAttemptRecoveryNotice />);
+    await screen.findByText(/checkoutRecovery.editConflict/);
+    expect(screen.getByRole('button', { name: 'checkoutRecovery.discardEdit' })).toBeTruthy();
+    expect(screen.queryByText(/checkoutRecovery.editRefused/)).toBeNull();
+    expect(screen.queryByText('checkoutRecovery.originalResultUnconfirmed')).toBeNull();
+  });
+
+  it('failed discard retains the edit and uses edit-specific text', async () => {
+    mocks.invoke.mockImplementation((command: string) => command === 'table_attempt_recovery_status'
+      ? Promise.resolve({ success: true, attempts: [{ ...snapshotConflict, kind: 'item_edit', errorCode: 'CANONICAL_EDIT_REFUSED_422' }] })
+      : Promise.reject(new Error('unconfirmed server version')));
+    render(<TableAttemptRecoveryNotice />);
+    fireEvent.click(await screen.findByRole('button', { name: 'checkoutRecovery.discardEdit' }));
+    await screen.findByText('checkoutRecovery.editReviewUnavailable');
+    expect(screen.queryByText('checkoutRecovery.originalResultUnconfirmed')).toBeNull();
+    expect(screen.getByText(/checkoutRecovery.editRefused/)).toBeTruthy();
+  });
+
+  it('filters terminal retired entries without marking status unavailable', async () => {
+    mocks.invoke.mockResolvedValue({ success: true, attempts: [{ ...snapshotConflict, kind: 'item_edit', state: 'retired' }] });
+    const view = render(<TableAttemptRecoveryNotice />);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalled());
+    expect(view.container.textContent).toBe('');
+  });
   it('shows a compact recovery label without exposing an internal order UUID and reviews the exact original', async () => {
     const orderId = '30900e3d-ea23-497e-9ea1-3a496962397e';
     const review = vi.fn(async () => true);
     mocks.invoke.mockResolvedValue({ success: true, attempts: [{ ...snapshotConflict, kind: 'item_edit', orderId }] });
     render(<TableAttemptRecoveryNotice onReviewEdit={review} />);
-    await screen.findByText(/checkoutRecovery.conflict/);
+    await screen.findByText(/checkoutRecovery.editConflict/);
     expect(screen.queryByText(new RegExp(orderId))).toBeNull();
     expect(screen.getByText(new RegExp(` · ${internalOrderReference(orderId)}$`))).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'modals.menu.draftRecover' }));

@@ -249,7 +249,7 @@ export const OrderCard = memo<OrderCardProps>(({
   const PaymentMethodIcon = ({ method }: { method: string }) => {
     const iconSize = 20;
 
-    if (method === 'twint') return <img src={twintLogo} alt="TWINT" className="h-5 w-auto rounded" />;
+    if (method === 'twint') return <img src={twintLogo} alt="TWINT" className="h-5 w-auto rounded-sm" />;
     if (method === 'cash') {
       return (
         <svg
@@ -526,7 +526,7 @@ export const OrderCard = memo<OrderCardProps>(({
       // (`order-card-overdue-pulse`, 4 cycles then steady — see OrderCard.css)
       // instead of infinite `animate-pulse`.
       className={`relative rounded-2xl sm:rounded-full py-3 sm:py-3 px-3 sm:px-6 cursor-pointer transform transition-all duration-300 touch-feedback ${resolvedTheme === 'light'
-        ? 'bg-[#fef8ee] border border-amber-100/80 shadow-sm active:bg-[#f8ecd9]'
+        ? 'bg-[#fef8ee] border border-amber-100/80 shadow-xs active:bg-[#f8ecd9]'
         : 'bg-[#26231e]/95 border border-white/20 shadow-lg active:bg-[#38342c]/95'
         } ${deliveryOlderThan40
           ? 'border-red-500/60 shadow-[inset_0_0_40px_6px_rgba(239,68,68,0.45)] order-card-overdue-pulse'
@@ -538,7 +538,7 @@ export const OrderCard = memo<OrderCardProps>(({
     >
         <div className="flex items-center justify-between gap-2 sm:gap-4">
         {/* Left Section - Order Number & Time */}
-        <div className="flex items-center gap-2 sm:gap-4 relative flex-shrink-0">
+        <div className="flex items-center gap-2 sm:gap-4 relative shrink-0">
           <div className="flex flex-col gap-0.5 sm:gap-1">
             <span className={`text-base sm:text-lg font-bold min-w-[50px] sm:min-w-[80px] ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white'}`}>
               {formatOrderNumber()}
@@ -633,7 +633,7 @@ export const OrderCard = memo<OrderCardProps>(({
             )}
             {isBoxOrder(order) && (order.is_test === true || order.is_test === 1 || order.isTest === true
               || order.integration_environment === 'sandbox' || order.integrationEnvironment === 'sandbox') && (
-              <span data-testid="box-test-order-badge" className="mt-1 inline-flex rounded border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
+              <span data-testid="box-test-order-badge" className="mt-1 inline-flex rounded-sm border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
                 {t('boxOrder.testOrder', { defaultValue: 'TEST · SANDBOX' })}
               </span>
             )}
@@ -643,7 +643,7 @@ export const OrderCard = memo<OrderCardProps>(({
         </div>
 
         {/* Right Section - Price, Order Type, and Payment Icon */}
-        <div className="flex flex-col items-center gap-1 sm:gap-2 mr-8 sm:mr-12 flex-shrink-0">
+        <div className="flex flex-col items-center gap-1 sm:gap-2 mr-8 sm:mr-12 shrink-0">
           <span className={`text-base sm:text-xl font-bold ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white/90'
             }`}>
             {formatCurrency(totalNormalized, order.currency ?? null)}
@@ -665,7 +665,7 @@ export const OrderCard = memo<OrderCardProps>(({
             <span
               data-testid="order-card-platform-payment"
               aria-label={platformPaymentA11y}
-              className={`text-[10px] sm:text-xs font-semibold whitespace-nowrap rounded px-1.5 py-0.5 border border-cyan-500/40 bg-cyan-500/10 ${resolvedTheme === 'light' ? 'text-cyan-700' : 'text-cyan-400'}`}
+              className={`text-[10px] sm:text-xs font-semibold whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-cyan-500/40 bg-cyan-500/10 ${resolvedTheme === 'light' ? 'text-cyan-700' : 'text-cyan-400'}`}
             >
               {platformPaymentLabel}
             </span>
@@ -679,7 +679,7 @@ export const OrderCard = memo<OrderCardProps>(({
               data-testid="order-card-payment-pending"
               role="status"
               aria-label={t('orderCard.paymentPendingA11y', { defaultValue: 'Payment pending' })}
-              className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded px-1.5 py-0.5 border border-amber-500/40 bg-amber-500/10 ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
+              className={`text-[10px] sm:text-xs font-semibold tracking-wide whitespace-nowrap rounded-sm px-1.5 py-0.5 border border-amber-500/40 bg-amber-500/10 ${resolvedTheme === 'light' ? 'text-amber-700' : 'text-amber-400'}`}
             >
               {t('orderCard.paymentPending', { defaultValue: 'PAY PENDING' })}
             </span>

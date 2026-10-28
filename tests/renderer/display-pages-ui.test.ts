@@ -44,7 +44,7 @@ test('CustomerDisplayPage reads local orders and projects them natively to deskt
   assert.match(source, /const keys = getKdsRecordIdentityKeys\(order\);/);
   assert.match(source, /order_number: getOrderIdentifier\(order, keys\[0\]\)/);
   assert.match(source, /formatCompactOrderNumberForDisplay/);
-  assert.match(source, /break-words/);
+  assert.match(source, /wrap-break-word/);
   // Desktop/TV output: a native external window fed by a native snapshot, never a hosted page.
   assert.match(
     source,

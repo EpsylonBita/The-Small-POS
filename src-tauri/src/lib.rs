@@ -1411,6 +1411,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
                 checkout_drafts::checkout_draft_resume_declined,
                 table_attempt_recovery::table_attempt_recovery_status,
                 table_attempt_recovery::table_attempt_recovery_confirm_original,
+                table_attempt_recovery::table_attempt_recovery_discard_edit,
             // App lifecycle
             memory_trim::memory_trim_webview,
             commands::runtime::app_shutdown,
@@ -1428,6 +1429,7 @@ fn run_normal(context: tauri::Context<tauri::Wry>) {
             commands::auth::auth_has_permission,
             commands::auth::auth_get_session_stats,
             commands::auth::auth_confirm_privileged_action,
+            commands::auth::auth_manager_approval_available,
             commands::auth::auth_setup_pin,
             commands::auth::auth_secure_session_get,
             commands::auth::auth_secure_session_set,

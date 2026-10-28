@@ -29,7 +29,7 @@ export const CustomerDetailsForm: React.FC<CustomerDetailsFormProps> = ({
     resolvedTheme === 'dark'
       ? 'border-white/12 bg-black/25 text-white placeholder-white/45 focus:border-yellow-400/80 focus:bg-black/35'
       : 'border-black/12 bg-white/65 text-gray-950 placeholder-gray-500 focus:border-yellow-500 focus:bg-white/90'
-  } focus:outline-none focus:ring-2 focus:ring-yellow-400/40`;
+  } focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`;
 
   return (
     <div>

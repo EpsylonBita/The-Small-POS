@@ -985,7 +985,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             <div className="pt-3 flex gap-2">
               <button
                 onClick={handleAdd}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-transform duration-150 active:scale-95 bg-emerald-600 border border-emerald-500 text-white shadow-sm shadow-emerald-600/30 active:bg-emerald-700"
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-transform duration-150 active:scale-95 bg-emerald-600 border border-emerald-500 text-white shadow-xs shadow-emerald-600/30 active:bg-emerald-700"
               >
                 <Plus className="w-4 h-4" />
                 {t('settings.peripherals.cashRegister.addDevice', 'Add Device')}
@@ -1046,7 +1046,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="flex-shrink-0">
+                        <div className="shrink-0">
                           {device.device_type === 'cash_register' ? (
                             <CreditCard className="w-4 h-4 text-amber-400" />
                           ) : (
@@ -1059,12 +1059,12 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                               {device.name}
                             </span>
                             {device.is_default && (
-                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded flex-shrink-0">
+                              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-sm shrink-0">
                                 {t('settings.peripherals.cashRegister.default', 'Default')}
                               </span>
                             )}
                             {!device.enabled && (
-                              <span className="text-xs bg-gray-500/20 text-gray-400 px-2 py-0.5 rounded flex-shrink-0">
+                              <span className="text-xs bg-gray-500/20 text-gray-400 px-2 py-0.5 rounded-sm shrink-0">
                                 {t('settings.peripherals.cashRegister.disabled', 'Disabled')}
                               </span>
                             )}
@@ -1157,10 +1157,10 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
 
       {/* Delete confirmation overlay */}
       {deleteConfirmId && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-gray-900/95 border border-white/15 rounded-3xl p-6 mx-6 max-w-sm w-full shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
-              <Trash2 className="w-5 h-5 text-red-400 flex-shrink-0" />
+              <Trash2 className="w-5 h-5 text-red-400 shrink-0" />
               <div>
                 <h3 className="text-sm font-semibold text-white">
                   {t('settings.peripherals.cashRegister.confirmDeleteTitle', 'Delete Device')}
@@ -1204,7 +1204,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
     // z-[20050] sits ABOVE the Settings LiquidGlassModal viewport (.liquid-glass-modal-viewport,
     // z-index: 20000) — matching the codebase's nested-above-glass-modal overlays (MenuItemModal,
     // TableCheckManagerModal). z-[1200] rendered behind Settings (live QA, Round 241).
-    <div className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6">
+    <div className="fixed inset-0 z-20050 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6">
       {/* Backdrop — click closes (close-only, never saves) */}
       <div className="absolute inset-0" onClick={closeForm} aria-hidden="true" />
       <div
@@ -1633,7 +1633,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
               onChange={() => updateForm({ print_mode: 'register_prints' })}
               className="sr-only peer"
             />
-            <div className="flex min-h-[44px] items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-yellow-500/50">
+            <div className="flex min-h-touch items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-hidden peer-focus:ring-2 peer-focus:ring-yellow-500/50">
               {t('settings.peripherals.cashRegister.registerPrints', 'Register prints receipt')}
             </div>
           </label>
@@ -1645,7 +1645,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
               onChange={() => updateForm({ print_mode: 'pos_sends_receipt' })}
               className="sr-only peer"
             />
-            <div className="flex min-h-[44px] items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-yellow-500/50">
+            <div className="flex min-h-touch items-center justify-center rounded-xl border-2 border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm liquid-glass-modal-text transition-colors peer-checked:border-yellow-500 peer-checked:bg-yellow-400/15 peer-checked:text-yellow-900 dark:peer-checked:text-yellow-200 peer-focus:outline-hidden peer-focus:ring-2 peer-focus:ring-yellow-500/50">
               {t('settings.peripherals.cashRegister.posSendsReceipt', 'POS sends receipt data')}
             </div>
           </label>
@@ -1682,7 +1682,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     <input
                       value={row.code}
                       onChange={(e) => updateTaxRate(i, 'code', e.target.value)}
-                      className="w-12 px-1.5 py-1 rounded bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      className="w-12 px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
                       maxLength={2}
                     />
                   </td>
@@ -1690,7 +1690,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     <input
                       value={row.rate}
                       onChange={(e) => updateTaxRate(i, 'rate', e.target.value)}
-                      className="w-16 px-1.5 py-1 rounded bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      className="w-16 px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
                       type="number"
                       min="0"
                       max="100"
@@ -1701,14 +1701,14 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
                     <input
                       value={row.label}
                       onChange={(e) => updateTaxRate(i, 'label', e.target.value)}
-                      className="w-full px-1.5 py-1 rounded bg-white/5 border border-white/10 liquid-glass-modal-text text-xs"
+                      className="w-full px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 liquid-glass-modal-text text-xs"
                     />
                   </td>
                   <td className="px-3 py-1.5">
                     <input
                       value={row.department}
                       onChange={(e) => updateTaxRate(i, 'department', e.target.value)}
-                      className="w-16 px-1.5 py-1 rounded bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
+                      className="w-16 px-1.5 py-1 rounded-sm bg-white/5 border border-white/10 text-center liquid-glass-modal-text text-xs"
                       type="number"
                       min="1"
                       max="99"
@@ -1781,7 +1781,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupI
             <button
               onClick={handleSave}
               disabled={isSaving || !form.name.trim()}
-              className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-sm shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
+              className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-xs shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
             >
               {isSaving
                 ? t('common.actions.saving', 'Saving...')

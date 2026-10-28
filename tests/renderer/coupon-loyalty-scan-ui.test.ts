@@ -100,7 +100,7 @@ test('LoyaltyPage exposes scanner action and supports card, phone, and member-co
   assert.match(page, /<Users className="w-5 h-5 text-green-500" \/>/);
   assert.match(page, /<Award className="w-5 h-5 text-yellow-500" \/>/);
   assert.match(page, /<TrendingUp className="w-5 h-5 text-amber-500" \/>/);
-  assert.match(page, /px-2 py-1 text-xs font-medium rounded border bg-transparent flex items-center gap-1/);
+  assert.match(page, /px-2 py-1 text-xs font-medium rounded-sm border bg-transparent flex items-center gap-1/);
   assert.match(page, /text-amber-300 border-amber-400\/50/);
   assert.match(page, /text-yellow-400 border-yellow-500\/40/);
   assert.match(page, /text-zinc-300 border-zinc-400\/40/);

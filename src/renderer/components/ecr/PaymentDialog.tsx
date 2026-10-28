@@ -134,7 +134,7 @@ export const PaymentDialog: React.FC<Props> = ({
   }
 
   return renderModalPortal(
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
+    <div className="fixed inset-0 z-1200 flex items-center justify-center">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
@@ -142,7 +142,7 @@ export const PaymentDialog: React.FC<Props> = ({
       />
 
       {/* Dialog */}
-      <div className="relative w-full max-w-md mx-4 p-8 rounded-2xl bg-gradient-to-br from-gray-800/95 to-gray-900/95 backdrop-blur-lg border border-gray-700/50 shadow-2xl">
+      <div className="relative w-full max-w-md mx-4 p-8 rounded-2xl bg-linear-to-br from-gray-800/95 to-gray-900/95 backdrop-blur-lg border border-gray-700/50 shadow-2xl">
         {/* Close button */}
         {status !== 'processing' && (
           <button

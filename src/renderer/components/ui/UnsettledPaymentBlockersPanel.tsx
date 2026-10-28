@@ -46,7 +46,25 @@ interface UnsettledPaymentBlockersPanelProps {
    * reference. Never a charge or a refund here.
    */
   onResolveTwintReturned?: (blocker: UnsettledPaymentBlocker) => void;
+  /**
+   * "Close without recording money (manager)" for the held corrections of a
+   * cancelled order (`edit_settlement_not_saved`, variant `order_cancelled`):
+   * their editor can never be reopened (Tomikro #00055, 28/10/2026). The
+   * caller asks the manager approval; nothing is charged or returned.
+   */
+  onCloseHeldEdit?: (blocker: UnsettledPaymentBlocker) => void;
   resolvingKey?: string | null;
+}
+
+/** Busy key of a held-correction close, shared with the caller. */
+export const heldEditClosingKey = (orderId: string) => `held-edit:${orderId}`;
+
+/** A held correction whose order is cancelled: only a manager closes it here. */
+export function isCancelledOrderHeldEdit(blocker: UnsettledPaymentBlocker): boolean {
+  return (
+    blocker.reasonCode === "edit_settlement_not_saved" &&
+    blocker.reasonVariant === "order_cancelled"
+  );
 }
 
 function getMethodBadgeClasses(method: string): string {
@@ -54,7 +72,7 @@ function getMethodBadgeClasses(method: string): string {
     case "cash":
       return "border-emerald-400/30 bg-emerald-500/10 text-emerald-200";
     case "card":
-      return "border-zinc-300/25 bg-white/[0.06] text-zinc-100";
+      return "border-zinc-300/25 bg-white/6 text-zinc-100";
     case "split":
       return "border-amber-400/30 bg-amber-500/10 text-amber-200";
     default:
@@ -94,6 +112,7 @@ export function UnsettledPaymentBlockersPanel({
   onSaveUnsavedPayment,
   onResolveUnsavedPayment,
   onResolveTwintReturned,
+  onCloseHeldEdit,
   resolvingKey = null,
 }: UnsettledPaymentBlockersPanelProps) {
   const { t } = useTranslation();
@@ -224,7 +243,7 @@ export function UnsettledPaymentBlockersPanel({
 
                 {reviewPayment ? (
                 <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.setAsidePaymentLabel", {
                         defaultValue: "Set-aside payment",
@@ -234,7 +253,7 @@ export function UnsettledPaymentBlockersPanel({
                       {formatCurrency(reviewPayment.amount || 0)}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.takenAtLabel", {
                         defaultValue: "Taken at",
@@ -251,7 +270,7 @@ export function UnsettledPaymentBlockersPanel({
                         : "-"}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.totalLabel", {
                         defaultValue: "Total",
@@ -264,7 +283,7 @@ export function UnsettledPaymentBlockersPanel({
                 </div>
                 ) : unsavedPayment ? (
                 <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {unsavedPayment.method === 'twint' ? t('twintPayment.receiptNotSaved') : t("paymentIntegrity.unsavedPaymentLabel", {
                         defaultValue: "Charged, not saved",
@@ -274,7 +293,7 @@ export function UnsettledPaymentBlockersPanel({
                       {isManualTwintRecord(unsavedPayment) ? formatCurrency(unsavedPayment.amountCents / 100,unsavedPayment.currency || 'CHF') : formatCurrency(unsavedPayment.amount || 0)}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {unsavedPayment.method === 'twint' ? t('twintPayment.receiptConfirmedAt') : t("paymentIntegrity.chargedAtLabel", {
                         defaultValue: "Charged at",
@@ -291,7 +310,7 @@ export function UnsettledPaymentBlockersPanel({
                         : "-"}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.totalLabel", {
                         defaultValue: "Total",
@@ -304,7 +323,7 @@ export function UnsettledPaymentBlockersPanel({
                 </div>
                 ) : (
                 <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[330px]">
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.totalLabel", {
                         defaultValue: "Total",
@@ -314,7 +333,7 @@ export function UnsettledPaymentBlockersPanel({
                       {formatBlockerAmount(blocker.totalAmount || 0)}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.settledLabel", {
                         defaultValue: "Settled",
@@ -324,7 +343,7 @@ export function UnsettledPaymentBlockersPanel({
                       {formatCurrency(blocker.settledAmount || 0)}
                     </div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/4 px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                       {t("paymentIntegrity.outstandingLabel", {
                         defaultValue: "Outstanding",
@@ -373,7 +392,7 @@ export function UnsettledPaymentBlockersPanel({
                     type="button"
                     disabled={Boolean(resolvingKey)}
                     onClick={() => onResolveSetAsidePayment(blocker)}
-                    className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-transparent bg-amber-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-amber-300 ${
+                    className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-transparent bg-amber-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-amber-300 ${
                       resolvingKey ? "cursor-not-allowed opacity-60" : ""
                     }`}
                     aria-busy={resolvingKey === setAsideResolvingKey(reviewPayment.paymentId)}
@@ -397,7 +416,7 @@ export function UnsettledPaymentBlockersPanel({
                       type="button"
                       disabled={Boolean(resolvingKey)}
                       onClick={() => onSaveUnsavedPayment(blocker)}
-                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-transparent bg-emerald-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-emerald-300 ${
+                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-transparent bg-emerald-400 px-3 py-2 text-sm font-semibold text-slate-950 transition-transform active:scale-[0.98] active:bg-emerald-300 ${
                         resolvingKey ? "cursor-not-allowed opacity-60" : ""
                       }`}
                       aria-busy={resolvingKey === unsavedSavingKey(unsavedPayment.idempotencyKey)}
@@ -417,7 +436,7 @@ export function UnsettledPaymentBlockersPanel({
                       type="button"
                       disabled={Boolean(resolvingKey)}
                       onClick={() => onResolveUnsavedPayment(blocker)}
-                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
                         resolvingKey ? "cursor-not-allowed opacity-60" : ""
                       }`}
                       aria-busy={resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)}
@@ -438,7 +457,7 @@ export function UnsettledPaymentBlockersPanel({
                       disabled={Boolean(resolvingKey)}
                       onClick={() => onResolveTwintReturned(blocker)}
                       data-testid={`twint-returned-${unsavedPayment.idempotencyKey}`}
-                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                      className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
                         resolvingKey ? "cursor-not-allowed opacity-60" : ""
                       }`}
                       aria-busy={resolvingKey === unsavedResolvingKey(unsavedPayment.idempotencyKey)}
@@ -456,6 +475,30 @@ export function UnsettledPaymentBlockersPanel({
                 </div>
               )}
 
+              {typeof onCloseHeldEdit === "function" && isCancelledOrderHeldEdit(blocker) && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={Boolean(resolvingKey)}
+                    onClick={() => onCloseHeldEdit(blocker)}
+                    data-testid={`close-held-edit-${blocker.orderId}`}
+                    className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-100 transition-transform active:scale-[0.98] active:bg-amber-500/25 ${
+                      resolvingKey ? "cursor-not-allowed opacity-60" : ""
+                    }`}
+                    aria-busy={resolvingKey === heldEditClosingKey(blocker.orderId)}
+                  >
+                    <Undo2 className="h-4 w-4" />
+                    {resolvingKey === heldEditClosingKey(blocker.orderId)
+                      ? t("paymentIntegrity.heldEditClosing", {
+                          defaultValue: "Closing...",
+                        })
+                      : t("paymentIntegrity.heldEditCloseAction", {
+                          defaultValue: "Close without recording money (manager)",
+                        })}
+                  </button>
+                </div>
+              )}
+
               {canResolveHere && (
                 <div className="mt-4 flex flex-wrap gap-2">
                   {resolveMethods.map((method) => {
@@ -467,7 +510,7 @@ export function UnsettledPaymentBlockersPanel({
                       ? method === "cash"
                         ? "border-transparent bg-emerald-500 text-slate-950 active:bg-emerald-400"
                         : "border-transparent bg-amber-400 text-slate-950 active:bg-amber-300"
-                      : "border-white/10 bg-white/[0.04] text-white active:bg-white/[0.08]";
+                      : "border-white/10 bg-white/4 text-white active:bg-white/8";
                     const icon =
                       method === "cash" ? (
                         <Banknote className="h-4 w-4" />
@@ -481,7 +524,7 @@ export function UnsettledPaymentBlockersPanel({
                         type="button"
                         disabled={Boolean(resolvingKey)}
                         onClick={() => onResolveBlocker?.(blocker, method)}
-                        className={`inline-flex min-h-[44px] items-center gap-2 rounded-2xl border px-3 py-2 text-sm font-semibold transition-transform active:scale-[0.98] ${baseClasses} ${
+                        className={`inline-flex min-h-touch items-center gap-2 rounded-2xl border px-3 py-2 text-sm font-semibold transition-transform active:scale-[0.98] ${baseClasses} ${
                           Boolean(resolvingKey)
                             ? "cursor-not-allowed opacity-60"
                             : ""

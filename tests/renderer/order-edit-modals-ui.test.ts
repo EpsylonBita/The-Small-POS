@@ -41,7 +41,7 @@ test('EditPaymentMethodModal: green save, soft-red cancel, amber/non-blue card, 
   // dark (subtle neutral border + zinc text + disabled cursor). No gray-300/gray-600/slate.
   assert.match(
     editPayment,
-    /!hasChanged \|\| isSaving[\s\S]*?bg-zinc-100 text-zinc-400 border border-zinc-200\/80 dark:bg-white\/\[0\.06\] dark:text-zinc-500 dark:border-white\/10 cursor-not-allowed/,
+    /!hasChanged \|\| isSaving[\s\S]*?bg-zinc-100 text-zinc-400 border border-zinc-200\/80 dark:bg-white\/6 dark:text-zinc-500 dark:border-white\/10 cursor-not-allowed/,
   );
   assert.doesNotMatch(editPayment, /bg-gray-300|dark:bg-gray-600/, 'disabled save must not use the blue-leaning grey tokens');
 
@@ -61,8 +61,8 @@ test('EditPaymentMethodModal: green save, soft-red cancel, amber/non-blue card, 
   assert.match(editPayment, /selectedMethod === 'cash'[\s\S]*?border-green-300\/70/);
 
   // Touch-safe buttons: rounded smooth, centered, min touch height.
-  assert.match(editPayment, /rounded-2xl font-medium flex items-center justify-center min-h-\[44px\]/); // save
-  assert.match(editPayment, /rounded-2xl border font-medium flex items-center justify-center min-h-\[44px\]/); // cancel
+  assert.match(editPayment, /rounded-2xl font-medium flex items-center justify-center min-h-touch(?![\w.-])/); // save
+  assert.match(editPayment, /rounded-2xl border font-medium flex items-center justify-center min-h-touch(?![\w.-])/); // cancel
 });
 
 test('Round 310: OrderCancellationModal uses the shared glass footer -- red confirm enabled, subdued when disabled, neutral safe close', () => {
@@ -95,7 +95,7 @@ test('Round 310: OrderCancellationModal uses the shared glass footer -- red conf
   );
   assert.match(
     footer,
-    /canConfirm\s*\?\s*'!bg-red-600 !text-white !border-red-600 active:!bg-red-700/,
+    /canConfirm\s*\?\s*'bg-red-600! text-white! border-red-600! active:bg-red-700!/,
     'the actionable confirm must go fully red with white letters (tap feedback, not hover)',
   );
   assert.match(footer, /:\s*'liquid-glass-modal-error'/);
@@ -153,7 +153,7 @@ test('Round 316: OrderCancellationModal safe button is keep/dismiss copy; red co
     cancellation,
     /liquid-glass-modal-button flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed/,
   );
-  assert.match(cancellation, /canConfirm\s*\?\s*'!bg-red-600 !text-white/);
+  assert.match(cancellation, /canConfirm\s*\?\s*'bg-red-600! text-white!/);
   assert.match(cancellation, /:\s*'liquid-glass-modal-error'/);
   assert.match(cancellation, /disabled=\{!canConfirm\}/);
   {

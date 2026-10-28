@@ -10,6 +10,7 @@ import logoWhite from "../assets/logo-white.png";
 import { AlertTriangle, Delete as DeleteIcon, Lock } from "lucide-react";
 import { getBridge, offEvent, onEvent } from "../../lib";
 import { pageMotionContainer, pageMotionItem } from "../components/ui/page-motion";
+import { extractPrivilegedActionError } from '../utils/privileged-actions';
 
 interface LoginPageProps {
     onLogin: (pin: string) => Promise<boolean>;
@@ -237,8 +238,11 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 setError(t('login.errors.invalidPin'));
             }
         } catch (err) {
+            const lockout = extractPrivilegedActionError(err);
             setError(
-                isLoginTimeoutError(err)
+                lockout?.code === 'AUTH_LOCKED_OUT' && lockout.minutes
+                    ? t('login.errors.lockedOut', { minutes: lockout.minutes })
+                    : isLoginTimeoutError(err)
                     ? t('login.errors.timeout', 'Login took too long. Please try again.')
                     : t('login.errors.loginFailed'),
             );
@@ -415,7 +419,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     which case the user MUST set a PIN before proceeding). */}
                 {showPinSetup && createPortal(
                     <div
-                        className="fixed inset-0 z-[1050] flex items-center justify-center p-4 sm:p-6"
+                        className="fixed inset-0 z-1050 flex items-center justify-center p-4 sm:p-6"
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="setup-pin-title"

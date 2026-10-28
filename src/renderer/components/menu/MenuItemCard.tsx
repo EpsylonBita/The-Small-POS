@@ -162,7 +162,7 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
             >
               <Minus size={16} />
             </button>
-            <span className={`text-xl font-bold min-w-[2rem] text-center ${
+            <span className={`text-xl font-bold min-w-8 text-center ${
               resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
             }`}>
               {quickQuantity}
@@ -199,7 +199,7 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, onSelect, onQu
       {item.is_customizable && (
         <div className="mb-1.5">
           <span
-            className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border shadow-sm ${
+            className={`inline-flex h-6 w-6 items-center justify-center rounded-lg border shadow-xs ${
               resolvedTheme === 'dark'
                 ? 'border-yellow-400/30 bg-yellow-400/15 text-yellow-300'
                 : 'border-amber-500/40 bg-amber-200/70 text-amber-900'

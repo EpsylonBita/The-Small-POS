@@ -138,7 +138,7 @@ test('users detail modal opens through an app-level portal with a blurred high-z
   assert.match(source, /\{showDetailsModal && selectedUser && renderModalPortal\(\s*<div/);
   assert.match(
     source,
-    /className="fixed inset-0 z-\[1200\] flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
+    /className="fixed inset-0 z-1200 flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
   );
   // No longer an inline page-contained z-50 modal.
   assert.doesNotMatch(source, /\{showDetailsModal && selectedUser && \(\s*<div/);
@@ -157,7 +157,7 @@ test('address delete uses a portaled confirmation modal, not a native confirm di
   assert.match(source, /\{addressPendingDelete && renderModalPortal\(\s*<div/);
   assert.match(
     source,
-    /className="fixed inset-0 z-\[1300\] flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
+    /className="fixed inset-0 z-1300 flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
   );
   assert.match(source, /onClick=\{\(\) => void confirmDeleteAddress\(\)\}/);
 });
@@ -242,7 +242,7 @@ test('UsersPage filter affordance is an accessible button with a status/loyalty 
   assert.match(source, /'bg-white border-gray-200 text-gray-900'/);
   // Click-away closes the popover; it sits above the page/sidebar (high z).
   assert.match(source, /onClick=\{\(\) => setShowFilterMenu\(false\)\}/);
-  assert.match(source, /z-\[1200\]/);
+  assert.match(source, /z-1200(?![\w.-])/);
 });
 
 // Regression contract for the clipped popover (2026-06-21 retest): with a filter active
@@ -379,7 +379,7 @@ test('UsersPage customer details modal exposes labelled dialog semantics', () =>
   assert.match(source, /\{showDetailsModal && selectedUser && renderModalPortal\(/);
   assert.match(
     source,
-    /className="fixed inset-0 z-\[1200\] flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
+    /className="fixed inset-0 z-1200 flex items-center justify-center p-4 bg-black\/50 backdrop-blur-sm"/,
   );
 });
 

@@ -1,12 +1,15 @@
 //! Crash recovery for exact canonical edits and committed cancellations.
 //! No PIN/approval token or payment collection is ever dispatched by this owner.
+//! Tomikro #00055 (27/10/2026): a refused edit outlived its cancelled order and
+//! draft, leaving a permanent notice. `retired` keeps its request and audit but
+//! leaves replay, status and draft protection; it never means `applied`.
 use crate::{
     database_lock::run_blocking_command,
     db::DbState,
     table_session_cache::{self, Scope},
 };
 use chrono::{Duration, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{future::Future, pin::Pin};
 use tauri::{Emitter, Manager};
@@ -50,6 +53,7 @@ impl From<crate::api::AdminFetchError> for Failure {
                 retry: true,
             },
             Some(409) => Self::guarded("CANONICAL_CONFLICT_REVIEW_REQUIRED"),
+            Some(422) => Self::guarded("CANONICAL_VALIDATION_REVIEW_REQUIRED"),
             _ => Self::guarded("CANONICAL_RECOVERY_REVIEW_REQUIRED"),
         }
     }
@@ -126,6 +130,81 @@ pub(crate) fn foreground_applied(conn: &Connection, kind: &str, event: &str) -> 
     Ok(())
 }
 
+/// Terminal `retired` preserves the immutable request without claiming application.
+/// Call inside the caller's transaction/DB lock; never retire a live dispatch.
+/// A pass is capped at 100 and its terminal state makes repeated passes idempotent.
+pub(crate) fn retire_cancelled_edits(conn: &Connection) -> Result<(), String> {
+    schema(conn)?;
+    let scope = table_session_cache::current_scope(conn)?;
+    let mut stmt = conn.prepare("SELECT client_event_id FROM table_attempt_recovery_v1 r
+        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4
+          AND kind='item_edit' AND status NOT IN ('applied','retired')
+          AND (status<>'processing' OR COALESCE(julianday(lease_until)>julianday('now'),0)=0)
+          AND EXISTS(SELECT 1 FROM orders o WHERE (o.id=r.local_order_id OR o.supabase_id=r.local_order_id)
+            AND o.organization_id=r.organization_id AND o.branch_id=r.branch_id
+            AND LOWER(TRIM(o.status)) IN ('cancelled','canceled'))
+        ORDER BY updated_at LIMIT 100").map_err(|e| e.to_string())?;
+    let events = stmt
+        .query_map(
+            params![
+                scope.organization,
+                scope.branch,
+                scope.terminal,
+                scope.owner
+            ],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+    for event in events {
+        retire_edit(
+            conn,
+            &scope,
+            &event,
+            "retired_target_cancelled",
+            &Value::Null,
+        )?;
+    }
+    Ok(())
+}
+
+fn retire_edit(
+    conn: &Connection,
+    scope: &Scope,
+    event: &str,
+    outcome: &str,
+    proof: &Value,
+) -> Result<(), String> {
+    // Audit is the before-image, including exact intent; no order or payment writes.
+    let before: String = conn.query_row("SELECT json_object('status',status,'request_json',request_json,
+        'attempts',attempts,'generation',generation,'lease_until',lease_until,'next_retry_at',next_retry_at,
+        'last_error_code',last_error_code,'updated_at',updated_at,'proof',json(?6))
+        FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
+          AND owner_terminal_id=?4 AND kind='item_edit' AND client_event_id=?5",
+        params![scope.organization,scope.branch,scope.terminal,scope.owner,event,proof.to_string()], |r| r.get(0)).map_err(|e|e.to_string())?;
+    conn.execute("INSERT INTO table_attempt_recovery_audit_v1(organization_id,branch_id,terminal_id,kind,client_event_id,before_json,outcome,created_at)
+        VALUES(?1,?2,?3,'item_edit',?4,?5,?6,?7)",params![scope.organization,scope.branch,scope.terminal,event,before,outcome,Utc::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+    conn.execute(
+        "UPDATE table_attempt_recovery_v1 SET status='retired',generation=generation+1,
+        lease_until=NULL,next_retry_at=NULL,last_error_code=?6,updated_at=?7
+        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4
+          AND kind='item_edit' AND client_event_id=?5",
+        params![
+            scope.organization,
+            scope.branch,
+            scope.terminal,
+            scope.owner,
+            event,
+            outcome,
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn claim(conn: &Connection) -> Result<Option<(Scope, Attempt)>, String> {
     let scope = table_session_cache::current_scope(conn)?;
     schema(conn)?;
@@ -152,6 +231,7 @@ fn claim(conn: &Connection) -> Result<Option<(Scope, Attempt)>, String> {
             json_object('client_event_id',c.client_event_id,'action','whole_order_cancel','cancellation_reason',c.cancellation_reason,'approved_staff_id',c.approved_staff_id),?4,?5
             FROM table_cancel_attempts_v1 c WHERE c.organization_id=?1 AND c.branch_id=?2 AND c.terminal_id=?3",params![scope.organization,scope.branch,scope.terminal,Utc::now().to_rfc3339(),scope.owner]).map_err(|e|e.to_string())?;
     }
+    retire_cancelled_edits(&tx)?;
     let row:Option<(String,String,String,Option<String>,String,i64,i64)>=tx.query_row("SELECT kind,client_event_id,local_order_id,session_id,request_json,generation,attempts FROM table_attempt_recovery_v1
         WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4 AND
         (((status IN ('pending','approval_required') OR (kind='whole_order_cancel' AND status='auth_required')) AND (next_retry_at IS NULL OR julianday(next_retry_at)<=julianday('now')))
@@ -159,6 +239,7 @@ fn claim(conn: &Connection) -> Result<Option<(Scope, Attempt)>, String> {
         ORDER BY updated_at ASC LIMIT 1",params![scope.organization,scope.branch,scope.terminal,scope.owner],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|e|e.to_string())?;
     let Some((kind, event, order, session, raw, generation, attempts)) = row else {
+        tx.commit().map_err(|e| e.to_string())?;
         return Ok(None);
     };
     let request =
@@ -236,7 +317,18 @@ async fn item_snapshot(
                 "PATCH",
                 Some(attempt.request.clone()),
             )
-            .await?;
+            .await
+            .map_err(|failure| match failure.code {
+                // Only a refusal of this exact immutable PATCH proves non-application.
+                // A GET conflict or a transport failure cannot authorize discard.
+                "CANONICAL_CONFLICT_REVIEW_REQUIRED" => {
+                    Failure::guarded("CANONICAL_EDIT_REFUSED_409")
+                }
+                "CANONICAL_VALIDATION_REVIEW_REQUIRED" => {
+                    Failure::guarded("CANONICAL_EDIT_REFUSED_422")
+                }
+                _ => failure,
+            })?;
         if reply.get("success").and_then(Value::as_bool) != Some(true) {
             return Err(Failure::guarded("CANONICAL_EDIT_UNCONFIRMED"));
         }
@@ -597,18 +689,183 @@ pub(crate) fn inspect_edit(
     schema(conn)?;
     let scope = table_session_cache::current_scope(conn)?;
     conn.query_row("SELECT status,last_error_code FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
-        AND kind='item_edit' AND client_event_id=?4 AND owner_terminal_id=?6 AND (local_order_id=?5 OR local_order_id IN (SELECT id FROM orders WHERE supabase_id=?5 AND organization_id=?1 AND branch_id=?2))",params![scope.organization,scope.branch,scope.terminal,event,order,scope.owner],
+        AND kind='item_edit' AND status<>'retired' AND client_event_id=?4 AND owner_terminal_id=?6 AND (local_order_id=?5 OR local_order_id IN (SELECT id FROM orders WHERE supabase_id=?5 AND organization_id=?1 AND branch_id=?2))",params![scope.organization,scope.branch,scope.terminal,event,order,scope.owner],
         |r|Ok(json!({"recoveryState":r.get::<_,String>(0)?,"errorCode":r.get::<_,Option<String>>(1)?}))).optional().map_err(|e|e.to_string())
 }
 
 pub(crate) fn status(conn: &Connection) -> Result<Value, String> {
     schema(conn)?;
     let scope = table_session_cache::current_scope(conn)?;
-    let mut stmt=conn.prepare("SELECT kind,client_event_id,local_order_id,session_id,status,last_error_code,next_retry_at FROM table_attempt_recovery_v1
-        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4 AND status<>'applied' ORDER BY updated_at LIMIT 100").map_err(|e|e.to_string())?;
+    // Retirement writes: take the write reservation before its eligibility read.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    retire_cancelled_edits(&tx)?;
+    let mut stmt=tx.prepare("SELECT kind,client_event_id,local_order_id,session_id,status,last_error_code,next_retry_at FROM table_attempt_recovery_v1
+        WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3 AND owner_terminal_id=?4 AND status NOT IN ('applied','retired') ORDER BY updated_at LIMIT 100").map_err(|e|e.to_string())?;
     let attempts=stmt.query_map(params![scope.organization,scope.branch,scope.terminal,scope.owner],|r|Ok(json!({"kind":r.get::<_,String>(0)?,"clientEventId":r.get::<_,String>(1)?,"orderId":r.get::<_,String>(2)?,"sessionId":r.get::<_,Option<String>>(3)?,"state":r.get::<_,String>(4)?,"errorCode":r.get::<_,Option<String>>(5)?,"nextRetryAt":r.get::<_,Option<String>>(6)?})))
         .map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    drop(stmt);
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(json!({"success":true,"attempts":attempts}))
+}
+
+fn select_discardable_edit(
+    conn: &Connection,
+    event: &str,
+) -> Result<(Scope, Attempt, String), String> {
+    if event.trim().is_empty() || event.len() > 255 {
+        return Err("RECOVERY_REQUEST_INVALID".into());
+    }
+    schema(conn)?;
+    let scope = table_session_cache::current_scope(conn)?;
+    let (order, session, raw, generation, attempts, code): (String,Option<String>,String,i64,i64,String) = conn.query_row(
+        "SELECT local_order_id,session_id,request_json,generation,attempts,last_error_code
+         FROM table_attempt_recovery_v1 WHERE organization_id=?1 AND branch_id=?2 AND terminal_id=?3
+           AND owner_terminal_id=?4 AND kind='item_edit' AND client_event_id=?5 AND status='conflict'
+           AND last_error_code IN ('CANONICAL_EDIT_REFUSED_409','CANONICAL_EDIT_REFUSED_422','CANONICAL_CONFLICT_REVIEW_REQUIRED')",
+        params![scope.organization,scope.branch,scope.terminal,scope.owner,event],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))
+        .optional().map_err(|e|e.to_string())?.ok_or("RECOVERY_EDIT_DISCARD_NOT_ALLOWED")?;
+    let request: Value = serde_json::from_str(&raw).map_err(|_| "RECOVERY_REQUEST_INVALID")?;
+    let remote = request["id"].as_str().ok_or("RECOVERY_REQUEST_INVALID")?;
+    uuid::Uuid::parse_str(remote).map_err(|_| "RECOVERY_REQUEST_INVALID")?;
+    if request["client_event_id"].as_str() != Some(event)
+        || request["expected_version"].as_i64().is_none_or(|v| v < 1)
+        || !conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM orders WHERE (id=?1 OR supabase_id=?1)
+            AND (id=?2 OR supabase_id=?2) AND organization_id=?3 AND branch_id=?4)",
+                params![order, remote, scope.organization, scope.branch],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?
+    {
+        return Err("RECOVERY_REQUEST_INVALID".into());
+    }
+    Ok((
+        scope,
+        Attempt {
+            kind: "item_edit".into(),
+            event: event.into(),
+            order,
+            session,
+            request,
+            generation,
+            attempts,
+        },
+        code,
+    ))
+}
+
+async fn discard_edit_with_transport(
+    db: &DbState,
+    event: &str,
+    transport: &dyn Transport,
+) -> Result<Value, String> {
+    let (scope, attempt, code) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        select_discardable_edit(&conn, event)?
+    };
+    let point = crate::recovery::create_pre_recovery_action_snapshot(db)?;
+    let remote = attempt.request["id"]
+        .as_str()
+        .ok_or("RECOVERY_REQUEST_INVALID")?;
+    let reply = transport
+        .send(
+            format!("/api/pos/orders/sync?order_id={remote}&limit=1"),
+            "GET",
+            None,
+        )
+        .await
+        .map_err(|_| "RECOVERY_EDIT_SERVER_UNCONFIRMED")?;
+    let orders = reply["orders"]
+        .as_array()
+        .filter(|rows| rows.len() == 1)
+        .ok_or("RECOVERY_EDIT_SERVER_UNCONFIRMED")?;
+    let parent = &orders[0];
+    let expected = attempt.request["expected_version"].as_i64().unwrap();
+    // Only a legacy conflict replays the old PATCH below, and only a newer
+    // server version keeps that replay from applying it. An exact 409/422
+    // refusal of this immutable PATCH already proves non-application, even at
+    // the unchanged version (a catalogue 422 need not advance it), as on Android.
+    let legacy = code == "CANONICAL_CONFLICT_REVIEW_REQUIRED";
+    if parent["id"].as_str() != Some(remote)
+        || parent["organization_id"].as_str() != Some(scope.organization.as_str())
+        || parent["branch_id"].as_str() != Some(scope.branch.as_str())
+        || parent["version"]
+            .as_i64()
+            .is_none_or(|v| v < expected || (legacy && v == expected))
+    {
+        return Err("RECOVERY_EDIT_SERVER_UNCONFIRMED".into());
+    }
+    let refusal_code = if legacy {
+        // Older clients did not persist which request produced the 409. Only
+        // after the fresh version fence may we verify the unchanged old PATCH.
+        // An applied event replays its journal; never discard that result (or
+        // any ambiguous response). No new event/version/body is manufactured.
+        match transport
+            .send(
+                "/api/pos/orders".into(),
+                "PATCH",
+                Some(attempt.request.clone()),
+            )
+            .await
+        {
+            Err(failure)
+                if matches!(
+                    failure.code,
+                    "CANONICAL_CONFLICT_REVIEW_REQUIRED" | "CANONICAL_VALIDATION_REVIEW_REQUIRED"
+                ) =>
+            {
+                failure.code
+            }
+            _ => return Err("RECOVERY_EDIT_REFUSAL_UNCONFIRMED".into()),
+        }
+    } else {
+        code.as_str()
+    };
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let (current, selected, current_code) = select_discardable_edit(&tx, event)?;
+    if current.organization != scope.organization
+        || current.branch != scope.branch
+        || current.terminal != scope.terminal
+        || current.owner != scope.owner
+        || selected.generation != attempt.generation
+        || selected.request != attempt.request
+        || selected.order != attempt.order
+        || selected.session != attempt.session
+        || selected.attempts != attempt.attempts
+        || current_code != code
+    {
+        return Err("RECOVERY_ORIGINAL_CHANGED".into());
+    }
+    retire_edit(
+        &tx,
+        &scope,
+        event,
+        "operator_discarded",
+        &json!({"snapshotId":point.id,"serverVersion":parent["version"],"verifiedRefusalCode":refusal_code,"remedyVersion":1}),
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(json!({"state":"retired","kind":"item_edit","clientEventId":event}))
+}
+
+#[tauri::command]
+pub async fn table_attempt_recovery_discard_edit(
+    db: tauri::State<'_, DbState>,
+    app: tauri::AppHandle,
+    arg0: Value,
+) -> Result<Value, String> {
+    let _lease = crate::repairs::acquire_terminal_binding_lease()?;
+    // Raw bridge.invoke packs this input into arg0. Native selects the request.
+    let event = arg0["clientEventId"]
+        .as_str()
+        .ok_or("RECOVERY_REQUEST_INVALID")?;
+    let result = discard_edit_with_transport(&db, event, &NativeTransport(&db)).await?;
+    let _ = app.emit("table_attempt_recovery", &result);
+    Ok(result)
 }
 // On the blocking pool, never the window thread or a runtime worker (Tomikro
 // 20/10/2026, see database_lock.rs).
@@ -959,6 +1216,312 @@ mod tests {
             )
             .unwrap();
         (local, raw)
+    }
+
+    #[test]
+    fn tomikro_cancelled_refused_edit_retires_once_with_original_audit() {
+        let db = crate::tests::harness::TestDb::open();
+        let local = setup(&db.state);
+        let conn = db.state.conn.lock().unwrap();
+        remember_item(&conn, &local, &request()).unwrap();
+        conn.execute("UPDATE table_attempt_recovery_v1 SET status='conflict',last_error_code='CANONICAL_CONFLICT_REVIEW_REQUIRED'",[]).unwrap();
+        conn.execute(
+            "UPDATE orders SET status='cancelled',order_number='00055' WHERE id=?1",
+            [&local],
+        )
+        .unwrap();
+        assert_eq!(status(&conn).unwrap()["attempts"], json!([]));
+        assert!(inspect_edit(&conn, "original-event", &local)
+            .unwrap()
+            .is_none());
+        let (state, body, generation): (String, String, i64) = conn
+            .query_row(
+                "SELECT status,request_json,generation FROM table_attempt_recovery_v1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "retired");
+        assert_eq!(body, request().to_string());
+        assert_eq!(generation, 1);
+        let before:String=conn.query_row("SELECT before_json FROM table_attempt_recovery_audit_v1 WHERE outcome='retired_target_cancelled'",[],|r|r.get(0)).unwrap();
+        let before: Value = serde_json::from_str(&before).unwrap();
+        assert_eq!(before["status"], "conflict");
+        assert_eq!(
+            before["last_error_code"],
+            "CANONICAL_CONFLICT_REVIEW_REQUIRED"
+        );
+        assert_eq!(before["request_json"], body);
+        assert!(claim(&conn).unwrap().is_none());
+        assert_eq!(status(&conn).unwrap()["attempts"], json!([]));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM table_attempt_recovery_audit_v1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn cancelled_edit_retirement_preserves_active_applied_live_and_other_scope_rows() {
+        for (state, cancelled, lease, foreign, retired) in [
+            ("conflict", false, None, false, false),
+            ("pending", true, None, false, true),
+            ("auth_required", true, None, false, true),
+            ("applied", true, None, false, false),
+            (
+                "processing",
+                true,
+                Some("2999-01-01T00:00:00Z"),
+                false,
+                false,
+            ),
+            (
+                "processing",
+                true,
+                Some("2000-01-01T00:00:00Z"),
+                false,
+                true,
+            ),
+            ("processing", true, None, false, true),
+            ("conflict", true, None, true, false),
+        ] {
+            let db = crate::tests::harness::TestDb::open();
+            let local = setup(&db.state);
+            let conn = db.state.conn.lock().unwrap();
+            remember_item(&conn, &local, &request()).unwrap();
+            remember_cancel(
+                &conn,
+                &local,
+                SESSION,
+                "cancel-original",
+                "Guest left",
+                ACTOR,
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE table_attempt_recovery_v1 SET status=?1,lease_until=?2",
+                params![state, lease],
+            )
+            .unwrap();
+            if cancelled {
+                conn.execute("UPDATE orders SET status='cancelled'", [])
+                    .unwrap();
+            }
+            if foreign {
+                conn.execute("UPDATE table_attempt_recovery_v1 SET owner_terminal_id='other' WHERE kind='item_edit'",[]).unwrap();
+            }
+            let listed = status(&conn).unwrap();
+            if !cancelled {
+                assert!(listed["attempts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["kind"] == "item_edit"));
+            }
+            let actual: String = conn
+                .query_row(
+                    "SELECT status FROM table_attempt_recovery_v1 WHERE kind='item_edit'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                actual,
+                if retired { "retired" } else { state },
+                "{state} cancelled={cancelled} foreign={foreign}"
+            );
+            let cancel: String = conn
+                .query_row(
+                    "SELECT status FROM table_attempt_recovery_v1 WHERE kind='whole_order_cancel'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(cancel, state, "edit rules never retire cancellations");
+        }
+    }
+
+    struct RefusedEdit {
+        status: Option<u16>,
+        reads: Fake,
+    }
+    impl Transport for RefusedEdit {
+        fn send(
+            &self,
+            path: String,
+            method: &'static str,
+            body: Option<Value>,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + '_>> {
+            Box::pin(async move {
+                if method == "PATCH" {
+                    assert_eq!(
+                        body,
+                        Some(request()),
+                        "refusal belongs to the exact retained replay"
+                    );
+                    return Err(Failure::from(match self.status {
+                        Some(code) => crate::api::AdminFetchError::with_status("refused", code),
+                        None => crate::api::AdminFetchError::transport("lost response"),
+                    }));
+                }
+                self.reads.send(path, method, body).await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_edit_requires_exact_server_refusal_and_scoped_version() {
+        for (http, version, allowed) in [
+            (None, 2, false),
+            (Some(409), 0, false),
+            (Some(422), 0, false),
+            // An exact refusal is proof even when the order did not move.
+            (Some(409), 1, true),
+            (Some(422), 1, true),
+            (Some(409), 2, true),
+            (Some(422), 2, true),
+        ] {
+            let db = crate::tests::harness::TestDb::open();
+            let local = setup(&db.state);
+            let (scope, attempt) = {
+                let conn = db.state.conn.lock().unwrap();
+                remember_item(&conn, &local, &request()).unwrap();
+                due(&conn);
+                claim(&conn).unwrap().unwrap()
+            };
+            let mut reads = fake(None);
+            reads.fresh_parent = Some(parent(version, "pending"));
+            let transport = RefusedEdit {
+                status: http,
+                reads,
+            };
+            let refusal = dispatch(&transport, &attempt).await;
+            {
+                let conn = db.state.conn.lock().unwrap();
+                finish(&conn, &scope, &attempt, refusal).unwrap();
+                if http.is_none() {
+                    // Even a parked transport failure is not refusal evidence.
+                    conn.execute("UPDATE table_attempt_recovery_v1 SET status='conflict'", [])
+                        .unwrap();
+                }
+            }
+            let result = discard_edit_with_transport(&db.state, "original-event", &transport).await;
+            assert_eq!(
+                result.is_ok(),
+                allowed,
+                "http={http:?}, version={version}, result={result:?}"
+            );
+            let conn = db.state.conn.lock().unwrap();
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM table_attempt_recovery_audit_v1 WHERE outcome='operator_discarded'",[],|r|r.get::<_,i64>(0)).unwrap(),i64::from(allowed));
+            if allowed {
+                assert_eq!(result.unwrap()["state"], "retired");
+                assert!(inspect_edit(&conn, "original-event", &local)
+                    .unwrap()
+                    .is_none());
+                assert!(select_discardable_edit(&conn, "original-event").is_err());
+            }
+            assert_eq!(
+                conn.query_row("SELECT version FROM orders WHERE id=?1", [&local], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert!(transport
+                .reads
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(
+                    |(path, method, body)| path.starts_with("/api/pos/orders/sync?order_id=")
+                        && method == "GET"
+                        && body.is_none()
+                ));
+            if http.is_none() {
+                assert!(transport.reads.calls.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_conflict_discard_verifies_exact_refusal_never_discards_journal_or_transport() {
+        for outcome in [
+            "409",
+            "422",
+            "transport",
+            "applied_journal",
+            "unchanged_version",
+        ] {
+            let db = crate::tests::harness::TestDb::open();
+            let local = setup(&db.state);
+            {
+                let conn = db.state.conn.lock().unwrap();
+                remember_item(&conn, &local, &request()).unwrap();
+                conn.execute("UPDATE table_attempt_recovery_v1 SET status='conflict',last_error_code='CANONICAL_CONFLICT_REVIEW_REQUIRED'",[]).unwrap();
+            }
+            let refused = RefusedEdit {
+                status: match outcome {
+                    "409" => Some(409),
+                    "422" => Some(422),
+                    _ => None,
+                },
+                reads: fake(None),
+            };
+            let mut journal = fake(None);
+            if outcome == "unchanged_version" {
+                // At its base version the old PATCH could still apply: never replay it.
+                journal.fresh_parent = Some(parent(1, "pending"));
+            }
+            let transport: &dyn Transport =
+                if matches!(outcome, "applied_journal" | "unchanged_version") {
+                    &journal
+                } else {
+                    &refused
+                };
+            let result = discard_edit_with_transport(&db.state, "original-event", transport).await;
+            let allowed = matches!(outcome, "409" | "422");
+            assert_eq!(result.is_ok(), allowed, "{outcome}: {result:?}");
+            let conn = db.state.conn.lock().unwrap();
+            let state: String = conn
+                .query_row("SELECT status FROM table_attempt_recovery_v1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(state, if allowed { "retired" } else { "conflict" });
+            assert_eq!(
+                conn.query_row(
+                    "SELECT request_json FROM table_attempt_recovery_v1",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                request().to_string()
+            );
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM table_attempt_recovery_audit_v1 WHERE outcome='operator_discarded'",[],|r|r.get::<_,i64>(0)).unwrap(),i64::from(allowed));
+            if outcome == "unchanged_version" {
+                assert_eq!(result.unwrap_err(), "RECOVERY_EDIT_SERVER_UNCONFIRMED");
+                let calls = journal.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].1, "GET", "no replay at the base version");
+            }
+            if outcome == "applied_journal" {
+                let calls = journal.calls.lock().unwrap();
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].1, "GET", "version fence precedes old replay");
+                assert_eq!(calls[1].1, "PATCH");
+                assert_eq!(calls[1].2, Some(request()));
+            }
+        }
     }
 
     #[tokio::test]

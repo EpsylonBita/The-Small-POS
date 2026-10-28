@@ -269,13 +269,13 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
   return ReactDOM.createPortal(
     <CashierRecovery>
     <div
-      className="fixed inset-0 z-[10040] px-4 py-6 sm:px-6 sm:py-8"
+      className="fixed inset-0 z-10040 px-4 py-6 sm:px-6 sm:py-8"
       style={{ isolation: 'isolate' }}
       data-cashier-recovery="true"
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-md" onClick={onClose} />
 
-      <div className="relative z-[10050] flex h-full items-center justify-center">
+      <div className="relative z-10050 flex h-full items-center justify-center">
         <div
           ref={dialogRef}
           role="dialog"
@@ -302,7 +302,7 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
                 ref={closeButtonRef}
                 type="button"
                 onClick={onClose}
-                className="liquid-glass-modal-button min-h-[44px] min-w-[44px] rounded-2xl p-2 transition-transform active:scale-95"
+                className="liquid-glass-modal-button min-h-touch min-w-touch rounded-2xl p-2 transition-transform active:scale-95"
                 aria-label={t('common.actions.close', { defaultValue: 'Close' })}
               >
                 <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -355,16 +355,16 @@ export const SyncRecoveryModal: React.FC<SyncRecoveryModalProps> = ({
               />
             )}
             <details className="mt-4 rounded-2xl border liquid-glass-modal-border text-slate-700 dark:text-slate-200">
-              <summary className="min-h-[44px] cursor-pointer px-4 py-3 text-sm font-semibold">{t('sync.recoveryCenter.showTechnicalDetails')}</summary>
+              <summary className="min-h-touch cursor-pointer px-4 py-3 text-sm font-semibold">{t('sync.recoveryCenter.showTechnicalDetails')}</summary>
               <div className="space-y-3 px-4 pb-4">
                 {rawParityDiagnostic && <pre className="whitespace-pre-wrap break-all text-xs">{rawParityDiagnostic.match(/CUSTOMER_ADDRESS_DEFAULT_(?:CONFLICT|RETRY)|idx_customer_addresses_default_unique/)?.[0] ?? t('sync.healthModal.failure.safeError')}</pre>}
-                {onOpenSnapshots && <button type="button" onClick={handleOpenSnapshots} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border liquid-glass-modal-border px-3 text-sm"><FolderOpen className="h-4 w-4" />{t('sync.recoveryCenter.openSnapshots')}</button>}
+                {onOpenSnapshots && <button type="button" onClick={handleOpenSnapshots} className="inline-flex min-h-touch items-center gap-2 rounded-xl border liquid-glass-modal-border px-3 text-sm"><FolderOpen className="h-4 w-4" />{t('sync.recoveryCenter.openSnapshots')}</button>}
               </div>
             </details>
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t liquid-glass-modal-border px-4 py-3 sm:px-6">
             <p className="text-xs text-slate-600 dark:text-slate-300">{lastCheckedAt ? t('sync.healthModal.lastChecked', {value: new Date(lastCheckedAt).toLocaleString(i18n?.resolvedLanguage || i18n?.language)}) : t('sync.healthModal.notCheckedYet')}</p>
-            <button type="button" onClick={() => void loadRecoveryState()} disabled={loading} aria-busy={loading} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border liquid-glass-modal-border px-4 text-sm font-semibold text-slate-700 disabled:opacity-50 dark:text-slate-100"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />{t('common.actions.refresh')}</button>
+            <button type="button" onClick={() => void loadRecoveryState()} disabled={loading} aria-busy={loading} className="inline-flex min-h-touch items-center gap-2 rounded-xl border liquid-glass-modal-border px-4 text-sm font-semibold text-slate-700 disabled:opacity-50 dark:text-slate-100"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />{t('common.actions.refresh')}</button>
           </div>
         </div>
       </div>

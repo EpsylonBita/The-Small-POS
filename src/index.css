@@ -1,8 +1,272 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --breakpoint-*: initial;
+  --breakpoint-xs: 375px;
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
+
+  --min-height-touch: 44px;
+  --min-height-touch-lg: 56px;
+  --min-height-touch-xl: 64px;
+
+  --min-width-touch: 44px;
+  --min-width-touch-lg: 56px;
+  --min-width-touch-xl: 64px;
+
+  --color-blue-50: #fafafa;
+  --color-blue-100: #f4f4f5;
+  --color-blue-200: #e4e4e7;
+  --color-blue-300: #d4d4d8;
+  --color-blue-400: #a1a1aa;
+  --color-blue-500: #71717a;
+  --color-blue-600: #52525b;
+  --color-blue-700: #3f3f46;
+  --color-blue-800: #27272a;
+  --color-blue-900: #18181b;
+  --color-blue-950: #09090b;
+
+  --color-indigo-50: #fafafa;
+  --color-indigo-100: #f4f4f5;
+  --color-indigo-200: #e4e4e7;
+  --color-indigo-300: #d4d4d8;
+  --color-indigo-400: #a1a1aa;
+  --color-indigo-500: #71717a;
+  --color-indigo-600: #52525b;
+  --color-indigo-700: #3f3f46;
+  --color-indigo-800: #27272a;
+  --color-indigo-900: #18181b;
+  --color-indigo-950: #09090b;
+
+  --color-sky-50: #fafafa;
+  --color-sky-100: #f4f4f5;
+  --color-sky-200: #e4e4e7;
+  --color-sky-300: #d4d4d8;
+  --color-sky-400: #a1a1aa;
+  --color-sky-500: #71717a;
+  --color-sky-600: #52525b;
+  --color-sky-700: #3f3f46;
+  --color-sky-800: #27272a;
+  --color-sky-900: #18181b;
+  --color-sky-950: #09090b;
+
+  --color-cyan-50: #fafafa;
+  --color-cyan-100: #f4f4f5;
+  --color-cyan-200: #e4e4e7;
+  --color-cyan-300: #d4d4d8;
+  --color-cyan-400: #a1a1aa;
+  --color-cyan-500: #71717a;
+  --color-cyan-600: #52525b;
+  --color-cyan-700: #3f3f46;
+  --color-cyan-800: #27272a;
+  --color-cyan-900: #18181b;
+  --color-cyan-950: #09090b;
+
+  --color-violet-50: #fafafa;
+  --color-violet-100: #f4f4f5;
+  --color-violet-200: #e4e4e7;
+  --color-violet-300: #d4d4d8;
+  --color-violet-400: #a1a1aa;
+  --color-violet-500: #71717a;
+  --color-violet-600: #52525b;
+  --color-violet-700: #3f3f46;
+  --color-violet-800: #27272a;
+  --color-violet-900: #18181b;
+  --color-violet-950: #09090b;
+
+  --color-purple-50: #fafafa;
+  --color-purple-100: #f4f4f5;
+  --color-purple-200: #e4e4e7;
+  --color-purple-300: #d4d4d8;
+  --color-purple-400: #a1a1aa;
+  --color-purple-500: #71717a;
+  --color-purple-600: #52525b;
+  --color-purple-700: #3f3f46;
+  --color-purple-800: #27272a;
+  --color-purple-900: #18181b;
+  --color-purple-950: #09090b;
+
+  --color-fuchsia-50: #fafafa;
+  --color-fuchsia-100: #f4f4f5;
+  --color-fuchsia-200: #e4e4e7;
+  --color-fuchsia-300: #d4d4d8;
+  --color-fuchsia-400: #a1a1aa;
+  --color-fuchsia-500: #71717a;
+  --color-fuchsia-600: #52525b;
+  --color-fuchsia-700: #3f3f46;
+  --color-fuchsia-800: #27272a;
+  --color-fuchsia-900: #18181b;
+  --color-fuchsia-950: #09090b;
+
+  --color-teal-50: #fafafa;
+  --color-teal-100: #f4f4f5;
+  --color-teal-200: #e4e4e7;
+  --color-teal-300: #d4d4d8;
+  --color-teal-400: #a1a1aa;
+  --color-teal-500: #71717a;
+  --color-teal-600: #52525b;
+  --color-teal-700: #3f3f46;
+  --color-teal-800: #27272a;
+  --color-teal-900: #18181b;
+  --color-teal-950: #09090b;
+
+  --color-pink-50: #fafafa;
+  --color-pink-100: #f4f4f5;
+  --color-pink-200: #e4e4e7;
+  --color-pink-300: #d4d4d8;
+  --color-pink-400: #a1a1aa;
+  --color-pink-500: #71717a;
+  --color-pink-600: #52525b;
+  --color-pink-700: #3f3f46;
+  --color-pink-800: #27272a;
+  --color-pink-900: #18181b;
+  --color-pink-950: #09090b;
+
+  --color-orange-50: #fffbeb;
+  --color-orange-100: #fef3c7;
+  --color-orange-200: #fde68a;
+  --color-orange-300: #fcd34d;
+  --color-orange-400: #fbbf24;
+  --color-orange-500: #f59e0b;
+  --color-orange-600: #d97706;
+  --color-orange-700: #b45309;
+  --color-orange-800: #92400e;
+  --color-orange-900: #78350f;
+  --color-orange-950: #451a03;
+
+  --color-pos-primary: #3f3f46;
+  --color-pos-secondary: #64748b;
+  --color-pos-success: #10b981;
+  --color-pos-warning: #f59e0b;
+  --color-pos-error: #ef4444;
+  --color-pos-pending: #f59e0b;
+  --color-pos-preparing: #52525b;
+  --color-pos-ready: #10b981;
+  --color-pos-completed: #6b7280;
+
+  --color-glass-primary: rgba(255, 255, 255, 0.8);
+  --color-glass-secondary: rgba(228, 228, 231, 0.8);
+  --color-glass-text: rgba(255, 255, 255, 0.9);
+  --color-glass-bg-primary: rgba(255, 255, 255, 0.18);
+  --color-glass-bg-secondary: rgba(255, 255, 255, 0.12);
+  --color-glass-bg-interactive: rgba(255, 255, 255, 0.15);
+  --color-glass-bg-hover: rgba(255, 255, 255, 0.25);
+  --color-glass-border-primary: rgba(255, 255, 255, 0.25);
+  --color-glass-border-secondary: rgba(255, 255, 255, 0.18);
+  --color-glass-border-interactive: rgba(255, 255, 255, 0.22);
+  --color-glass-border-hover: rgba(255, 255, 255, 0.35);
+
+  --text-touch-sm: 14px;
+  --text-touch-sm--line-height: 20px;
+  --text-touch-base: 16px;
+  --text-touch-base--line-height: 24px;
+  --text-touch-lg: 18px;
+  --text-touch-lg--line-height: 28px;
+  --text-touch-xl: 20px;
+  --text-touch-xl--line-height: 32px;
+
+  --animate-touch-feedback: scale 0.1s ease-in-out;
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-glass-float: glass-float 6s ease-in-out infinite;
+  --animate-glass-shimmer: glass-shimmer 2s linear infinite;
+  --animate-modal-enter: modal-enter 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --animate-backdrop-enter: backdrop-enter 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  --backdrop-blur-xs: 2px;
+  --backdrop-blur-glass: 10px;
+  --backdrop-blur-glass-lg: 12px;
+  --backdrop-blur-glass-xl: 16px;
+
+  --shadow-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.18);
+  --shadow-glass-lg: 0 12px 40px 0 rgba(0, 0, 0, 0.22);
+  --shadow-glass-xl: 0 15px 45px 0 rgba(0, 0, 0, 0.28);
+  --shadow-glass-glow:
+    0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
+
+  @keyframes scale {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(0.95);
+    }
+  }
+  @keyframes glass-float {
+    0%,
+    100% {
+      transform: translateY(0px);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+  @keyframes glass-shimmer {
+    0% {
+      background-position: -200px 0;
+    }
+    100% {
+      background-position: calc(200px + 100%) 0;
+    }
+  }
+  @keyframes modal-enter {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+  }
+  @keyframes backdrop-enter {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+  input::placeholder, textarea::placeholder { color: var(--color-gray-400); }
+
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+
+  /* Tailwind 4's space-y-* puts the gap on each child's bottom margin (Tailwind 3
+     used the next child's top margin), and inline elements ignore vertical margins,
+     so stacked plain labels, spans and links lost their spacing. As inline-blocks
+     they keep the Tailwind 3 gap and their own width; any display utility still
+     wins (zero specificity). */
+  :where([class*='space-y-']) > :where(label, span, a, small, strong, em, b, i, code, abbr, time, mark, u, s) {
+    display: inline-block;
+  }
+}
 
 /* ---- Base resets for POS touchscreen environment ---- */
+
+@layer utilities {
 
 *,
 *::before,
@@ -86,4 +350,5 @@ a {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   border: none;
   cursor: pointer;
+}
 }

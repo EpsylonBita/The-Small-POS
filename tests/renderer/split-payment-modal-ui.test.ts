@@ -7,7 +7,7 @@ const modalSource = readFileSync(path.join(process.cwd(), 'src/renderer/componen
 const glassCss = readFileSync(path.join(process.cwd(), 'src/renderer/styles/glassmorphism.css'), 'utf8');
 
 test('split payment preserves one bounded scroll body and a separate footer', () => {
-  assert.match(modalSource, /contentClassName="flex min-h-0 flex-col overflow-hidden !px-6 !py-3"/);
+  assert.match(modalSource, /contentClassName="flex min-h-0 flex-col overflow-hidden px-6! py-3!"/);
   assert.match(modalSource, /flex min-h-0 flex-1 flex-col space-y-3/);
   assert.match(modalSource, /min-h-0 flex-1 overflow-y-auto scrollbar-hide pb-24 scroll-pb-24/);
   assert.equal((modalSource.match(/overflow-y-auto/g) ?? []).length, 1);
@@ -27,7 +27,7 @@ test('empty by-items people stay compact while assigned portions retain their de
 });
 
 test('selected split and receipt segments keep the shared contrast override', () => {
-  assert.equal((modalSource.match(/bg-yellow-400 text-black shadow-sm split-payment-segment-selected/g) ?? []).length, 2);
+  assert.equal((modalSource.match(/bg-yellow-400 text-black shadow-xs split-payment-segment-selected/g) ?? []).length, 2);
   assert.equal((modalSource.match(/bg-yellow-400 text-black split-payment-segment-selected/g) ?? []).length, 2);
   assert.match(glassCss, /button\.split-payment-segment-selected[\s\S]*?color:\s*#000\s*!important/);
   assert.doesNotMatch(modalSource, /<[a-z][^>]*\stitle=/);

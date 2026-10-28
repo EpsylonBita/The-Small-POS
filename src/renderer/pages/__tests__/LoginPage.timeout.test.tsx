@@ -28,7 +28,7 @@ vi.mock('../../contexts/i18n-context', () => ({
   useI18n: () => ({
     language: 'en',
     setLanguage: vi.fn(),
-    t: (key: string, fallback?: string) => {
+    t: (key: string, fallback?: string | { minutes: number }) => {
       const copy: Record<string, string> = {
         'login.title': 'The Small',
         'login.subtitle': 'Enter your PIN to continue',
@@ -39,13 +39,15 @@ vi.mock('../../contexts/i18n-context', () => ({
         'login.errors.invalidPin': 'Wrong code',
         'login.errors.loginFailed': 'Login failed. Please try again.',
         'login.errors.timeout': 'Login took too long. Please try again.',
+        'login.errors.lockedOut': 'Too many wrong PIN attempts. Try again in {{minutes}} minutes.',
         'login.createPin': 'Create PIN',
         'login.newPin': 'New PIN (6 digits)',
         'login.confirmPin': 'Confirm PIN',
         'login.savePin': 'Save PIN',
         'common.cancel': 'Cancel',
       };
-      return copy[key] ?? fallback ?? key;
+      const text = copy[key] ?? (typeof fallback === 'string' ? fallback : key);
+      return typeof fallback === 'object' ? text.replace('{{minutes}}', String(fallback.minutes)) : text;
     },
   }),
 }));
@@ -134,6 +136,17 @@ describe('LoginPage login deadlines', () => {
 
     expect(screen.getByText('Login took too long. Please try again.')).toBeInTheDocument();
     expect(screen.queryByText('Wrong code')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { code: 'AUTH_LOCKED_OUT', minutes: 15, reason: 'Too many failed attempts' },
+    JSON.stringify({ code: 'AUTH_LOCKED_OUT', minutes: 15, reason: 'Too many failed attempts' }),
+    new Error(JSON.stringify({ code: 'AUTH_LOCKED_OUT', minutes: 15, reason: 'Too many failed attempts' })),
+  ])('shows the remaining lockout minutes from the native error: %j', async error => {
+    render(<LoginPage onLogin={vi.fn().mockRejectedValue(error)} />);
+    await enterSixDigitPin();
+    expect(screen.getByText('Too many wrong PIN attempts. Try again in 15 minutes.')).toBeInTheDocument();
+    expect(screen.queryByText('Login failed. Please try again.')).not.toBeInTheDocument();
   });
 
   it('enforces one six-digit PIN rule and keeps the setup actions readable', async () => {

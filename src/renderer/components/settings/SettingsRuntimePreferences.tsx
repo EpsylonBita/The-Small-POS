@@ -63,7 +63,7 @@ export function SettingsRuntimePreferences({ onOpenPrinterSettings, onOpenSecuri
     { section: 'touch', label: t('settings.workflow.windowsTouch', { defaultValue: 'Pointer and touch feedback' }) },
     { section: 'power', label: t('settings.workflow.windowsPower', { defaultValue: 'Screen sleep and power' }) },
   ];
-  const buttonClass = 'min-h-[44px] rounded-xl border liquid-glass-modal-border px-4 py-3 text-sm font-medium liquid-glass-modal-text active:bg-black/5 dark:active:bg-white/5 disabled:cursor-wait disabled:opacity-50';
+  const buttonClass = 'min-h-touch rounded-xl border liquid-glass-modal-border px-4 py-3 text-sm font-medium liquid-glass-modal-text active:bg-black/5 dark:active:bg-white/5 disabled:cursor-wait disabled:opacity-50';
 
   return (
     <div className="space-y-5" data-testid="settings-runtime-preferences">
@@ -81,7 +81,7 @@ export function SettingsRuntimePreferences({ onOpenPrinterSettings, onOpenSecuri
             disabled={savingAudio} onClick={() => void saveAudio()}
             className="flex h-11 w-14 shrink-0 items-center justify-center rounded-xl disabled:opacity-50">
             <span className={`relative h-7 w-12 rounded-full transition-colors ${audioEnabled ? 'bg-yellow-400' : 'bg-slate-400/50'}`}>
-              <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${audioEnabled ? 'left-1 translate-x-5' : 'left-1'}`} />
+              <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${audioEnabled ? 'left-1 translate-x-5' : 'left-1'}`} />
             </span>
           </button>
         </div>

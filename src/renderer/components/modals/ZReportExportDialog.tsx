@@ -96,21 +96,21 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
   const shellClassName = isDarkTheme
     ? 'z-report-glass-shell border-yellow-400/25 text-white shadow-2xl shadow-black/40'
     : 'z-report-glass-shell border-yellow-500/30 text-slate-950 shadow-2xl shadow-slate-950/20';
-  const contentClassName = isDarkTheme ? 'z-report-glass-content !p-4 text-white' : 'z-report-glass-content !p-4 text-slate-950';
+  const contentClassName = isDarkTheme ? 'z-report-glass-content p-4! text-white' : 'z-report-glass-content p-4! text-slate-950';
   const insetClass = isDarkTheme
-    ? 'border-yellow-400/15 bg-black/30 shadow-sm shadow-black/20 backdrop-blur-xl'
-    : 'border-yellow-500/25 bg-white/70 shadow-sm shadow-slate-950/10 backdrop-blur-xl';
+    ? 'border-yellow-400/15 bg-black/30 shadow-xs shadow-black/20 backdrop-blur-xl'
+    : 'border-yellow-500/25 bg-white/70 shadow-xs shadow-slate-950/10 backdrop-blur-xl';
   const tileClass = isDarkTheme
-    ? 'border-white/[0.12] bg-white/[0.08] text-white'
-    : 'border-slate-900/[0.12] bg-white/80 text-slate-950';
+    ? 'border-white/12 bg-white/8 text-white'
+    : 'border-slate-900/12 bg-white/80 text-slate-950';
   const strongText = isDarkTheme ? 'text-white' : 'text-slate-950';
   const mutedText = isDarkTheme ? 'text-white/85' : 'text-slate-700';
   const softText = isDarkTheme ? 'text-white/60' : 'text-slate-500';
   const secondaryButton = isDarkTheme
-    ? 'border-yellow-400/20 bg-black/30 text-white active:bg-white/[0.12]'
+    ? 'border-yellow-400/20 bg-black/30 text-white active:bg-white/12'
     : 'border-yellow-500/25 bg-white/80 text-slate-900 active:bg-white';
   const primaryButton = 'border-yellow-500/40 bg-yellow-400 text-black shadow-lg shadow-yellow-500/20 active:bg-yellow-300';
-  const buttonBase = 'inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-50';
+  const buttonBase = 'inline-flex min-h-touch items-center justify-center gap-2 rounded-xl border px-4 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-50';
 
   const listTitleId = useId();
   const previewTitleId = useId();
@@ -323,8 +323,8 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
         data-z-report-id={view.id}
         data-z-report-export-row
         onClick={() => selectRow(view.id)}
-        className={`w-full rounded-2xl border p-3 text-left transition active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
-          isSelected ? 'border-yellow-400 bg-yellow-400/[0.16] ring-2 ring-yellow-400/60' : tileClass
+        className={`w-full rounded-2xl border p-3 text-left transition active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+          isSelected ? 'border-yellow-400 bg-yellow-400/16 ring-2 ring-yellow-400/60' : tileClass
         }`}
       >
         <div className="flex items-start justify-between gap-2">
@@ -339,9 +339,9 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
         </div>
         <div className={`mt-1 flex items-center gap-1.5 text-xs font-bold ${mutedText}`}>
           <CalendarDays className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          <span className="break-words">{formatBusinessDate(identity.reportDate)}</span>
+          <span className="wrap-break-word">{formatBusinessDate(identity.reportDate)}</span>
         </div>
-        <div className={`mt-0.5 break-words text-[11px] font-semibold ${softText}`}>
+        <div className={`mt-0.5 wrap-break-word text-[11px] font-semibold ${softText}`}>
           {formatPeriod(identity.periodStart, identity.periodEnd)}
         </div>
         <div className="mt-2 grid grid-cols-2 gap-2">
@@ -377,7 +377,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
         <p className={`text-sm font-semibold leading-5 ${mutedText}`}>{t('modals.zReport.exportDialog.subtitle')}</p>
 
         <div className="flex min-h-0 flex-col gap-4 lg:flex-row">
-          <section aria-labelledby={listTitleId} className={`flex min-w-0 flex-col rounded-2xl border p-3 lg:w-[22rem] lg:shrink-0 ${insetClass}`}>
+          <section aria-labelledby={listTitleId} className={`flex min-w-0 flex-col rounded-2xl border p-3 lg:w-88 lg:shrink-0 ${insetClass}`}>
             <h3 id={listTitleId} className={`text-base font-black ${strongText}`}>{t('modals.zReport.exportDialog.listTitle')}</h3>
             <p className={`mt-0.5 text-[11px] font-semibold ${softText}`}>{t('modals.zReport.exportDialog.listHint')}</p>
             <div className="mt-3 min-h-0">
@@ -390,7 +390,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
               {list.status === 'error' && (
                 <div role="alert" data-z-report-export-list-error className="rounded-xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm font-bold text-rose-700 dark:text-rose-200">
                   <div>{t('modals.zReport.exportDialog.loadFailed')}</div>
-                  {list.detail && <div className={`mt-1 break-words text-[11px] font-semibold ${softText}`}>{list.detail}</div>}
+                  {list.detail && <div className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{list.detail}</div>}
                   <button
                     type="button"
                     onClick={() => setReloadKey((current) => current + 1)}
@@ -437,14 +437,14 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                           <th
                             colSpan={2}
                             scope="colgroup"
-                            className="border-t border-slate-900/10 bg-yellow-400/[0.1] px-3 py-1.5 text-left text-xs font-black dark:border-white/10"
+                            className="border-t border-slate-900/10 bg-yellow-400/10 px-3 py-1.5 text-left text-xs font-black dark:border-white/10"
                           >
                             {section.rows[0]?.section}
                           </th>
                         </tr>
                         {section.rows.map((row, index) => (
-                          <tr key={`${row.rowKey}-${index}`} className="border-t border-slate-900/[0.06] dark:border-white/[0.06]">
-                            <td className={`break-words px-3 py-1.5 font-semibold ${mutedText}`}>{row.line}</td>
+                          <tr key={`${row.rowKey}-${index}`} className="border-t border-slate-900/6 dark:border-white/6">
+                            <td className={`wrap-break-word px-3 py-1.5 font-semibold ${mutedText}`}>{row.line}</td>
                             <td className={`whitespace-nowrap px-3 py-1.5 text-right font-black tabular-nums ${strongText}`}>{row.text || '—'}</td>
                           </tr>
                         ))}
@@ -499,7 +499,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
           <section
             aria-labelledby={provisionalTitleId}
             data-z-report-export-provisional
-            className="rounded-2xl border border-dashed border-amber-500/50 bg-amber-400/[0.08] p-4"
+            className="rounded-2xl border border-dashed border-amber-500/50 bg-amber-400/8 p-4"
           >
             <div className="flex items-start gap-3">
               <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
@@ -507,7 +507,7 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                 <h3 id={provisionalTitleId} className={`text-base font-black ${strongText}`}>
                   {t('modals.zReport.exportDialog.provisionalTitle')}
                 </h3>
-                <p className={`mt-1 break-words text-xs font-semibold leading-5 ${mutedText}`}>
+                <p className={`mt-1 wrap-break-word text-xs font-semibold leading-5 ${mutedText}`}>
                   {t('modals.zReport.exportDialog.provisionalHelp')}
                 </p>
               </div>
@@ -550,8 +550,8 @@ const ZReportExportDialog: React.FC<ZReportExportDialogProps> = ({ isOpen, onClo
                 : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
             }`}
           >
-            <div className="break-words">{notice.text}</div>
-            {notice.detail && <div className={`mt-1 break-words text-[11px] font-semibold ${softText}`}>{notice.detail}</div>}
+            <div className="wrap-break-word">{notice.text}</div>
+            {notice.detail && <div className={`mt-1 wrap-break-word text-[11px] font-semibold ${softText}`}>{notice.detail}</div>}
           </div>
         )}
       </div>

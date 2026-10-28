@@ -3,7 +3,15 @@ import type {
   PrivilegedActionScope,
 } from '../../lib/ipc-contracts'
 
-const KNOWN_PRIVILEGED_ERROR_CODES = new Set(['UNAUTHORIZED', 'REAUTH_REQUIRED'])
+export interface ApprovalErrorPayload extends PrivilegedActionErrorPayload {
+  permission?: string
+  minutes?: number
+}
+
+const KNOWN_PRIVILEGED_ERROR_CODES = new Set([
+  'UNAUTHORIZED', 'REAUTH_REQUIRED', 'NO_APPROVER_IN_STORE', 'APPROVALS_PAUSED',
+  'AUTH_LOCKED_OUT', 'MANAGER_PIN_REFUSED',
+])
 
 const normalizeCode = (value: unknown): string | null => {
   if (typeof value !== 'string') {
@@ -17,7 +25,7 @@ const normalizeCode = (value: unknown): string | null => {
 const normalizePayload = (
   value: Record<string, unknown>,
   fallbackScope?: PrivilegedActionScope
-): PrivilegedActionErrorPayload | null => {
+): ApprovalErrorPayload | null => {
   const code = normalizeCode(value.code)
   if (!code) {
     return null
@@ -54,13 +62,16 @@ const normalizePayload = (
     reason,
     ttlSeconds,
     ...(approval ? { approval } : {}),
+    ...(typeof value.permission === 'string' ? { permission: value.permission } : {}),
+    ...(typeof value.minutes === 'number' && Number.isFinite(value.minutes) && value.minutes > 0
+      ? { minutes: Math.ceil(value.minutes) } : {}),
   }
 }
 
 const parseFromText = (
   text: string,
   fallbackScope?: PrivilegedActionScope
-): PrivilegedActionErrorPayload | null => {
+): ApprovalErrorPayload | null => {
   const trimmed = text.trim()
   if (!trimmed) {
     return null
@@ -100,7 +111,7 @@ const parseFromText = (
 export const extractPrivilegedActionError = (
   error: unknown,
   fallbackScope?: PrivilegedActionScope
-): PrivilegedActionErrorPayload | null => {
+): ApprovalErrorPayload | null => {
   if (!error) {
     return null
   }

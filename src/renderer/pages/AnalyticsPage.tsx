@@ -93,7 +93,7 @@ const AnalyticsPage: React.FC = () => {
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
+      className={`p-4 rounded-2xl ${isDark ? 'bg-white/5' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
     >
       <div className="flex items-center justify-between mb-2">
         <div className={`p-2 rounded-2xl ${color}`}>
@@ -224,7 +224,7 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/5' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="flex items-center gap-2 mb-4">
             <PieChart className="w-5 h-5 text-amber-500" />
@@ -239,7 +239,7 @@ const AnalyticsPage: React.FC = () => {
                 </div>
                 <div className={`h-2 rounded-full ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-amber-500 to-orange-500"
+                    className="h-full rounded-full bg-linear-to-r from-amber-500 to-orange-500"
                     style={{ width: `${Math.min(cat.percentage, 100)}%` }}
                   />
                 </div>
@@ -251,7 +251,7 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/5' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="flex items-center gap-2 mb-4">
             <Clock className="w-5 h-5 text-amber-500" />
@@ -263,7 +263,7 @@ const AnalyticsPage: React.FC = () => {
               return (
                 <div key={entry.hour} className="flex-1 flex flex-col items-center">
                   <div
-                    className="w-full bg-gradient-to-t from-amber-500 to-orange-500 rounded-t"
+                    className="w-full bg-linear-to-t from-amber-500 to-orange-500 rounded-t"
                     style={{ height: `${height}%`, minHeight: '4px' }}
                   />
                   <span className={`text-xs mt-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
@@ -280,7 +280,7 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/5' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="grid grid-cols-2 gap-4">
             <div className="flex items-center gap-3">
@@ -311,7 +311,7 @@ const AnalyticsPage: React.FC = () => {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-2xl ${isDark ? 'bg-white/[0.05]' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
+          className={`p-4 rounded-2xl ${isDark ? 'bg-white/5' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-lg`}
         >
           <div className="flex items-center gap-2 mb-4">
             <Route className="w-5 h-5 text-amber-500" />

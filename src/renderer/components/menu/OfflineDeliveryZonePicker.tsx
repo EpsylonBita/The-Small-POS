@@ -36,7 +36,7 @@ export const OfflineDeliveryZonePicker: React.FC<OfflineDeliveryZonePickerProps>
       data-testid="offline-zone-picker"
       className={`flex items-start gap-2 p-3 rounded-lg mb-3 bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 dark:border-amber-400/30 ${className}`}
     >
-      <MapPin className="w-5 h-5 flex-shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
+      <MapPin className="w-5 h-5 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden="true" />
       <div className="flex-1 min-w-0">
         <p id={titleId} className="text-sm font-semibold antialiased text-amber-800 dark:text-amber-200">
           {t('menu.cart.offlineZoneChoiceTitle')}

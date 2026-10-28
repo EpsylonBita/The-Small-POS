@@ -1267,11 +1267,11 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const drawerActivityItemClass = 'flex items-start justify-between gap-4 rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 shadow-[0_10px_24px_rgba(15,23,42,0.07)] dark:border-neutral-700/60 dark:bg-black/35 dark:shadow-[0_10px_26px_rgba(0,0,0,0.22)]';
   const drawerEmptyStateClass = 'rounded-3xl border border-dashed border-slate-300/90 bg-slate-50/80 px-6 py-4 text-center dark:border-neutral-700/70 dark:bg-neutral-900/70';
   const drawerEmptyIconClass = 'mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 text-slate-500 shadow-[0_10px_24px_rgba(15,23,42,0.09)] dark:bg-neutral-800 dark:text-neutral-400 dark:shadow-[0_10px_25px_rgba(0,0,0,0.24)]';
-  const drawerInputClass = 'w-full rounded-2xl border border-slate-300/90 bg-white/95 px-4 py-3 text-slate-900 shadow-inner outline-none transition-colors placeholder:text-slate-400 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700/80 dark:bg-black dark:text-white dark:placeholder:text-neutral-500';
-  const drawerExpenseSubmitClass = '!border-slate-300/80 !bg-white/70 !font-bold !text-emerald-700 !shadow-[0_8px_20px_rgba(15,23,42,0.08)] active:!scale-[0.98] disabled:!text-emerald-500 disabled:!opacity-100 dark:!border-neutral-700/60 dark:!bg-transparent dark:!text-emerald-400 dark:!shadow-none';
-  const drawerStaffPaymentSubmitClass = '!border-slate-300/80 !bg-white/70 !font-bold !text-amber-700 !shadow-[0_8px_20px_rgba(15,23,42,0.08)] active:!scale-[0.98] disabled:!text-amber-500 disabled:!opacity-100 dark:!border-neutral-700/60 dark:!bg-transparent dark:!text-yellow-400 dark:!shadow-none';
+  const drawerInputClass = 'w-full rounded-2xl border border-slate-300/90 bg-white/95 px-4 py-3 text-slate-900 shadow-inner outline-hidden transition-colors placeholder:text-slate-400 focus:border-yellow-400/70 focus:ring-2 focus:ring-yellow-400/15 disabled:cursor-not-allowed disabled:opacity-60 dark:border-neutral-700/80 dark:bg-black dark:text-white dark:placeholder:text-neutral-500';
+  const drawerExpenseSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-emerald-700! shadow-[0_8px_20px_rgba(15,23,42,0.08)]! active:scale-[0.98]! disabled:text-emerald-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-emerald-400! dark:shadow-none!';
+  const drawerStaffPaymentSubmitClass = 'border-slate-300/80! bg-white/70! font-bold! text-amber-700! shadow-[0_8px_20px_rgba(15,23,42,0.08)]! active:scale-[0.98]! disabled:text-amber-500! disabled:opacity-100! dark:border-neutral-700/60! dark:bg-transparent! dark:text-yellow-400! dark:shadow-none!';
   const drawerDropdownMenuClass = 'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-2xl border border-slate-200/90 bg-white text-slate-900 shadow-[0_18px_38px_rgba(15,23,42,0.16)] dark:border-neutral-700/80 dark:bg-neutral-950 dark:text-white dark:shadow-[0_18px_44px_rgba(0,0,0,0.42)]';
-  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors active:bg-slate-100 focus:bg-slate-100 focus:outline-none dark:text-white dark:active:bg-neutral-800 dark:focus:bg-neutral-800';
+  const drawerDropdownOptionClass = 'flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors active:bg-slate-100 focus:bg-slate-100 focus:outline-hidden dark:text-white dark:active:bg-neutral-800 dark:focus:bg-neutral-800';
 
   const renderDrawerDropdown = ({
     dropdownKey,
@@ -1318,7 +1318,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             {selectedOption?.label}
           </span>
           <ChevronDown
-            className={`h-5 w-5 shrink-0 text-slate-500 transition-transform dark:text-neutral-300 ${isOpenDropdown ? 'rotate-180 !text-yellow-500 dark:!text-yellow-300' : ''}`}
+            className={`h-5 w-5 shrink-0 text-slate-500 transition-transform dark:text-neutral-300 ${isOpenDropdown ? 'rotate-180 text-yellow-500! dark:text-yellow-300!' : ''}`}
           />
         </button>
 
@@ -1393,7 +1393,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <POSGlassBadge variant={isExpense ? 'error' : 'warning'} size="sm" className="!px-2.5 !py-1">
+            <POSGlassBadge variant={isExpense ? 'error' : 'warning'} size="sm" className="px-2.5! py-1!">
               {isExpense
                 ? t('modals.expense.tabs.expenses', 'Expenses')
                 : t('modals.expense.tabs.staffPayments', 'Staff Payments')}
@@ -1477,7 +1477,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         onClose={onClose}
         title={t('modals.expense.title', 'Drawer Outflows')}
         size="lg"
-        className="!max-w-4xl !w-[90vw] !max-h-[95vh]"
+        className="max-w-4xl! w-[90vw]! max-h-[95vh]!"
         contentClassName="flex min-h-0 flex-col gap-4"
         ariaLabel={t('modals.expense.title', 'Drawer Outflows')}
       >
@@ -1528,7 +1528,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               variant="secondary"
               icon={<RefreshCw className="h-4 w-4" />}
               disabled={resolving}
-              className="!h-11 !shrink-0 !justify-center !rounded-xl !px-4"
+              className="h-11! shrink-0! justify-center! rounded-xl! px-4!"
               onClick={() => {
                 void refreshModalData();
               }}
@@ -1570,7 +1570,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             variant="secondary"
             icon={<RefreshCw className="h-4 w-4" />}
             disabled={resolving}
-            className="!h-11 !justify-center !rounded-xl !px-4"
+            className="h-11! justify-center! rounded-xl! px-4!"
             onClick={() => {
               void refreshModalData();
             }}
@@ -1624,7 +1624,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     onValueChange={(amount) => setExpenseDraft((current) => ({ ...current, amount }))}
                     placeholder="0,00"
                     disabled={!canRecord}
-                    className={`${drawerInputClass} !pl-10 text-lg font-bold`}
+                    className={`${drawerInputClass} pl-10! text-lg font-bold`}
                   />
                   <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
                 </div>
@@ -1657,7 +1657,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                     onChange={(event) => setExpenseDraft((current) => ({ ...current, receiptNumber: event.target.value }))}
                     placeholder={t('modals.expense.receiptPlaceholder', 'Invoice, receipt, or reference number')}
                     disabled={!canRecord}
-                    className={`${drawerInputClass} !pl-10`}
+                    className={`${drawerInputClass} pl-10!`}
                   />
                   <FileText className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 </div>
@@ -1834,7 +1834,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   onValueChange={(amount) => setPaymentDraft((current) => ({ ...current, amount }))}
                   placeholder="0,00"
                   disabled={!canRecord}
-                  className={`${drawerInputClass} !pl-10 text-lg font-bold`}
+                  className={`${drawerInputClass} pl-10! text-lg font-bold`}
                 />
                 <Banknote className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
               </div>

@@ -192,7 +192,7 @@ export const ReservationsView: React.FC = memo(() => {
   const fieldLabelClass = `text-sm font-medium ${isDark ? 'text-gray-300' : 'text-gray-800'}`;
   // Shared input/select class for the create + service-booking modal controls.
   // Translucent neutral surface so fields stay readable on the blurry-glass modal shell.
-  const modalInputClass = `px-3 py-2 rounded-xl border ${isDark ? 'bg-gray-950/55 text-white border-white/10' : 'bg-white/55 text-gray-950 border-white/60 shadow-sm shadow-black/5'}`;
+  const modalInputClass = `px-3 py-2 rounded-xl border ${isDark ? 'bg-gray-950/55 text-white border-white/10' : 'bg-white/55 text-gray-950 border-white/60 shadow-xs shadow-black/5'}`;
   const modalPanelClass = `relative z-10 w-full max-w-2xl mx-4 rounded-[26px] backdrop-blur-2xl shadow-[0_30px_90px_rgba(0,0,0,0.5)] border ring-1 p-5 ${isDark ? 'bg-gray-950/55 border-white/10 ring-white/10' : 'bg-white/28 border-white/65 ring-white/35'}`;
   const modalScrimClass = `absolute inset-0 backdrop-blur-xl ${isDark ? 'bg-black/55' : 'bg-black/30'}`;
   const createPartySize = Number(createForm.partySize);
@@ -906,31 +906,31 @@ export const ReservationsView: React.FC = memo(() => {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <motion.div variants={pageMotionContainer} className="flex flex-wrap gap-3">
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('reservationsView.stats.total', { defaultValue: 'Total' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.total}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
             <div className={`text-sm text-yellow-500`}>
               {t('reservationsView.stats.pending', { defaultValue: 'Pending' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.pending}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
               {t('reservationsView.stats.confirmed', { defaultValue: 'Confirmed' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.confirmed}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
             <div className={`text-sm text-green-500`}>
               {activeTab === 'rooms' ? t('roomWorkflow.staying') : t('reservationsView.stats.seated', { defaultValue: 'Seated' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{visibleStats.seated}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
               {t('reservationsView.stats.guests', { defaultValue: 'Guests' })}
             </div>
@@ -1081,7 +1081,7 @@ export const ReservationsView: React.FC = memo(() => {
                 <motion.div
                   variants={pageMotionItem}
                   key={appointment.id}
-                  className={`p-4 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}
+                  className={`p-4 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}
                   style={{ borderLeft: `4px solid var(--${appointmentStatusColors[appointment.status]}-500, #6b7280)` }}
                 >
                   <div className="flex items-start justify-between">
@@ -1144,7 +1144,7 @@ export const ReservationsView: React.FC = memo(() => {
                 <motion.div
                   variants={pageMotionItem}
                   key={res.id}
-                  className={`p-4 rounded-2xl cursor-pointer transition-transform active:scale-[0.99] ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}
+                  className={`p-4 rounded-2xl cursor-pointer transition-transform active:scale-[0.99] ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'}`}
                   style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
                   onClick={() => openReservationDetails(res.id)}
                 >
@@ -1236,7 +1236,7 @@ export const ReservationsView: React.FC = memo(() => {
                         <motion.div
                           variants={pageMotionItem}
                           key={res.id}
-                          className={`px-3 py-2 rounded-xl cursor-pointer transition-transform active:scale-[0.98] ${isDark ? 'bg-gray-700' : 'bg-white shadow-sm'}`}
+                          className={`px-3 py-2 rounded-xl cursor-pointer transition-transform active:scale-[0.98] ${isDark ? 'bg-gray-700' : 'bg-white shadow-xs'}`}
                           style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
                           onClick={() => openReservationDetails(res.id)}
                         >
@@ -1244,7 +1244,7 @@ export const ReservationsView: React.FC = memo(() => {
                               <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>
                                 {res.customerName}
                               </span>
-                              <span className={`text-xs px-2 py-0.5 rounded bg-${statusColors[res.status]}-500/10 text-${statusColors[res.status]}-500`}>
+                              <span className={`text-xs px-2 py-0.5 rounded-sm bg-${statusColors[res.status]}-500/10 text-${statusColors[res.status]}-500`}>
                                 {statusLabels[res.status]}
                               </span>
                             </div>
@@ -1302,7 +1302,7 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {showCreateModal && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center">
           <div className={modalScrimClass} onClick={() => setShowCreateModal(false)} />
           <div
             ref={createDialogRef}
@@ -1490,14 +1490,14 @@ export const ReservationsView: React.FC = memo(() => {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setShowCreateModal(false)}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-[44px] px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'}`}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 onClick={() => void handleCreateReservation()}
                 disabled={isCreating || !isCreateReservationReady}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-[44px] px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:active:scale-100 disabled:cursor-not-allowed ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35 disabled:bg-white/5 disabled:text-gray-500 disabled:border-white/10' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35 disabled:bg-gray-200/70 disabled:text-gray-500 disabled:border-gray-300/80'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:active:scale-100 disabled:cursor-not-allowed ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35 disabled:bg-white/5 disabled:text-gray-500 disabled:border-white/10' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35 disabled:bg-gray-200/70 disabled:text-gray-500 disabled:border-gray-300/80'}`}
               >
                 {isCreating
                   ? t('common.creating', { defaultValue: 'Creating...' })
@@ -1509,7 +1509,7 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {showServiceModal && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center">
           <div className={modalScrimClass} onClick={closeServiceModal} />
           <div
             ref={serviceDialogRef}
@@ -1614,14 +1614,14 @@ export const ReservationsView: React.FC = memo(() => {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={closeServiceModal}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-[44px] px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border ${isDark ? 'bg-red-500/25 text-red-200 border-red-400/40 active:bg-red-500/35' : 'bg-red-500/20 text-red-900 border-red-500/50 active:bg-red-500/30'}`}
               >
                 {t('common.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 onClick={() => void handleCreateServiceBooking()}
                 disabled={isCreatingService}
-                className={`inline-flex items-center justify-center text-center gap-2 min-h-[44px] px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:opacity-60 ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35'}`}
+                className={`inline-flex items-center justify-center text-center gap-2 min-h-touch px-4 py-2 rounded-xl transition-transform active:scale-95 border disabled:opacity-60 ${isDark ? 'bg-green-500/25 text-green-200 border-green-500/45 active:bg-green-500/35' : 'bg-green-500/25 text-green-900 border-green-600/50 active:bg-green-500/35'}`}
               >
                 {isCreatingService
                   ? t('common.creating', { defaultValue: 'Creating...' })
@@ -1633,7 +1633,7 @@ export const ReservationsView: React.FC = memo(() => {
       )}
 
       {(selectedReservation || isDetailsLoading) && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex justify-end">
+        <div className="fixed inset-0 z-1200 flex justify-end">
           <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setSelectedReservation(null)} />
           <div className={`relative h-full w-full max-w-xl p-4 overflow-y-auto rounded-l-[26px] backdrop-blur-2xl shadow-2xl ${isDark ? 'bg-gray-900/85 border-l border-white/10' : 'bg-white/85 border-l border-white/60'}`}>
             <div className="flex items-center justify-between mb-4">

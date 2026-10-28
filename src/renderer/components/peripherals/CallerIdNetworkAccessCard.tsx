@@ -195,9 +195,9 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
         <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2">
             {ready ? (
-              <ShieldCheck className="h-5 w-5 flex-shrink-0 text-emerald-600 dark:text-emerald-300" />
+              <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-300" />
             ) : (
-              <ShieldAlert className="h-5 w-5 flex-shrink-0 text-yellow-700 dark:text-yellow-300" />
+              <ShieldAlert className="h-5 w-5 shrink-0 text-yellow-700 dark:text-yellow-300" />
             )}
             <h4 id="caller-id-network-access-label" className="liquid-glass-modal-text text-sm font-semibold">
               {t(
@@ -255,18 +255,18 @@ export const CallerIdNetworkAccessCard: React.FC = () => {
         }`}
       >
         {busy ? (
-          <Loader2 className="mt-0.5 h-4 w-4 flex-shrink-0 animate-spin" />
+          <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />
         ) : ready ? (
-          <ShieldCheck className="mt-0.5 h-4 w-4 flex-shrink-0" />
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
         ) : (
-          <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0" />
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
         )}
         <span className="flex-1">{statusText}</span>
         <button
           type="button"
           onClick={() => void refreshStatus()}
           disabled={busy}
-          className="inline-flex min-h-[32px] min-w-[32px] flex-shrink-0 items-center justify-center rounded-lg border border-current/20 disabled:opacity-50"
+          className="inline-flex min-h-[32px] min-w-[32px] shrink-0 items-center justify-center rounded-lg border border-current/20 disabled:opacity-50"
           aria-label={t(
             'settings.peripherals.callerId.networkAccess.checkAgain',
             'Check permission again',

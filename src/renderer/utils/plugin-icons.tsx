@@ -313,7 +313,7 @@ export function PluginIcon({ plugin, size = 32, className = '', showTooltip = tr
     const { width, height, radius } = getLogoDimensions(logo.kind, size);
     return (
       <div
-        className={`inline-flex items-center justify-center shadow-sm ${className}`}
+        className={`inline-flex items-center justify-center shadow-xs ${className}`}
         style={{
           width,
           height,

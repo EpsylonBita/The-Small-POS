@@ -9,6 +9,9 @@ interface PINLoginModalProps {
   onSubmit: (pin: string) => Promise<boolean> | boolean
   title?: string
   subtitle?: string
+  /** Availability and pause states keep the dialog open without collecting a PIN. */
+  blockedMessage?: string
+  errorMessage?: string
 }
 
 export const PINLoginModal: React.FC<PINLoginModalProps> = ({
@@ -17,6 +20,8 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
   onSubmit,
   title,
   subtitle,
+  blockedMessage,
+  errorMessage,
 }) => {
   const [pin, setPin] = useState('')
   const [loading, setLoading] = useState(false)
@@ -28,7 +33,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
   const pinSlots = Array.from({ length: 6 }, (_, index) => index)
 
   const handleNumber = (n: string) => {
-    if (pin.length < 6 && !loading) {
+    if (pin.length < 6 && !loading && !blockedMessage) {
       setPin(prev => prev + n)
       setError('')
     }
@@ -47,6 +52,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
   }
 
   const handleSubmit = async () => {
+    if (blockedMessage) return
     if (!pin || loading) {
       if (!pin) setError(t('auth.login.enterPin'))
       return
@@ -59,12 +65,13 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
     } catch (error: any) {
       setError(error?.message || t('auth.login.error'))
     } finally {
+      setPin('')
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    if (!isOpen) {
+    if (!isOpen || blockedMessage) {
       setPin('')
       setError('')
       setLoading(false)
@@ -103,7 +110,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
     return () => {
       document.removeEventListener('keydown', handleKeyDown, true)
     }
-  }, [isOpen, pin, loading])
+  }, [isOpen, pin, loading, blockedMessage])
 
   return (
     <LiquidGlassModal
@@ -112,10 +119,10 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
       title={titleToShow}
       size="sm"
       closeOnBackdrop={false}
-      className="!max-w-[400px] max-h-[calc(100dvh-1.5rem)]"
+      className="max-w-[400px]! max-h-[calc(100dvh-1.5rem)]"
       contentClassName="space-y-3"
     >
-      <div className="rounded-2xl border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-emerald-950 shadow-sm shadow-emerald-950/5 dark:text-emerald-50">
+      {!blockedMessage && <div className="rounded-2xl border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-emerald-950 shadow-xs shadow-emerald-950/5 dark:text-emerald-50">
         <div className="flex items-start gap-3">
           <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
             <ShieldCheck size={16} aria-hidden="true" />
@@ -129,8 +136,13 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
             </p>
           </div>
         </div>
-      </div>
+      </div>}
 
+      {blockedMessage ? (
+        <p role="status" className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm text-slate-900 dark:text-slate-100">
+          {blockedMessage}
+        </p>
+      ) : <>
       <div
         aria-label={t('auth.login.pinEntry', 'PIN entry')}
         className="rounded-2xl border border-slate-300 bg-white p-3 text-center shadow-inner dark:border-white/15 dark:bg-slate-950/80"
@@ -149,7 +161,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
                 className={[
                   'flex h-9 items-center justify-center rounded-md border text-lg font-semibold',
                   filled
-                    ? 'border-emerald-500 bg-emerald-500 text-white shadow-sm'
+                    ? 'border-emerald-500 bg-emerald-500 text-white shadow-xs'
                     : 'border-slate-300 bg-slate-100 text-slate-400 dark:border-white/15 dark:bg-slate-900 dark:text-slate-500',
                 ].join(' ')}
               >
@@ -160,12 +172,12 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
         </div>
       </div>
 
-      {error && (
+      {(errorMessage || error) && (
         <div
           role="alert"
           className="rounded-2xl border border-red-400/50 bg-red-500/10 px-3 py-2 text-center text-sm font-semibold text-red-700 dark:text-red-200"
         >
-          {error}
+          {errorMessage || error}
         </div>
       )}
 
@@ -176,7 +188,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
             type="button"
             onClick={() => handleNumber(n)}
             disabled={loading}
-            className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
+            className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
           >
             {n}
           </button>
@@ -185,7 +197,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           type="button"
           onClick={handleClear}
           disabled={loading || !pin}
-          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white px-2 text-center text-sm font-semibold text-slate-800 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
+          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white px-2 text-center text-sm font-semibold text-slate-800 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
         >
           {t('common.clear', 'Clear')}
         </button>
@@ -193,7 +205,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           type="button"
           onClick={() => handleNumber('0')}
           disabled={loading}
-          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
+          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-lg font-semibold text-slate-950 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/15 dark:bg-slate-900 dark:text-white"
         >
           0
         </button>
@@ -202,7 +214,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
           onClick={handleBack}
           disabled={loading || !pin}
           aria-label={t('common.actions.backspace', 'Backspace')}
-          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-slate-800 shadow-sm transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
+          className="inline-flex min-h-[48px] items-center justify-center rounded-xl border border-slate-300 bg-white text-center text-slate-800 shadow-xs transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 dark:text-slate-100"
         >
           <DeleteIcon size={20} className="shrink-0" aria-hidden="true" />
         </button>
@@ -212,12 +224,13 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({
         type="button"
         onClick={handleSubmit}
         disabled={!pin || loading}
-        className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-center text-base font-semibold text-white shadow-sm transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
+        className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-center text-base font-semibold text-white shadow-xs transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 dark:disabled:bg-slate-700 dark:disabled:text-slate-300"
       >
         {loading
           ? t('auth.login.loading')
           : t('common.actions.confirm', { defaultValue: 'Confirm' })}
       </button>
+      </>}
     </LiquidGlassModal>
   )
 }

@@ -201,7 +201,7 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
       style={{ maxWidth: 360 }}
     >
       <div
-        className={`${liquidGlassModalCard()} ${colors.border} border bg-gradient-to-r ${colors.bg}`}
+        className={`${liquidGlassModalCard()} ${colors.border} border bg-linear-to-r ${colors.bg}`}
         style={{ backdropFilter: 'blur(20px)' }}
       >
         {/* Header with dismiss button */}
@@ -219,7 +219,7 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
           {dismissible && (
             <button
               onClick={handleDismiss}
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-2xl text-gray-400 transition-transform active:scale-95 active:bg-white/10"
+              className="inline-flex min-h-touch min-w-touch items-center justify-center rounded-2xl text-gray-400 transition-transform active:scale-95 active:bg-white/10"
               aria-label="Dismiss"
             >
               <X className="h-4 w-4 text-gray-400" />

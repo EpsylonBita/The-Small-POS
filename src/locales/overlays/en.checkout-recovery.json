@@ -61,7 +61,11 @@
     "conflict": "The original request requires review before you continue.",
     "refresh": "Refresh status",
     "confirmOriginalResult": "Verify original cancellation",
-    "originalResultUnconfirmed": "The original cancellation could not be confirmed. It remains saved. Reconnect and review the check before continuing."
+    "originalResultUnconfirmed": "The original cancellation could not be confirmed. It remains saved. Reconnect and review the check before continuing.",
+    "editRefused": "The change was not applied because the order changed in the meantime. Open it again and make the change from the beginning.",
+    "editConflict": "The saved edit needs review. Reopen the order before continuing.",
+    "discardEdit": "Discard old edit",
+    "editReviewUnavailable": "The saved edit could not be opened or discarded. Reconnect and check the order again."
   },
   "paymentIntegrity": {
     "reasonCodes": {

@@ -57,10 +57,10 @@ test('ConnectionSettingsModal uses a responsive settings hub shell', () => {
   assert.match(source, /ref=\{detailScrollRef\}/);
   assert.match(source, /detailScrollRef\.current\?\.scrollTo\(\{ top: 0 \}\)/);
   // Left-rail wrapping and visible thin scrollbars keep both columns discoverable.
-  assert.match(source, /block break-words text-sm font-semibold leading-tight/);
-  assert.equal((source.match(/\[scrollbar-width:thin\]/g) ?? []).length, 2);
+  assert.match(source, /block wrap-break-word text-sm font-semibold leading-tight/);
+  assert.equal((source.match(/scrollbar-thin/g) ?? []).length, 2);
   assert.doesNotMatch(source, /scrollbar-hide/);
-  assert.match(source, /contentClassName="!overflow-hidden !p-4 sm:!p-5"/);
+  assert.match(source, /contentClassName="overflow-hidden! p-4! sm:p-5!"/);
   // The old workbench shell identifiers are gone.
   assert.doesNotMatch(source, /data-settings-workbench/);
   assert.doesNotMatch(source, /settings-workbench/);
@@ -479,7 +479,7 @@ test('Round 325: Data section is three zones — recovery, green safe fixes, the
   // Collapsed summary: a short warning title + summary + chevron, native marker hidden, 44px target -- and
   // it must NOT expose any destructive handler/label before the operator expands.
   assert.match(summary, /<summary[\s\S]*?list-none[\s\S]*?\[&::-webkit-details-marker\]:hidden/);
-  assert.match(summary, /min-h-\[44px\]/);
+  assert.match(summary, /min-h-touch(?![\w.-])/);
   assert.match(summary, /t\('settings\.database\.advancedResetTitle', 'Advanced reset tools'\)/);
   assert.match(summary, /t\('settings\.database\.advancedResetSummary', 'Deletes data'\)/);
   assert.match(summary, /<ChevronDown[\s\S]*?group-open:rotate-180/);
@@ -499,7 +499,7 @@ test('Round 325: Data section is three zones — recovery, green safe fixes, the
   assert.match(expanded, /t\('settings\.database\.cannotUndo'/);
 
   // Consistent sizing/alignment: repair + danger buttons share ONE touch geometry; only the color differs.
-  assert.match(source, /const DB_ACTION_GEOMETRY =\s*\n?\s*'inline-flex min-h-\[44px\] items-center justify-center/);
+  assert.match(source, /const DB_ACTION_GEOMETRY =\s*\n?\s*'inline-flex min-h-touch items-center justify-center/);
   assert.match(source, /const DB_REPAIR_BTN_MD = `\$\{DB_ACTION_GEOMETRY\}[^`]*emerald/);
   assert.match(source, /const DB_DANGER_BTN_MD = `\$\{DB_ACTION_GEOMETRY\}[^`]*red/);
 
@@ -568,7 +568,7 @@ test('Round 195: Connection action bar gives Save a deliberate primary slot, not
   const primary = connection.slice(connection.indexOf('data-connection-primary-action'));
   assert.match(primary, /data-connection-primary-action className="flex justify-center"/);
   assert.match(primary, /onClick=\{handleSaveConnection\}/);
-  assert.match(primary, /className=\{SAVE_BTN_MD \+ ' min-h-\[44px\] w-full sm:w-auto sm:min-w-\[240px\]'\}/);
+  assert.match(primary, /className=\{SAVE_BTN_MD \+ ' min-h-touch w-full sm:w-auto sm:min-w-\[240px\]'\}/);
   assert.match(primary, /t\('modals\.connectionSettings\.save'\)/);
 
   // The old unstructured flat action row is gone from the connection section.
@@ -608,7 +608,7 @@ test('Round 227/295: ConnectionSettingsModal switches use the shared POSGlassSwi
   // The local switch-track class + the old label/peer-checkbox wrapper are gone.
   assert.doesNotMatch(source, /const switchTrackClass =/);
   assert.doesNotMatch(source, /sr-only peer/);
-  assert.doesNotMatch(source, /<label className="relative inline-flex min-h-\[44px\] items-center justify-center cursor-pointer">/);
+  assert.doesNotMatch(source, /<label className="relative inline-flex min-h-touch items-center justify-center cursor-pointer">/);
 
   // The active hardware switches and receipt prompt retain the shared component.
   // Unsupported preferences and the retired custom timeout are no longer controls.
@@ -866,7 +866,7 @@ test('Round 241: the Add/Edit fiscal device form is a focused glass submodal, no
 
   // The overlay must layer ABOVE the Settings LiquidGlassModal viewport (.liquid-glass-modal-viewport,
   // z-index: 20000) — Round 241 live QA caught it at z-[1200], rendering behind Settings.
-  const overlayZMatch = cashRegisterSource.match(/fixed inset-0 z-\[(\d+)\][^"]*bg-black\/70 backdrop-blur-sm/);
+  const overlayZMatch = cashRegisterSource.match(/fixed inset-0 z-(\d+)[^"]*bg-black\/70 backdrop-blur-sm/);
   assert.ok(overlayZMatch, 'the fiscal device overlay must declare an explicit fixed-inset z-[N] backdrop');
   const overlayZ = Number(overlayZMatch[1]);
   const glassCss = readFileSync(
@@ -881,7 +881,7 @@ test('Round 241: the Add/Edit fiscal device form is a focused glass submodal, no
     `fiscal overlay z (${overlayZ}) must exceed the LiquidGlassModal viewport z (${viewportZ})`,
   );
   // The too-low z-[1200] that rendered behind the Settings modal must not return.
-  assert.doesNotMatch(cashRegisterSource, /fixed inset-0 z-\[1200\]/);
+  assert.doesNotMatch(cashRegisterSource, /fixed inset-0 z-1200(?![\w.-])/);
   assert.match(
     cashRegisterSource,
     /role="dialog"\s*aria-modal="true"\s*aria-labelledby="cash-register-device-form-title"/,
@@ -1004,7 +1004,7 @@ test('CallerId uses one non-sticky refresh action instead of retired save/test c
   assert.doesNotMatch(callerIdSource, /sticky bottom-0|pb-32/);
   assert.match(
     callerIdSource,
-    /onClick=\{handleRefresh\}[\s\S]*?liquid-glass-modal-button[\s\S]*?min-h-\[44px\][\s\S]*?items-center justify-center/,
+    /onClick=\{handleRefresh\}[\s\S]*?liquid-glass-modal-button[\s\S]*?min-h-touch(?![\w.-])[\s\S]*?items-center justify-center/,
   );
   assert.doesNotMatch(callerIdSource, /handleSaveAndActivate|handleDisable|handleTest/);
 });
@@ -1189,7 +1189,7 @@ test('Round 290/291/295: cash-register switches use the shared POSGlassSwitch (n
   assert.doesNotMatch(cashRegisterSource, /aria-checked=\{fiscalPrintEnabled\}/);
   // No yellow-gradient ON tokens linger anywhere (the Print-Mode selectors never used these).
   assert.doesNotMatch(cashRegisterSource, /from-yellow-300|to-yellow-500|shadow-yellow-500/);
-  assert.doesNotMatch(cashRegisterSource, /peer-checked:bg-gradient-to-b/);
+  assert.doesNotMatch(cashRegisterSource, /peer-checked:bg-linear-to-b/);
 
   // All three switches are the shared component, and it is imported.
   assert.match(cashRegisterSource, /import \{ POSGlassSwitch \} from '\.\.\/ui\/pos-glass-components'/);
@@ -1246,7 +1246,7 @@ test('Round 293: the connection action bar is a balanced, centered, same-height 
 
   // Each of the (2-3) secondary buttons is flex-1 (equal width), 44px+ tall, with centered wrap-friendly
   // content -- visually balanced, and Greek text wraps neatly centred rather than overflowing.
-  const equalSized = secondary.match(/min-h-\[44px\] flex-1 items-center justify-center/g) || [];
+  const equalSized = secondary.match(/min-h-touch flex-1 items-center justify-center/g) || [];
   assert.ok(equalSized.length >= 3, 'all three secondary actions must be equal-width, same-height, centered');
   assert.match(secondary, /text-center leading-tight/);
   // They stay neutral glass; no Save / green ever leaks into the secondary cluster.
@@ -1258,7 +1258,7 @@ test('Round 293: the connection action bar is a balanced, centered, same-height 
   // a substantial desktop min-width so it never reads as a tiny floating leftover.
   const primary = connection.slice(primStart);
   assert.match(primary, /data-connection-primary-action className="flex justify-center"/);
-  assert.match(primary, /className=\{SAVE_BTN_MD \+ ' min-h-\[44px\] w-full sm:w-auto sm:min-w-\[240px\]'\}/);
+  assert.match(primary, /className=\{SAVE_BTN_MD \+ ' min-h-touch w-full sm:w-auto sm:min-w-\[240px\]'\}/);
   assert.match(primary, /onClick=\{handleSaveConnection\}/);
 
   // Handlers + aria preserved exactly (UI-only change; no behaviour/sync/auth touched).
@@ -1307,12 +1307,12 @@ test('Round 295: POSGlassSwitch is the single shared switch with exact 58x34 / 2
   assert.doesNotMatch(body, /after:content/);
 
   // Transparent >=44px touch target wrapper; the visible pill never changes size.
-  assert.match(body, /min-h-\[44px\] min-w-\[44px\][\s\S]*?bg-transparent/);
+  assert.match(body, /min-h-touch min-w-touch(?![\w.-])[\s\S]*?bg-transparent/);
 
   // EXACT visible geometry: 58x34 pill, 28px (h-7 w-7) white knob, 3px inset, 24px travel.
   assert.match(body, /h-\[34px\] w-\[58px\] shrink-0 rounded-full/);
-  assert.match(body, /absolute top-\[3px\] start-\[3px\] h-7 w-7 rounded-full bg-white/);
-  assert.match(body, /translate-x-\[24px\] rtl:-translate-x-\[24px\]/);
+  assert.match(body, /absolute top-\[3px\] inset-s-\[3px\] h-7 w-7 rounded-full bg-white/);
+  assert.match(body, /translate-x-\[24px\] rtl:translate-x-\[-24px\]/);
   assert.match(body, /translate-x-0/);
 
   // ON = semantic green glass + soft green glow; OFF = neutral grey glass (light + dark).
@@ -1479,7 +1479,7 @@ test('Round 305: PrintQueuePanel is touch-first and on-palette (no hover, no sky
   ]) {
     const btn = sliceButton(panel, marker);
     assert.match(btn, /\bw-full\b/, `${marker} must be w-full so the grid track sets an equal width`);
-    assert.match(btn, /min-h-\[44px\]/, `${marker} must be a >=44px touch target`);
+    assert.match(btn, /min-h-touch(?![\w.-])/, `${marker} must be a >=44px touch target`);
     assert.match(btn, /inline-flex/, `${marker} must be inline-flex`);
     assert.match(btn, /items-center/, `${marker} must vertically center its content`);
     assert.match(btn, /justify-center/, `${marker} must horizontally center its content`);

@@ -1304,8 +1304,8 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       animate="show"
       variants={pageMotionContainer}
       className={`relative h-full min-h-0 overflow-y-auto scrollbar-hide ${resolvedTheme === 'dark'
-      ? 'bg-gradient-to-br from-gray-900 to-gray-950'
-      : 'bg-gradient-to-br from-gray-50 to-gray-100'
+      ? 'bg-linear-to-br from-gray-900 to-gray-950'
+      : 'bg-linear-to-br from-gray-50 to-gray-100'
       }`}
     >
       {/* Header with glassmorphism */}

@@ -151,6 +151,7 @@ fn cancelled_edit_target(
 fn load(conn: &Connection, input: &Value) -> Result<Value, String> {
     let scope = scope(conn, input)?;
     let tx = write_transaction(conn)?;
+    crate::table_attempt_recovery::retire_cancelled_edits(&tx)?;
     let previous = read(&tx, &scope)?;
     let draft = &previous["draft"];
     let Some(order) = cancelled_edit_target(&tx, &scope, draft)? else {
@@ -1352,6 +1353,34 @@ mod tests {
             check_admission(&conn, &fresh).unwrap_err(),
             "CHECKOUT_DRAFT_EDIT_TARGET_CANCELLED"
         );
+    }
+
+    #[test]
+    fn checkout_cancelled_target_archives_editor_protected_only_by_retired_edit() {
+        let db = crate::tests::harness::TestDb::open();
+        let conn = db.state.conn.lock().unwrap();
+        let input = cancelled_editor_fixture(&conn);
+        crate::table_attempt_recovery::remember_item(&conn,"cancelled-target",&json!({"client_event_id":"unconfirmed-edit","id":"cancelled-target","expected_version":1})).unwrap();
+        conn.execute("UPDATE table_attempt_recovery_v1 SET status='conflict',last_error_code='CANONICAL_CONFLICT_REVIEW_REQUIRED'",[]).unwrap();
+        assert!(crate::table_attempt_recovery::inspect_edit(
+            &conn,
+            "unconfirmed-edit",
+            "cancelled-target"
+        )
+        .unwrap()
+        .is_some());
+        let result = load(&conn, &input).unwrap();
+        assert!(result["draft"].is_null());
+        assert_eq!(result["invalidation"]["reason"], "edit_target_cancelled");
+        assert!(crate::table_attempt_recovery::inspect_edit(
+            &conn,
+            "unconfirmed-edit",
+            "cancelled-target"
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM checkout_draft_archive_v1 WHERE reason='edit_target_cancelled'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM table_attempt_recovery_audit_v1 WHERE outcome='retired_target_cancelled'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     }
 
     #[test]

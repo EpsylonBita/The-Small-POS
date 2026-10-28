@@ -139,7 +139,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
   if (!open) return null;
 
   return renderModalPortal(
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-1200 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -237,7 +237,7 @@ export const ScanDevicePanel: React.FC<ScanDevicePanelProps> = ({
                     void submitCode(manualCode, 'manual');
                   }
                 }}
-                className={`min-h-11 min-w-0 flex-1 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                className={`min-h-11 min-w-0 flex-1 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                 placeholder={manualPlaceholder}
               />
               <button

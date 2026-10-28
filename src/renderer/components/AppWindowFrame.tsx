@@ -96,7 +96,7 @@ function updateTone(status: AppFrameUpdateStatus, isDark: boolean): string {
     case 'not-available':
     default:
       return isDark
-        ? 'border-white/10 bg-white/[0.05] text-zinc-300'
+        ? 'border-white/10 bg-white/5 text-zinc-300'
         : 'border-zinc-900/10 bg-white/58 text-zinc-700';
   }
 }
@@ -394,7 +394,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
     ? `${update.label} - ${update.detail}`
     : update?.label;
   const logoSource = isDark ? logoDark : logoLight;
-  const controlBase = `inline-flex h-[32px] min-h-[32px] w-[48px] min-w-[48px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none transition-colors duration-75 active:bg-yellow-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
+  const controlBase = `inline-flex h-[32px] min-h-[32px] w-[48px] min-w-[48px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none transition-colors duration-75 active:bg-yellow-400/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80 ${
     isDark ? 'text-zinc-100' : 'text-zinc-900'
   }`;
 
@@ -408,7 +408,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
       onPointerCancel={stopWindowDrag}
       onLostPointerCapture={stopWindowDrag}
       style={{ zIndex: 2147483600, pointerEvents: 'auto' }}
-      className={`relative z-[2147483600] h-8 w-full shrink-0 touch-none select-none border-b border-slate-200/80 bg-white/95 px-2 shadow-[0_1px_0_rgba(15,23,42,0.04)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/95 ${className}`}
+      className={`relative z-2147483600 h-8 w-full shrink-0 touch-none select-none border-b border-slate-200/80 bg-white/95 px-2 shadow-[0_1px_0_rgba(15,23,42,0.04)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/95 ${className}`}
     >
       <div
         data-app-window-drag-zone
@@ -442,7 +442,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           data-update-status={update.status}
           onClick={update.onOpen}
           aria-label={updateLabel}
-          className={`app-frame-update-pill absolute left-1/2 top-full z-30 mt-1.5 inline-flex h-8 max-w-[420px] -translate-x-1/2 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 ${updateTone(update.status, isDark)}`}
+          className={`app-frame-update-pill absolute left-1/2 top-full z-30 mt-1.5 inline-flex h-8 max-w-[420px] -translate-x-1/2 items-center justify-center gap-2 rounded-xl border px-3 text-xs font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80 ${updateTone(update.status, isDark)}`}
         >
           <UpdateIcon className={`h-4 w-4 shrink-0 ${update.busy ? 'animate-spin' : ''}`} />
           <span className="truncate">{update.label}</span>
@@ -469,7 +469,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           onClick={() => runWindowCommand('minimize')}
           className={controlBase}
         >
-          <Minus className="block h-4 w-4 translate-y-[1px]" />
+          <Minus className="block h-4 w-4 translate-y-px" />
         </button>
         <button
           type="button"
@@ -495,7 +495,7 @@ export const AppWindowFrame: React.FC<AppWindowFrameProps> = ({
           data-app-window-no-drag
           aria-label={t('common.actions.close', 'Close')}
           onClick={() => runWindowCommand('close')}
-          className="inline-flex h-[32px] min-h-[32px] w-[48px] min-w-[48px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none text-red-500 transition-colors duration-75 active:bg-red-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
+          className="inline-flex h-[32px] min-h-[32px] w-[48px] min-w-[48px] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none text-red-500 transition-colors duration-75 active:bg-red-500/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-300/80"
         >
           <X className="block h-4 w-4" />
         </button>

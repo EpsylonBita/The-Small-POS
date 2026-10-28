@@ -415,13 +415,32 @@ pub fn load_payments_not_saved_blockers(
         let (number,total,status):(String,f64,String)=conn.query_row("SELECT COALESCE(order_number,id),COALESCE(total_amount,0),COALESCE(payment_status,'pending') FROM orders WHERE id=?1",[&order_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
             .optional().map_err(|error|error.to_string())?.unwrap_or((order_id.clone(),0.0,"pending".into()));
         let settled = crate::payments::load_principal_paid_for_order(conn, &order_id)?;
+        // A cancelled order's correction can never be saved: a manager closes it here.
+        let closed = crate::edit_settlement_recovery::order_closed_for_edits(conn, &order_id)?;
+        let (reason_text, suggested_fix) = if closed {
+            ("The order was cancelled, so this confirmed correction can never be saved. Its original collection or refund is retained.",
+             "Check the bank POS and the drawer for this correction's money. A manager then closes it here without recording money.")
+        } else {
+            ("A confirmed order correction is not saved yet. Its original collection or refund is retained.",
+             "Reopen the saved order edit and save the same correction. Do not collect or return the money again.")
+        };
         blockers.push(UnsettledPaymentBlocker {
-            order_id,order_number:number,total_amount:Cents::round_half_even(total),settled_amount:Cents::round_half_even(settled),
-            payment_status:status,payment_method:"pending".into(),reason_code:"edit_settlement_not_saved".into(),
-            reason_text:"A confirmed order correction is not saved yet. Its original collection or refund is retained.".into(),
-            suggested_fix:"Reopen the saved order edit and save the same correction. Do not collect or return the money again.".into(),
-            severity:IntegritySeverity::Blocking.as_str().into(),difference_cents:0,reason_amounts:BTreeMap::new(),
-            reason_variant:None,review_payment:None,unsaved_payment:None,platform_held:false,
+            order_id,
+            order_number: number,
+            total_amount: Cents::round_half_even(total),
+            settled_amount: Cents::round_half_even(settled),
+            payment_status: status,
+            payment_method: "pending".into(),
+            reason_code: "edit_settlement_not_saved".into(),
+            reason_text: reason_text.into(),
+            suggested_fix: suggested_fix.into(),
+            severity: IntegritySeverity::Blocking.as_str().into(),
+            difference_cents: 0,
+            reason_amounts: BTreeMap::new(),
+            reason_variant: closed.then(|| "order_cancelled".to_string()),
+            review_payment: None,
+            unsaved_payment: None,
+            platform_held: false,
         });
     }
     // A proven refusal is told as such (review 06/10/2026): it never awaits a

@@ -49,7 +49,7 @@ export const HousekeepingView: React.FC = memo(() => {
   const today = toLocalDateString(now);
   const bridge = getBridge();
   const lightGlassSurface = 'bg-white/72 border-zinc-300/80 shadow-[0_12px_30px_rgba(15,23,42,0.10)]';
-  const lightControlSurface = 'bg-white/90 text-gray-950 border-zinc-300 shadow-sm shadow-black/5';
+  const lightControlSurface = 'bg-white/90 text-gray-950 border-zinc-300 shadow-xs shadow-black/5';
 
   // Resolve identity + current rooms so rooms sitting in `cleaning` status surface
   // as visible fallback rows even before a housekeeping_tasks row exists for them.
@@ -617,7 +617,7 @@ export const HousekeepingView: React.FC = memo(() => {
                           {t('housekeepingView.room', { defaultValue: 'Room' })} {task.room_number || task.room_id || '-'}
                         </span>
                         <span
-                          className="px-2 py-0.5 rounded text-xs"
+                          className="px-2 py-0.5 rounded-sm text-xs"
                           style={{ backgroundColor: priorityColor.bg, color: priorityColor.text }}
                         >
                           {t(`housekeepingView.priority.${task.priority}`, { defaultValue: task.priority })}

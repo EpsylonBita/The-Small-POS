@@ -130,7 +130,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
       onClose={canClose ? onClose : () => { }}
       title={getTitle()}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={canClose}
       closeOnEscape={canClose}
     >
@@ -362,14 +362,14 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         <button
           type="button"
           onClick={handleInstall}
-          className="w-full min-h-12 rounded-2xl bg-green-600 px-6 py-3 font-bold text-white transition-transform active:scale-[0.98] active:bg-green-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-300/80"
+          className="w-full min-h-12 rounded-2xl bg-green-600 px-6 py-3 font-bold text-white transition-transform active:scale-[0.98] active:bg-green-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-green-300/80"
         >
           {t('updates.actions.installNow')}
         </button>
         <button
           type="button"
           onClick={handleClose}
-          className="w-full min-h-12 rounded-2xl bg-gray-600 px-6 py-3 font-semibold text-white transition-transform active:scale-[0.98] active:bg-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
+          className="w-full min-h-12 rounded-2xl bg-gray-600 px-6 py-3 font-semibold text-white transition-transform active:scale-[0.98] active:bg-gray-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80"
         >
           {t('updates.actions.installLater')}
         </button>

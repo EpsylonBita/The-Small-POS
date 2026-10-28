@@ -2628,22 +2628,35 @@ fn resolve_local_payment_currency_and_collector(
         && table_session
             .as_deref()
             .is_some_and(|id| !id.trim().is_empty());
-    let current_terminal = fresh_table_collection
+    // Tomikro #00055 (27/10/2026): a paid edit's card difference sent without
+    // collector IDs fell back to the order's historical shift, which this
+    // till no longer had, and the currency lookup refused with free text.
+    // New money at the till belongs to the cashier now collecting it, so the
+    // terminal's active cashier comes before the order's shift. Only the
+    // choice of shift changes for ordinary sales: no new refusal is added.
+    let drawer_collection_without_collector = input.payment_origin == "manual"
+        && input.collected_by.as_deref() == Some("cashier_drawer")
+        && input.requested_staff_shift_id.is_none();
+    let current_terminal = (fresh_table_collection || drawer_collection_without_collector)
         .then(|| crate::terminal_helpers::resolve_canonical_terminal_identity_in_connection(conn))
         .flatten();
+    let current_cashier = match current_terminal.as_deref() {
+        Some(terminal) => {
+            order_ownership::resolve_active_cashier_assignment(conn, &order_branch, terminal)?
+        }
+        None => None,
+    };
     let payment_shift = if fresh_table_collection {
         match input.requested_staff_shift_id.as_deref() {
             Some(id) => Some(id.to_string()),
-            None => match current_terminal.as_deref() {
-                Some(terminal) => order_ownership::resolve_active_cashier_assignment(
-                    conn,
-                    &order_branch,
-                    terminal,
-                )?
-                .map(|(shift, _)| shift),
-                None => None,
-            },
+            None => current_cashier.as_ref().map(|(shift, _)| shift.clone()),
         }
+    } else if let Some((shift, staff)) = current_cashier
+        .clone()
+        .filter(|_| drawer_collection_without_collector)
+    {
+        *collecting_cashier = Some((shift.clone(), staff));
+        Some(shift)
     } else {
         input.requested_staff_shift_id.clone().or(order_shift).or_else(|| conn.query_row(
             "SELECT id FROM staff_shifts WHERE branch_id = ?1 AND status = 'active' AND role_type IN ('cashier', 'manager') ORDER BY check_in_time DESC LIMIT 1",
@@ -2651,20 +2664,22 @@ fn resolve_local_payment_currency_and_collector(
         ).optional().ok().flatten())
     };
     let payment_shift = payment_shift.ok_or_else(|| "SHIFT_CURRENCY_UNAVAILABLE".to_string())?;
-    if crate::shifts::require_shift_operating_currency(conn, &payment_shift)? != currency {
-        return Err("SHIFT_CURRENCY_MISMATCH".to_string());
-    }
     if fresh_table_collection {
-        let (role, staff, status, terminal): (String, String, String, String) = conn
+        let (role, staff, status, terminal, branch): (String, String, String, String, String) = conn
             .query_row(
-                "SELECT role_type, staff_id, status, COALESCE(terminal_id, '')
+                "SELECT role_type, staff_id, status, COALESCE(terminal_id, ''), COALESCE(branch_id, '')
              FROM staff_shifts WHERE id = ?1",
                 params![payment_shift],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
-            .map_err(|error| format!("read table payment collector: {error}"))?;
+            .optional()
+            .map_err(|_| "EDIT_LOCAL_OPERATION_FAILED")?
+            .ok_or("EDIT_PAYMENT_COLLECTOR_UNAVAILABLE")?;
         if status != "active" || !matches!(role.as_str(), "cashier" | "manager") {
             return Err("SHIFT_CURRENCY_UNAVAILABLE".into());
+        }
+        if branch != order_branch {
+            return Err("OPERATING_CURRENCY_BRANCH_MISMATCH".into());
         }
         if current_terminal.as_deref() != Some(terminal.as_str()) {
             return Err("PAYMENT_COLLECTOR_TERMINAL_MISMATCH".into());
@@ -2676,7 +2691,23 @@ fn resolve_local_payment_currency_and_collector(
         {
             return Err("PAYMENT_COLLECTOR_STAFF_MISMATCH".into());
         }
-        *collecting_cashier = Some((payment_shift, staff));
+        *collecting_cashier = Some((payment_shift.clone(), staff));
+    } else if input.collected_by.as_deref() == Some("cashier_drawer") {
+        // A named collector shift this till does not have refused before as
+        // free text from the currency lookup; it keeps refusing, with a code.
+        let known: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM staff_shifts WHERE id = ?1)",
+                params![payment_shift],
+                |row| row.get(0),
+            )
+            .map_err(|_| "EDIT_LOCAL_OPERATION_FAILED")?;
+        if !known {
+            return Err("EDIT_PAYMENT_COLLECTOR_UNAVAILABLE".into());
+        }
+    }
+    if crate::shifts::require_shift_operating_currency(conn, &payment_shift)? != currency {
+        return Err("SHIFT_CURRENCY_MISMATCH".to_string());
     }
     if !input.currency.trim().is_empty()
         && normalize_currency_code(&input.currency).as_deref() != Some(currency.as_str())
@@ -6012,9 +6043,10 @@ mod tests {
         let db = waiter_check_cashier_fixture();
         let mut payload = waiter_check_cash_payload();
         payload["staffShiftId"] = serde_json::json!("explicit-missing-shift");
-        assert!(record_payment(&db, &payload)
-            .unwrap_err()
-            .contains("read shift currency"));
+        assert_eq!(
+            record_payment(&db, &payload).unwrap_err(),
+            "EDIT_PAYMENT_COLLECTOR_UNAVAILABLE"
+        );
         let conn = db.conn.lock().unwrap();
         assert_eq!(
             conn.query_row("SELECT count(*) FROM order_payments", [], |row| row

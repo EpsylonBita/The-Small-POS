@@ -6765,6 +6765,45 @@ fn preview_edit_settlement_superseding(
     }))
 }
 
+fn require_journaled_edit_admission(
+    conn: &rusqlite::Connection,
+    order: &str,
+    payload: &OrderEditSettlementPayload,
+    event: &str,
+    methods: &[String],
+) -> Result<(), EditRefusal> {
+    payments::ensure_ecommerce_order_mutation_allowed(conn, order, None)?;
+    let local = payload
+        .expected_local_version
+        .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
+    crate::edit_settlement_recovery::require_canonical_preflight_detailed(
+        conn,
+        order,
+        event,
+        payload
+            .expected_version
+            .ok_or("EDIT_SETTLEMENT_VERSION_REQUIRED")?,
+        local,
+    )?;
+    crate::edit_settlement_recovery::require_fulfillment_capability(
+        conn,
+        order,
+        event,
+        payload
+            .order_updates
+            .as_ref()
+            .and_then(|updates| updates.order_type.as_deref()),
+    )?;
+    require_original_edit_quote_detailed(conn, order, event, payload)?;
+    Ok(crate::edit_settlement_recovery::require_edit_policy(
+        conn,
+        order,
+        event,
+        methods,
+        payload.items.len(),
+    )?)
+}
+
 #[tauri::command]
 pub async fn orders_apply_edit_settlement(
     arg0: Option<serde_json::Value>,
@@ -6811,42 +6850,13 @@ pub async fn orders_apply_edit_settlement(
             // Freshness is checked by the uncached canonical preview before the
             // picker; a physically confirmed delta is never expired by time.
             let admission = |conn: &rusqlite::Connection| -> Result<(), String> {
-                let checked = (|| -> Result<(), EditRefusal> {
-                    payments::ensure_ecommerce_order_mutation_allowed(
-                        conn,
-                        &actual_order_id,
-                        None,
-                    )?;
-                    let local = payload
-                        .expected_local_version
-                        .ok_or("EDIT_CANONICAL_PREFLIGHT_REQUIRED")?;
-                    crate::edit_settlement_recovery::require_canonical_preflight_detailed(
-                        conn,
-                        &actual_order_id,
-                        event,
-                        payload
-                            .expected_version
-                            .ok_or("EDIT_SETTLEMENT_VERSION_REQUIRED")?,
-                        local,
-                    )?;
-                    crate::edit_settlement_recovery::require_fulfillment_capability(
-                        conn,
-                        &actual_order_id,
-                        event,
-                        payload
-                            .order_updates
-                            .as_ref()
-                            .and_then(|updates| updates.order_type.as_deref()),
-                    )?;
-                    require_original_edit_quote_detailed(conn, &actual_order_id, event, &payload)?;
-                    Ok(crate::edit_settlement_recovery::require_edit_policy(
-                        conn,
-                        &actual_order_id,
-                        event,
-                        &methods,
-                        payload.items.len(),
-                    )?)
-                })();
+                let checked = require_journaled_edit_admission(
+                    conn,
+                    &actual_order_id,
+                    &payload,
+                    event,
+                    &methods,
+                );
                 if let Err(refusal) = &checked {
                     *refusal_slot
                         .lock()
@@ -6917,6 +6927,7 @@ pub async fn orders_apply_edit_settlement(
         Ok(response)
     }
     .await;
+    let result = result.map_err(crate::edit_settlement_recovery::normalize_edit_error);
     let refused = match &result {
         Err(error) => Some(error.as_str()),
         Ok(response) if response["success"] == false => response["error"]
@@ -6956,16 +6967,19 @@ fn reconcile_unapplied_edit_settlement(
         return Err("EDIT_RECONCILIATION_DECISION_REQUIRED".into());
     }
     let order_raw = value_str(request, &["orderId", "order_id"]).ok_or("Missing orderId")?;
-    let event = value_str(request, &["client_event_id", "clientEventId"])
-        .ok_or("EDIT_SETTLEMENT_ID_REQUIRED")?;
+    // The Z checks close every held correction of a cancelled order at once
+    // (Tomikro #00055, 28/10/2026): its editor can never be reopened.
+    let order_scope = reconcile.get("scope").and_then(Value::as_str) == Some("order");
+    let event = value_str(request, &["client_event_id", "clientEventId"]);
+    if order_scope == event.is_some() {
+        return Err("EDIT_SETTLEMENT_ID_REQUIRED".into());
+    }
     let reason = value_str(reconcile, &["reason"]).unwrap_or_default();
-    {
+    let proven = {
         let conn = db.conn.lock().map_err(|error| error.to_string())?;
         let order = resolve_renderer_order_id(&conn, &order_raw)?;
-        if !crate::edit_settlement_recovery::proven_not_applied(&conn, &order, &event)? {
-            return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
-        }
-    }
+        proven_held_corrections(&conn, &order, event.as_deref())?
+    };
     let approver = crate::auth::authorize_money_action(
         crate::auth::MoneyApproval::VoidPayments,
         db,
@@ -6986,13 +7000,50 @@ fn reconcile_unapplied_edit_settlement(
     let _lease = crate::repairs::acquire_terminal_binding_lease()?;
     let conn = db.conn.lock().map_err(|error| error.to_string())?;
     let order = resolve_renderer_order_id(&conn, &order_raw)?;
-    crate::edit_settlement_recovery::reconcile_unapplied(
-        &conn,
-        &order,
-        &event,
-        &serde_json::json!({"approvedBy":approved_by,"via":approver.via}),
-        &reason,
-    )
+    let approval = serde_json::json!({"approvedBy":approved_by,"via":approver.via});
+    let Some(event) = event else {
+        // Re-proved under the lock: the approved set is exactly what is closed.
+        if proven_held_corrections(&conn, &order, None)? != proven {
+            return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+        }
+        for event in &proven {
+            crate::edit_settlement_recovery::reconcile_unapplied(
+                &conn, &order, event, &approval, &reason,
+            )?;
+        }
+        return Ok(
+            serde_json::json!({"success":true,"state":"reconciled","orderId":order,"closedEvents":proven}),
+        );
+    };
+    crate::edit_settlement_recovery::reconcile_unapplied(&conn, &order, &event, &approval, &reason)
+}
+
+/// The attempts a manager may close without money: the named one, or (no
+/// event) every held money correction of a cancelled order. Each must be
+/// proven never applied; an open order keeps its editor path.
+fn proven_held_corrections(
+    conn: &rusqlite::Connection,
+    order: &str,
+    event: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let events = match event {
+        Some(event) => vec![event.to_string()],
+        None => {
+            if !crate::edit_settlement_recovery::order_closed_for_edits(conn, order)? {
+                return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+            }
+            crate::edit_settlement_recovery::pending_financial_events(conn, order)?
+        }
+    };
+    if events.is_empty() {
+        return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+    }
+    for event in &events {
+        if !crate::edit_settlement_recovery::proven_not_applied(conn, order, event)? {
+            return Err("EDIT_RECONCILIATION_NOT_PROVEN".into());
+        }
+    }
+    Ok(events)
 }
 
 fn validate_journaled_edit_target_superseding(
@@ -7489,7 +7540,7 @@ fn apply_edit_settlement_changes(
                 payments: payment_rows,
             } => {
                 if payment_rows.is_empty() {
-                    return Err("Collect action requires at least one payment".into());
+                    return Err("EDIT_INVALID_REQUEST".into());
                 }
                 let recorded_total: f64 = payment_rows.iter().map(|payment| payment.amount).sum();
                 let outstanding = (next_total - paid_total_before).max(0.0);
@@ -7498,9 +7549,7 @@ fn apply_edit_settlement_changes(
                         != Cents::round_half_even(outstanding))
                     || recorded_total > outstanding + 0.01
                 {
-                    return Err(format!(
-                        "Collected amount {recorded_total:.2} exceeds outstanding balance {outstanding:.2}"
-                    ));
+                    return Err("EDIT_COLLECTION_AMOUNT_MISMATCH".into());
                 }
 
                 for (index, payment) in payment_rows.into_iter().enumerate() {
@@ -7553,7 +7602,7 @@ fn apply_edit_settlement_changes(
                 refunds: refund_rows,
             } => {
                 if refund_rows.is_empty() {
-                    return Err("Refund action requires at least one payment allocation".into());
+                    return Err("EDIT_INVALID_REQUEST".into());
                 }
                 let refund_total: f64 = refund_rows.iter().map(|refund| refund.amount).sum();
                 let required_refund =
@@ -7562,9 +7611,7 @@ fn apply_edit_settlement_changes(
                     && Cents::round_half_even(refund_total)
                         != Cents::round_half_even(required_refund);
                 if exact_mismatch || (refund_total - required_refund).abs() > 0.01 {
-                    return Err(format!(
-                        "Refund allocation {refund_total:.2} must match the overpaid amount {required_refund:.2}"
-                    ));
+                    return Err("EDIT_REFUND_AMOUNT_MISMATCH".into());
                 }
 
                 for (index, refund) in refund_rows.into_iter().enumerate() {
@@ -7729,7 +7776,7 @@ pub async fn orders_report_edit_refusal(
         | "EDIT_CANONICAL_ORIGINAL_CHANGED"
         | "EDIT_CANONICAL_SNAPSHOT_INVALID"
         | "EDIT_SETTLEMENT_VERSION_CHANGED") => code,
-        _ => "EDIT_REFUSAL_UNCLASSIFIED",
+        _ => "EDIT_INVALID_REFUSAL_REPORT",
     };
     let field = request["field"].as_str().and_then(|field| {
         crate::edit_settlement_recovery::EDIT_REFUSAL_FIELDS
@@ -10057,6 +10104,8 @@ pub(crate) fn authorize_owing_order_cancel_with_evidence(
                         .into(),
                 ttl_seconds: None,
                 approval: Some("void_orders"),
+                permission: None,
+                minutes: None,
             }
             .into());
         }
@@ -10250,6 +10299,8 @@ async fn release_refused_table_cancellation(
                 .into(),
             ttl_seconds: None,
             approval: Some("void_orders"),
+            permission: None,
+            minutes: None,
         }
         .into());
     }
@@ -17136,6 +17187,205 @@ mod paid_edit_ledger_tests {
     }
 
     #[test]
+    fn tomikro_refused_card_edit_exact_retries_stay_local_and_never_duplicate_money() {
+        let _keyring = crate::tests::fake_keyring::install_empty();
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let mut request = journaled_edit_fixture(&conn, false);
+        request["action"]["payments"][0]["method"] = serde_json::json!("card");
+        request["action"]["payments"][0]["staffShiftId"] =
+            serde_json::json!("missing-explicit-collector");
+        let preview = parse_order_edit_settlement_preview_payload(Some(request.clone())).unwrap();
+        assert_eq!(
+            preview_edit_settlement_in_connection(&conn, &preview).unwrap()["requiredAction"],
+            "collect"
+        );
+        let first = run_journaled_edit(&conn, &request).unwrap();
+        assert_eq!(first["success"], false);
+        assert_eq!(first["error"], "EDIT_PAYMENT_COLLECTOR_UNAVAILABLE");
+        // Both retries use the same local journal/apply path, with no transport
+        // or fresh capability request. This explains a no-server-call refusal;
+        // the original bundle cannot distinguish this from preview's early hold.
+        assert_eq!(run_journaled_edit(&conn, &request).unwrap(), first);
+        assert_eq!(run_journaled_edit(&conn, &request).unwrap(), first);
+        let retained = crate::edit_settlement_recovery::inspect(&conn, "edit-event", "legacy-edit")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained["state"], "refused");
+        assert_eq!(retained["request"], request);
+        // Preview checks this retained event before fetch_edit_capability and
+        // refuses RECOVERY_ORIGINAL_REQUEST_REQUIRED rather than recollecting.
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM order_payments", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM parity_sync_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT total_amount FROM orders WHERE id='legacy-edit'",
+                [],
+                |r| r.get::<_, f64>(0)
+            )
+            .unwrap(),
+            6.0
+        );
+    }
+
+    #[test]
+    fn tomikro_00055_card_delta_after_two_round_preview() {
+        for stale_order_shift in [false, true] {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let mut request = journaled_edit_fixture(&conn, false);
+            let lines = serde_json::json!([{"id":"22222222-2222-4222-8222-222222222222","name":"Original","quantity":1,"unit_price":13.2,"total_price":13.2}]);
+            conn.execute("UPDATE orders SET total_amount=13.2,total_amount_cents=1320,subtotal=13.2,items=?1,staff_id=NULL,staff_shift_id=NULL,supabase_id='dd4930fa-0758-4e7f-87c6-acdf3c91130b',currency='EUR' WHERE id='legacy-edit'",[lines.to_string()]).unwrap();
+            conn.execute("UPDATE order_payments SET amount=13.2,amount_cents=1320,staff_id=NULL,staff_shift_id=NULL,transaction_ref=NULL WHERE id='original-six'",[]).unwrap();
+            conn.execute("UPDATE staff_shifts SET check_in_time='2026-10-27T15:07:00Z' WHERE id='edit-shift'",[]).unwrap();
+            request["items"] = lines;
+            request["items"].as_array_mut().unwrap().push(
+                serde_json::json!({"name":"Added","quantity":1,"unit_price":3.9,"total_price":3.9}),
+            );
+            request["action"] = serde_json::json!({"type":"collect","payments":[{"method":"card","amount":3.9,"paymentOrigin":"manual","collectedBy":"cashier_drawer","staffId":"cashier","staffShiftId":"edit-shift"}]});
+            if stale_order_shift {
+                // Missing renderer attribution is legal (the UUID filter omits it
+                // when activeShift is not hydrated). Historical order ownership is
+                // not the collector of this new, explicitly at-the-till difference.
+                conn.execute("UPDATE orders SET staff_shift_id='historical-shift-not-mirrored' WHERE id='legacy-edit'",[]).unwrap();
+                request["action"]["payments"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("staffShiftId");
+                request["action"]["payments"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("staffId");
+            }
+            // The first capability round races an ACK advancing canonical revision.
+            let (original, mut remote) = canonical_preflight_fixture(&conn, 2);
+            conn.execute(
+                "UPDATE orders SET remote_version=2 WHERE id='legacy-edit'",
+                [],
+            )
+            .unwrap();
+            assert_eq!(
+                crate::edit_settlement_recovery::remember_canonical_preflight(
+                    &conn,
+                    "legacy-edit",
+                    "edit-event",
+                    &original,
+                    &remote
+                )
+                .unwrap_err(),
+                "EDIT_SETTLEMENT_VERSION_CHANGED"
+            );
+            let original =
+                crate::edit_settlement_recovery::capture_preflight(&conn, "legacy-edit").unwrap();
+            remote["order"]["version"] = serde_json::json!(2);
+            let (wire, local) = crate::edit_settlement_recovery::remember_canonical_preflight(
+                &conn,
+                "legacy-edit",
+                "edit-event",
+                &original,
+                &remote,
+            )
+            .unwrap();
+            request["expected_version"] = serde_json::json!(wire);
+            request["expected_local_version"] = serde_json::json!(local);
+            let financials=financials_from_server_quote(&serde_json::json!({"total_amount":17.1,"subtotal":17.1,"tax_amount":0,"discount_amount":0,"delivery_fee":0,"tip_amount":0,"tax_breakdown":[]})).unwrap();
+            request["financials"] = financials_for_renderer(&financials);
+            let payload =
+                parse_order_edit_settlement_preview_payload(Some(request.clone())).unwrap();
+            let proposed = quoted_edit_input(&conn, "legacy-edit", &payload).unwrap();
+            db::set_setting(&conn,"edit_settlement_quote_v1","edit-org:edit-branch:11111111-1111-4111-8111-111111111111:edit-event",&serde_json::json!({"orderId":"legacy-edit","input":proposed,"financials":request["financials"]}).to_string()).unwrap();
+            assert_eq!(
+                preview_edit_settlement_in_connection(&conn, &payload).unwrap()["requiredAction"],
+                "collect"
+            );
+            let currency_probe = payments::resolve_local_payment_currency(&conn, &payments::build_payment_record_input(&serde_json::json!({"orderId":"legacy-edit","method":"card","amount":3.9,"paymentOrigin":"manual","collectedBy":"cashier_drawer"})).unwrap());
+            let apply = || {
+                let (payload, action) =
+                    parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+                let methods = edit_settlement_action_methods(&action);
+                apply_journaled_edit_settlement_admitted(
+                    &conn,
+                    "legacy-edit",
+                    &payload,
+                    action,
+                    &request,
+                    "2026-10-27T21:37:24Z",
+                    |conn| {
+                        require_journaled_edit_admission(
+                            conn,
+                            "legacy-edit",
+                            &payload,
+                            "edit-event",
+                            &methods,
+                        )
+                        .map_err(|refusal| refusal.code)
+                    },
+                )
+            };
+            let answer = apply().unwrap();
+            assert_eq!(
+                answer["success"], true,
+                "stale_order_shift={stale_order_shift}, currency={currency_probe:?}, {answer}"
+            );
+            assert_eq!(apply().unwrap(), answer);
+            let (count, cents): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*),SUM(amount_cents) FROM order_payments",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((count, cents), (2, 1710));
+            let original_owner: (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT staff_id,staff_shift_id FROM order_payments WHERE id='original-six'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(original_owner, (None, None));
+            assert_eq!(
+                conn.query_row(
+                    "SELECT amount_cents FROM order_payments WHERE id='original-six'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1320
+            );
+            assert_eq!(answer["paymentStatus"], "paid");
+            let collector: (String, String, i64, String, String) = conn
+                .query_row(
+                    "SELECT staff_id,staff_shift_id,amount_cents,method,currency FROM order_payments WHERE id<>'original-six'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                collector,
+                (
+                    "cashier".into(),
+                    "edit-shift".into(),
+                    390,
+                    "card".into(),
+                    "EUR".into()
+                )
+            );
+        }
+    }
+
+    #[test]
     fn header_correction_menu_metadata_proves_unchanged_items_money_and_replays_original() {
         let _keyring = crate::tests::fake_keyring::install_empty();
         let db = test_db();
@@ -18631,7 +18881,7 @@ mod paid_edit_ledger_tests {
             "2026-09-29T12:46:00Z",
         )
         .expect_err("collecting the proven money twice must be refused");
-        assert!(error.contains("exceeds outstanding balance"), "{error}");
+        assert_eq!(error, "EDIT_COLLECTION_AMOUNT_MISMATCH");
         assert_eq!(stored_payment_status(&conn, "order-grown-over"), "paid");
     }
 
@@ -19018,10 +19268,7 @@ mod paid_edit_ledger_tests {
             "2026-09-29T12:00:00Z",
         )
         .expect_err("nothing to refund locally");
-        assert!(
-            error.contains("must match the overpaid amount 0.00"),
-            "{error}"
-        );
+        assert_eq!(error, "EDIT_REFUND_AMOUNT_MISMATCH");
 
         // The save goes through and the order stays paid; the server ledger
         // settles the missing money later.
@@ -19074,7 +19321,7 @@ mod paid_edit_ledger_tests {
             "2026-09-29T12:10:00Z",
         )
         .expect_err("the missing money is not refunded here");
-        assert!(error.contains("overpaid amount 2.00"), "{error}");
+        assert_eq!(error, "EDIT_REFUND_AMOUNT_MISMATCH");
 
         let (response, _) = apply_edit_settlement_in_connection(
             &conn,
@@ -19859,6 +20106,76 @@ mod paid_edit_ledger_tests {
                     "no"
                 )
                 .unwrap_err(),
+                "EDIT_RECONCILIATION_NOT_PROVEN"
+            );
+        }
+
+        /// Tomikro #00055 (28/10/2026): refused card collections of an order
+        /// cancelled afterwards held every Z, and the editor that offers the
+        /// manager's close could no longer be opened.
+        #[test]
+        fn a_cancelled_orders_held_corrections_close_from_the_z_checks_only() {
+            let _keyring = crate::tests::fake_keyring::install_empty();
+            let db = test_db();
+            let conn = db.conn.lock().unwrap();
+            let request = journaled_edit_fixture(&conn, false);
+            let (payload, action) =
+                parse_order_edit_settlement_apply_payload(Some(request.clone())).unwrap();
+            apply_journaled_edit_settlement_admitted(
+                &conn,
+                "legacy-edit",
+                &payload,
+                action,
+                &request,
+                "2026-10-06T10:00:00Z",
+                |_| Err("EDIT_SETTLEMENT_METHOD_UNAVAILABLE".into()),
+            )
+            .unwrap();
+            let blockers = |conn: &rusqlite::Connection| {
+                crate::payment_integrity::load_payments_not_saved_blockers(conn, "edit-branch")
+                    .unwrap()
+            };
+            // A live order keeps its editor path: no order-wide close.
+            assert_eq!(blockers(&conn)[0].reason_variant, None);
+            assert_eq!(
+                proven_held_corrections(&conn, "legacy-edit", None).unwrap_err(),
+                "EDIT_RECONCILIATION_NOT_PROVEN"
+            );
+            conn.execute(
+                "UPDATE orders SET status='cancelled' WHERE id='legacy-edit'",
+                [],
+            )
+            .unwrap();
+            let held = blockers(&conn);
+            assert_eq!(held.len(), 1);
+            assert_eq!(held[0].reason_code, "edit_settlement_not_saved");
+            assert_eq!(held[0].reason_variant.as_deref(), Some("order_cancelled"));
+            let proven = proven_held_corrections(&conn, "legacy-edit", None).unwrap();
+            assert_eq!(proven, vec!["edit-event".to_string()]);
+            let approval = json!({"approvedBy":"manager-1","via":"manager_pin"});
+            for event in &proven {
+                crate::edit_settlement_recovery::reconcile_unapplied(
+                    &conn,
+                    "legacy-edit",
+                    event,
+                    &approval,
+                    "Order cancelled; closed from the Z checks",
+                )
+                .unwrap();
+            }
+            assert!(blockers(&conn).is_empty());
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM order_payments"), 1);
+            assert_eq!(count(&conn, "SELECT COUNT(*) FROM payment_adjustments"), 0);
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT COUNT(*) FROM edit_settlement_reconciliations_v1"
+                ),
+                1
+            );
+            // Nothing is left to close.
+            assert_eq!(
+                proven_held_corrections(&conn, "legacy-edit", None).unwrap_err(),
                 "EDIT_RECONCILIATION_NOT_PROVEN"
             );
         }

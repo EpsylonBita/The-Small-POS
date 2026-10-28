@@ -102,7 +102,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
   };
 
   const fieldClass =
-    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-none focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
 
   return (
     <LiquidGlassModal
@@ -110,7 +110,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
       onClose={onClose}
       title={t('modals.editAddress.title')}
       size="md"
-      className="!max-w-lg max-h-[90vh]"
+      className="max-w-lg! max-h-[90vh]"
     >
       <div className="overflow-y-auto scrollbar-hide">
             {/* Form */}

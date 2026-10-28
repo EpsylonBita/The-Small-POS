@@ -149,7 +149,7 @@ export const TipModal: React.FC<TipModalProps> = ({
       onClose={onClose}
       title={t('modals.tip.title', 'Add Tip')}
       size="sm"
-      className="!max-w-md"
+      className="max-w-md!"
       closeOnBackdrop={false}
     >
       <div className="space-y-3">
@@ -166,7 +166,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                 aria-pressed={selectedPercentage === percentage}
                 className={`min-h-10 text-sm font-bold ${tipChoiceButtonBaseClass} ${
                   selectedPercentage === percentage
-                    ? '!border-emerald-400/70 !bg-emerald-50 text-emerald-700 dark:!bg-emerald-500/25 dark:text-emerald-100'
+                    ? 'border-emerald-400/70! bg-emerald-50! text-emerald-700 dark:bg-emerald-500/25! dark:text-emerald-100'
                     : 'liquid-glass-modal-text'
                 }`}
               >
@@ -190,7 +190,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                 setManualAmount(value);
               }}
               placeholder="0,00"
-              className="w-full rounded-xl border-2 border-slate-200/90 bg-white/90 py-2.5 pl-10 pr-4 text-lg font-bold liquid-glass-modal-text shadow-inner outline-none transition-colors focus:border-emerald-400/60 dark:border-white/15 dark:bg-white/10"
+              className="w-full rounded-xl border-2 border-slate-200/90 bg-white/90 py-2.5 pl-10 pr-4 text-lg font-bold liquid-glass-modal-text shadow-inner outline-hidden transition-colors focus:border-emerald-400/60 dark:border-white/15 dark:bg-white/10"
             />
           </div>
         </div>
@@ -212,7 +212,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                   aria-pressed={isSelected}
                   className={`flex min-h-14 items-center gap-3 p-2.5 text-left ${tipChoiceButtonBaseClass} ${
                     isSelected
-                      ? '!border-yellow-400/80 !bg-yellow-50/90 dark:!bg-yellow-400/10'
+                      ? 'border-yellow-400/80! bg-yellow-50/90! dark:bg-yellow-400/10!'
                       : ''
                   }`}
                 >
@@ -245,7 +245,7 @@ export const TipModal: React.FC<TipModalProps> = ({
                     aria-pressed={recipientStaffId === option.staffId}
                     className={`min-h-10 truncate px-2 text-sm font-semibold ${tipChoiceButtonBaseClass} ${
                       recipientStaffId === option.staffId
-                        ? '!border-yellow-400/80 !bg-yellow-50/90 dark:!bg-yellow-400/10 liquid-glass-modal-text'
+                        ? 'border-yellow-400/80! bg-yellow-50/90! dark:bg-yellow-400/10! liquid-glass-modal-text'
                         : 'liquid-glass-modal-text'
                     }`}
                   >

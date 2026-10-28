@@ -73,7 +73,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
       }}
       title={orderNumber ? `${t('modals.editPaymentMethod.title')} - #${orderNumber}` : t('modals.editPaymentMethod.title')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={!isSaving}
       closeOnEscape={!isSaving}
       closeDisabled={isSaving}
@@ -99,7 +99,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
                   className={`w-full rounded-2xl border p-3 text-left transition-colors ${
                     isSelected
                       ? 'border-amber-400/70 bg-amber-100/60 dark:border-amber-400/50 dark:bg-amber-500/20'
-                      : 'border-zinc-300/70 bg-white/65 active:bg-zinc-100 dark:border-white/15 dark:bg-white/[0.06] dark:active:bg-white/[0.1]'
+                      : 'border-zinc-300/70 bg-white/65 active:bg-zinc-100 dark:border-white/15 dark:bg-white/6 dark:active:bg-white/10'
                   } ${isSaving ? 'cursor-not-allowed opacity-70' : ''}`}
                 >
                   <div className="flex items-center justify-between gap-3">
@@ -154,7 +154,7 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={onClose}
           disabled={isSaving}
-          className={`flex-1 px-4 py-2 rounded-2xl border font-medium flex items-center justify-center min-h-[44px] transition-colors border-red-300/70 bg-red-50 text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 ${
+          className={`flex-1 px-4 py-2 rounded-2xl border font-medium flex items-center justify-center min-h-touch transition-colors border-red-300/70 bg-red-50 text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 ${
             isSaving ? 'opacity-70 cursor-not-allowed' : 'active:bg-red-100 dark:active:bg-red-500/15'
           }`}
         >
@@ -164,9 +164,9 @@ export const EditPaymentMethodModal: React.FC<EditPaymentMethodModalProps> = ({
           type="button"
           onClick={handleSubmit}
           disabled={!hasChanged || isSaving}
-          className={`flex-1 px-4 py-2 rounded-2xl font-medium flex items-center justify-center min-h-[44px] transition-colors ${
+          className={`flex-1 px-4 py-2 rounded-2xl font-medium flex items-center justify-center min-h-touch transition-colors ${
             !hasChanged || isSaving
-              ? 'bg-zinc-100 text-zinc-400 border border-zinc-200/80 dark:bg-white/[0.06] dark:text-zinc-500 dark:border-white/10 cursor-not-allowed'
+              ? 'bg-zinc-100 text-zinc-400 border border-zinc-200/80 dark:bg-white/6 dark:text-zinc-500 dark:border-white/10 cursor-not-allowed'
               : 'bg-green-600 active:bg-green-700 text-white'
           }`}
         >

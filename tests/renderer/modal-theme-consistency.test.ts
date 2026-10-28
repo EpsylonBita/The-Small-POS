@@ -89,7 +89,7 @@ test('ingredient styling is scoped to the menu customizer instead of leaking int
 
 test('menu item customizer uses theme-aware shared search, footer, controls and notes surfaces', () => {
   assert.match(menuItemModal, /className="liquid-glass-modal-input w-full pl-9 pr-8/);
-  assert.match(menuItemModal, /className="liquid-glass-modal-footer flex-shrink-0/);
+  assert.match(menuItemModal, /className="liquid-glass-modal-footer shrink-0/);
   assert.match(menuItemModal, /className="liquid-glass-modal-inset rounded-xl/);
   assert.match(menuItemModal, /className="liquid-glass-modal-icon-button flex h-9 w-9/);
   assert.match(menuItemModal, /className="liquid-glass-modal-inset rounded-3xl p-5/);
@@ -97,7 +97,7 @@ test('menu item customizer uses theme-aware shared search, footer, controls and 
 });
 
 test('plugin setup modal explicitly protects its heading, close control and form labels in light mode', () => {
-  assert.match(integrationsPage, /className="plugin-setup-modal !max-w-(?:lg|2xl)"/);
+  assert.match(integrationsPage, /className="plugin-setup-modal max-w-(?:lg|2xl)!"/);
   assert.match(
     glassStyles,
     /html:not\(\.dark\) \.plugin-setup-modal \.liquid-glass-modal-title\s*\{[\s\S]*?color:\s*#18181b !important/,
@@ -115,7 +115,7 @@ test('plugin setup modal explicitly protects its heading, close control and form
 test('Z report has distinct light and dark text, panel and control tokens', () => {
   assert.match(
     zReportModal,
-    /\? 'z-report-glass-content !overflow-hidden !p-4 text-white'\s*:\s*'z-report-glass-content !overflow-hidden !p-4 text-slate-950'/,
+    /\? 'z-report-glass-content overflow-hidden! p-4! text-white'\s*:\s*'z-report-glass-content overflow-hidden! p-4! text-slate-950'/,
   );
   assert.match(zReportModal, /const strongTextClass = isDarkTheme \? 'text-white' : 'text-slate-950'/);
   assert.match(zReportModal, /const modalInsetClassName = isDarkTheme[\s\S]*?: 'border-yellow-500\/25 bg-white\/70/);
@@ -162,8 +162,8 @@ test('printer list verification, role, row and transport surfaces use shared sem
   const listEnd = printerSettingsModal.indexOf('// Render discovery view', listStart);
   const printerList = printerSettingsModal.slice(listStart, listEnd);
   assert.doesNotMatch(printerList, /className="p-3 rounded-lg bg-white\/5 border border-white\/10 flex items-center justify-between"/);
-  assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded border border-white\/10 liquid-glass-modal-text-muted"/);
-  assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded border border-amber-500\/30 text-amber-200"/);
+  assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded-sm border border-white\/10 liquid-glass-modal-text-muted"/);
+  assert.doesNotMatch(printerList, /className="px-2 py-0\.5 rounded-sm border border-amber-500\/30 text-amber-200"/);
 });
 
 test('printer setup selector and onboarding surfaces use shared light and dark tones', () => {

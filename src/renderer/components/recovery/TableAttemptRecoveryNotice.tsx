@@ -5,10 +5,12 @@ import { formatCompactOrderNumberForDisplay } from '../../utils/orderNumberUtils
 
 type Attempt = { kind: string; clientEventId: string; orderId?: string; sessionId?: string;
   errorCode?: string;
-  state: 'pending' | 'processing' | 'approval_required' | 'auth_required' | 'conflict' | 'applied' };
-const states = new Set(['pending', 'processing', 'approval_required', 'auth_required', 'conflict', 'applied']);
+  state: 'pending' | 'processing' | 'approval_required' | 'auth_required' | 'conflict' | 'applied' | 'retired' };
+const states = new Set(['pending', 'processing', 'approval_required', 'auth_required', 'conflict', 'applied', 'retired']);
 const canConfirmOriginal = (entry: Attempt) => entry.kind === 'whole_order_cancel' &&
   entry.state === 'conflict' && entry.errorCode === 'CANONICAL_SNAPSHOT_REVIEW_REQUIRED';
+const canDiscardEdit = (entry: Attempt) => entry.kind === 'item_edit' && entry.state === 'conflict' &&
+  ['CANONICAL_EDIT_REFUSED_409', 'CANONICAL_EDIT_REFUSED_422', 'CANONICAL_CONFLICT_REVIEW_REQUIRED'].includes(entry.errorCode ?? '');
 
 /** Status reads and selected original receipt verification share the native recovery owner. */
 export function TableAttemptRecoveryNotice({ onReviewEdit }: { onReviewEdit?: (clientEventId: string) => Promise<boolean> } = {}) {
@@ -29,7 +31,7 @@ export function TableAttemptRecoveryNotice({ onReviewEdit }: { onReviewEdit?: (c
       if (!response?.success || !Array.isArray(response.attempts) || response.attempts.some((entry: Attempt) =>
         !entry.clientEventId || !states.has(entry.state))) throw new Error('TABLE_RECOVERY_STATUS_UNAVAILABLE');
       if (revision.current !== version) return;
-      const pending = response.attempts.filter((entry: Attempt) => entry.state !== 'applied');
+      const pending = response.attempts.filter((entry: Attempt) => entry.state !== 'applied' && entry.state !== 'retired');
       lastValid.current = pending;
       setAttempts(pending);
       // Native status is capped at 100. An incomplete list must not turn
@@ -90,6 +92,26 @@ export function TableAttemptRecoveryNotice({ onReviewEdit }: { onReviewEdit?: (c
       }
     }
   }, [onReviewEdit]);
+  const discardEdit = useCallback(async (entry: Attempt) => {
+    if (!canDiscardEdit(entry) || confirmation.current !== null || unavailable) return;
+    const binding = bindingRevision.current;
+    confirmation.current = entry.clientEventId;
+    setConfirming(entry.clientEventId);
+    setUnconfirmed(null);
+    try {
+      const result = await getBridge().invoke('table_attempt_recovery_discard_edit', { clientEventId: entry.clientEventId });
+      if (bindingRevision.current !== binding) return;
+      if (result?.state !== 'retired') setUnconfirmed(entry.clientEventId);
+      await refresh();
+    } catch {
+      if (bindingRevision.current === binding) setUnconfirmed(entry.clientEventId);
+    } finally {
+      if (bindingRevision.current === binding) {
+        confirmation.current = null;
+        setConfirming(null);
+      }
+    }
+  }, [refresh, unavailable]);
   useEffect(() => {
     const update = () => { void refresh(); };
     const reset = () => {
@@ -121,10 +143,18 @@ export function TableAttemptRecoveryNotice({ onReviewEdit }: { onReviewEdit?: (c
     <h3 className="font-semibold">{t('checkoutRecovery.title')}</h3>
     <p>{t('checkoutRecovery.guidance')}</p>
     {unavailable && <p>{t('checkoutRecovery.unavailable')}</p>}
-    {unconfirmed && attempts.some(entry => entry.clientEventId === unconfirmed) && <p>{t('checkoutRecovery.originalResultUnconfirmed')}</p>}
+    {unconfirmed && attempts.some(entry => entry.clientEventId === unconfirmed) && <p>{t(
+      attempts.find(entry => entry.clientEventId === unconfirmed)?.kind === 'item_edit'
+        ? 'checkoutRecovery.editReviewUnavailable' : 'checkoutRecovery.originalResultUnconfirmed')}</p>}
     <ul className="my-2 space-y-1">
       {attempts.map(entry => <li key={`${entry.kind}:${entry.clientEventId}`}>
-        {t(`checkoutRecovery.${entry.state}`)}{entry.orderId ? ` · ${formatCompactOrderNumberForDisplay(entry.orderId)}` : ''}
+        {t(entry.kind === 'item_edit' && entry.state === 'conflict'
+          ? (entry.errorCode?.startsWith('CANONICAL_EDIT_REFUSED_') ? 'checkoutRecovery.editRefused' : 'checkoutRecovery.editConflict')
+          : `checkoutRecovery.${entry.state}`)}{entry.orderId ? ` · ${formatCompactOrderNumberForDisplay(entry.orderId)}` : ''}
+        {canDiscardEdit(entry) && <button type="button" disabled={confirming !== null || unavailable}
+          onClick={() => void discardEdit(entry)} className="ml-2 rounded-lg border px-3 py-2 disabled:opacity-50">
+          {t('checkoutRecovery.discardEdit')}
+        </button>}
         {onReviewEdit && entry.kind === 'item_edit' && entry.state !== 'processing' && <button type="button"
           disabled={confirming !== null || unavailable} onClick={() => void reviewEdit(entry)}
           className="ml-2 rounded-lg border px-3 py-2 disabled:opacity-50">

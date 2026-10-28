@@ -369,7 +369,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder={t('serviceCatalog.searchPlaceholder', { defaultValue: 'Search services...' })}
-                className={`pl-10 pr-4 py-2 rounded-xl border min-w-[260px] ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+                className={`pl-10 pr-4 py-2 rounded-xl border min-w-[260px] ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               />
             </div>
             <button
@@ -392,9 +392,9 @@ export const ServiceCatalogView: React.FC = memo(() => {
             key={tab.id}
             type="button"
             onClick={() => setActiveTab(tab.id)}
-            className={`flex-shrink-0 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+            className={`shrink-0 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
               activeTab === tab.id
-                ? 'bg-yellow-400 text-black shadow-sm'
+                ? 'bg-yellow-400 text-black shadow-xs'
                 : isDark ? 'text-zinc-400 active:text-zinc-100 active:bg-zinc-800' : 'text-gray-600 active:text-gray-900 active:bg-white'
             }`}
           >
@@ -471,7 +471,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
 
                 {/* Category Badge */}
                 {service.category && (
-                  <div className={`inline-block px-2 py-0.5 rounded text-xs mb-2 ${isDark ? 'bg-zinc-900 text-zinc-300 border border-zinc-800' : 'bg-gray-100 text-gray-600 border border-gray-200'}`}>
+                  <div className={`inline-block px-2 py-0.5 rounded-sm text-xs mb-2 ${isDark ? 'bg-zinc-900 text-zinc-300 border border-zinc-800' : 'bg-gray-100 text-gray-600 border border-gray-200'}`}>
                     {service.category.name}
                   </div>
                 )}
@@ -527,7 +527,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
       )}
 
       {serviceModalMode && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
           <button
             type="button"
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -572,7 +572,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   value={serviceDraft.name}
                   onChange={(event) => setServiceDraft((current) => ({ ...current, name: event.target.value }))}
                   placeholder={t('serviceCatalog.fields.namePlaceholder', { defaultValue: 'Service name' })}
-                  className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-none focus:ring-2 focus:ring-yellow-400`}
+                  className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-hidden focus:ring-2 focus:ring-yellow-400`}
                 />
               </label>
 
@@ -586,7 +586,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                     value={serviceDraft.price}
                     onValueChange={(price) => setServiceDraft((current) => ({ ...current, price }))}
                     placeholder="0,00"
-                    className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-none focus:ring-2 focus:ring-yellow-400`}
+                    className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-hidden focus:ring-2 focus:ring-yellow-400`}
                   />
                 </label>
 
@@ -598,7 +598,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                     inputMode="numeric"
                     value={serviceDraft.durationMinutes}
                     onChange={(event) => setServiceDraft((current) => ({ ...current, durationMinutes: event.target.value.replace(/[^0-9]/g, '') }))}
-                    className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-none focus:ring-2 focus:ring-yellow-400`}
+                    className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-hidden focus:ring-2 focus:ring-yellow-400`}
                   />
                 </label>
               </div>
@@ -610,7 +610,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 <select
                   value={serviceDraft.categoryId}
                   onChange={(event) => setServiceDraft((current) => ({ ...current, categoryId: event.target.value }))}
-                  className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-none focus:ring-2 focus:ring-yellow-400`}
+                  className={`w-full rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-hidden focus:ring-2 focus:ring-yellow-400`}
                 >
                   <option value="">{t('serviceCatalog.fields.noCategory', { defaultValue: 'No category' })}</option>
                   {categories.map((category) => (
@@ -628,7 +628,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   onChange={(event) => setServiceDraft((current) => ({ ...current, description: event.target.value }))}
                   placeholder={t('serviceCatalog.fields.descriptionPlaceholder', { defaultValue: 'Optional description' })}
                   rows={3}
-                  className={`w-full resize-none rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-none focus:ring-2 focus:ring-yellow-400`}
+                  className={`w-full resize-none rounded-xl border px-3 py-2 ${isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/70 border-gray-200/70 text-gray-900'} focus:outline-hidden focus:ring-2 focus:ring-yellow-400`}
                 />
               </label>
 
@@ -645,7 +645,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                   />
                   <span
                     aria-hidden="true"
-                    className={`relative inline-flex h-8 w-14 shrink-0 rounded-full border p-1 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-yellow-400/60 ${isDark ? 'border-white/15 bg-zinc-700/70' : 'border-gray-300 bg-gray-300/80'} peer-checked:border-yellow-400/60 peer-checked:bg-yellow-400/90 after:content-[''] after:absolute after:top-1 after:start-1 after:h-6 after:w-6 after:rounded-full after:bg-white after:shadow-md after:transition-transform peer-checked:after:translate-x-6`}
+                    className={`relative inline-flex h-8 w-14 shrink-0 rounded-full border p-1 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-yellow-400/60 ${isDark ? 'border-white/15 bg-zinc-700/70' : 'border-gray-300 bg-gray-300/80'} peer-checked:border-yellow-400/60 peer-checked:bg-yellow-400/90 after:content-[''] after:absolute after:top-1 after:inset-s-1 after:h-6 after:w-6 after:rounded-full after:bg-white after:shadow-md after:transition-transform peer-checked:after:translate-x-6`}
                   />
                 </span>
               </label>
@@ -673,7 +673,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
       )}
 
       {deleteTarget && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
           <button
             type="button"
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"

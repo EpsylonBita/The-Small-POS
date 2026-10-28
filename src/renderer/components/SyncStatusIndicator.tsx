@@ -647,7 +647,7 @@ const getSyncHealthPresentation = (
         textClassName: 'text-slate-700 dark:text-slate-300',
         dotClassName: 'bg-slate-500',
         panelClassName:
-          'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-white/[0.05]',
+          'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-white/5',
         iconClassName: 'text-slate-600 dark:text-slate-300',
         detail: t('sync.health.staleDetail', {
           defaultValue:
@@ -848,11 +848,11 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                   })}
                 </p>
                 {z.waitsFor === 'server_refusal' && z.serverMessage && (
-                  <p className="mt-1 break-words opacity-80">{z.serverMessage}</p>
+                  <p className="mt-1 wrap-break-word opacity-80">{z.serverMessage}</p>
                 )}
                 {z.errorCode && (
                   <details className="mt-1 text-xs opacity-80">
-                    <summary className="min-h-[44px] cursor-pointer py-2">
+                    <summary className="min-h-touch cursor-pointer py-2">
                       {t('sync.zGate.details', { defaultValue: 'Details for support' })}
                     </summary>
                     <p className="break-all">{z.errorCode}</p>
@@ -892,7 +892,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                       {t(`sync.zGate.kind.${kind}`, { defaultValue: Z_GATE_KIND_DEFAULTS[kind] })}
                       {typeof row.amountCents === 'number' && ` · ${formatCurrency(row.amountCents / 100)}`}
                     </p>
-                    {row.serverMessage && <p className="mt-1 break-words">{row.serverMessage}</p>}
+                    {row.serverMessage && <p className="mt-1 wrap-break-word">{row.serverMessage}</p>}
                     {row.setAside && (
                       <p className="mt-1 font-semibold">
                         {t('sync.zGate.setAsideState', {
@@ -901,7 +901,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                       </p>
                     )}
                     <details className="mt-1 text-xs opacity-80">
-                      <summary className="min-h-[44px] cursor-pointer py-2">
+                      <summary className="min-h-touch cursor-pointer py-2">
                         {t('sync.zGate.details', { defaultValue: 'Details for support' })}
                       </summary>
                       <p className="break-all">{row.errorCode || row.status}</p>
@@ -913,7 +913,7 @@ export const ZGateSetAsidePanel: React.FC<{ className?: string }> = ({ className
                     onClick={() => void handleAction(row)}
                     disabled={busyQueueId !== null}
                     aria-busy={busy}
-                    className="inline-flex min-h-[48px] shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"
+                    className="inline-flex min-h-[48px] shrink-0 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
                   >
                     {row.setAside
                       ? t('sync.zGate.undo', { defaultValue: 'Bring back' })
@@ -2342,14 +2342,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   useBackgroundAccessibilityIsolation(showDetailPanel);
 
   const modalSurfaceClass =
-    'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
+    'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/4 dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const modalInsetClass =
     'rounded-[22px] border border-slate-200/80 bg-slate-50/90 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/20 dark:shadow-none';
   const modalEyebrowClass =
     'text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400';
   const modalMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
   const metaChipClass =
-    'inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/88 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200';
+    'inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/88 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200';
   const footerClass =
     'sticky bottom-0 z-10 mt-5 border-t border-slate-200/80 bg-white/88 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-[#071018]/88';
   const detailPanelBlockerMetadata = useMemo(
@@ -2446,7 +2446,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </p>
               {capacityWarning && (
                 <div className="mt-3 flex max-w-3xl items-start gap-2.5 rounded-[18px] border border-orange-500/30 bg-orange-500/10 px-4 py-3">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-orange-600 dark:text-orange-300" />
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-600 dark:text-orange-300" />
                   <div className="min-w-0 text-sm text-orange-800 dark:text-orange-200">
                     <p className="font-semibold">
                       {t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
@@ -2515,12 +2515,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             onOpenFinancialPanel={() => setShowFinancialPanel(true)}
             showWhenFallback
             className="w-full"
-            buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.08]"
+            buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/8"
           />
           <button
             type="button"
             onClick={handleOpenRecovery}
-            className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:active:bg-white/[0.08] inline-flex items-center gap-2"
+            className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 active:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/8 inline-flex items-center gap-2"
           >
             <Database className="h-4 w-4" />
             {t('sync.dashboard.openRecovery', { defaultValue: 'Open Recovery Center' })}
@@ -2649,7 +2649,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </span>
             </div>
 
-            <p className="break-words text-sm font-medium text-orange-800 dark:text-orange-100/90">
+            <p className="wrap-break-word text-sm font-medium text-orange-800 dark:text-orange-100/90">
               {queueFailure.lastError}
             </p>
 
@@ -2749,7 +2749,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             {t('sync.dashboard.versionsSubtitle')}
           </p>
           {isMobileWaiter && parentTerminalId && (
-            <div className="mt-3 inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200">
+            <div className="mt-3 inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200">
               {t('terminal.labels.parentTerminal', { defaultValue: 'Parent' })}: {parentTerminalId.substring(0, 8)}...
             </div>
           )}
@@ -2789,7 +2789,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             </button>
             <button
               onClick={() => setShowFinancialPanel(true)}
-              className="inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors active:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:active:bg-white/[0.08]"
+              className="inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors active:bg-slate-50 dark:border-white/10 dark:bg-white/4 dark:text-slate-100 dark:active:bg-white/8"
             >
               {t('sync.actions.manage')}
             </button>
@@ -2933,7 +2933,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                               })}
                             </div>
                           </div>
-                          <span className="rounded-full border border-white/60 bg-white/80 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-700 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-200">
+                          <span className="rounded-full border border-white/60 bg-white/80 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200">
                             {t(`recovery.status.${issue.status}`, {
                               defaultValue: issue.status,
                             })}
@@ -3188,11 +3188,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <div className={modalEyebrowClass}>{t('sync.system.lastSyncByEntity')}</div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                     {Object.entries(systemHealth.lastSyncTimes).map(([entity, ts]) => (
-                      <div key={entity} className="rounded-[18px] border border-slate-200/80 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-white/[0.03]">
+                      <div key={entity} className="rounded-[18px] border border-slate-200/80 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-white/3">
                         <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
                           {ENTITY_TYPE_KEYS[entity] ? t(ENTITY_TYPE_KEYS[entity], { defaultValue: entity }) : entity}
                         </div>
-                        <div className="mt-2 break-words text-xs font-mono text-slate-700 dark:text-slate-200">
+                        <div className="mt-2 wrap-break-word text-xs font-mono text-slate-700 dark:text-slate-200">
                           {ts ? new Date(ts).toLocaleString() : '\u2014'}
                         </div>
                       </div>
@@ -3299,7 +3299,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     return ReactDOM.createPortal(
       <CashierRecovery>
       <div
-        className="fixed inset-0 z-[10000]"
+        className="fixed inset-0 z-10000"
         style={{ isolation: 'isolate' }}
         data-liquid-glass-modal-viewport
         data-cashier-recovery="true"
@@ -3311,7 +3311,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         />
 
         <div
-          className="absolute inset-0 z-[10050] flex items-center justify-center px-3 py-4 sm:px-6 sm:py-8"
+          className="absolute inset-0 z-10050 flex items-center justify-center px-3 py-4 sm:px-6 sm:py-8"
           onClick={() => setShowDetailPanel(false)}
         >
           <div
@@ -3337,7 +3337,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <button
                 ref={closeButtonRef}
                 onClick={() => setShowDetailPanel(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-300 bg-slate-100 text-slate-800 active:bg-slate-200 dark:border-white/15 dark:bg-white/[0.06] dark:text-white dark:active:bg-white/[0.12]"
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-300 bg-slate-100 text-slate-800 active:bg-slate-200 dark:border-white/15 dark:bg-white/6 dark:text-white dark:active:bg-white/12"
                 aria-label={t('sync.healthModal.close')}
               >
                 <X className="h-5 w-5" />
@@ -3472,7 +3472,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       <button
                         type="button"
                         onClick={handleOpenExportDir}
-                        className="mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"
+                        className="mt-3 inline-flex min-h-[48px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
                       >
                         <FolderOpen className="h-4 w-4" />
                         {t('sync.healthModal.actions.openFolder')}
@@ -3486,7 +3486,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     <div
                       key={item.key}
                       data-testid={`health-service-${item.key}`}
-                      className="rounded-2xl border border-current/10 bg-white/55 px-3 py-2 dark:bg-white/[0.08]"
+                      className="rounded-2xl border border-current/10 bg-white/55 px-3 py-2 dark:bg-white/8"
                     >
                       <div className="text-xs font-bold uppercase tracking-wide opacity-70">{item.label}</div>
                       <div className="mt-1 text-sm font-black">{item.value}</div>
@@ -3499,7 +3499,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               <ZGateSetAsidePanel className="mt-4" />
 
               <details className={cn('mt-4 rounded-2xl border', liquidGlassModalTone('neutral'))}>
-                <summary className="min-h-[44px] cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>
+                <summary className="min-h-touch cursor-pointer px-4 py-3 text-sm font-bold">{t('sync.healthModal.sections.supportActions')}</summary>
                 <div className="space-y-4 border-t border-slate-200 p-4 dark:border-white/15">
                   <ul className="list-inside list-disc space-y-2 text-sm">{localizedHealthSummary.recommendedActions.map(action => <li key={action}>{action}</li>)}</ul>
                   {visibleSyncFailures.length > 0 && <h4 className="text-sm font-bold">{t('sync.healthModal.syncDetails', {defaultValue: 'Sync details'})}</h4>}
@@ -3519,7 +3519,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <button
                     onClick={handleExport}
                     disabled={exporting}
-                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-black text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"
+                    className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 text-sm font-black text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"
                   >
                     <Download className={cn('h-5 w-5', exporting && 'animate-bounce')} />
                     {t('sync.healthModal.actions.export')}
@@ -3528,8 +3528,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   <p className="text-sm opacity-75">{t('sync.healthModal.support.safeLocal')}</p>
                   {incidentReport?.success && <p role="status">{t(!incidentReport.bundleStored ? 'sync.healthModal.support.reportReceived' : incidentReport.alertSent || incidentReport.alertStatus === 'throttled' ? 'sync.healthModal.support.received' : 'sync.healthModal.support.notificationFailed')}</p>}
                   {incidentReport?.error && <p role="alert">{t('sync.healthModal.support.sendFailed')}</p>}
-                  {exportPath && <button onClick={handleOpenExportDir} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
-                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
+                  {exportPath && <button onClick={handleOpenExportDir} className="inline-flex min-h-touch items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><FolderOpen className="h-4 w-4" />{t('sync.healthModal.actions.openFolder')}</button>}
+                  <button onClick={() => setAdvancedExpanded(value => !value)} aria-expanded={advancedExpanded} aria-controls={healthAdvancedId} className="inline-flex min-h-touch items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-slate-900 active:bg-slate-100 dark:border-white/15 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><ChevronDown className="h-4 w-4" />{advancedExpanded ? t('sync.healthModal.actions.closeAdvanced') : t('sync.healthModal.actions.openAdvanced')}</button>
 
               {advancedExpanded && (
                 <section id={healthAdvancedId} className={cn('mt-5 space-y-4 rounded-3xl border p-5', liquidGlassModalTone('neutral'))}>
@@ -3548,9 +3548,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       [t('sync.healthModal.advanced.fields.printerFailures'), formatNumber(countDesktopPrinterFailures(systemHealth), {}, locale)],
                       [t('sync.healthModal.advanced.fields.crashCount'), formatNumber(systemHealth?.panicCount ?? 0, {}, locale)],
                     ].map(([label, value]) => (
-                      <div key={String(label)} className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-yellow-400/10 dark:bg-white/[0.05]">
+                      <div key={String(label)} className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-yellow-400/10 dark:bg-white/5">
                         <div className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-yellow-100/60">{label}</div>
-                        <div className="mt-1 break-words text-sm font-black text-slate-900 dark:text-white">{String(value)}</div>
+                        <div className="mt-1 wrap-break-word text-sm font-black text-slate-900 dark:text-white">{String(value)}</div>
                       </div>
                     ))}
                   </div>
@@ -3561,8 +3561,8 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </details>
             </div>
             <div className="flex shrink-0 flex-wrap gap-3 border-t border-slate-200 bg-white px-5 py-3 dark:border-white/15 dark:bg-slate-950">
-              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
-              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/[0.12]"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
+              {systemHealth && healthAvailability !== 'unavailable' && needsRecovery && <button type="button" onClick={handleOpenRecovery} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><Database className="h-5 w-5" />{t('sync.dashboard.openRecovery', {defaultValue: 'Open Recovery Center'})}</button>}
+              <button type="button" onClick={loadSystemHealth} disabled={systemLoading} aria-busy={systemLoading} className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-900 active:bg-slate-100 disabled:opacity-50 dark:border-white/20 dark:bg-white/[0.07] dark:text-white dark:active:bg-white/12"><RefreshCw className={cn('h-5 w-5', systemLoading && 'animate-spin')} />{t('sync.healthModal.actions.refresh')}</button>
             </div>
           </div>
         </div>
@@ -3581,7 +3581,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       {/* Heart Icon Status Indicator */}
       <button
         ref={launcherRef}
-        className="group relative flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10"
+        className="group relative flex min-h-touch min-w-touch items-center justify-center rounded-full p-2 transition-all duration-200 active:bg-slate-100/80 dark:active:bg-white/10"
         onClick={() => setShowDetailPanel(!showDetailPanel)}
         aria-label={heartLabel}
         data-heart-tone={heartTone}
@@ -3611,13 +3611,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       {!syncStatus.isOnline && (
         <div className="flex items-center gap-1.5">
           <span className="flex items-center gap-1 text-xs font-semibold text-red-500 dark:text-red-400">
-            <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />
+            <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
             {t('sync.labels.offline')}
           </span>
           <button
             onClick={handleForceSync}
             disabled={syncStatus.syncInProgress}
-            className="flex min-h-[44px] min-w-[44px] items-center justify-center p-1 rounded-md text-red-400 active:bg-red-500/20 transition-colors disabled:opacity-50"
+            className="flex min-h-touch min-w-touch items-center justify-center p-1 rounded-md text-red-400 active:bg-red-500/20 transition-colors disabled:opacity-50"
             aria-label={t('sync.actions.retry', { defaultValue: 'Retry sync' })}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
@@ -3630,10 +3630,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       {capacityWarning && (
         <button
           onClick={() => setShowDetailPanel(true)}
-          className="flex min-h-[44px] items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors active:bg-orange-500/15 dark:text-orange-300"
+          className="flex min-h-touch items-center gap-1 rounded-md px-1.5 py-1 text-xs font-semibold text-orange-600 transition-colors active:bg-orange-500/15 dark:text-orange-300"
           aria-label={t('sync.capacity.title', { defaultValue: 'Sync backlog growing' })}
         >
-          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
           {t('sync.capacity.badge', {
             defaultValue: 'Backlog {{percent}}%',
             percent: capacityWarningPercent,

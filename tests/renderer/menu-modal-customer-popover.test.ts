@@ -51,13 +51,13 @@ test('pickup customer popover is portaled app-level above the LiquidGlassModal v
   // z-[1200] in-modal layer was mounted underneath it and stayed invisible.
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /\{showCustomerPopover && renderModalPortal\(\s*<div/);
-  assert.match(source, /className="fixed inset-0 z-\[20050\] flex items-center justify-center"/);
+  assert.match(source, /className="fixed inset-0 z-20050 flex items-center justify-center"/);
   // Full-screen blurred backdrop.
   assert.match(source, /absolute inset-0 bg-black\/50 backdrop-blur-md/);
 
   // The old in-modal layer that hid behind the modal is gone.
   assert.doesNotMatch(source, /\{showCustomerPopover && \(\s*<div/);
-  assert.doesNotMatch(source, /z-\[1200\]/);
+  assert.doesNotMatch(source, /z-1200(?![\w.-])/);
 });
 
 // Regression contract for the unnamed popover close control (2026-06-21 live QA): the
@@ -126,19 +126,19 @@ test('MenuModal header cannot horizontally clip the full/edit modal off the view
   // first category tab, and first product column).
 
   // Long titles and the edit badge wrap within the bounded first grid column.
-  assert.doesNotMatch(source, /liquid-glass-modal-title text-xl flex-shrink-0/);
+  assert.doesNotMatch(source, /liquid-glass-modal-title text-xl shrink-0/);
   assert.match(source, /className="liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0"/);
   assert.match(source, /title=\{getModalTitle\(\)\}/);
-  assert.match(source, /<span className="whitespace-normal break-words">\{getModalTitle\(\)\}<\/span>/);
-  assert.match(source, /flex-shrink-0 whitespace-normal[\s\S]*?editModeMessage/);
+  assert.match(source, /<span className="whitespace-normal wrap-break-word">\{getModalTitle\(\)\}<\/span>/);
+  assert.match(source, /shrink-0 whitespace-normal[\s\S]*?editModeMessage/);
 
   // The header flex chain can shrink below its content so it never forces the shell wide.
-  assert.match(source, /flex flex-col gap-1 px-5 py-2\.5 border-b border-white\/10 flex-shrink-0 min-w-0/);
+  assert.match(source, /flex flex-col gap-1 px-5 py-2\.5 border-b border-white\/10 shrink-0 min-w-0/);
   assert.match(source, /grid grid-cols-\[minmax\(0,1fr\)_auto\] items-center gap-3 w-full min-w-0/);
   assert.match(source, /col-span-2 row-start-2/);
 
   // The close control is always reachable (never the clipped element).
-  assert.match(source, /liquid-glass-modal-button p-2 min-h-0 min-w-0 flex-shrink-0/);
+  assert.match(source, /liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0/);
 
   // Both populated states share a bounded, truncating neutral chip in either theme.
   const chipSource = readFileSync(

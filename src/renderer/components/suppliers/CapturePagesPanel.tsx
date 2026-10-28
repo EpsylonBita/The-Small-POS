@@ -322,7 +322,7 @@ export const CapturePagesPanel: React.FC<CapturePagesPanelProps> = ({
 
   return renderModalPortal(
     <div
-      className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div

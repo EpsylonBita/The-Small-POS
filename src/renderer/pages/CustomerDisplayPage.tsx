@@ -563,7 +563,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
                   onClick={() => void handleRefresh()}
                   disabled={isRefreshing}
                   aria-label={t('common.refresh', 'Refresh')}
-                  className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm active:scale-95 ${
+                  className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-xs active:scale-95 ${
                     isDark
                       ? 'border border-white/80 bg-white text-black active:bg-zinc-200'
                       : 'border border-black bg-black text-white active:bg-zinc-800'
@@ -745,7 +745,7 @@ function CustomerDisplayView({ model, externalWindow }: { model: DisplayModel; e
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <div
-                          className={`break-words font-black leading-tight ${
+                          className={`wrap-break-word font-black leading-tight ${
                             externalWindow ? 'text-4xl' : 'text-2xl'
                           }`}
                         >

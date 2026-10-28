@@ -136,25 +136,25 @@ export function LoyaltyRedeemModal({
 
   const glassPanelClass = 'rounded-2xl border liquid-glass-modal-border bg-white/10 p-4 backdrop-blur-xl dark:bg-black/20';
   const glassSubtlePanelClass = 'rounded-2xl border liquid-glass-modal-border bg-white/10 px-3 py-2 text-xs liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-black/20';
-  const glassIconButtonClass = 'liquid-glass-modal-button !min-h-0 !p-2 transition-transform duration-150 active:scale-95 disabled:pointer-events-none disabled:opacity-30';
+  const glassIconButtonClass = 'liquid-glass-modal-button min-h-0! p-2! transition-transform duration-150 active:scale-95 disabled:pointer-events-none disabled:opacity-30';
   const glassQuickButtonClass = (active: boolean) =>
     `flex-1 rounded-2xl border py-1.5 text-xs font-semibold transition-[transform,background-color,border-color] duration-150 active:scale-[0.98] ${
       active
-        ? 'border-yellow-400/70 bg-yellow-400/25 text-yellow-900 shadow-sm dark:bg-yellow-400/20 dark:text-yellow-100'
+        ? 'border-yellow-400/70 bg-yellow-400/25 text-yellow-900 shadow-xs dark:bg-yellow-400/20 dark:text-yellow-100'
         : 'liquid-glass-modal-border liquid-glass-modal-text-muted bg-white/10 dark:bg-black/20'
     }`;
 
   const modal = (
-    <div {...cashierPortalProps} className="fixed inset-0 z-[2147483000] flex items-center justify-center p-4">
-      <div className="liquid-glass-modal-backdrop !fixed !inset-0" aria-hidden="true" />
+    <div {...cashierPortalProps} className="fixed inset-0 z-2147483000 flex items-center justify-center p-4">
+      <div className="liquid-glass-modal-backdrop fixed! inset-0!" aria-hidden="true" />
       <div className="liquid-glass-modal-shell relative w-full max-w-md overflow-hidden">
         {/* Header */}
-        <div className="liquid-glass-modal-header !px-5 !py-4">
+        <div className="liquid-glass-modal-header px-5! py-4!">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-yellow-300/50 bg-yellow-400 text-black shadow-lg shadow-yellow-500/20">
               <Gift className="w-5 h-5" />
             </div>
-            <h2 className="liquid-glass-modal-title !text-lg">
+            <h2 className="liquid-glass-modal-title text-lg!">
               {t('loyalty.redeemTitle', 'Redeem Loyalty Points')}
             </h2>
           </div>
@@ -266,7 +266,7 @@ export function LoyaltyRedeemModal({
               value={amountInput}
               onValueChange={handleAmountChange}
               onBlur={normalizeAmountInput}
-              className="w-full bg-transparent text-2xl font-bold outline-none liquid-glass-modal-text"
+              className="w-full bg-transparent text-2xl font-bold outline-hidden liquid-glass-modal-text"
             />
           </div>
           <div className="mt-2 flex items-center justify-between gap-3 text-xs liquid-glass-modal-text-muted">

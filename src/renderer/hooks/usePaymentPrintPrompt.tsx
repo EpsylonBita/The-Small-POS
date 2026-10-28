@@ -81,11 +81,11 @@ export function usePaymentPrintPrompt() {
       size="sm"
       closeOnBackdrop={false}
       closeOnEscape={false}
-      contentClassName="!px-6 !py-5"
+      contentClassName="px-6! py-5!"
     >
       <div className="space-y-5">
         <div className="flex items-start gap-4">
-          <Printer className="h-9 w-9 flex-shrink-0 text-yellow-500 dark:text-yellow-300" />
+          <Printer className="h-9 w-9 shrink-0 text-yellow-500 dark:text-yellow-300" />
           <div className="min-w-0 space-y-2">
             <p className="text-sm leading-6 liquid-glass-modal-text-muted">
               {t(

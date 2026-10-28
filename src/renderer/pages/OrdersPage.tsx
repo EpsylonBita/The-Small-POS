@@ -720,7 +720,7 @@ const OrdersPage: React.FC = () => {
               onClick={fetchOrders}
               disabled={syncing}
               aria-label={refreshLabel}
-              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm ${isDark ? 'border border-white/80 bg-white text-black active:bg-zinc-200' : 'border border-black bg-black text-white active:bg-zinc-800'} ${syncing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+              className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-xs ${isDark ? 'border border-white/80 bg-white text-black active:bg-zinc-200' : 'border border-black bg-black text-white active:bg-zinc-800'} ${syncing ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
             >
               <RefreshCw className={`w-5 h-5 ${syncing ? 'animate-spin' : ''}`} />
             </button>
@@ -737,7 +737,7 @@ const OrdersPage: React.FC = () => {
                 placeholder={t('orders.searchPlaceholder', {
                   defaultValue: 'Search by order number, customer name, or phone...',
                 })}
-                className={`flex-1 bg-transparent outline-none ${isDark ? 'text-zinc-100 placeholder:text-zinc-500' : 'text-gray-900 placeholder:text-gray-500'}`}
+                className={`flex-1 bg-transparent outline-hidden ${isDark ? 'text-zinc-100 placeholder:text-zinc-500' : 'text-gray-900 placeholder:text-gray-500'}`}
               />
               {searchTerm && (
                 <button
@@ -827,7 +827,7 @@ const OrdersPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={handleClearFilters}
-                    className={`mt-3 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-medium transition active:scale-[0.97] ${
+                    className={`mt-3 inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-medium transition active:scale-[0.97] ${
                       isDark
                         ? 'border-yellow-300/30 bg-yellow-400/10 text-yellow-200 active:bg-yellow-400/20'
                         : 'border-amber-300 bg-amber-100/70 text-amber-800 active:bg-amber-200'
@@ -844,7 +844,7 @@ const OrdersPage: React.FC = () => {
       </div>
 
       {/* Orders List */}
-      <div className={`flex-1 overflow-y-auto scrollbar-hide p-6 ${isDark ? 'bg-gradient-to-b from-black via-black to-zinc-950/80' : 'bg-[#fdfaf5]'}`}>
+      <div className={`flex-1 overflow-y-auto scrollbar-hide p-6 ${isDark ? 'bg-linear-to-b from-black via-black to-zinc-950/80' : 'bg-[#fdfaf5]'}`}>
         {orders.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <ShoppingBag className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-700' : 'text-gray-400'}`} />

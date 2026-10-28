@@ -186,7 +186,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
       size="lg"
       closeOnBackdrop={false}
       closeOnEscape={true}
-      className="!max-w-2xl max-h-[90vh]"
+      className="max-w-2xl! max-h-[90vh]"
     >
       <p className="mb-6 liquid-glass-modal-text-muted">
         {t('modals.editOrderItems.message', { count: orderCount })}

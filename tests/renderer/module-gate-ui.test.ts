@@ -22,10 +22,10 @@ test('module lock and upsell surfaces use amber/neutral touch styling, not old b
 
   assert.match(lockedFeature, /from-amber-400\/25 to-white\/10/);
   assert.match(lockedFeature, /text-amber-300 relative z-10/);
-  assert.match(lockedFeature, /min-h-\[44px\][\s\S]*active:scale-\[0\.98\]/);
+  assert.match(lockedFeature, /min-h-touch(?![\w.-])[\s\S]*active:scale-\[0\.98\]/);
   assert.match(upsellCard, /text-amber-300/);
   assert.match(upsellCard, /active:scale-\[0\.99\] active:bg-white\/10/);
-  assert.match(trialPrompt, /min-h-\[44px\] min-w-\[44px\][\s\S]*rounded-2xl/);
+  assert.match(trialPrompt, /min-h-touch min-w-touch(?![\w.-])[\s\S]*rounded-2xl/);
   assert.match(trialPrompt, /active:scale-95 active:bg-white\/10/);
 });
 

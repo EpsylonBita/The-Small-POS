@@ -347,7 +347,7 @@ test('TableCheckManager secondary sheets portal to body with a full-viewport blu
   );
   // Full-viewport fixed overlay stacked above the main table-check modal (z 20000),
   // dimmed + blurred so the rest of the POS screen is obscured.
-  assert.match(modalSource, /className="fixed inset-0 z-\[20050\][^"]*bg-black\/35[^"]*backdrop-blur-md/);
+  assert.match(modalSource, /className="fixed inset-0 z-20050(?![\w.-])[^"]*bg-black\/35[^"]*backdrop-blur-md/);
   // The old in-shell absolute overlay (clipped by the modal container) is gone.
   assert.doesNotMatch(modalSource, /className="absolute inset-0 z-10 flex items-center justify-center bg-black\/35/);
 });

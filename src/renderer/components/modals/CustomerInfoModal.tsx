@@ -160,7 +160,7 @@ export const CustomerInfoModal: React.FC<CustomerInfoModalProps> = ({
       onClose={onClose}
       title={t('modals.customerInfo.title')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

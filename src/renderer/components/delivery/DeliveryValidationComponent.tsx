@@ -231,7 +231,7 @@ export function DeliveryValidationComponent({
             placeholder={t('forms.placeholders.enterAddress')}
             required
             aria-required="true"
-            className="w-full rounded-2xl border border-gray-300 bg-white/80 py-2.5 pl-10 pr-4 text-gray-900 outline-none backdrop-blur-sm transition-shadow focus:border-amber-400 focus:ring-2 focus:ring-amber-400/35 dark:border-white/10 dark:bg-zinc-950/70 dark:text-white"
+            className="w-full rounded-2xl border border-gray-300 bg-white/80 py-2.5 pl-10 pr-4 text-gray-900 outline-hidden backdrop-blur-sm transition-shadow focus:border-amber-400 focus:ring-2 focus:ring-amber-400/35 dark:border-white/10 dark:bg-zinc-950/70 dark:text-white"
           />
         </div>
       </div>
@@ -334,7 +334,7 @@ export function DeliveryValidationComponent({
         <div className="flex gap-2">
           <button
             onClick={() => setUIState(prev => ({ ...prev, showOverrideModal: true }))}
-            className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 py-2 font-semibold text-black transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 disabled:opacity-50"
+            className="inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl bg-amber-400 px-4 py-2 font-semibold text-black transition-transform active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80 disabled:opacity-50"
           >
             <Settings className="w-4 h-4" />
             Override Delivery Restriction
@@ -344,7 +344,7 @@ export function DeliveryValidationComponent({
 
       {/* Override Confirmation Modal */}
       {uiState.showOverrideModal && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/45 backdrop-blur-md">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center bg-black/45 backdrop-blur-md">
           <div className="mx-4 w-full max-w-md rounded-[28px] border border-white/25 bg-white/72 p-6 shadow-[0_24px_80px_rgba(0,0,0,0.28)] backdrop-blur-2xl dark:border-white/12 dark:bg-zinc-950/74">
             <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">
               Override Delivery Restriction
@@ -360,13 +360,13 @@ export function DeliveryValidationComponent({
             <div className="flex gap-3">
               <button
                 onClick={handleOverride}
-                className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-2xl bg-amber-400 px-4 py-2 font-semibold text-black transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
+                className="inline-flex min-h-touch flex-1 items-center justify-center rounded-2xl bg-amber-400 px-4 py-2 font-semibold text-black transition-transform active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80"
               >
                 Confirm Override
               </button>
               <button
                 onClick={() => setUIState(prev => ({ ...prev, showOverrideModal: false }))}
-                className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-2xl bg-red-600 px-4 py-2 font-semibold text-white transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/80"
+                className="inline-flex min-h-touch flex-1 items-center justify-center rounded-2xl bg-red-600 px-4 py-2 font-semibold text-white transition-transform active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-300/80"
               >
                 Cancel
               </button>

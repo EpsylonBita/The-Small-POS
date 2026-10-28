@@ -53,7 +53,7 @@ test('loyalty redemption is an explicit checkout discount, not an immediate moda
   assert.doesNotMatch(redeemModal, /bridge\.loyalty\.redeemPoints/);
   assert.match(redeemModal, /createPortal/);
   assert.match(redeemModal, /document\.body/);
-  assert.match(redeemModal, /z-\[2147483000\]/);
+  assert.match(redeemModal, /z-2147483000(?![\w.-])/);
   assert.match(redeemModal, /liquid-glass-modal-shell/);
   assert.match(redeemModal, /liquid-glass-modal-input/);
   assert.match(redeemModal, /liquid-glass-modal-button/);

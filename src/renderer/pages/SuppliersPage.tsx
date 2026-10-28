@@ -1772,7 +1772,7 @@ const SuppliersPage: React.FC = () => {
                           ? t('suppliers.searchSuppliers', 'Search suppliers...')
                           : t('suppliers.searchInvoices', 'Search invoices...')
                       }
-                      className="h-11 w-full rounded-xl bg-transparent pl-10 pr-3 text-sm outline-none"
+                      className="h-11 w-full rounded-xl bg-transparent pl-10 pr-3 text-sm outline-hidden"
                     />
                   </div>
                   <div className={`relative rounded-xl border ${fieldClass}`}>
@@ -1781,7 +1781,7 @@ const SuppliersPage: React.FC = () => {
                       <select
                         value={supplierFilter}
                         onChange={(event) => setSupplierFilter(event.target.value as typeof supplierFilter)}
-                        className="h-11 rounded-xl bg-transparent pl-10 pr-8 text-sm outline-none"
+                        className="h-11 rounded-xl bg-transparent pl-10 pr-8 text-sm outline-hidden"
                       >
                         <option value="all">{t('common.all', 'All')}</option>
                         <option value="active">{t('suppliers.active', 'Active')}</option>
@@ -1791,7 +1791,7 @@ const SuppliersPage: React.FC = () => {
                       <select
                         value={invoiceFilter}
                         onChange={(event) => setInvoiceFilter(event.target.value as typeof invoiceFilter)}
-                        className="h-11 rounded-xl bg-transparent pl-10 pr-8 text-sm outline-none"
+                        className="h-11 rounded-xl bg-transparent pl-10 pr-8 text-sm outline-hidden"
                       >
                         <option value="all">{t('common.all', 'All')}</option>
                         <option value="unpaid">{t('suppliers.status.unpaid', 'Unpaid')}</option>
@@ -2003,7 +2003,7 @@ const SuppliersPage: React.FC = () => {
 
       {supplierSummary && renderModalPortal(
           <motion.div
-            className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -2132,7 +2132,7 @@ const SuppliersPage: React.FC = () => {
 
       {selectedInvoice && selectedInvoiceStatus && renderModalPortal(
           <motion.div
-            className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -2213,14 +2213,14 @@ const SuppliersPage: React.FC = () => {
                             aria-label={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                             value={paymentAmount}
                             onValueChange={setPaymentAmount}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                             placeholder={t('suppliers.invoices.paymentAmount', 'Payment amount')}
                           />
                           <select
                             value={paymentMethod}
                             disabled={saving}
                             onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           >
                             <option value="cash">{t('suppliers.invoices.methods.cash', 'Cash')}</option>
                             <option value="bank_transfer">{t('suppliers.invoices.methods.bankTransfer', 'Bank transfer')}</option>
@@ -2233,7 +2233,7 @@ const SuppliersPage: React.FC = () => {
                             value={paymentDate}
                             disabled={saving}
                             onChange={(event) => setPaymentDate(event.target.value)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           />
                         </div>
                         <div className="grid gap-3 sm:grid-cols-2">
@@ -2241,14 +2241,14 @@ const SuppliersPage: React.FC = () => {
                             value={paymentReference}
                             disabled={saving}
                             onChange={(event) => setPaymentReference(event.target.value)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                             placeholder={t('suppliers.invoices.reference', 'Reference')}
                           />
                           <input
                             value={paymentNotes}
                             disabled={saving}
                             onChange={(event) => setPaymentNotes(event.target.value)}
-                            className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                            className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                             placeholder={t('suppliers.invoices.paymentNotes', 'Payment notes')}
                           />
                         </div>
@@ -2291,7 +2291,7 @@ const SuppliersPage: React.FC = () => {
                             <p className={`mt-1 text-xs ${subtleClass}`}>
                               {t(getPaymentLabelKey(payment), payment.payment_method)}
                             </p>
-                            {payment.reference_number && <p className={`mt-1 break-words text-xs ${subtleClass}`}>{payment.reference_number}</p>}
+                            {payment.reference_number && <p className={`mt-1 wrap-break-word text-xs ${subtleClass}`}>{payment.reference_number}</p>}
                           </div>
                         ))
                       ) : (
@@ -2309,7 +2309,7 @@ const SuppliersPage: React.FC = () => {
 
       {importOpen && renderModalPortal(
           <motion.div
-            className="fixed inset-0 z-[1200] flex justify-end bg-black/50 backdrop-blur-sm p-0 sm:p-4 md:p-6"
+            className="fixed inset-0 z-1200 flex justify-end bg-black/50 backdrop-blur-sm p-0 sm:p-4 md:p-6"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -2382,7 +2382,7 @@ const SuppliersPage: React.FC = () => {
                             setInvoiceNumber(event.target.value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.import.invoiceNumber', 'Invoice number')}
                         />
                         <input
@@ -2392,7 +2392,7 @@ const SuppliersPage: React.FC = () => {
                             setInvoiceDate(event.target.value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.import.invoiceDate', 'Invoice date')}
                         />
                         <input
@@ -2402,7 +2402,7 @@ const SuppliersPage: React.FC = () => {
                             setCorrectDueDate(event.target.value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.dueDate', 'Due date')}
                         />
                         <CentsMoneyInput
@@ -2413,7 +2413,7 @@ const SuppliersPage: React.FC = () => {
                             setCorrectAmount(value);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
                           placeholder={t('suppliers.amount', 'Amount')}
                         />
                       </div>
@@ -2424,7 +2424,7 @@ const SuppliersPage: React.FC = () => {
                           setCorrectNotes(event.target.value);
                           setImportError(null);
                         }}
-                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-none disabled:opacity-50 ${fieldClass}`}
+                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-hidden disabled:opacity-50 ${fieldClass}`}
                         placeholder={t('suppliers.fields.notes', 'Notes')}
                       />
                       {correctLoadError && (
@@ -2469,7 +2469,7 @@ const SuppliersPage: React.FC = () => {
                           setImportDraft(null);
                           setImportError(null);
                         }}
-                        className={`mt-2 h-11 w-full rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                        className={`mt-2 h-11 w-full rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                         placeholder={t('suppliers.import.supplierPlaceholder', 'Fresh Farms')}
                       />
                       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
@@ -2480,7 +2480,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           placeholder={t('suppliers.import.supplierPhone', 'Phone')}
                         />
                         <input
@@ -2490,7 +2490,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           placeholder={t('suppliers.import.supplierEmail', 'Email')}
                         />
                       </div>
@@ -2502,7 +2502,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           placeholder={t('suppliers.import.invoiceNumber', 'Invoice number')}
                         />
                         <input
@@ -2512,7 +2512,7 @@ const SuppliersPage: React.FC = () => {
                             setImportDraft(null);
                             setImportError(null);
                           }}
-                          className={`h-10 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                          className={`h-10 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           placeholder={t('suppliers.import.invoiceDate', 'Invoice date')}
                         />
                       </div>
@@ -2523,7 +2523,7 @@ const SuppliersPage: React.FC = () => {
                           setImportDraft(null);
                           setImportError(null);
                         }}
-                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-none ${fieldClass}`}
+                        className={`mt-2 min-h-20 w-full resize-none rounded-xl border px-3 py-2 text-sm outline-hidden ${fieldClass}`}
                         placeholder={t('suppliers.import.supplierNotes', 'Supplier notes from invoice')}
                       />
                     </div>
@@ -2593,7 +2593,7 @@ const SuppliersPage: React.FC = () => {
                           onKeyDown={(event) => {
                             if (event.key === 'Enter') appendBarcodeRow(manualBarcode);
                           }}
-                          className={`min-w-0 flex-1 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                          className={`min-w-0 flex-1 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                           placeholder={t('suppliers.import.barcodePlaceholder', 'Barcode')}
                         />
                         <button
@@ -2837,7 +2837,7 @@ const SuppliersPage: React.FC = () => {
 
       {captureEnabled && captureQueueOpen && renderModalPortal(
         <div
-          className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
           onClick={() => setCaptureQueueOpen(false)}
         >
           <div
@@ -2909,7 +2909,7 @@ const InfoLine: React.FC<{ icon: React.ReactNode; label: string; value: string; 
     <div className="text-yellow-400">{icon}</div>
     <div className="min-w-0">
       <p className={`text-xs ${subtleClass}`}>{label}</p>
-      <p className="break-words text-sm font-medium">{value}</p>
+      <p className="wrap-break-word text-sm font-medium">{value}</p>
     </div>
   </div>
 );
@@ -2938,19 +2938,19 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
       <input
         value={row.name}
         onChange={(event) => onChange(index, { name: event.target.value })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`}
+        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
         placeholder={t('suppliers.import.itemName', 'Item name')}
       />
       <input
         value={row.sku || ''}
         onChange={(event) => onChange(index, { sku: event.target.value })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`}
+        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
         placeholder={t('suppliers.import.sku', 'SKU')}
       />
       <input
         value={row.barcode || ''}
         onChange={(event) => onChange(index, { barcode: event.target.value })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`}
+        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
         placeholder={t('suppliers.import.barcode', 'Barcode')}
       />
       <input
@@ -2958,7 +2958,7 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
         min="0"
         value={row.quantity}
         onChange={(event) => onChange(index, { quantity: toNumber(event.target.value, 0) })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`}
+        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
         placeholder={t('suppliers.import.quantity', 'Qty')}
       />
       <input
@@ -2966,7 +2966,7 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
         min="0"
         value={row.cost}
         onChange={(event) => onChange(index, { cost: toNumber(event.target.value, 0) })}
-        className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`}
+        className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
         placeholder={t('suppliers.import.cost', 'Cost')}
       />
       <button
@@ -2978,10 +2978,10 @@ const ImportRowEditor: React.FC<ImportRowEditorProps> = ({ row, index, fieldClas
       </button>
     </div>
     <div className="mt-2 grid gap-2 md:grid-cols-4">
-      <input value={row.unit} onChange={(event) => onChange(index, { unit: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} placeholder={t('suppliers.import.unit', 'Unit')} />
-      <input value={row.category || ''} onChange={(event) => onChange(index, { category: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} placeholder={t('suppliers.import.category', 'Category')} />
-      <input value={row.subcategory || ''} onChange={(event) => onChange(index, { subcategory: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} placeholder={t('suppliers.import.subcategory', 'Subcategory')} />
-      <input value={row.notes || ''} onChange={(event) => onChange(index, { notes: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} placeholder={t('suppliers.import.notes', 'Notes')} />
+      <input value={row.unit} onChange={(event) => onChange(index, { unit: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.unit', 'Unit')} />
+      <input value={row.category || ''} onChange={(event) => onChange(index, { category: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.category', 'Category')} />
+      <input value={row.subcategory || ''} onChange={(event) => onChange(index, { subcategory: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.subcategory', 'Subcategory')} />
+      <input value={row.notes || ''} onChange={(event) => onChange(index, { notes: event.target.value })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} placeholder={t('suppliers.import.notes', 'Notes')} />
     </div>
     <div className="mt-2 flex flex-wrap items-center gap-2">
       <p className={`text-xs ${subtleClass}`}>{t('suppliers.import.rowNumber', 'Row')} {index + 1}</p>
@@ -3024,7 +3024,7 @@ const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleCla
             <input
               value={row.name}
               onChange={(event) => onChange(index, { name: event.target.value })}
-              className={`h-10 min-w-[220px] rounded-2xl border px-3 text-sm font-semibold outline-none ${fieldClass}`}
+              className={`h-10 min-w-[220px] rounded-2xl border px-3 text-sm font-semibold outline-hidden ${fieldClass}`}
             />
             <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${statusClass}`}>
               {t(`suppliers.import.status.${row.status}`, row.status)}
@@ -3035,9 +3035,9 @@ const ReviewRow: React.FC<ReviewRowProps> = ({ row, index, fieldClass, subtleCla
           </p>
         </div>
         <div className="grid grid-cols-3 gap-2">
-          <input type="number" min="0" value={row.quantity} onChange={(event) => onChange(index, { quantity: toNumber(event.target.value, 0) })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} />
-          <input type="number" min="0" value={row.cost} onChange={(event) => onChange(index, { cost: toNumber(event.target.value, 0) })} className={`h-10 rounded-2xl border px-3 text-sm outline-none ${fieldClass}`} />
-          <select value={row.status} onChange={(event) => onChange(index, { status: event.target.value as ImportRowStatus })} className={`h-10 rounded-2xl border px-2 text-sm outline-none ${fieldClass}`}>
+          <input type="number" min="0" value={row.quantity} onChange={(event) => onChange(index, { quantity: toNumber(event.target.value, 0) })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} />
+          <input type="number" min="0" value={row.cost} onChange={(event) => onChange(index, { cost: toNumber(event.target.value, 0) })} className={`h-10 rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`} />
+          <select value={row.status} onChange={(event) => onChange(index, { status: event.target.value as ImportRowStatus })} className={`h-10 rounded-2xl border px-2 text-sm outline-hidden ${fieldClass}`}>
             <option value="create">{t('suppliers.import.status.create', 'Create')}</option>
             <option value="update">{t('suppliers.import.status.update', 'Update')}</option>
             <option value="skip">{t('suppliers.import.status.skip', 'Skip')}</option>

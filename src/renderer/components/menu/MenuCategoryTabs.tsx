@@ -185,13 +185,13 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
             <button
               key={category.id}
               onClick={() => handleCategoryChange(category.id)}
-              className={`min-h-[38px] flex-shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-semibold antialiased shadow-sm backdrop-blur-md transition-all duration-200 touch-feedback active:translate-y-0 active:scale-95 sm:px-3.5 ${
+              className={`min-h-[38px] shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-semibold antialiased shadow-xs backdrop-blur-md transition-all duration-200 touch-feedback active:translate-y-0 active:scale-95 sm:px-3.5 ${
                 selectedCategory === category.id
                   ? resolvedTheme === 'dark'
                     ? 'border-yellow-300/55 bg-yellow-400 text-black shadow-none ring-1 ring-yellow-200/25'
                     : 'border-yellow-500/60 bg-yellow-400 text-black shadow-none ring-1 ring-yellow-200/35'
                   : resolvedTheme === 'dark'
-                    ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 active:border-white/25 active:bg-white/[0.14]'
+                    ? 'border-white/12 bg-white/8 text-zinc-100 shadow-black/20 active:border-white/25 active:bg-white/[0.14]'
                     : 'border-white/70 bg-white/75 text-gray-800 shadow-gray-900/5 active:border-gray-300 active:bg-white'
               }`}
             >
@@ -209,13 +209,13 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
               <button
                 key={subcategory.id}
                 onClick={() => handleSubcategoryChange(subcategory.id)}
-                className={`min-h-[40px] whitespace-nowrap rounded-full border px-3.5 py-2 text-sm font-semibold antialiased shadow-sm backdrop-blur-md transition-all duration-200 touch-feedback active:translate-y-0 active:scale-95 sm:px-4 ${
+                className={`min-h-[40px] whitespace-nowrap rounded-full border px-3.5 py-2 text-sm font-semibold antialiased shadow-xs backdrop-blur-md transition-all duration-200 touch-feedback active:translate-y-0 active:scale-95 sm:px-4 ${
                   selectedSubcategory === subcategory.id
                     ? resolvedTheme === 'dark'
                       ? 'border-yellow-300/55 bg-yellow-400 text-black shadow-none ring-1 ring-yellow-200/25'
                       : 'border-yellow-500/60 bg-yellow-400 text-black shadow-none ring-1 ring-yellow-200/35'
                     : resolvedTheme === 'dark'
-                      ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 active:border-white/25 active:bg-white/[0.14]'
+                      ? 'border-white/12 bg-white/8 text-zinc-100 shadow-black/20 active:border-white/25 active:bg-white/[0.14]'
                       : 'border-white/70 bg-white/75 text-gray-700 shadow-gray-900/5 active:border-gray-300 active:bg-white'
                 }`}
               >

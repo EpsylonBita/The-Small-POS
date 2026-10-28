@@ -19,7 +19,7 @@ test('TablesPage StatusChangeModal mounts through an app-level portal', () => {
   assert.match(pageSource, /return createPortal\(modalContent, document\.body\);/);
 
   // The full-viewport fixed backdrop with blur is preserved.
-  assert.match(pageSource, /className="fixed inset-0 z-\[1200\]/);
+  assert.match(pageSource, /className="fixed inset-0 z-1200(?![\w.-])/);
   assert.match(pageSource, /bg-black\/50 backdrop-blur-sm/);
 
   // A no-document guard falls back to an inline render instead of throwing.
@@ -29,11 +29,11 @@ test('TablesPage StatusChangeModal mounts through an app-level portal', () => {
 test('TablesPage StatusChangeModal overlay stacks above the sidebar and FAB, not on z-50', () => {
   // A portal alone is insufficient: with z-50 the backdrop ties the sidebar (z-50) and
   // loses to the FAB (z-[900]). The wrapper must use a POS app-modal z-index above both.
-  const overlay = pageSource.match(/className="fixed inset-0 (z-\[\d+\]|z-50)/);
+  const overlay = pageSource.match(/className="fixed inset-0 (z-\d+|z-50)/);
   assert.ok(overlay, 'StatusChangeModal overlay wrapper className not found');
   assert.notEqual(overlay[1], 'z-50', 'overlay must not stay on the z-50 sidebar layer');
 
-  const zMatch = overlay[1].match(/z-\[(\d+)\]/);
+  const zMatch = overlay[1].match(/z-(\d+)/);
   assert.ok(zMatch, `overlay z-index must be an explicit app-modal layer, got "${overlay[1]}"`);
   const z = Number(zMatch[1]);
   assert.ok(z > 900, `overlay z-index ${z} must be above the FAB layer (z-900)`);

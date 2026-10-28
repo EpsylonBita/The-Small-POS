@@ -316,7 +316,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   return (
     <div className="flex-1 p-2 sm:p-3 overflow-y-auto touch-scroll scrollbar-hide">
       {preview && previewPosition && createPortal(
-        <div {...cashierPortalProps} className="fixed inset-0 z-[2147483001]" onPointerDown={() => setPreview(null)}>
+        <div {...cashierPortalProps} className="fixed inset-0 z-2147483001" onPointerDown={() => setPreview(null)}>
           <div
             className={`absolute max-h-[min(70vh,22rem)] overflow-hidden rounded-2xl border p-4 shadow-2xl backdrop-blur-2xl ${
               resolvedTheme === 'dark'
@@ -347,7 +347,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
               <button
                 type="button"
                 onClick={() => setPreview(null)}
-                className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border transition-colors ${
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors ${
                   resolvedTheme === 'dark'
                     ? 'border-white/10 bg-white/5 text-zinc-300 active:bg-white/10 active:text-white'
                     : 'border-black/10 bg-black/5 text-gray-600 active:bg-black/10 active:text-gray-950'
@@ -358,7 +358,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
               </button>
             </div>
 
-            <div className="max-h-[14rem] overflow-y-auto pr-1 scrollbar-hide">
+            <div className="max-h-56 overflow-y-auto pr-1 scrollbar-hide">
               {preview.item.description ? (
                 <p className={`text-base font-semibold leading-relaxed ${
                   resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'
@@ -404,9 +404,9 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
         && onShortcutNavigate
         && featuredNavigationShortcuts.length > 0 && (
           <section
-            className={`mb-3 rounded-2xl border p-3 shadow-sm backdrop-blur-md ${
+            className={`mb-3 rounded-2xl border p-3 shadow-xs backdrop-blur-md ${
               resolvedTheme === 'dark'
-                ? 'border-white/10 bg-white/[0.04] shadow-black/20'
+                ? 'border-white/10 bg-white/4 shadow-black/20'
                 : 'border-white/80 bg-white/65 shadow-gray-900/5'
             }`}
             aria-label={t('menu.featuredShortcuts.quickAccess')}
@@ -438,9 +438,9 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                     key={shortcut.id}
                     type="button"
                     onClick={() => onShortcutNavigate(shortcut.categoryId, shortcut.subcategoryId)}
-                    className={`flex min-h-[42px] flex-shrink-0 items-center gap-2 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-semibold antialiased shadow-sm transition-all duration-150 active:scale-[0.98] ${
+                    className={`flex min-h-[42px] shrink-0 items-center gap-2 whitespace-nowrap rounded-xl border px-3 py-2 text-[13px] font-semibold antialiased shadow-xs transition-all duration-150 active:scale-[0.98] ${
                       resolvedTheme === 'dark'
-                        ? 'border-white/12 bg-white/[0.08] text-zinc-100 shadow-black/20 active:border-yellow-300/60 active:bg-yellow-400 active:text-black'
+                        ? 'border-white/12 bg-white/8 text-zinc-100 shadow-black/20 active:border-yellow-300/60 active:bg-yellow-400 active:text-black'
                         : 'border-white/80 bg-white/90 text-gray-800 shadow-gray-900/5 active:border-yellow-500 active:bg-yellow-400 active:text-black'
                     }`}
                     aria-label={
@@ -455,14 +455,14 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
                     {shortcut.kind === 'category' ? (
                       <LayoutGrid
                         aria-hidden="true"
-                        className={`h-4 w-4 flex-shrink-0 ${
+                        className={`h-4 w-4 shrink-0 ${
                           resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600'
                         }`}
                       />
                     ) : (
                       <Layers
                         aria-hidden="true"
-                        className={`h-4 w-4 flex-shrink-0 ${
+                        className={`h-4 w-4 shrink-0 ${
                           resolvedTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-600'
                         }`}
                       />

@@ -335,7 +335,7 @@ export function RepairIntakeDialog({
       onClose={onClose}
       title={isQuick ? t('repairs.quickService') : t('repairs.newRepair')}
       size="xl"
-      className="!max-h-[94vh]"
+      className="max-h-[94vh]!"
       closeDisabled={isSubmitting}
     >
       <form className="space-y-5 p-1 text-slate-950 dark:text-white" onSubmit={submit}>

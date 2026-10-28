@@ -124,7 +124,7 @@ export const EditSettlementDeltaModal: React.FC<EditSettlementDeltaModalProps> =
       }}
       title={title}
       size="md"
-      className="!max-w-md"
+      className="max-w-md!"
       closeOnBackdrop={false}
       closeOnEscape={false}
     >

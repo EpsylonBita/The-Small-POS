@@ -19,7 +19,7 @@ test('ServiceCatalogView add/edit and delete modals portal outside the page with
   assert.match(viewSource, /import \{ renderModalPortal \} from '\.\.\/\.\.\/\.\.\/utils\/render-modal-portal';/);
   const portalUsages = viewSource.match(/renderModalPortal\(/g);
   assert.ok(portalUsages && portalUsages.length >= 2, 'add/edit and delete modals should portal');
-  assert.match(viewSource, /fixed inset-0 z-\[1200\]/);
+  assert.match(viewSource, /fixed inset-0 z-1200(?![\w.-])/);
   assert.match(viewSource, /absolute inset-0 bg-black\/50 backdrop-blur-sm/);
 });
 
@@ -70,9 +70,9 @@ test('Round 393: ServiceCatalogView uses the shared page title and touch-first r
 
   // Category tabs follow the yellow selected accent and hide native horizontal scrollbars.
   assert.match(viewSource, /overflow-x-auto scrollbar-hide border/);
-  assert.match(viewSource, /activeTab === tab\.id\s*\?\s*'bg-yellow-400 text-black shadow-sm'/);
-  assert.doesNotMatch(viewSource, /bg-zinc-100 text-black shadow-sm/);
-  assert.doesNotMatch(viewSource, /bg-black text-white shadow-sm/);
+  assert.match(viewSource, /activeTab === tab\.id\s*\?\s*'bg-yellow-400 text-black shadow-xs'/);
+  assert.doesNotMatch(viewSource, /bg-zinc-100 text-black shadow-xs/);
+  assert.doesNotMatch(viewSource, /bg-black text-white shadow-xs/);
 
   // The scrollable service grid hides native scrollbars, and old small-radius controls are gone.
   assert.match(viewSource, /className="flex-1 overflow-y-auto scrollbar-hide"/);

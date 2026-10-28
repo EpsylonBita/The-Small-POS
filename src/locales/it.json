@@ -1,4 +1,10 @@
 {
+  "checkoutRecovery": {
+    "editRefused": "La modifica non è stata applicata perché nel frattempo l’ordine è cambiato. Riaprilo e ripeti la modifica dall’inizio.",
+    "editConflict": "La modifica salvata deve essere verificata. Riapri l’ordine prima di continuare.",
+    "discardEdit": "Scarta la vecchia modifica",
+    "editReviewUnavailable": "Non è stato possibile aprire o scartare la modifica salvata. Riconnettiti e controlla di nuovo l’ordine."
+  },
   "missedPlatformOrders": {
     "title_one": "{{count}} ordine della piattaforma rifiutato mentre la cassa era offline",
     "title_other": "{{count}} ordini della piattaforma rifiutati mentre la cassa era offline",
@@ -623,7 +629,15 @@
   },
   "auth": {
     "managerApproval": {
-      "subtitle": "Nessuno è in turno su questa cassa. Un responsabile autorizzato inserisce il proprio PIN. Non viene addebitato nulla."
+      "subtitle": "Nessuno è in turno su questa cassa. Un responsabile autorizzato inserisce il proprio PIN. Non viene addebitato nulla.",
+      "checking": "Verifica di chi può approvare nel negozio…",
+      "noApprover": "Nessuno in questo negozio ha il permesso «{{right}}». Il titolare può assegnarlo in admin → Ruoli. Non serve un PIN.",
+      "pinRefused": "Questo PIN non appartiene a nessuno con il permesso «{{right}}». Inserisci il PIN personale di un responsabile autorizzato, non il PIN di accesso alla cassa.",
+      "paused": "Troppi PIN del responsabile errati. Le approvazioni sono sospese per {{minutes}} minuti. Puoi ancora accedere alla cassa.",
+      "rights": {
+        "voidPayments": "annullare pagamenti",
+        "cancelOrders": "annullare ordini"
+      }
     },
     "login": {
       "title": "Accesso personale",
@@ -4282,7 +4296,13 @@
         "keepEditing": "Continua la modifica",
         "discard": "Annulla ordine"
       },
-      "editFailed": "Impossibile salvare le modifiche. Riprova.",
+      "editFailed": "La modifica non è stata salvata. Conserva il carrello e riprova la modifica salvata. Se il pagamento è già stato incassato, non addebitarlo di nuovo; chiedi a un responsabile di riconciliarlo in Stato del sistema.",
+      "editCurrencyUnavailable": "La valuta necessaria per questa modifica non è verificata. Conserva il carrello e chiedi di verificare le valute di ordine, pagamento e turno prima di riprovare. Non incassare di nuovo.",
+      "editCurrencyMismatch": "Le valute di ordine, pagamento e turno di cassa non coincidono. Chiedi di verificarle prima di riprovare. Non incassare di nuovo.",
+      "editCollectorUnavailable": "Non è stato possibile verificare il turno del cassiere. Verifica che il cassiere abbia iniziato il turno su questa cassa e riprova la modifica salvata. Non incassare di nuovo.",
+      "editPaymentMismatch": "La differenza confermata non corrisponde alla modifica. Conserva il carrello e chiedi a un responsabile di riconciliare il pagamento in Stato del sistema. Non addebitare di nuovo.",
+      "editLocalOperationFailed": "La cassa non ha potuto leggere o salvare la modifica localmente. Conserva il carrello e riprova. Se il problema persiste, esporta i dati di assistenza da Stato del sistema. Non incassare di nuovo.",
+      "editScopeChanged": "La connessione della cassa o il negozio è cambiato. Ripristina la connessione e riprova la modifica salvata. Conserva il carrello e non incassare di nuovo.",
       "saveChanges": "Salva modifiche",
       "addCustomer": "Aggiungi cliente",
       "customerInfo": "Info cliente (facoltativo)",
@@ -5271,6 +5291,11 @@
       "unsavedAlreadyResolved": "Questo pagamento è già registrato come restituito.",
       "unsavedSavedAfterAll": "Questo pagamento è stato salvato comunque: non c'è nulla da restituire.",
       "unsavedResolveFailed": "Impossibile registrarlo: {{error}}",
+      "heldEditCloseReason": "Ordine annullato; correzione chiusa da un responsabile dai controlli dello Z senza registrare denaro",
+      "heldEditApprovalTitle": "Chiudi la correzione senza denaro",
+      "heldEditApprovalSubtitle": "Controlla prima il POS della banca e il cassetto. Un membro dello staff con il diritto di annullare i pagamenti inserisce il proprio PIN. Non viene addebitato né restituito nulla.",
+      "heldEditClosed": "La correzione è stata chiusa. Nessun denaro è stato registrato.",
+      "heldEditCloseFailed": "Non è stato possibile chiudere la correzione. Resta in sospeso; non è stato registrato nulla.",
       "unsavedSaved": "Pagamento salvato.",
       "unsavedStillNotSaved": "Ancora non salvato su questa cassa. Non addebitare di nuovo. Riprova, oppure restituisci il denaro al cliente e confermalo qui."
     },
@@ -6136,7 +6161,8 @@
       "enterPin": "Inserisci il PIN",
       "invalidPin": "Codice errato",
       "loginFailed": "Accesso non riuscito. Riprova.",
-      "timeout": "L'accesso ha impiegato troppo tempo. Riprova."
+      "timeout": "L'accesso ha impiegato troppo tempo. Riprova.",
+      "lockedOut": "Troppi tentativi di PIN errati. Riprova tra {{minutes}} minuti."
     },
     "backspace": "Cancella"
   },
@@ -10225,7 +10251,8 @@
       "payments_not_saved__new_order": "Un pagamento con carta di {{paymentAmount}} è stato addebitato per un nuovo ordine non ancora salvato su questa cassa: l'ordine e il suo pagamento restano in attesa finché non vengono salvati. Il cliente è stato addebitato: non addebitare di nuovo.",
       "payments_not_saved__new_order_cannot_save": "Un pagamento con carta di {{paymentAmount}} è stato addebitato per un nuovo ordine non ancora salvato su questa cassa: l'ordine e il suo pagamento restano in attesa finché non vengono salvati. Il cliente è stato addebitato: non addebitare di nuovo.",
       "cancelled_order_claims_payment": "Questo ordine è annullato ma risulta ancora pagato, e questa cassa non ha alcuna registrazione di pagamento per esso. Non è in questo Rapporto Z. Questo non blocca la chiusura della giornata.",
-      "edit_settlement_not_saved": "Una correzione confermata non è ancora salvata. L’incasso o il rimborso originale è conservato."
+      "edit_settlement_not_saved": "Una correzione confermata non è ancora salvata. L’incasso o il rimborso originale è conservato.",
+      "edit_settlement_not_saved__order_cancelled": "L’ordine è stato annullato, quindi questa correzione confermata non potrà mai essere salvata. L’incasso o il rimborso originale resta conservato."
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Recupera l’annullamento originale del tavolo. Non consegnare o rimborsare nuovamente il denaro.",
@@ -10238,7 +10265,8 @@
       "payments_not_saved__new_order": "Salva di nuovo il pagamento: salva l'ordine e il suo pagamento, senza un nuovo addebito. Se non si riesce a salvarlo, restituisci il denaro al cliente e confermalo qui.",
       "payments_not_saved__new_order_cannot_save": "Questo ordine e il suo pagamento non possono essere salvati su questa cassa. Restituisci il denaro al cliente, poi confermalo qui.",
       "cancelled_order_claims_payment": "Ripristina dal server («Sincronizza ora»): un pagamento che il server ha viene copiato qui. Se non ce n'è nessuno, il titolare decide cosa deve indicare l'ordine.",
-      "edit_settlement_not_saved": "Riapri la modifica salvata e salva la stessa correzione. Non incassare o rimborsare di nuovo."
+      "edit_settlement_not_saved": "Riapri la modifica salvata e salva la stessa correzione. Non incassare o rimborsare di nuovo.",
+      "edit_settlement_not_saved__order_cancelled": "Controlla il POS della banca e il cassetto per il denaro di questa correzione. Poi un responsabile la chiude qui senza registrare denaro."
     },
     "setAsidePaymentLabel": "Pagamento messo da parte",
     "takenAtLabel": "Incassato alle",
@@ -10248,6 +10276,8 @@
     "chargedAtLabel": "Addebitato alle",
     "unsavedSaveAgainAction": "Salva di nuovo il pagamento",
     "unsavedReturnedAction": "Denaro restituito al cliente",
+    "heldEditCloseAction": "Chiudi senza registrare denaro (responsabile)",
+    "heldEditClosing": "Chiusura...",
     "unsavedSaving": "Salvataggio...",
     "unsavedResolving": "Registrazione..."
   },

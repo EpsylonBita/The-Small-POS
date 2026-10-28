@@ -24,7 +24,7 @@ test('EditOptionsModal uses the touch POS palette: glass modal, rounded-2xl card
   assert.match(source, /active:bg-slate-100[^"']*dark:active:bg-slate-800/);
   assert.match(source, /active:bg-emerald-100[^"']*dark:active:bg-emerald-500\/20/);
   assert.match(source, /active:bg-amber-100[^"']*dark:active:bg-amber-500\/20/);
-  assert.match(source, /focus-visible:outline-none focus-visible:ring-2/);
+  assert.match(source, /focus-visible:outline-hidden focus-visible:ring-2/);
   assert.doesNotMatch(source, /hover:/);
   assert.doesNotMatch(source, /group-hover:/);
   assert.doesNotMatch(source, /dark:hover:/);

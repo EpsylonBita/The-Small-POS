@@ -264,7 +264,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
         {/* Quick Scan Button */}
         <button
           className={`
-            flex items-center justify-center gap-2 px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400
+            flex items-center justify-center gap-2 px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400
             ${isDark
               ? 'bg-yellow-400 text-black'
               : 'bg-black text-white'
@@ -303,7 +303,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
           </div>
           <button
             onClick={handleNavigateToInventory}
-            className={`ml-auto px-3 py-1.5 rounded-xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+            className={`ml-auto px-3 py-1.5 rounded-xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
               isDark
                 ? 'bg-amber-500/20 text-amber-300'
                 : 'bg-amber-100 text-amber-800'

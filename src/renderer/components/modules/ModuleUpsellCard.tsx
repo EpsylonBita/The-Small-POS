@@ -177,7 +177,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
         >
           <div className="flex items-center gap-3">
             {/* Lock icon with gradient */}
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-400/25 to-white/10 flex items-center justify-center flex-shrink-0 border border-amber-400/25">
+            <div className="w-10 h-10 rounded-2xl bg-linear-to-br from-amber-400/25 to-white/10 flex items-center justify-center shrink-0 border border-amber-400/25">
               <Lock className="h-5 w-5 text-amber-300" />
             </div>
 
@@ -186,7 +186,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
               <p className={`liquid-glass-modal-text-muted text-sm ${displayGuidance ? '' : 'truncate'}`}>{displayedDescription}</p>
             </div>
 
-            <ChevronRight className="h-5 w-5 text-gray-500 flex-shrink-0" />
+            <ChevronRight className="h-5 w-5 text-gray-500 shrink-0" />
           </div>
           <DisplayPurchaseGuidance moduleId={moduleInfo.module_id} compact />
         </button>
@@ -197,7 +197,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
           onClose={handleClose}
           title={moduleInfo.display_name}
           size="md"
-          className="!max-w-lg"
+          className="max-w-lg!"
         >
           <ModuleUpsellContent
             moduleInfo={moduleInfo}
@@ -234,7 +234,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
       onClose={handleClose}
       title={moduleInfo.display_name}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
     >
       <ModuleUpsellContent
         moduleInfo={moduleInfo}
@@ -283,7 +283,7 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
     <div className="space-y-6">
       {/* Header with icon and description */}
       <div className="flex items-start gap-4">
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-400/25 to-white/10 flex items-center justify-center flex-shrink-0 border border-amber-400/25">
+        <div className="w-16 h-16 rounded-2xl bg-linear-to-br from-amber-400/25 to-white/10 flex items-center justify-center shrink-0 border border-amber-400/25">
           <Lock className="h-8 w-8 text-amber-300" />
         </div>
         <div>
@@ -305,7 +305,7 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
         <ul className="space-y-2">
           {displayedFeatures.slice(0, compact ? 3 : 5).map((feature) => (
             <li key={feature.id} className="flex items-start gap-2">
-              <Check className="h-4 w-4 text-green-400 mt-0.5 flex-shrink-0" />
+              <Check className="h-4 w-4 text-green-400 mt-0.5 shrink-0" />
               <div>
                 <span className="liquid-glass-modal-text text-sm">{feature.name}</span>
                 {!compact && feature.description && (

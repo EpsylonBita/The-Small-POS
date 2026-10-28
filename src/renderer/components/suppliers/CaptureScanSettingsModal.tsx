@@ -580,7 +580,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
         value={friendlyName}
         onChange={(event) => setFriendlyName(event.target.value)}
         placeholder={device.name}
-        className={`h-10 w-full rounded-2xl border px-3 text-sm outline-none ${fieldClass}`}
+        className={`h-10 w-full rounded-2xl border px-3 text-sm outline-hidden ${fieldClass}`}
       />
 
       <label className="flex min-h-10 items-center gap-3 text-sm">
@@ -643,7 +643,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
 
   return renderModalPortal(
     <div
-      className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-1200 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
@@ -687,7 +687,7 @@ export const CaptureScanSettingsModal: React.FC<CaptureScanSettingsModalProps> =
               <span className="min-w-0 flex-1">
                 {problem}
                 {problemDetail && (
-                  <span className="mt-1 block break-words text-xs opacity-80" data-testid="capture-problem-detail">
+                  <span className="mt-1 block wrap-break-word text-xs opacity-80" data-testid="capture-problem-detail">
                     {t('suppliers.capture.settings.problemDetail', 'What the scanner said: {{detail}}', { detail: problemDetail })}
                   </span>
                 )}

@@ -302,10 +302,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   );
 
   const flavorFilterButtonBaseClass =
-    'inline-flex h-12 min-w-[7rem] items-center justify-center rounded-full border px-5 text-sm font-semibold antialiased box-border transition-colors duration-150 touch-feedback';
+    'inline-flex h-12 min-w-28 items-center justify-center rounded-full border px-5 text-sm font-semibold antialiased box-border transition-colors duration-150 touch-feedback';
 
   const modalHeader = (
-    <div className="flex-shrink-0 px-5 pt-3 pb-1.5 space-y-2">
+    <div className="shrink-0 px-5 pt-3 pb-1.5 space-y-2">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-[1.05rem] font-semibold liquid-glass-modal-text">
@@ -417,7 +417,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   );
 
   const modalFooter = (
-    <div className="liquid-glass-modal-footer flex-shrink-0 border-t px-5 py-2 space-y-2 relative z-10">
+    <div className="liquid-glass-modal-footer shrink-0 border-t px-5 py-2 space-y-2 relative z-10">
       {selectedIngredients.length > 0 && (
         <div className="liquid-glass-modal-inset rounded-xl px-2.5 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
           <div className="flex items-center gap-2 min-w-0">
@@ -439,7 +439,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               )}
               {selectedWithoutItems.length > 0 && (
                 <span className="text-xs text-red-400 inline-flex items-center gap-1">
-                  <Ban className="w-3 h-3 flex-shrink-0" />
+                  <Ban className="w-3 h-3 shrink-0" />
                   {t('menu.itemModal.withoutCount', { count: selectedWithoutItems.length })}
                 </span>
               )}
@@ -522,7 +522,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           >
             <Minus className="h-5 w-5" strokeWidth={3.5} aria-hidden="true" />
           </button>
-          <span className="text-lg font-bold liquid-glass-modal-text min-w-[1.75rem] text-center">
+          <span className="text-lg font-bold liquid-glass-modal-text min-w-7 text-center">
             {quantity}
           </span>
           <button
@@ -542,7 +542,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           {notes
             ? (t('menu.itemModal.editNotes', { defaultValue: 'Edit Notes' }))
             : (t('menu.itemModal.addNotes', { defaultValue: 'Add Notes' }))}
-          {notes && <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />}
+          {notes && <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" />}
         </button>
 
         <span className="text-xl font-bold text-green-500">
@@ -774,7 +774,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
         {/* Notes overlay */}
         {showNotesOverlay && renderModalPortal(
-          <div className="fixed inset-0 z-[20050] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm p-4">
+          <div className="fixed inset-0 z-20050 flex items-center justify-center bg-slate-950/45 backdrop-blur-sm p-4">
             <div className="liquid-glass-modal-inset rounded-3xl p-5 mx-6 max-w-md w-full shadow-2xl backdrop-blur-2xl">
               <h3 className="text-sm font-semibold liquid-glass-modal-text mb-3">
                 {t('menu.itemModal.specialInstructions')}

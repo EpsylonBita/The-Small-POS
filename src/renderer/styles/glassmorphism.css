@@ -2,6 +2,7 @@
 /* Optimized for touch interfaces and larger screens */
 
 /* CSS Custom Properties for Consistent Theming */
+@layer utilities {
 :root {
   /* Glass backgrounds - Light theme, neutral grey tint */
   --glass-bg-primary: rgba(24, 24, 27, 0.05);
@@ -624,6 +625,7 @@ body.pos-modal-open .pos-fab * {
   opacity: 0.8;
   animation: none;
 }
+}
 
 @keyframes pos-fab-rotate {
   from {
@@ -853,7 +855,11 @@ body.pos-modal-open .pos-fab * {
 }
 
 /* Base Glass Container Classes */
-.pos-glass-container {
+@layer utilities {
+.pos-glass-container,
+.pos-glass-card,
+.pos-glass-card-compact,
+.pos-glass-modal {
   position: relative;
   background: rgba(255, 255, 255, 0.8);
   /* Fallback for no backdrop-filter support */
@@ -866,19 +872,25 @@ body.pos-modal-open .pos-fab * {
 
 /* If backdrop-filter is not supported, use solid background */
 @supports not (backdrop-filter: blur(10px)) {
-  .pos-glass-container {
+  .pos-glass-container,
+  .pos-glass-card,
+  .pos-glass-card-compact,
+  .pos-glass-modal {
     background: rgba(248, 250, 252, 0.95);
     border: 1px solid rgba(203, 213, 225, 0.5);
   }
 }
 
-.pos-glass-primary {
+.pos-glass-primary,
+.pos-glass-card,
+.pos-glass-modal {
   background: rgba(113, 113, 122, 0.15);
   border: 1px solid rgba(113, 113, 122, 0.2);
   box-shadow: 0 8px 32px 0 rgba(113, 113, 122, 0.2);
 }
 
-.pos-glass-secondary {
+.pos-glass-secondary,
+.pos-glass-card-compact {
   background: rgba(113, 113, 122, 0.1);
   border: 1px solid rgba(113, 113, 122, 0.15);
   box-shadow: 0 8px 32px 0 rgba(113, 113, 122, 0.15);
@@ -887,7 +899,12 @@ body.pos-modal-open .pos-fab * {
   border-radius: var(--pos-glass-radius-medium);
 }
 
-.pos-glass-interactive {
+.pos-glass-interactive,
+.pos-glass-button,
+.pos-glass-button-large,
+.pos-glass-button-xl,
+.pos-glass-input,
+.pos-glass-pin-input {
   background: var(--pos-glass-bg-interactive);
   border: 1px solid var(--pos-glass-border-interactive);
   backdrop-filter: var(--pos-glass-blur-interactive);
@@ -903,13 +920,23 @@ body.pos-modal-open .pos-fab * {
 }
 
 @media (hover: hover) {
-  .pos-glass-interactive:hover {
+  .pos-glass-interactive:hover,
+  .pos-glass-button:hover,
+  .pos-glass-button-large:hover,
+  .pos-glass-button-xl:hover,
+  .pos-glass-input:hover,
+  .pos-glass-pin-input:hover {
     background: var(--pos-glass-bg-hover);
     border: 1px solid var(--pos-glass-border-hover);
   }
 }
 
-.pos-glass-interactive:active {
+.pos-glass-interactive:active,
+.pos-glass-button:active,
+.pos-glass-button-large:active,
+.pos-glass-button-xl:active,
+.pos-glass-input:active,
+.pos-glass-pin-input:active {
   transform: translateY(0) scale(var(--pos-touch-feedback-scale));
   transition: var(--pos-glass-transition-fast);
   background: var(--pos-glass-bg-active);
@@ -917,7 +944,12 @@ body.pos-modal-open .pos-fab * {
 }
 
 /* Touch feedback animation */
-.pos-glass-interactive::before {
+.pos-glass-interactive::before,
+.pos-glass-button::before,
+.pos-glass-button-large::before,
+.pos-glass-button-xl::before,
+.pos-glass-input::before,
+.pos-glass-pin-input::before {
   content: '';
   position: absolute;
   top: 50%;
@@ -932,28 +964,32 @@ body.pos-modal-open .pos-fab * {
   z-index: 1;
 }
 
-.pos-glass-interactive:active::before {
+.pos-glass-interactive:active::before,
+.pos-glass-button:active::before,
+.pos-glass-button-large:active::before,
+.pos-glass-button-xl:active::before,
+.pos-glass-input:active::before,
+.pos-glass-pin-input:active::before {
   width: 120%;
   height: 120%;
 }
 
 /* Specialized Glass Components for POS */
 .pos-glass-card {
-  @apply pos-glass-container pos-glass-primary;
   padding: 1.5rem;
   margin: 1rem 0;
   position: relative;
 }
 
 .pos-glass-card-compact {
-  @apply pos-glass-container pos-glass-secondary;
   padding: 1rem;
   margin: 0.5rem 0;
   border-radius: var(--pos-glass-radius-medium);
 }
 
-.pos-glass-button {
-  @apply pos-glass-interactive;
+.pos-glass-button,
+.pos-glass-button-large,
+.pos-glass-button-xl {
   padding: 1rem 1.5rem;
   border: none;
   font-weight: 600;
@@ -972,7 +1008,6 @@ body.pos-modal-open .pos-fab * {
 }
 
 .pos-glass-button-large {
-  @apply pos-glass-button;
   padding: 1.25rem 2rem;
   min-height: 64px;
   font-size: 1.25rem;
@@ -980,7 +1015,6 @@ body.pos-modal-open .pos-fab * {
 }
 
 .pos-glass-button-xl {
-  @apply pos-glass-button;
   padding: 1.5rem 2.5rem;
   min-height: 72px;
   font-size: 1.375rem;
@@ -988,7 +1022,6 @@ body.pos-modal-open .pos-fab * {
 }
 
 .pos-glass-input {
-  @apply pos-glass-interactive;
   padding: 1rem 1.25rem;
   border: 1px solid var(--pos-glass-border-interactive);
   background: var(--pos-glass-bg-interactive);
@@ -1014,7 +1047,6 @@ body.pos-modal-open .pos-fab * {
 
 /* PIN Input specific styling */
 .pos-glass-pin-input {
-  @apply pos-glass-interactive;
   padding: 1.5rem;
   text-align: center;
   font-size: 1.5rem;
@@ -1027,7 +1059,6 @@ body.pos-modal-open .pos-fab * {
 
 /* POS Modal styling */
 .pos-glass-modal {
-  @apply pos-glass-container pos-glass-primary;
   position: fixed;
   top: 50%;
   left: 50%;
@@ -1342,6 +1373,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   background: linear-gradient(135deg, rgba(34, 211, 238, 0.16), rgba(8, 145, 178, 0.06)) !important;
   border-color: rgba(34, 211, 238, 0.45) !important;
 }
+}
 
 @keyframes modalEnter {
   from {
@@ -1410,6 +1442,8 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     transform: translateY(-10px) scale(0.96);
   }
 }
+
+@layer utilities {
 
 .liquid-glass-modal-shell.leaving {
   animation: liquidModalExit 180ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
@@ -1915,11 +1949,21 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 
 /* Reduced motion support */
 @media (prefers-reduced-motion: reduce) {
-  .pos-glass-interactive {
+  .pos-glass-interactive,
+  .pos-glass-button,
+  .pos-glass-button-large,
+  .pos-glass-button-xl,
+  .pos-glass-input,
+  .pos-glass-pin-input {
     transition: none;
   }
 
-  .pos-glass-interactive:hover {
+  .pos-glass-interactive:hover,
+  .pos-glass-button:hover,
+  .pos-glass-button-large:hover,
+  .pos-glass-button-xl:hover,
+  .pos-glass-input:hover,
+  .pos-glass-pin-input:hover {
     transform: none;
   }
 
@@ -1985,7 +2029,13 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 /* Glassmorphism Design System for POS - Matching Admin Dashboard */
 
 /* Base glass container */
-.glass-container {
+.glass-container,
+.pos-glass-button,
+.pos-glass-button-large,
+.pos-glass-button-xl,
+.pos-glass-tab,
+.pos-glass-sidebar,
+.pos-glass-modal {
   backdrop-filter: var(--glass-blur-primary);
   -webkit-backdrop-filter: var(--glass-blur-primary);
   border-radius: var(--glass-radius-medium);
@@ -1994,19 +2044,25 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 /* Glass variants */
-.glass-primary {
+.glass-primary,
+.pos-glass-modal {
   background: var(--glass-bg-primary);
   border: 1px solid var(--glass-border-primary);
   box-shadow: var(--glass-shadow-primary);
 }
 
-.glass-secondary {
+.glass-secondary,
+.pos-glass-sidebar {
   background: var(--glass-bg-secondary);
   border: 1px solid var(--glass-border-secondary);
   box-shadow: var(--glass-shadow-primary);
 }
 
-.glass-interactive {
+.glass-interactive,
+.pos-glass-button,
+.pos-glass-button-large,
+.pos-glass-button-xl,
+.pos-glass-tab {
   background: var(--glass-bg-interactive);
   border: 1px solid var(--glass-border-interactive);
   box-shadow: var(--glass-shadow-primary);
@@ -2015,13 +2071,21 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 @media (hover: hover) {
-  .glass-interactive:hover {
+  .glass-interactive:hover,
+  .pos-glass-button:hover,
+  .pos-glass-button-large:hover,
+  .pos-glass-button-xl:hover,
+  .pos-glass-tab:hover {
     background: var(--glass-bg-hover);
     border-color: var(--glass-border-hover);
   }
 }
 
-.glass-interactive:active {
+.glass-interactive:active,
+.pos-glass-button:active,
+.pos-glass-button-large:active,
+.pos-glass-button-xl:active,
+.pos-glass-tab:active {
   transform: scale(0.98);
 }
 
@@ -2051,8 +2115,9 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 /* POS specific classes */
-.pos-glass-button {
-  @apply glass-container glass-interactive;
+.pos-glass-button,
+.pos-glass-button-large,
+.pos-glass-button-xl {
   min-height: var(--touch-target-min);
   min-width: var(--touch-target-min);
   padding: 0.75rem 1.5rem;
@@ -2065,7 +2130,6 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .pos-glass-tab {
-  @apply glass-container glass-interactive;
   padding: 0.75rem 1.5rem;
   border-radius: var(--glass-radius-large);
   font-weight: 500;
@@ -2079,13 +2143,11 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 .pos-glass-sidebar {
-  @apply glass-container glass-secondary;
   backdrop-filter: var(--glass-blur-secondary);
   -webkit-backdrop-filter: var(--glass-blur-secondary);
 }
 
 .pos-glass-modal {
-  @apply glass-container glass-primary;
   backdrop-filter: var(--glass-blur-secondary);
   -webkit-backdrop-filter: var(--glass-blur-secondary);
   border-radius: var(--glass-radius-xl);
@@ -2099,6 +2161,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 
 .theme-bg-dark {
   background: #000000;
+}
 }
 
 /* Animations */
@@ -2123,6 +2186,8 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     background-position: 200% 0;
   }
 }
+
+@layer utilities {
 
 .glass-float {
   animation: glass-float 3s ease-in-out infinite;
@@ -2153,20 +2218,35 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 /* Focus styles */
-.glass-interactive:focus-visible {
+.glass-interactive:focus-visible,
+.pos-glass-button:focus-visible,
+.pos-glass-button-large:focus-visible,
+.pos-glass-button-xl:focus-visible,
+.pos-glass-tab:focus-visible {
   outline: 2px solid rgba(234, 179, 8, 0.85);
   outline-offset: 2px;
 }
 
 /* High contrast mode support */
 @media (prefers-contrast: high) {
-  .glass-container {
+  .glass-container,
+  .pos-glass-button,
+  .pos-glass-button-large,
+  .pos-glass-button-xl,
+  .pos-glass-tab,
+  .pos-glass-sidebar,
+  .pos-glass-modal {
     border-width: 2px;
   }
 
-  .glass-interactive:hover {
+  .glass-interactive:hover,
+  .pos-glass-button:hover,
+  .pos-glass-button-large:hover,
+  .pos-glass-button-xl:hover,
+  .pos-glass-tab:hover {
     border-width: 3px;
   }
+}
 }
 
 /* ===== ORDER CARD SPECIFIC ANIMATIONS ===== */
@@ -2318,6 +2398,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 /* Order Card Classes */
+@layer utilities {
 .order-card-enhanced {
   animation: order-card-glow 3s ease-in-out infinite;
   transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
@@ -2357,6 +2438,7 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
     0 0 0 4px rgba(255, 255, 255, 0.1),
     0 0 20px rgba(113, 113, 122, 0.6);
   animation: priority-pulse 2s ease-in-out infinite;
+}
 }
 
 /* Enhanced Animation Classes for New Order Modal */
@@ -2405,6 +2487,8 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
   }
 }
 
+@layer utilities {
+
 .animate-fade-in {
   animation: fade-in 0.6s ease-out forwards;
 }
@@ -2418,7 +2502,9 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 /* Enhanced glassmorphism variants for different order types */
-.pos-glass-primary {
+.pos-glass-primary,
+.pos-glass-card,
+.pos-glass-modal {
   background: linear-gradient(135deg,
       rgba(113, 113, 122, 0.4) 0%,
       rgba(63, 63, 70, 0.3) 100%);
@@ -2449,7 +2535,12 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 }
 
 /* Interactive effects for order type cards (touch: press feedback only) */
-.pos-glass-interactive:active {
+.pos-glass-interactive:active,
+.pos-glass-button:active,
+.pos-glass-button-large:active,
+.pos-glass-button-xl:active,
+.pos-glass-input:active,
+.pos-glass-pin-input:active {
   transform: scale(0.98);
   transition: transform 0.1s ease-out;
 }
@@ -2930,4 +3021,5 @@ html:not(.dark) .order-type-transparent-modal [data-order-type-card="service"] s
 
 .dark .bulk-action-reset:active {
   background: #7dd3fc !important;
+}
 }

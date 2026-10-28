@@ -405,7 +405,7 @@ export const WaiterDevicesSection: React.FC = () => {
                 {/* Currently checked-in staff */}
                 <div className="flex items-start gap-2 text-xs liquid-glass-modal-text-muted">
                   <Users className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span className="min-w-0 break-words">
+                  <span className="min-w-0 wrap-break-word">
                     {device.activeStaff.length > 0
                       ? t('settings.waiterDevices.activeStaff', {
                           names: device.activeStaff.map(describeStaff).join(', '),

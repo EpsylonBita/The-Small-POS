@@ -120,7 +120,7 @@ export function showPhoneShiftNotice(shift: UnitClosedShift, t: Translate): void
               <button
                 type="button"
                 data-testid="phone-shift-notice-open"
-                className="min-h-[44px] rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-gray-950 hover:bg-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+                className="min-h-touch rounded-full bg-amber-400 px-4 py-1.5 text-xs font-semibold text-gray-950 hover:bg-amber-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400"
                 onClick={() => {
                   toast.dismiss(instance.id);
                   openPhoneShiftStaff();
@@ -131,7 +131,7 @@ export function showPhoneShiftNotice(shift: UnitClosedShift, t: Translate): void
               <button
                 type="button"
                 data-testid="phone-shift-notice-dismiss"
-                className="min-h-[44px] rounded-full border border-gray-300 px-4 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 dark:border-white/20 dark:text-gray-100 dark:hover:bg-white/10"
+                className="min-h-touch rounded-full border border-gray-300 px-4 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 dark:border-white/20 dark:text-gray-100 dark:hover:bg-white/10"
                 onClick={() => toast.dismiss(instance.id)}
               >
                 {t('common.close', { defaultValue: 'Close' })}

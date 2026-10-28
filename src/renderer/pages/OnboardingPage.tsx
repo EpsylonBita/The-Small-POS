@@ -127,10 +127,10 @@ const OnboardingPage: React.FC = () => {
 
     const errorContent = error && (
         <div ref={errorPanel} id="onboarding-error" role="alert" tabIndex={-1}
-            className="flex gap-3 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-200 outline-none focus-visible:ring-2 focus-visible:ring-red-300">
+            className="flex gap-3 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-200 outline-hidden focus-visible:ring-2 focus-visible:ring-red-300">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
             <div className="min-w-0">
-                <p className="break-words font-medium">{error.message}</p>
+                <p className="wrap-break-word font-medium">{error.message}</p>
                 {step === 2 && <p className="mt-1 text-red-200/80">{error.syncing
                     ? t('onboarding.syncRetryHint', { defaultValue: 'Check your internet connection and try again to finish syncing.' })
                     : t('onboarding.retryHint', { defaultValue: 'Check your internet connection and confirm the code is current, then try again.' })}</p>}
@@ -195,7 +195,7 @@ const OnboardingPage: React.FC = () => {
                                         <motion.button key={option.code} type="button" lang={option.code} aria-label={option.name} aria-pressed={language === option.code}
                                             onClick={() => void handleLanguageSelect(option.code)} disabled={isSubmitting}
                                             whileTap={reduceMotion ? undefined : { scale: 0.985 }} transition={transition}
-                                            className={`flex min-h-16 items-center gap-3 rounded-2xl border px-4 py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60 ${index === languages.length - 1 && languages.length % 2 === 1 ? 'sm:col-span-2' : ''} ${language === option.code ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200' : 'border-zinc-700 bg-zinc-950/40 text-zinc-200 active:bg-zinc-800'}`}>
+                                            className={`flex min-h-16 items-center gap-3 rounded-2xl border px-4 py-3 text-left outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60 ${index === languages.length - 1 && languages.length % 2 === 1 ? 'sm:col-span-2' : ''} ${language === option.code ? 'border-yellow-400 bg-yellow-400/15 text-yellow-200' : 'border-zinc-700 bg-zinc-950/40 text-zinc-200 active:bg-zinc-800'}`}>
                                             <span className="flex h-8 w-9 shrink-0 items-center justify-center rounded-lg border border-current/15 text-xs font-semibold uppercase tracking-wide" aria-hidden="true">{option.code === 'el' ? 'GR' : option.code}</span>
                                             <span className="flex-1 text-base font-medium">{option.name}</span>
                                             {language === option.code ? <Check className="h-5 w-5" aria-hidden="true" /> : <ArrowRight className="h-4 w-4 text-zinc-500" aria-hidden="true" />}
@@ -210,7 +210,7 @@ const OnboardingPage: React.FC = () => {
                         {step === 2 && phase !== 'complete' && (
                             <form onSubmit={handleSubmit} noValidate className="space-y-5" aria-busy={isSubmitting}>
                                 <div>
-                                    <h2 ref={stepHeading} tabIndex={-1} className="text-xl font-semibold outline-none">{t('onboarding.connectionTitle', { defaultValue: 'Connect your terminal' })}</h2>
+                                    <h2 ref={stepHeading} tabIndex={-1} className="text-xl font-semibold outline-hidden">{t('onboarding.connectionTitle', { defaultValue: 'Connect your terminal' })}</h2>
                                     <p className="mt-1 text-sm text-zinc-400">{t('onboarding.connectionIntro', { defaultValue: 'Link this POS to your business using its connection code.' })}</p>
                                 </div>
                                 {/* Both columns are label + box: the grid stretches the two boxes to one height so the
@@ -223,7 +223,7 @@ const OnboardingPage: React.FC = () => {
                                             aria-invalid={Boolean(inputError || (error && !decoded))}
                                             aria-describedby={`onboarding-code-help onboarding-key-hint${inputError && !error ? ' onboarding-code-invalid' : ''}${error ? ' onboarding-error' : ''}`}
                                             autoComplete="off" autoCapitalize="none" spellCheck={false}
-                                            className="min-h-28 w-full flex-1 resize-y rounded-2xl border border-zinc-600 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-none placeholder:font-sans placeholder:text-zinc-500 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/30 disabled:opacity-60"
+                                            className="min-h-28 w-full flex-1 resize-y rounded-2xl border border-zinc-600 bg-zinc-950 px-4 py-3 font-mono text-sm text-zinc-200 outline-hidden placeholder:font-sans placeholder:text-zinc-500 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/30 disabled:opacity-60"
                                             placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste your full connection code here' })} />
                                     </div>
                                     <div className="flex flex-col">
@@ -257,11 +257,11 @@ const OnboardingPage: React.FC = () => {
                                 <div className="flex flex-col-reverse gap-3 border-t border-zinc-800 pt-5 sm:flex-row sm:items-center sm:justify-between">
                                     <motion.button type="button" onClick={() => { setError(null); setStep(1); }} disabled={isSubmitting}
                                         whileTap={reduceMotion ? undefined : { scale: 0.98 }} transition={transition}
-                                        className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-medium text-zinc-300 outline-none active:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-yellow-400 disabled:opacity-50">
+                                        className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-5 py-3 text-sm font-medium text-zinc-300 outline-hidden active:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-yellow-400 disabled:opacity-50">
                                         <ArrowLeft className="h-4 w-4" aria-hidden="true" />{t('common.back', { defaultValue: 'Back' })}
                                     </motion.button>
                                     <motion.button type="submit" disabled={isSubmitting} whileTap={reduceMotion ? undefined : { scale: 0.98 }} transition={transition}
-                                        className="inline-flex min-h-12 items-center justify-center gap-3 rounded-xl bg-yellow-400 text-black font-semibold px-6 py-3 text-sm outline-none active:bg-yellow-300 focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60">
+                                        className="inline-flex min-h-12 items-center justify-center gap-3 rounded-xl bg-yellow-400 text-black font-semibold px-6 py-3 text-sm outline-hidden active:bg-yellow-300 focus-visible:ring-2 focus-visible:ring-yellow-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-wait disabled:opacity-60">
                                         {t('onboarding.connect', { defaultValue: 'Connect & Sync' })}<ArrowRight className="h-4 w-4" aria-hidden="true" />
                                     </motion.button>
                                 </div>
@@ -282,7 +282,7 @@ const OnboardingPage: React.FC = () => {
                 <section className="mt-4 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50">
                     <button type="button" aria-expanded={recoveryOpen} aria-controls="onboarding-recovery" disabled={isSubmitting}
                         onClick={() => setRecoveryOpen((open) => !open)}
-                        className="flex min-h-16 w-full items-center justify-between gap-4 rounded-2xl px-5 py-3 text-left outline-none active:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-yellow-400 disabled:opacity-50 sm:px-6">
+                        className="flex min-h-16 w-full items-center justify-between gap-4 rounded-2xl px-5 py-3 text-left outline-hidden active:bg-zinc-800 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-yellow-400 disabled:opacity-50 sm:px-6">
                         <span><span className="block text-sm font-medium text-zinc-300">{t('onboarding.recoveryTitle', { defaultValue: 'Restore an existing terminal' })}</span><span className="mt-0.5 block text-xs text-zinc-500">{t('onboarding.recoveryHelp', { defaultValue: 'Use local backups and recovery tools.' })}</span></span>
                         <motion.span animate={{ rotate: recoveryOpen ? 180 : 0 }} transition={transition}><ChevronDown className="h-4 w-4 text-zinc-400" aria-hidden="true" /></motion.span>
                     </button>

@@ -69,7 +69,7 @@ export const OrderTypeSelector: React.FC<OrderTypeSelectorProps> = ({
                 : resolvedTheme === 'dark'
                   ? "border-gray-600/50 bg-gray-700/30 text-gray-300 active:border-gray-500/70 active:bg-gray-700/50"
                   : "border-gray-200 bg-white/50 text-gray-700 active:border-gray-300 active:bg-white/70"
-            } active:scale-[0.98] transform focus:outline-none focus:ring-2 focus:ring-yellow-400/40`}
+            } active:scale-[0.98] transform focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`}
           >
             <div className="text-2xl mb-2 flex items-center justify-center">
               {type === "dine-in" && <TableOrderIcon className="w-6 h-6" />}

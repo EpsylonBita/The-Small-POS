@@ -102,7 +102,7 @@ test('Appointment modal renders above the floating action button and hides nativ
   assert.ok(fabBlock.includes('<FloatingActionButton'), 'appointments FAB render block should exist');
   assert.ok(fabBlock.includes('!embedded && !showCreateModal && !showCustomerSearch'), 'FAB should be hidden while embedded or modal stack is open');
   // Keep the modal layer high for non-portal content as well.
-  assert.match(viewSource, /className=\{`fixed inset-0 z-\[1000\] flex items-center justify-center backdrop-blur-xl/);
+  assert.match(viewSource, /className=\{`fixed inset-0 z-1000 flex items-center justify-center backdrop-blur-xl/);
   assert.match(viewSource, /max-h-\[calc\(100%-1\.5rem\)\] sm:max-h-\[calc\(100%-3rem\)\]/);
   assert.doesNotMatch(viewSource, /className="fixed inset-0 z-50 flex items-center justify-center/);
   // Native white scrollbars are hidden while preserving scroll behavior.
@@ -185,7 +185,7 @@ test('Appointment create modal closes on Escape via the topmost-dialog close-onl
   // Portal/blur preserved: still portaled to body with the full-screen blurred backdrop,
   // and the X close button still calls onClose.
   assert.match(viewSource, /return renderModalPortal\(/);
-  assert.match(viewSource, /fixed inset-0 z-\[1000\][^`]*backdrop-blur-xl/);
+  assert.match(viewSource, /fixed inset-0 z-1000(?![\w.-])[^`]*backdrop-blur-xl/);
   assert.match(viewSource, /isDark \? 'bg-black\/55' : 'bg-black\/22'/);
   assert.match(viewSource, /onClick=\{onClose\}/);
 
@@ -795,13 +795,13 @@ test('Round 285/307: New Appointment slots stay gated on staff + service (in-con
   // Round 307 replaced the pre-context grid of disabled muted-glass slots with a friendly empty state, so
   // the real slot grid now renders only in the staff+service branch. In that branch a slot keeps its
   // >=44px touch target, is disabled only when booked, and uses the selected-yellow / booked-red semantics.
-  assert.match(viewSource, /min-h-\[44px\]/);
+  assert.match(viewSource, /min-h-touch(?![\w.-])/);
   assert.match(viewSource, /disabled=\{booked\}/);
   assert.match(viewSource, /selected\s*\?\s*'bg-yellow-400 text-black border-yellow-400'/);
   assert.match(viewSource, /bg-red-500\/10 border-red-500\/30 text-red-300 line-through cursor-not-allowed/);
   // The old per-button pre-context muted-glass disabled slot is gone (the empty state replaces it).
   assert.doesNotMatch(viewSource, /disabled=\{booked \|\| !hasStaffAndService\}/);
-  assert.doesNotMatch(viewSource, /bg-white\/\[0\.03\] border-white\/10 text-zinc-600 cursor-not-allowed/);
+  assert.doesNotMatch(viewSource, /bg-white\/3 border-white\/10 text-zinc-600 cursor-not-allowed/);
 
   // Changing staff or service clears the picked time so availability is recalculated in context.
   // Round 308: the staff/service fields are the GlassSelect listbox, whose onChange passes the value
@@ -931,7 +931,7 @@ test('Round 308: GlassSelect is a touch-first glass listbox (aria, 44px, truncat
   assert.match(glass, /aria-selected=\{isSelected\}/);
 
   // Touch target >=44px; the selected value text truncates and cannot overlap the chevron.
-  assert.match(glass, /min-h-\[44px\]/);
+  assert.match(glass, /min-h-touch(?![\w.-])/);
   assert.match(glass, /min-w-0 flex-1 truncate/);
   assert.match(glass, /<ChevronDown/);
   assert.match(glass, /shrink-0/, 'the chevron stays a fixed-size sibling beside the truncating label');

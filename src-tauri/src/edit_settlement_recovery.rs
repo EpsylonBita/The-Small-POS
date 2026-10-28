@@ -271,7 +271,7 @@ pub(crate) struct EditRefusal {
 impl EditRefusal {
     pub(crate) fn at(code: &str, field: Option<&'static str>) -> Self {
         Self {
-            code: code.to_string(),
+            code: refusal_code(code).to_string(),
             field,
         }
     }
@@ -279,7 +279,7 @@ impl EditRefusal {
 
 impl From<String> for EditRefusal {
     fn from(code: String) -> Self {
-        Self { code, field: None }
+        Self::at(&code, None)
     }
 }
 
@@ -291,6 +291,15 @@ impl From<&str> for EditRefusal {
 
 /// The new refusal: the order was refreshed from the server; reopen it.
 pub(crate) const EDIT_ORDER_REFRESHED: &str = "EDIT_ORDER_REFRESHED";
+
+pub(crate) const EDIT_REFUSAL_STAGES: &[&str] = &[
+    "preview",
+    "commit",
+    "refresh",
+    "renderer",
+    "items",
+    "customer_details",
+];
 
 /// Field names a refusal may name in the support log (names only, never values).
 pub(crate) const EDIT_REFUSAL_FIELDS: &[&str] = &[
@@ -347,6 +356,21 @@ fn refusal_field(name: &str) -> Option<&'static str> {
 
 /// The fixed code at the head of a refusal (`EDIT_X: detail` → `EDIT_X`).
 pub(crate) fn refusal_code(error: &str) -> &str {
+    // Money-action approval errors carry required scope/approval metadata.
+    // Classify their fixed code for support without flattening the IPC envelope.
+    if let Ok(payload) = serde_json::from_str::<Value>(error) {
+        if payload["code"] == "UNAUTHORIZED" {
+            return "STAFF_SESSION_EXPIRED";
+        }
+        if let Some(code) = payload["code"]
+            .as_str()
+            .filter(|code| crate::diagnostics::is_runtime_error_code(code))
+        {
+            if let Some(start) = error.find(code) {
+                return &error[start..start + code.len()];
+            }
+        }
+    }
     let end = error
         .find(|ch: char| !(ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'))
         .unwrap_or(error.len());
@@ -354,8 +378,26 @@ pub(crate) fn refusal_code(error: &str) -> &str {
     if crate::diagnostics::is_runtime_error_code(code) {
         code
     } else {
-        "EDIT_REFUSAL_UNCLASSIFIED"
+        // SQL, lock, I/O and unexpected dependency failures share a fixed
+        // local-operation class. Never export their private detail or lose
+        // the fact that local persistence/admission failed.
+        "EDIT_LOCAL_OPERATION_FAILED"
     }
+}
+
+pub(crate) fn normalize_edit_error(error: String) -> String {
+    if serde_json::from_str::<Value>(&error)
+        .ok()
+        .and_then(|payload| {
+            payload["code"].as_str().map(|code| {
+                code == "UNAUTHORIZED" || crate::diagnostics::is_runtime_error_code(code)
+            })
+        })
+        == Some(true)
+    {
+        return error;
+    }
+    refusal_code(&error).to_string()
 }
 
 /// One fixed-code support-log event per refusal: the refusal code and the
@@ -371,6 +413,91 @@ pub(crate) fn log_edit_refusal(stage: &'static str, refusal: &EditRefusal) {
         refusal = refusal_code(&refusal.code),
         "Order edit refused"
     );
+}
+
+#[cfg(test)]
+mod refusal_contract_tests {
+    use super::*;
+
+    #[test]
+    fn edit_settlement_dependency_error_literals_have_fixed_codes() {
+        // Include dependencies rather than just EDIT_* literals: payment and
+        // currency errors escape through the same edit command boundary.
+        for (file, source) in [
+            ("orders", include_str!("commands/orders.rs")),
+            ("recovery", include_str!("edit_settlement_recovery.rs")),
+            ("payments", include_str!("payments.rs")),
+            ("refunds", include_str!("refunds.rs")),
+            ("shifts", include_str!("shifts.rs")),
+            ("ownership", include_str!("order_ownership.rs")),
+            ("scope", include_str!("table_session_cache.rs")),
+            ("currency", include_str!("fiscal/payload_builder.rs")),
+            ("headers", include_str!("order_header_preflight.rs")),
+        ] {
+            for marker in ["Err(", "ok_or("] {
+                for rest in source.split(marker).skip(1) {
+                    let Some(literal) = rest.trim_start().strip_prefix('"') else {
+                        continue;
+                    };
+                    let literal = literal.split('"').next().unwrap();
+                    let code = literal.split(':').next().unwrap();
+                    if !code.is_empty()
+                        && code
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    {
+                        assert!(
+                            crate::diagnostics::is_runtime_error_code(code),
+                            "{file}: {code} must be registered"
+                        );
+                    } else {
+                        // Free text from validation, SQLite and I/O is deliberately
+                        // classified at the boundary; it can never leak to support.
+                        assert_ne!(refusal_code(literal), "EDIT_REFUSAL_UNCLASSIFIED");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edit_settlement_local_failures_are_classified_without_private_details() {
+        for error in [
+            "read fresh payment operating scope: no such column: PRIVATE_CANARY",
+            "database is locked",
+            "disk I/O error",
+            "poisoned lock: PRIVATE_CANARY",
+        ] {
+            assert_eq!(EditRefusal::from(error).code, "EDIT_LOCAL_OPERATION_FAILED");
+        }
+        assert_eq!(
+            refusal_code("PAYMENT_CURRENCY_UNAVAILABLE: PRIVATE_CANARY"),
+            "PAYMENT_CURRENCY_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn edit_settlement_keeps_structured_money_approval_for_the_existing_pin_flow() {
+        for code in [
+            "REAUTH_REQUIRED",
+            "NO_APPROVER_IN_STORE",
+            "APPROVALS_PAUSED",
+            "AUTH_LOCKED_OUT",
+            "MANAGER_PIN_REFUSED",
+            "UNAUTHORIZED",
+        ] {
+            let error = json!({"code":code,"scope":"cash_drawer_control","approval":"void_payments","reason":"PRIVATE_CANARY"}).to_string();
+            assert_eq!(
+                refusal_code(&error),
+                if code == "UNAUTHORIZED" {
+                    "STAFF_SESSION_EXPIRED"
+                } else {
+                    code
+                }
+            );
+            assert_eq!(normalize_edit_error(error.clone()), error);
+        }
+    }
 }
 
 /// The first field two snapshots of the same order differ in.
@@ -1741,6 +1868,42 @@ pub(crate) fn pending_financial_edits(
         .map_err(|error| error.to_string())
 }
 
+/// The held money corrections of one order: the attempts that make
+/// `pending_financial_edits` list it.
+pub(crate) fn pending_financial_events(
+    conn: &Connection,
+    order: &str,
+) -> Result<Vec<String>, String> {
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='edit_settlement_attempts_v1')",[],|row|row.get(0)).map_err(|error|error.to_string())?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut statement=conn.prepare("SELECT client_event_id FROM edit_settlement_attempts_v1 WHERE order_id=?1 AND state IN ('prepared','refused')
+        AND (NOT json_valid(request_json) OR json_extract(request_json,'$.action.type') IN ('collect','refund')) ORDER BY created_at,client_event_id").map_err(|error|error.to_string())?;
+    let rows = statement
+        .query_map([order], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+/// A held correction of a cancelled order (or of one no longer on this till)
+/// can never be reopened and saved (Tomikro #00055, 28/10/2026: four refused
+/// card collections held every Z after the order was cancelled). Only these
+/// are offered the manager's close-without-money from the Z checks; a live
+/// order keeps its editor path.
+pub(crate) fn order_closed_for_edits(conn: &Connection, order: &str) -> Result<bool, String> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT LOWER(TRIM(COALESCE(status,''))) FROM orders WHERE id=?1 OR supabase_id=?1 LIMIT 1",
+            [order],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(status.is_none_or(|status| matches!(status.as_str(), "cancelled" | "canceled")))
+}
+
 pub(crate) fn inspect(
     conn: &Connection,
     event: &str,
@@ -1851,7 +2014,7 @@ pub(crate) fn run(
         // happened. Retain the confirmed action: an exact save retry, a
         // re-quote under a new event, or a manager reconciliation; never
         // authorize recollection.
-        json!({"success":false,"code":"EDIT_SETTLEMENT_NOT_APPLIED","error":error,
+        json!({"success":false,"code":"EDIT_SETTLEMENT_NOT_APPLIED","error":refusal_code(&error),
             "clientEventId":event,"orderId":order,"transactionRolledBack":true,
             "paymentPersisted":false,"requiresReconciliation":true,"requoteAllowed":true})
     };

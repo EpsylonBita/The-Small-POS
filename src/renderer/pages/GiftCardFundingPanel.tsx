@@ -613,7 +613,7 @@ const GiftCardFundingPanel: React.FC<GiftCardFundingPanelProps> = ({
     warning: isDark ? 'text-amber-300' : 'text-amber-700',
   };
   const sectionClass = `rounded-2xl border p-3 ${isDark ? 'border-zinc-800 bg-zinc-900/60' : 'border-gray-200 bg-white/70'}`;
-  const fieldClass = `h-12 w-full rounded-xl border px-3 text-base outline-none focus:ring-2 focus:ring-yellow-400 disabled:opacity-50 ${
+  const fieldClass = `h-12 w-full rounded-xl border px-3 text-base outline-hidden focus:ring-2 focus:ring-yellow-400 disabled:opacity-50 ${
     isDark ? 'border-zinc-700 bg-zinc-900 text-zinc-100' : 'border-gray-200 bg-white text-gray-900'
   }`;
   const optionClass = (selected: boolean) =>

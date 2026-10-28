@@ -145,7 +145,7 @@ test('MenuCart uses the yellow POS accent for its quick-action icons', () => {
   const menuCart = source(menuCartPath);
 
   for (const icon of ['Ticket', 'Award', 'Percent']) {
-    const iconIdx = menuCart.indexOf(`<${icon} className="h-8 w-8 flex-shrink-0"`);
+    const iconIdx = menuCart.indexOf(`<${icon} className="h-8 w-8 shrink-0"`);
     const buttonIdx = menuCart.lastIndexOf('<button', iconIdx);
     assert.ok(iconIdx > 0 && buttonIdx > 0, `${icon} cart action should exist`);
 
@@ -232,7 +232,7 @@ test('MenuCart discount picker stays an app-level fixed overlay with a blurred b
   const idx = menuCart.indexOf("menu.cart.discountPickerTitle");
   assert.ok(idx > 0, 'discount picker modal should exist');
   const shell = menuCart.slice(Math.max(0, idx - 700), idx);
-  assert.match(shell, /fixed inset-0 z-\[\d{4}\]/, 'discount modal must be an app-level fixed overlay');
+  assert.match(shell, /fixed inset-0 z-\d{4}(?![\w.-])/, 'discount modal must be an app-level fixed overlay');
   assert.match(shell, /backdrop-blur/, 'discount modal must keep a blurred backdrop');
 });
 
@@ -288,7 +288,7 @@ test('nested MenuCart overlays mark role="dialog" so Escape closes only the topm
   // A nested cart overlay must declare role="dialog" to become topmost — otherwise the
   // parent MenuModal stays "topmost" and ALSO closes on Escape, dropping the draft cart.
   // All four fixed overlays (line-price editor, coupon, line-discount, discount) opt in.
-  for (const z of ['z-\\[1190\\]', 'z-\\[1195\\]', 'z-\\[1198\\]', 'z-\\[1200\\]']) {
+  for (const z of ['z-1190', 'z-1195', 'z-1198', 'z-1200']) {
     const re = new RegExp(
       `<div className="fixed inset-0 ${z} flex items-center justify-center p-4" role="dialog"`,
     );

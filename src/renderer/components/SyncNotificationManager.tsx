@@ -196,7 +196,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
           </div>
 
           {/* Auto-apply toggle */}
-          <div className="flex items-center justify-between mb-3 p-2 bg-blue-50 rounded">
+          <div className="flex items-center justify-between mb-3 p-2 bg-blue-50 rounded-sm">
             <span className="text-sm text-gray-700">Auto-apply updates</span>
             <button
               onClick={() => setAutoApply(!autoApply)}
@@ -214,20 +214,20 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
 
           <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-hide">
             {Object.entries(groupedUpdates).map(([category, updates]) => (
-              <div key={category} className="border border-gray-200 rounded">
+              <div key={category} className="border border-gray-200 rounded-sm">
                 <div className="flex items-center justify-between p-2 bg-gray-50">
                   <div>
                     <div className="text-sm font-medium">{categoryLabels[category]}</div>
                     <div className="text-xs text-gray-600">{updates.length} update(s)</div>
                   </div>
                   <div className="flex gap-2">
-                    <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                    <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-sm">
                       v{updates[0].data?.version || '?'}
                     </span>
                     {!autoApply && (
                       <button
                         onClick={() => updates.forEach(handleApplyUpdate)}
-                        className="bg-blue-600 text-white px-2 py-1 rounded text-xs hover:bg-blue-700"
+                        className="bg-blue-600 text-white px-2 py-1 rounded-sm text-xs hover:bg-blue-700"
                       >
                         Apply
                       </button>
@@ -244,7 +244,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
                 onClick={() => {
                   pendingUpdates.forEach(handleApplyUpdate);
                 }}
-                className="w-full bg-blue-600 text-white py-2 rounded text-sm font-medium hover:bg-blue-700"
+                className="w-full bg-blue-600 text-white py-2 rounded-sm text-sm font-medium hover:bg-blue-700"
               >
                 Apply All Updates
               </button>
@@ -262,7 +262,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
 
       {/* Restart Required Modal */}
       {restartRequired && renderModalPortal(
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1200]">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-1200">
           <div className="bg-white rounded-3xl p-6 max-w-md w-full mx-4">
             <div className="flex items-center mb-4">
               <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center mr-4">
@@ -286,7 +286,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
             <div className="flex gap-3">
               <button 
                 onClick={handleRestartLater}
-                className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded font-medium hover:bg-gray-300"
+                className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded-sm font-medium hover:bg-gray-300"
               >
                 Restart Later
               </button>
@@ -294,7 +294,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
                 onClick={() => {
                   void handleRestartNow();
                 }}
-                className="flex-1 bg-red-600 text-white py-2 px-4 rounded font-medium hover:bg-red-700"
+                className="flex-1 bg-red-600 text-white py-2 px-4 rounded-sm font-medium hover:bg-red-700"
               >
                 Restart Now
               </button>

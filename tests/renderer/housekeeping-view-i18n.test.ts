@@ -342,7 +342,7 @@ test('Round 359: Housekeeping light theme keeps cards, controls, and action butt
   );
   assert.match(
     viewSource,
-    /const lightControlSurface = 'bg-white\/90 text-gray-950 border-zinc-300 shadow-sm shadow-black\/5'/,
+    /const lightControlSurface = 'bg-white\/90 text-gray-950 border-zinc-300 shadow-xs shadow-black\/5'/,
   );
 
   // Light labels/body copy moved darker; the old washed-out gray-500 metadata should not remain in the

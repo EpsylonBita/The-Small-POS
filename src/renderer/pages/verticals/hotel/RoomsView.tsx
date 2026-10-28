@@ -614,7 +614,7 @@ export const RoomsView: React.FC<RoomsViewProps> = memo(({
               ? t('roomsView.newCheckinOrReservation', { defaultValue: 'New Check-in or Reservation' })
               : t('roomsView.newCheckin', { defaultValue: 'New Check-in' })
           }
-          className="!bottom-20 sm:!bottom-6"
+          className="bottom-20! sm:bottom-6!"
         />
       )}
 
@@ -903,7 +903,7 @@ export default RoomsView;
 // Helper Components
 const StatCard: React.FC<{ label: string; value: string | number; color?: string; isDark: boolean; className?: string }> = 
   ({ label, value, color, isDark, className }) => (
-  <motion.div variants={pageMotionItem} className={`px-3 py-2 sm:px-4 sm:py-3 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'} ${className || ''}`}>
+  <motion.div variants={pageMotionItem} className={`px-3 py-2 sm:px-4 sm:py-3 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-xs'} ${className || ''}`}>
     <div className={`text-xs sm:text-sm ${color || (isDark ? 'text-gray-400' : 'text-gray-500')}`}>{label}</div>
     <div className={`text-lg sm:text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{value}</div>
   </motion.div>
@@ -1036,7 +1036,7 @@ const Modal: React.FC<{
   }, [onClose]);
 
   return renderModalPortal(
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
       <div
         ref={dialogRef}

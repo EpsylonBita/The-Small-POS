@@ -349,7 +349,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   return ReactDOM.createPortal(
     <div
       data-cashier-recovery="true"
-      className="fixed inset-0 z-[10020] px-4 py-6 sm:px-6 sm:py-8"
+      className="fixed inset-0 z-10020 px-4 py-6 sm:px-6 sm:py-8"
       style={{ isolation: 'isolate' }}
     >
       <div
@@ -357,7 +357,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
         onClick={onClose}
       />
 
-      <div className="relative z-[10030] flex h-full items-center justify-center">
+      <div className="relative z-10030 flex h-full items-center justify-center">
         <div
           className="liquid-glass-modal-shell flex w-full flex-col overflow-hidden rounded-3xl"
           style={{
@@ -477,7 +477,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                     <button
                       onClick={handleRetryAll}
                       disabled={!!processing}
-                      className="rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-blue-500/25 transition-all hover:from-blue-600 hover:to-cyan-600 hover:shadow-blue-500/40 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-xl bg-linear-to-r from-blue-500 to-cyan-500 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-blue-500/25 transition-all hover:from-blue-600 hover:to-cyan-600 hover:shadow-blue-500/40 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {processing === 'all'
                         ? t('sync.financial.retryingAll')
@@ -539,7 +539,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                             return (
                               <div
                                 key={item.id}
-                                className="rounded-2xl border border-white/10 bg-black/5 p-4 dark:bg-white/[0.03]"
+                                className="rounded-2xl border border-white/10 bg-black/5 p-4 dark:bg-white/3"
                               >
                                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                                   <div className="min-w-0 flex-1">

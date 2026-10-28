@@ -987,10 +987,10 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
             </button>
             {showFilterMenu && (
               <>
-                <div className="fixed inset-0 z-[1190]" onClick={() => setShowFilterMenu(false)} aria-hidden="true" />
+                <div className="fixed inset-0 z-1190" onClick={() => setShowFilterMenu(false)} aria-hidden="true" />
                 <div
                   role="menu"
-                  className={`absolute right-0 top-full z-[1200] mt-2 flex max-h-[calc(100vh-28rem)] min-h-[12rem] w-64 flex-col rounded-2xl border p-3 shadow-2xl ${
+                  className={`absolute right-0 top-full z-1200 mt-2 flex max-h-[calc(100vh-28rem)] min-h-48 w-64 flex-col rounded-2xl border p-3 shadow-2xl ${
                     resolvedTheme === 'dark'
                       ? 'bg-zinc-900 border-zinc-700 text-white'
                       : 'bg-white border-gray-200 text-gray-900'
@@ -1280,7 +1280,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
 
       {/* User Details Modal */}
       {showDetailsModal && selectedUser && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-1200 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
           <div
             ref={detailsDialogRef}
             role="dialog"
@@ -1388,7 +1388,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
+                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
                                   placeholder={t('modals.addNewAddress.addressPlaceholder')}
                                 />
 
@@ -1411,7 +1411,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                         }`}
                                       >
                                         <div className="flex items-start gap-2">
-                                          <MapPin className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+                                          <MapPin className="w-4 h-4 text-gray-400 mt-0.5 shrink-0" />
                                           <div className="flex-1 min-w-0">
                                             <p className="font-medium truncate">
                                               {suggestion.structured_formatting?.main_text || suggestion.description}
@@ -1442,7 +1442,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
+                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
                                 />
                               </div>
                               <div>
@@ -1459,7 +1459,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
+                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
                                 />
                               </div>
                               <div>
@@ -1476,7 +1476,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                     resolvedTheme === 'dark'
                                       ? 'bg-gray-800 text-white border-gray-600'
                                       : 'bg-white text-gray-900 border-gray-300'
-                                  } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
+                                  } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
                                 />
                               </div>
                             </div>
@@ -1494,7 +1494,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                   resolvedTheme === 'dark'
                                     ? 'bg-gray-800 text-white border-gray-600'
                                     : 'bg-white text-gray-900 border-gray-300'
-                                } border focus:outline-none focus:ring-2 focus:ring-yellow-500`}
+                                } border focus:outline-hidden focus:ring-2 focus:ring-yellow-500`}
                               />
                             </div>
                             <div className="flex items-center gap-2">
@@ -1517,7 +1517,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                         ) : (
                           // View Mode
                           <div className="flex items-start gap-2">
-                            <MapPin className="w-4 h-4 mt-0.5 text-gray-400 flex-shrink-0" />
+                            <MapPin className="w-4 h-4 mt-0.5 text-gray-400 shrink-0" />
                             <div className="flex-1 min-w-0">
                               <p className={`text-sm font-medium ${
                                 resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
@@ -1539,7 +1539,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
                                 </p>
                               )}
                             </div>
-                            <div className="flex items-center gap-2 flex-shrink-0">
+                            <div className="flex items-center gap-2 shrink-0">
                               <button
                                 onClick={() => handleEditAddress(address)}
                                 className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-amber-500 active:bg-amber-500/10 active:scale-[0.96] transition-transform"
@@ -1626,7 +1626,7 @@ const UsersPage: React.FC<{ initialSearchTerm?: string }> = ({
 
       {addressPendingDelete && renderModalPortal(
         <div
-          className="fixed inset-0 z-[1300] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          className="fixed inset-0 z-1300 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
           onClick={() => setAddressPendingDelete(null)}
         >
           <div

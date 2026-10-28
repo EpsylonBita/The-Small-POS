@@ -101,10 +101,10 @@ export const DriveThruView: React.FC = memo(() => {
     ? 'border border-white/10 bg-zinc-900/78 text-zinc-100 shadow-[0_18px_45px_rgba(0,0,0,0.28)]'
     : 'border border-yellow-300/45 bg-white/78 text-zinc-950 shadow-[0_18px_45px_rgba(24,24,27,0.08)]';
   const subtleSurface = isDark
-    ? 'border border-white/10 bg-white/[0.06]'
-    : 'border border-zinc-200 bg-white/80 shadow-sm';
+    ? 'border border-white/10 bg-white/6'
+    : 'border border-zinc-200 bg-white/80 shadow-xs';
   const secondaryButtonSurface = isDark
-    ? 'border border-white/10 bg-white/[0.08] text-zinc-200 active:bg-white/[0.12]'
+    ? 'border border-white/10 bg-white/8 text-zinc-200 active:bg-white/12'
     : 'border border-zinc-200 bg-zinc-100 text-zinc-700 active:bg-zinc-200';
   const primaryButtonSurface = isDark
     ? 'border border-yellow-400/45 bg-yellow-400/18 text-yellow-100 active:bg-yellow-400/26'

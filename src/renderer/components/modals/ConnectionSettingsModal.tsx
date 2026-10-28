@@ -54,7 +54,7 @@ const CANCEL_BTN_MD =
 // color: safe repair is calm green ("keeps your data"), danger is red and lives behind a collapsed
 // disclosure so it is never openly mixed with normal maintenance.
 const DB_ACTION_GEOMETRY =
-  'inline-flex min-h-[44px] items-center justify-center flex-shrink-0 px-4 py-2 rounded-xl transition-transform duration-150 active:scale-[0.98] font-medium text-sm whitespace-nowrap';
+  'inline-flex min-h-touch items-center justify-center shrink-0 px-4 py-2 rounded-xl transition-transform duration-150 active:scale-[0.98] font-medium text-sm whitespace-nowrap';
 const DB_REPAIR_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-200 active:bg-emerald-500/25`;
 const DB_DANGER_BTN_MD = `${DB_ACTION_GEOMETRY} border-2 border-red-500 bg-red-600/15 text-red-700 active:bg-red-600/25 dark:bg-red-600/30 dark:text-red-200 dark:active:bg-red-600/50`;
 
@@ -955,8 +955,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
         </div>
       }
       size="full"
-      className="!max-w-[min(1180px,96vw)] !max-h-[min(900px,94vh)]"
-      contentClassName="!overflow-hidden !p-4 sm:!p-5"
+      className="max-w-[min(1180px,96vw)]! max-h-[min(900px,94vh)]!"
+      contentClassName="overflow-hidden! p-4! sm:p-5!"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
@@ -982,7 +982,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               active row carries the single yellow accent. */}
           <nav
             aria-label={t('modals.connectionSettings.title')}
-            className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 [scrollbar-width:thin] lg:pr-2"
+            className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin lg:pr-2"
           >
             {settingsNavGroups.map((group) => (
               <div key={group.id} className="space-y-1">
@@ -1007,10 +1007,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     >
                       {navItem?.icon}
                       <span className="min-w-0">
-                        <span className="block break-words text-sm font-semibold leading-tight">
+                        <span className="block wrap-break-word text-sm font-semibold leading-tight">
                           {sectionMeta[id].label}
                         </span>
-                        <span className="block break-words text-xs leading-snug liquid-glass-modal-text-muted">
+                        <span className="block wrap-break-word text-xs leading-snug liquid-glass-modal-text-muted">
                           {sectionMeta[id].detail}
                         </span>
                       </span>
@@ -1022,7 +1022,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
           </nav>
 
           {/* Right column — the active section body. */}
-          <div ref={detailScrollRef} className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 [scrollbar-width:thin] lg:pr-2">
+          <div ref={detailScrollRef} className="min-h-0 space-y-3 overflow-y-auto overflow-x-hidden pr-1 scrollbar-thin lg:pr-2">
           {settingsLoadFailed && <div role="alert" className="rounded-xl border border-amber-500/40 p-3 space-y-2">
             <p className="text-sm liquid-glass-modal-text">{t('settings.workflow.deviceLoadFailed', { defaultValue: 'Could not read saved device settings. Retry before changing device connections.' })}</p>
             <button type="button" onClick={() => setSettingsLoadAttempt(value => value + 1)} className={liquidGlassModalButton('secondary', 'md')}>{t('common.retry', 'Retry')}</button>
@@ -1203,7 +1203,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     </span>
                   ))}
                   {enabledModuleNames.length > OVERVIEW_CHIP_LIMIT ? (
-                    <button type="button" aria-expanded={showAllModules} onClick={() => setShowAllModules(value => !value)} className="inline-flex min-h-[44px] items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
+                    <button type="button" aria-expanded={showAllModules} onClick={() => setShowAllModules(value => !value)} className="inline-flex min-h-touch items-center rounded-full border liquid-glass-modal-border bg-white/5 px-2.5 py-1 text-xs font-semibold liquid-glass-modal-text-muted dark:bg-black/20">
                       {showAllModules ? t('settings.workflow.showLess', { defaultValue: 'Show fewer' }) : t('settings.deviceSetup.overview.moreCount', '+{{count}} more', {
                         count: enabledModuleNames.length - OVERVIEW_CHIP_LIMIT,
                       })}
@@ -1306,7 +1306,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               <button
                 onClick={handlePasteBoth}
                 aria-label={t('modals.connectionSettings.pasteBothTooltip')}
-                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center gap-2 text-center leading-tight'}
+                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-touch flex-1 items-center justify-center gap-2 text-center leading-tight'}
               >
                 <Clipboard className="w-4 h-4 shrink-0" />
                 {t('modals.connectionSettings.pasteBoth')}
@@ -1314,7 +1314,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               {allowManualCredentials && (
                 <button
                   onClick={handleTest}
-                  className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center text-center leading-tight'}
+                  className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-touch flex-1 items-center justify-center text-center leading-tight'}
                 >
                   {t('modals.connectionSettings.test')}
                 </button>
@@ -1322,7 +1322,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               <button
                 onClick={handleManualPolicySync}
                 disabled={isSyncingSettings}
-                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-[44px] flex-1 items-center justify-center text-center leading-tight'}
+                className={liquidGlassModalButton('secondary', 'md') + ' inline-flex min-h-touch flex-1 items-center justify-center text-center leading-tight'}
               >
                 {isSyncingSettings ? t('common.loading', 'Loading...') : t('settings.deviceSetup.syncButton', 'Sync settings')}
               </button>
@@ -1330,7 +1330,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
             <div data-connection-primary-action className="flex justify-center">
               <button
                 onClick={handleSaveConnection}
-                className={SAVE_BTN_MD + ' min-h-[44px] w-full sm:w-auto sm:min-w-[240px]'}
+                className={SAVE_BTN_MD + ' min-h-touch w-full sm:w-auto sm:min-w-[240px]'}
               >
                 <Check className="w-4 h-4" />
                 {t('modals.connectionSettings.save')}
@@ -1656,7 +1656,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
                     destructive actions + their existing handlers/confirmation chain render only when an
                     operator deliberately expands. Red is reserved for the actual destructive buttons. */}
                 <details data-database-danger-zone className="group rounded-2xl border-2 border-red-500/40 bg-red-500/5 p-4">
-                  <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-3 transition-transform active:scale-[0.99] [&::-webkit-details-marker]:hidden">
+                  <summary className="flex min-h-touch cursor-pointer list-none items-center gap-3 transition-transform active:scale-[0.99] [&::-webkit-details-marker]:hidden">
                     <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
                     <span className="flex min-w-0 flex-1 flex-col">
                       <span className="font-semibold text-red-600 dark:text-red-300">{t('settings.database.advancedResetTitle', 'Advanced reset tools')}</span>

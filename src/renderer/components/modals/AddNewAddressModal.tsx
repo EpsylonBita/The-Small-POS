@@ -532,7 +532,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   };
 
   const fieldClass =
-    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-none focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
+    'w-full rounded-2xl border border-gray-300 bg-white/60 px-4 py-2.5 text-gray-900 placeholder:text-gray-500 focus:border-yellow-500 focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40 dark:border-gray-600 dark:bg-gray-800/55 dark:text-gray-100 dark:placeholder:text-gray-400';
   const addressFieldClass = `${fieldClass} pl-10`;
 
   return (
@@ -541,7 +541,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       onClose={onClose}
       title={t('modals.addNewAddress.title')}
       size="lg"
-      className="!max-w-2xl"
+      className="max-w-2xl!"
     >
       <div className="p-6">
         <p className="liquid-glass-modal-text-muted mb-6">
@@ -609,7 +609,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                     className="w-full px-4 py-3 text-left active:bg-white/10 dark:active:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-700/20 last:border-b-0"
                   >
                     <div className="flex items-start gap-2">
-                      <MapPin className="w-4 h-4 text-gray-400 mt-1 flex-shrink-0" />
+                      <MapPin className="w-4 h-4 text-gray-400 mt-1 shrink-0" />
                       <div>
                         <p className="text-sm font-medium liquid-glass-modal-text">
                           {getSuggestionStreetLabel(suggestion)}

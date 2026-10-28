@@ -61,7 +61,11 @@
     "conflict": "Die ursprüngliche Anfrage muss geprüft werden, bevor Sie fortfahren.",
     "refresh": "Status aktualisieren",
     "confirmOriginalResult": "Ursprüngliche Stornierung prüfen",
-    "originalResultUnconfirmed": "Die ursprüngliche Stornierung konnte nicht bestätigt werden und bleibt gespeichert. Stellen Sie die Verbindung wieder her und prüfen Sie die Rechnung, bevor Sie fortfahren."
+    "originalResultUnconfirmed": "Die ursprüngliche Stornierung konnte nicht bestätigt werden und bleibt gespeichert. Stellen Sie die Verbindung wieder her und prüfen Sie die Rechnung, bevor Sie fortfahren.",
+    "editRefused": "Die Änderung wurde nicht übernommen, weil sich die Bestellung inzwischen geändert hat. Öffne sie erneut und nimm die Änderung von Anfang an vor.",
+    "editConflict": "Die gespeicherte Änderung muss geprüft werden. Öffne die Bestellung erneut, bevor du fortfährst.",
+    "discardEdit": "Alte Änderung verwerfen",
+    "editReviewUnavailable": "Die gespeicherte Änderung konnte nicht geöffnet oder verworfen werden. Stelle die Verbindung wieder her und prüfe die Bestellung erneut."
   },
   "paymentIntegrity": {
     "reasonCodes": {

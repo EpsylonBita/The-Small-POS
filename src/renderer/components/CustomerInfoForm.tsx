@@ -54,7 +54,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
     isDark
       ? 'border-white/12 bg-black/25 text-white placeholder-white/45 focus:border-yellow-400/80 focus:bg-black/35'
       : 'border-black/12 bg-white/65 text-gray-950 placeholder-gray-500 focus:border-yellow-500 focus:bg-white/90'
-  } focus:outline-none focus:ring-2 focus:ring-yellow-400/40`;
+  } focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`;
   const orderTypeCardClass = (type: "dine-in" | "pickup" | "delivery") => `rounded-2xl border p-4 text-center backdrop-blur-sm transition-transform duration-150 ${
     orderType === type
       ? isDark
@@ -63,7 +63,7 @@ const CustomerInfoForm: React.FC<CustomerInfoFormProps> = ({
       : isDark
         ? 'border-white/12 bg-black/25 text-gray-300 active:border-white/20 active:bg-black/35'
         : 'border-black/10 bg-white/55 text-gray-700 active:border-black/15 active:bg-white/75'
-  } active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-yellow-400/40`;
+  } active:scale-[0.98] focus:outline-hidden focus:ring-2 focus:ring-yellow-400/40`;
 
   const handleAddressChange = (field: string, value: string) => {
     setCustomerInfo((prev) => ({

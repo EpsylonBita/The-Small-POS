@@ -61,7 +61,11 @@
     "conflict": "La richiesta originale deve essere verificata prima di continuare.",
     "refresh": "Aggiorna stato",
     "confirmOriginalResult": "Verifica l’annullamento originale",
-    "originalResultUnconfirmed": "L’annullamento originale non è stato confermato e resta salvato. Riconnettiti e controlla il conto prima di continuare."
+    "originalResultUnconfirmed": "L’annullamento originale non è stato confermato e resta salvato. Riconnettiti e controlla il conto prima di continuare.",
+    "editRefused": "La modifica non è stata applicata perché nel frattempo l’ordine è cambiato. Riaprilo e ripeti la modifica dall’inizio.",
+    "editConflict": "La modifica salvata deve essere verificata. Riapri l’ordine prima di continuare.",
+    "discardEdit": "Scarta la vecchia modifica",
+    "editReviewUnavailable": "Non è stato possibile aprire o scartare la modifica salvata. Riconnettiti e controlla di nuovo l’ordine."
   },
   "paymentIntegrity": {
     "reasonCodes": {

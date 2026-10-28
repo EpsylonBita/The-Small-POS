@@ -62,7 +62,7 @@ test('SuppliersPage import drawer portals above the page container with a blurre
 
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /\{importOpen && renderModalPortal\(\s*<motion\.div/);
-  assert.match(source, /className="fixed inset-0 z-\[1200\] flex justify-end bg-black\/50 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-1200 flex justify-end bg-black\/50 backdrop-blur-sm/);
   assert.doesNotMatch(source, /\{importOpen && \(\s*<motion\.div\s+className="fixed inset-0 z-50/);
   assert.doesNotMatch(source, /<AnimatePresence>[\s\S]*\{importOpen && renderModalPortal/);
 
@@ -86,14 +86,14 @@ test('SuppliersPage supplier detail overlays portal above the page container wit
   // invoice queue. Same z-index, same backdrop, so none of them can be trapped
   // behind the page container.
   assert.equal(
-    [...source.matchAll(/className="fixed inset-0 z-\[1200\] flex items-center justify-center bg-black\/55 p-4 backdrop-blur-sm"/g)].length,
+    [...source.matchAll(/className="fixed inset-0 z-1200 flex items-center justify-center bg-black\/55 p-4 backdrop-blur-sm"/g)].length,
     3,
   );
   assert.match(source, /\{captureEnabled && captureQueueOpen && renderModalPortal\(/);
   assert.doesNotMatch(source, /\{supplierSummary && \(\s*<motion\.div/);
   assert.doesNotMatch(source, /\{selectedInvoice && selectedInvoiceStatus && \(\s*<motion\.div/);
   assert.doesNotMatch(source, /className="fixed inset-0 z-50 flex items-center justify-center/);
-  assert.doesNotMatch(source, /className="fixed inset-0 z-\[60\] flex items-center justify-center/);
+  assert.doesNotMatch(source, /className="fixed inset-0 z-60 flex items-center justify-center/);
 });
 
 test('SuppliersPage uses unwrapped icons and yellow transparent selection chrome', () => {
@@ -285,7 +285,7 @@ test('SuppliersPage import overlay exposes labelled dialog semantics with a blur
 
   // Still portaled outside the page container with the standard blurred app backdrop.
   assert.match(source, /\{importOpen && renderModalPortal\(\s*<motion\.div/);
-  assert.match(source, /className="fixed inset-0 z-\[1200\] flex justify-end bg-black\/50 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-1200 flex justify-end bg-black\/50 backdrop-blur-sm/);
 });
 
 // Regression contract for the non-dismissable import overlay (2026-06-21 live QA): Escape
@@ -463,8 +463,8 @@ test('SuppliersPage supervisor polish keeps supplier/import controls rounded and
   assert.doesNotMatch(source, /bg-purple|text-purple|border-purple|ring-purple/);
   assert.match(source, /inline-flex min-h-10 items-center gap-2 rounded-2xl/);
   assert.match(source, /inline-flex h-10 w-10 .*rounded-2xl border/);
-  assert.match(source, /h-10 rounded-2xl border px-3 text-sm outline-none/);
-  assert.match(source, /h-10 min-w-\[220px\] rounded-2xl border px-3 text-sm font-semibold outline-none/);
+  assert.match(source, /h-10 rounded-2xl border px-3 text-sm outline-hidden/);
+  assert.match(source, /h-10 min-w-\[220px\] rounded-2xl border px-3 text-sm font-semibold outline-hidden/);
   assert.match(source, /mt-2 rounded-2xl border px-3 py-2 text-xs/);
 });
 

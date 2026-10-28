@@ -176,7 +176,7 @@ test('OrdersPage uses neutral header chrome and compact order numbers', () => {
   assert.match(source, /const displayOrderNumber = getDisplayOrderNumber\(order\);/);
   assert.match(source, /<span className="font-mono font-bold text-lg">\{displayOrderNumber\}<\/span>/);
   assert.match(source, /<div className=\{isDark \? 'bg-black' : 'bg-\[#fffaf1\]'\}>/);
-  assert.doesNotMatch(source, /bg-gradient-to-br from-zinc-950 via-slate-950 to-zinc-900/);
+  assert.doesNotMatch(source, /bg-linear-to-br from-zinc-950 via-slate-950 to-zinc-900/);
   assert.doesNotMatch(source, /<div className=\{`border-b/);
   assert.doesNotMatch(source, /#\{order\.order_number\}/);
 });
@@ -697,7 +697,7 @@ test('OrdersPage clear-filters action is a real touch-sized button, not a naked 
 
   // Touch target: inline-flex, ~44px min height, rounded-2xl, icon+label centered with a gap.
   assert.match(btn, /inline-flex/);
-  assert.match(btn, /min-h-\[44px\]/);
+  assert.match(btn, /min-h-touch(?![\w.-])/);
   assert.match(btn, /rounded-2xl/);
   assert.match(btn, /items-center/);
   assert.match(btn, /justify-center/);
@@ -1206,7 +1206,7 @@ test('TablesPage compact card shows table.section (wrapping, no 60px cap), not r
   // The compact grid card renders the structured section line (MapPin), gated on section presence.
   assert.match(source, /\{table\.section && \(/);
   // Round 208: the section span uses the available width and wraps gracefully -- no hard truncation cap.
-  assert.match(source, /<span className="min-w-0 break-words leading-snug">\{table\.section\}<\/span>/);
+  assert.match(source, /<span className="min-w-0 wrap-break-word leading-snug">\{table\.section\}<\/span>/);
   assert.doesNotMatch(source, /max-w-\[60px\]/);
   // The raw notes render is gone from the card.
   assert.doesNotMatch(source, /\{table\.notes\}/);
@@ -1498,12 +1498,12 @@ test('FloatingActionButton opens on taps even when drag pointer capture retarget
 
   assert.match(
     source,
-    /fixed z-\[900\]/,
+    /fixed z-900(?![\w.-])/,
     'FAB should float over page content but stay below modal backdrops so it is blurred behind open modals',
   );
   assert.doesNotMatch(
     source,
-    /z-\[2147482500\]/,
+    /z-2147482500(?![\w.-])/,
     'FAB must not use an always-on-top z-index above modal overlays',
   );
   assert.match(
@@ -1957,16 +1957,16 @@ test('Round 346: OrderFlow order-type chooser matches the OrderDashboard respons
   assert.match(source, /const composeOrderTypeAriaLabel = \(title: string, description: string\): string =>/);
   assert.match(source, /const visibleOrderTypeCardCount = 1 \+ \(hasDeliveryModule \? 1 : 0\) \+ \(hasTablesModule \? 1 : 0\);/);
   assert.match(source, /const orderTypeModalWidthClass =/);
-  assert.match(source, /'!max-w-3xl'/);
-  assert.match(source, /'!max-w-xl'/);
-  assert.match(source, /'!max-w-lg'/);
+  assert.match(source, /'max-w-3xl!'/);
+  assert.match(source, /'max-w-xl!'/);
+  assert.match(source, /'max-w-lg!'/);
   assert.match(source, /const orderTypeGridColsClass =/);
   assert.match(source, /'grid-cols-1 sm:grid-cols-3'/);
 
   // Modal uses the computed width class plus the transparent-shell class; grid uses gap-4
   // sm:gap-5 + the computed cols class.
   assert.match(source, /className=\{`\$\{orderTypeModalWidthClass\} order-type-transparent-modal`\}/);
-  assert.match(source, /contentClassName="!p-0 !overflow-visible"/);
+  assert.match(source, /contentClassName="p-0! overflow-visible!"/);
   assert.match(source, /<div className=\{`grid gap-4 sm:gap-5 \$\{orderTypeGridColsClass\}`\}>/);
 
   // Scope card-level a11y/touch guards to the order-type modal region (open -> close).
@@ -2025,7 +2025,7 @@ test('New Order chooser keeps its wrapper invisible and uses light-theme card su
     );
     assert.match(
       source.slice(modalIdx, modalIdx + 220),
-      /contentClassName="!p-0 !overflow-visible"/,
+      /contentClassName="p-0! overflow-visible!"/,
       `${name} must remove inherited shell spacing around the floating cards`,
     );
     for (const cardType of ['delivery', 'pickup', 'table']) {
@@ -2139,13 +2139,13 @@ test('OrderDashboard order-type chooser adapts its width/grid for up to five car
   // Width + grid are now driven by the visible card count (pickup always present; delivery/table/
   // room/service optional), so the modal stays roomy for 4-5 cards instead of a fixed 3-up.
   assert.match(source, /const visibleOrderTypeCardCount =/);
-  assert.match(source, /visibleOrderTypeCardCount >= 5\s*\?\s*"!max-w-5xl"/);
+  assert.match(source, /visibleOrderTypeCardCount >= 5\s*\?\s*"max-w-5xl!"/);
   assert.match(source, /const orderTypeGridColsClass =/);
   assert.match(source, /className=\{`\$\{orderTypeModalWidthClass\} order-type-transparent-modal`\}/);
-  assert.match(source, /contentClassName="!p-0 !overflow-visible"/);
+  assert.match(source, /contentClassName="p-0! overflow-visible!"/);
   assert.match(source, /grid gap-4 sm:gap-5 \$\{orderTypeGridColsClass\}/);
   // The old delivery+table-only fixed width/grid expressions are gone.
-  assert.doesNotMatch(source, /hasDeliveryModule && hasTablesModule \? "!max-w-3xl" : "!max-w-lg"/);
+  assert.doesNotMatch(source, /hasDeliveryModule && hasTablesModule \? "max-w-3xl!" : "max-w-lg!"/);
 
   // Round 322: the chooser grid is intentionally composed for 4 and 5 cards (no 3+1 / no orphaned
   // bottom-left row leaving an empty bottom-right hole).
@@ -2567,14 +2567,14 @@ test('Round 255: New Order room pickers are roomier (wider modal, 3-col grid, bo
   // scrollbar is preserved.
   assert.match(
     moduleSource,
-    /<LiquidGlassModal isOpen=\{isOpen\} onClose=\{onClose\} title=\{title\} className="!max-w-(2xl|3xl)">/,
+    /<LiquidGlassModal isOpen=\{isOpen\} onClose=\{onClose\} title=\{title\} className="max-w-(2xl|3xl)!">/,
   );
   assert.match(
     moduleSource,
     /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3/,
   );
   // The dashboard Room Order selector uses the same roomier treatment.
-  assert.match(source, /title=\{t\("orderFlow\.roomOrderTitle"[^}]*\}\)\}\s*className="!max-w-(2xl|3xl)"/);
+  assert.match(source, /title=\{t\("orderFlow\.roomOrderTitle"[^}]*\}\)\}\s*className="max-w-(2xl|3xl)!"/);
   assert.match(
     source,
     /grid max-h-\[60vh\][^"]*overflow-y-auto scrollbar-hide pb-2 sm:grid-cols-2 lg:grid-cols-3/,
@@ -2846,7 +2846,7 @@ test('Round 231: standalone TablesPage has a touch-first floor selector composin
   assert.match(sel, /aria-pressed=\{floorFilter === floor\}/);
 
   // Touch-safe: 44px centred buttons with active feedback; no hover / no native title in the strip.
-  assert.match(sel, /min-h-\[44px\] items-center justify-center/);
+  assert.match(sel, /min-h-touch items-center justify-center/);
   assert.match(sel, /active:scale-95/);
   assert.doesNotMatch(sel, /hover:/);
   assert.doesNotMatch(sel, /\btitle=/);
@@ -2896,7 +2896,7 @@ test('Round 246: bulk-action bar has no off-theme blue/slate, no hover/title, an
   assert.doesNotMatch(source, /[^a-zA-Z]title=/);
   assert.match(source, /active:scale-95/);
   // Normal buttons keep a >=44px touch target with centered icon+text.
-  assert.match(source, /min-h-\[40px\] sm:min-h-\[44px\]/);
+  assert.match(source, /min-h-\[40px\] sm:min-h-touch(?![\w.-])/);
   assert.match(source, /flex items-center justify-center/);
 });
 

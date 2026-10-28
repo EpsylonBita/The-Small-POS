@@ -638,19 +638,19 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <motion.div variants={pageMotionContainer} className="flex flex-wrap gap-3">
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-sm'}`}>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-xs'}`}>
               <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
               <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-emerald-400' : 'bg-white/86 border-gray-200 border-t-emerald-500 shadow-sm'}`}>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-emerald-400' : 'bg-white/86 border-gray-200 border-t-emerald-500 shadow-xs'}`}>
               <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
               <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-amber-400' : 'bg-white/86 border-gray-200 border-t-amber-500 shadow-sm'}`}>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border border-t-2 ${isDark ? 'bg-zinc-950/80 border-zinc-800 border-t-amber-400' : 'bg-white/86 border-gray-200 border-t-amber-500 shadow-xs'}`}>
               <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
               <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
             </motion.div>
-            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-sm'}`}>
+            <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-950/80 border-zinc-800' : 'bg-white/86 border-gray-200 shadow-xs'}`}>
               <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
               <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
             </motion.div>
@@ -672,7 +672,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder={t('appointments.searchPlaceholder', 'Search...')}
-                className={`pl-10 pr-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+                className={`pl-10 pr-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               />
             </div>
           </div>
@@ -777,7 +777,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                               variants={pageMotionItem}
                               key={apt.id}
                               className={`px-3 py-2 rounded-2xl border-l-4 ${statusConfig[apt.status].border} ${
-                                isDark ? 'bg-gray-700' : 'bg-white shadow-sm'
+                                isDark ? 'bg-gray-700' : 'bg-white shadow-xs'
                               }`}
                             >
                               <div className="flex items-center gap-2">
@@ -827,7 +827,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
                   variants={pageMotionItem}
                   key={apt.id}
                   className={`p-4 rounded-2xl border-l-4 ${statusConfig[apt.status].border} ${
-                    isDark ? 'bg-gray-800' : 'bg-white shadow-sm'
+                    isDark ? 'bg-gray-800' : 'bg-white shadow-xs'
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -894,7 +894,7 @@ export const AppointmentsView: React.FC<AppointmentsViewProps> = memo(({
         <FloatingActionButton
           onClick={() => setShowCreateModal(true)}
           aria-label={t('appointments.newAppointment', { defaultValue: 'New Appointment' })}
-          className="!bottom-20 sm:!bottom-6"
+          className="bottom-20! sm:bottom-6!"
         />
       )}
 
@@ -1046,7 +1046,7 @@ const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, pla
         aria-controls={listboxId}
         aria-label={ariaLabel}
         onClick={() => setOpen((prev) => !prev)}
-        className={`flex w-full items-center gap-2 min-h-[44px] px-3.5 py-2.5 rounded-xl border text-sm text-left transition active:scale-[0.99] focus:outline-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100 active:bg-zinc-900 focus:ring-2 focus:ring-zinc-600' : 'bg-white border-gray-300 text-gray-900 active:bg-gray-50 focus:ring-2 focus:ring-gray-300'}`}
+        className={`flex w-full items-center gap-2 min-h-touch px-3.5 py-2.5 rounded-xl border text-sm text-left transition active:scale-[0.99] focus:outline-hidden ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100 active:bg-zinc-900 focus:ring-2 focus:ring-zinc-600' : 'bg-white border-gray-300 text-gray-900 active:bg-gray-50 focus:ring-2 focus:ring-gray-300'}`}
       >
         <span className={`min-w-0 flex-1 truncate ${selected ? '' : (isDark ? 'text-zinc-500' : 'text-gray-400')}`}>
           {selected ? selected.label : placeholder}
@@ -1072,7 +1072,7 @@ const GlassSelect: React.FC<GlassSelectProps> = ({ value, onChange, options, pla
                   role="option"
                   aria-selected={isSelected}
                   onClick={() => { onChange(option.value); setOpen(false); }}
-                  className={`flex w-full items-center gap-2 min-h-[44px] rounded-xl px-3 py-2 text-sm text-left transition ${
+                  className={`flex w-full items-center gap-2 min-h-touch rounded-xl px-3 py-2 text-sm text-left transition ${
                     isSelected
                       ? 'bg-yellow-400 text-black'
                       : (isDark ? 'text-zinc-200 active:bg-white/10' : 'text-gray-800 active:bg-black/5')
@@ -1252,7 +1252,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   const hasStaffAndService = Boolean(formData.staffId && formData.serviceId);
 
   return renderModalPortal(
-    <div className={`fixed inset-0 z-[1000] flex items-center justify-center backdrop-blur-xl p-3 sm:p-6 ${isDark ? 'bg-black/55' : 'bg-black/22'}`}>
+    <div className={`fixed inset-0 z-1000 flex items-center justify-center backdrop-blur-xl p-3 sm:p-6 ${isDark ? 'bg-black/55' : 'bg-black/22'}`}>
       <motion.div
         ref={dialogRef}
         role="dialog"
@@ -1346,14 +1346,14 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     value={formData.customerName}
                     onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
                     placeholder={t('appointments.modal.walkInName', 'Walk-in name')}
-                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
                   />
                   <input
                     type="tel"
                     value={formData.customerPhone}
                     onChange={(e) => setFormData(prev => ({ ...prev, customerPhone: e.target.value }))}
                     placeholder={t('appointments.modal.walkInPhone', 'Phone')}
-                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
                   />
                 </div>
               </div>
@@ -1407,7 +1407,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
               placeholder={t('appointments.modal.notesPlaceholder', 'Optional notes...')}
               rows={3}
-              className={`w-full px-3.5 py-2.5 rounded-xl border text-sm resize-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+              className={`w-full px-3.5 py-2.5 rounded-xl border text-sm resize-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-hidden ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
             />
           </div>
 
@@ -1479,7 +1479,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
           {!hasStaffAndService ? (
             <div
               data-appointment-slots-empty
-              className={`flex flex-col items-center justify-center gap-3 p-6 text-center rounded-2xl border ${isDark ? 'bg-amber-500/[0.06] backdrop-blur-md border-amber-400/20' : 'bg-amber-50/60 backdrop-blur-xl border-amber-200/70'}`}
+              className={`flex flex-col items-center justify-center gap-3 p-6 text-center rounded-2xl border ${isDark ? 'bg-amber-500/6 backdrop-blur-md border-amber-400/20' : 'bg-amber-50/60 backdrop-blur-xl border-amber-200/70'}`}
             >
               <div className={`flex h-12 w-12 items-center justify-center rounded-2xl border ${isDark ? 'bg-amber-500/15 border-amber-400/30 text-amber-300' : 'bg-amber-100/80 border-amber-200 text-amber-600'}`}>
                 <Clock className="h-6 w-6" />
@@ -1504,7 +1504,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium ${
                         step.done
                           ? (isDark ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-700')
-                          : (isDark ? 'bg-white/[0.04] border-white/15 text-zinc-400' : 'bg-white/50 border-gray-200 text-gray-500')
+                          : (isDark ? 'bg-white/4 border-white/15 text-zinc-400' : 'bg-white/50 border-gray-200 text-gray-500')
                       }`}
                     >
                       {step.done ? <CheckCircle className="h-3.5 w-3.5" /> : <StepIcon className="h-3.5 w-3.5" />}
@@ -1551,7 +1551,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       type="button"
                       disabled={booked}
                       onClick={() => handleTimeSelect(slot)}
-                      className={`flex items-center justify-center min-h-[44px] py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
+                      className={`flex items-center justify-center min-h-touch py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
                         ${selected
                           ? 'bg-yellow-400 text-black border-yellow-400'
                           : booked
@@ -1567,8 +1567,8 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               </div>
 
               <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
-                <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
+                <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded-sm border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded-sm" /> {t('appointments.workflow.unavailable', 'Unavailable')}</span>
               </div>
             </div>
           ) : null}
@@ -1606,7 +1606,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
           <button
             onClick={handleCreateAppointment}
             disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
-            className="px-5 py-2.5 rounded-xl font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-sm shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
+            className="px-5 py-2.5 rounded-xl font-semibold bg-emerald-600 text-white border border-emerald-500 shadow-xs shadow-emerald-600/30 transition-transform duration-150 active:scale-95 active:bg-emerald-700 disabled:bg-zinc-400/20 disabled:text-zinc-400 disabled:border-zinc-400/30 disabled:shadow-none disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
           </button>

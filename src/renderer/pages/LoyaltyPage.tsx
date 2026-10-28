@@ -343,7 +343,7 @@ const LoyaltyPage: React.FC = () => {
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           placeholder={t('loyalty.searchCustomers', 'Search customers...')}
-          className={`flex-1 bg-transparent outline-none text-sm ${isDark ? 'text-zinc-100 placeholder-zinc-500' : 'text-gray-900 placeholder-gray-400'}`}
+          className={`flex-1 bg-transparent outline-hidden text-sm ${isDark ? 'text-zinc-100 placeholder-zinc-500' : 'text-gray-900 placeholder-gray-400'}`}
         />
       </div>
 
@@ -388,7 +388,7 @@ const LoyaltyPage: React.FC = () => {
                     </p>
                   )}
                 </div>
-                <span className={`px-2 py-1 text-xs font-medium rounded border bg-transparent flex items-center gap-1 ${getTierColor(customer.tier)}`}>
+                <span className={`px-2 py-1 text-xs font-medium rounded-sm border bg-transparent flex items-center gap-1 ${getTierColor(customer.tier)}`}>
                   {getTierIcon(customer.tier)}
                   {getTierLabel(customer.tier)}
                 </span>

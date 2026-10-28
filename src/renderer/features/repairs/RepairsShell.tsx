@@ -120,7 +120,7 @@ const TIMELINE_EVENT_KEYS: Readonly<Record<string, string>> = {
 }
 
 const cardClass =
-  'rounded-2xl border border-slate-200 bg-white/85 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/75'
+  'rounded-2xl border border-slate-200 bg-white/85 shadow-xs backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/75'
 
 function isRepairOverdue(repair: RepairListItemSnapshot, now: number): boolean {
   if (!repair.dueAt || TERMINAL_STATUSES.has(repair.status)) return false

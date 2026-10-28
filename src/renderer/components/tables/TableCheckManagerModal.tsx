@@ -357,7 +357,7 @@ const applyLocalTableSessionSnapshot = async (session: TableSessionDetails, loca
 const glassSurfaceClass =
   'rounded-xl border liquid-glass-modal-border bg-white/55 shadow-[0_14px_36px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:bg-black/20 dark:shadow-[0_18px_42px_rgba(2,6,23,0.35)]';
 const glassSubtleSurfaceClass =
-  'rounded-xl border liquid-glass-modal-border bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] backdrop-blur-xl dark:bg-white/[0.045]';
+  'rounded-xl border liquid-glass-modal-border bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] backdrop-blur-xl dark:bg-white/4.5';
 const glassInputClass = 'liquid-glass-modal-input w-full';
 
 const isLocalSessionId = (sessionId: string | null | undefined): boolean =>
@@ -886,7 +886,7 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
       <p
         role="status"
         aria-labelledby={labelledBy}
-        className="rounded-xl border liquid-glass-modal-border bg-white/35 px-3 py-2 text-sm liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-white/[0.045]"
+        className="rounded-xl border liquid-glass-modal-border bg-white/35 px-3 py-2 text-sm liquid-glass-modal-text-muted backdrop-blur-xl dark:bg-white/4.5"
       >
         {emptyLabel}
       </p>
@@ -897,7 +897,7 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
     <div
       role="listbox"
       aria-labelledby={labelledBy}
-      className="max-h-44 space-y-1 overflow-y-auto rounded-xl border liquid-glass-modal-border bg-white/35 p-1.5 backdrop-blur-xl dark:bg-white/[0.045]"
+      className="max-h-44 space-y-1 overflow-y-auto rounded-xl border liquid-glass-modal-border bg-white/35 p-1.5 backdrop-blur-xl dark:bg-white/4.5"
     >
       {options.map(option => {
         const selected = value === option.id;
@@ -910,7 +910,7 @@ const TableDestinationPicker: React.FC<TableDestinationPickerProps> = ({
             onClick={() => onChange(option.id)}
             className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors ${
               selected
-                ? 'bg-blue-600 text-white shadow-sm'
+                ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-gray-900 hover:bg-black/5 dark:text-zinc-100 dark:hover:bg-white/10'
             }`}
           >
@@ -1008,7 +1008,7 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
     // every modal opens outside the container and blurs the rest of the screen.
     <motion.div
       {...cashierPortalProps}
-      className="fixed inset-0 z-[20050] flex items-center justify-center bg-black/35 p-4 backdrop-blur-md dark:bg-black/55"
+      className="fixed inset-0 z-20050 flex items-center justify-center bg-black/35 p-4 backdrop-blur-md dark:bg-black/55"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -1019,7 +1019,7 @@ const SecondarySheet: React.FC<SecondarySheetProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby={sheetTitleId}
-        className="liquid-glass-modal-shell !w-full !max-w-2xl overflow-hidden"
+        className="liquid-glass-modal-shell w-full! max-w-2xl! overflow-hidden"
       >
         <div className="liquid-glass-modal-header px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
@@ -2834,7 +2834,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                           transition={{ delay: Math.min(index * 0.025, 0.18) }}
                           whileHover={{ scale: 1.01 }}
                           whileTap={{ scale: 0.99 }}
-                          className={`${glassSubtleSurfaceClass} grid w-full grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-3 text-left transition-colors hover:border-blue-400/40 hover:bg-blue-500/10 focus:outline-none focus:ring-2 focus:ring-blue-400/40 ${
+                          className={`${glassSubtleSurfaceClass} grid w-full grid-cols-[auto_1fr_auto] items-center gap-4 px-4 py-3 text-left transition-colors hover:border-blue-400/40 hover:bg-blue-500/10 focus:outline-hidden focus:ring-2 focus:ring-blue-400/40 ${
                             isSelectedForBatch ? 'border-blue-400/70 bg-blue-500/15' : ''
                           }`}
                         >
@@ -2929,7 +2929,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setSecondaryModal('covers')}
-                    className={`${glassSubtleSurfaceClass} px-4 py-3 text-left transition-colors hover:bg-white/45 dark:hover:bg-white/[0.08]`}
+                    className={`${glassSubtleSurfaceClass} px-4 py-3 text-left transition-colors hover:bg-white/45 dark:hover:bg-white/8`}
                   >
                     <p className="text-[11px] font-medium uppercase tracking-wide liquid-glass-modal-text-muted">
                       {tr('labels.covers', 'Covers')}
@@ -3532,7 +3532,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                   className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
                     selectedWaiterId === ''
                       ? 'border-blue-400/50 bg-blue-500/10'
-                      : 'hover:bg-white/45 dark:hover:bg-white/[0.08]'
+                      : 'hover:bg-white/45 dark:hover:bg-white/8'
                   }`}
                 >
                   <span className="font-semibold liquid-glass-modal-text">{tr('labels.unassignedWaiter', 'Unassigned')}</span>
@@ -3556,7 +3556,7 @@ export const TableCheckManagerModal: React.FC<TableCheckManagerModalProps> = ({
                       className={`${glassSubtleSurfaceClass} flex items-center justify-between gap-3 px-3 py-3 text-left transition-colors ${
                         selectedWaiterId === waiter.id
                           ? 'border-blue-400/50 bg-blue-500/10'
-                          : 'hover:bg-white/45 dark:hover:bg-white/[0.08]'
+                          : 'hover:bg-white/45 dark:hover:bg-white/8'
                       }`}
                     >
                       <span className="min-w-0">

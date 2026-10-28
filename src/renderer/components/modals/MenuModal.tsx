@@ -25,6 +25,7 @@ import { LoyaltyRedeemModal } from './LoyaltyRedeemModal';
 import { useCheckoutDraftPersistence } from '../../hooks/useCheckoutDraftPersistence';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { deriveMenuEditChanges, MENU_EDIT_MAX_LINES, RendererEditRefusal, type MenuEditHeaders, type MenuOrderEditData, type MenuEditPreflight } from '../../services/MenuOrderEdit';
+import { editRefusalMessageKey } from '../../utils/editRefusalMessage';
 import { LegacyShiftCurrencyConfirmationRequired } from '../../services/CheckoutDraftStore';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { notifyMoneySettingsUnavailable } from '../../utils/checkoutMoneySettings';
@@ -2982,7 +2983,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         }
         const message = code.includes('POS_ORDER_SETTLEMENT_UNAVAILABLE') ? 'editServerUpdate'
           : !draftPersistence.isPending() && /(?:ORDER_HEADER_SYNC_REQUIRED|ORDER_VERSION_CONFLICT|EDIT_(?:CANONICAL_ORIGINAL_CHANGED|CANONICAL_QUOTE_CHANGED|CANONICAL_QUOTE_REQUIRED|SETTLEMENT_VERSION_CHANGED|ORIGINAL_ITEMS_UNAVAILABLE|CANONICAL_SNAPSHOT_INVALID))/.test(code) ? 'editCanonicalChanged'
-          : /EDIT_(?:PREVIOUS_SETTLEMENT|ORIGINAL_PAYMENT)_SYNC_REQUIRED/.test(code) ? 'editSyncRequired' : 'editFailed';
+          : /EDIT_(?:PREVIOUS_SETTLEMENT|ORIGINAL_PAYMENT)_SYNC_REQUIRED/.test(code) ? 'editSyncRequired' : editRefusalMessageKey(code);
         if (message === 'editCanonicalChanged') setStaleEdit(true);
         toast.error(t(`modals.menu.${message}`) || 'Failed to save changes');
       }
@@ -3469,16 +3470,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         onClose={handleMenuSurfaceClose}
         ariaLabel={getModalTitle()}
         header={
-          <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 flex-shrink-0 min-w-0">
+          <div className="flex flex-col gap-1 px-5 py-2.5 border-b border-white/10 shrink-0 min-w-0">
             {/* Main row: Title + Customer + Close */}
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 w-full min-w-0">
               <h2
                 className="liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0"
                 title={getModalTitle()}
               >
-                <span className="whitespace-normal break-words">{getModalTitle()}</span>
+                <span className="whitespace-normal wrap-break-word">{getModalTitle()}</span>
                 {editMode && (
-                  <span className="flex-shrink-0 whitespace-normal text-xs font-medium text-amber-800 dark:text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full">
+                  <span className="shrink-0 whitespace-normal text-xs font-medium text-amber-800 dark:text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full">
                     <Pencil className="w-3 h-3 inline mr-1" />
                     {t('modals.menu.editModeMessage') || 'Editing'}
                   </span>
@@ -3494,7 +3495,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   value={menuSearchQuery}
                   onChange={(e) => setMenuSearchQuery(e.target.value)}
                   placeholder={salonMode ? t('salonSale.search') : t('menu.search', { defaultValue: 'Search menu items...' })}
-                  className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-yellow-400/70 focus:outline-none focus:ring-1 focus:ring-yellow-400"
+                  className="liquid-glass-modal-input h-10 w-full rounded-xl pl-9 pr-9 text-sm focus:border-yellow-400/70 focus:outline-hidden focus:ring-1 focus:ring-yellow-400"
                 />
                 {menuSearchQuery && (
                   <button
@@ -3507,7 +3508,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 )}
               </div>
 
-              <div className="flex items-center gap-3 min-w-0 flex-shrink-0 col-start-2 row-start-1">
+              <div className="flex items-center gap-3 min-w-0 shrink-0 col-start-2 row-start-1">
                 {/* Customer info chip or Add Customer button */}
                 <div className="min-w-0">
                   {orderType === 'delivery' && selectedCustomer ? (
@@ -3535,7 +3536,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 {/* Close button */}
                 <button
                   onClick={requestClose}
-                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0 flex-shrink-0"
+                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
                   aria-label={t('common.actions.close')}
                 >
                   <X className="w-5 h-5" />
@@ -3549,7 +3550,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 <span>{selectedAddress.street_address || selectedAddress.street}, {selectedAddress.postal_code || selectedAddress.city}</span>
                 {effectiveDeliveryZoneInfo?.zone && (
                   <>
-                    <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">
+                    <span className="px-2 py-0.5 rounded-sm bg-amber-500/20 text-amber-300 font-medium">
                       {effectiveDeliveryZoneInfo.zone.name}
                     </span>
                     <span>{t('modals.menu.fee')}: {formatCurrency(resolvedDeliveryFee)}</span>
@@ -3680,7 +3681,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           </div>
 
           {/* Right Panel - Cart - Flex layout for proper height inheritance */}
-          <div className="w-72 md:w-[19rem] flex-shrink-0 min-h-0 bg-transparent py-2 pl-3 pr-2">
+          <div className="w-72 md:w-76 shrink-0 min-h-0 bg-transparent py-2 pl-3 pr-2">
             <div className="flex h-full min-h-0 flex-col overflow-visible bg-transparent">
               <MenuCart
               cartItems={cartItems}
@@ -3842,7 +3843,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
       {/* Customer Info Modal - compact centered overlay */}
       {showCustomerPopover && renderModalPortal(
-        <div className="fixed inset-0 z-[20050] flex items-center justify-center" onClick={() => setShowCustomerPopover(false)}>
+        <div className="fixed inset-0 z-20050 flex items-center justify-center" onClick={() => setShowCustomerPopover(false)}>
           {/* Heavy blur backdrop */}
           <div className="absolute inset-0 bg-black/50 backdrop-blur-md" />
 
@@ -3850,19 +3851,19 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           <div
             role="dialog"
             aria-modal="true"
-            className="relative w-[340px] rounded-2xl overflow-hidden liquid-glass-modal-shell !fixed !top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !max-w-[340px] !max-h-fit !animate-none"
+            className="relative w-[340px] rounded-2xl overflow-hidden liquid-glass-modal-shell fixed! top-1/2! left-1/2! -translate-x-1/2! -translate-y-1/2! max-w-[340px]! max-h-fit! animate-none!"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="liquid-glass-modal-header !py-4 !px-5">
-              <h3 className="liquid-glass-modal-title !text-lg">
+            <div className="liquid-glass-modal-header py-4! px-5!">
+              <h3 className="liquid-glass-modal-title text-lg!">
                 {t('modals.menu.customerInfo', { defaultValue: 'Customer Info (Optional)' })}
               </h3>
               <button
                 onClick={() => setShowCustomerPopover(false)}
                 aria-label={t('common.actions.close', { defaultValue: 'Close' })}
                 title={t('common.actions.close', { defaultValue: 'Close' })}
-                className="liquid-glass-modal-close !w-8 !h-8 !text-base"
+                className="liquid-glass-modal-close w-8! h-8! text-base!"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -3936,7 +3937,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
       {/* Processing Overlay */}
       {isOpen && effectiveProcessing && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1100]">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-1100">
           <div className="rounded-2xl p-8 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border backdrop-blur-xl">
             <div className="flex flex-col items-center space-y-4">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-500"></div>

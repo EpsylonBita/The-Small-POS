@@ -59,7 +59,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
       : 'border-black/10 bg-white/82 shadow-black/18'
   }`;
   const detailCardClass = `rounded-2xl border p-3 ${
-    isDark ? 'border-white/10 bg-white/[0.06]' : 'border-black/10 bg-white/70'
+    isDark ? 'border-white/10 bg-white/6' : 'border-black/10 bg-white/70'
   }`;
   const closeButtonClass = `inline-flex h-10 w-10 items-center justify-center rounded-2xl transition-transform duration-150 active:scale-95 ${
     isDark ? 'text-gray-300 active:bg-white/10' : 'text-gray-600 active:bg-black/10'
@@ -198,7 +198,7 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
         <div className={`mb-4 flex items-center gap-2 rounded-2xl p-3 ${
           isDark ? 'bg-red-500/20 border border-red-500/30' : 'bg-red-50 border border-red-200'
         }`}>
-          <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0" />
+          <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
           <span className="text-red-500 text-sm font-medium">
             {t('reservationInfoPanel.lateWarning', { 
               defaultValue: '{{minutes}} minutes late',

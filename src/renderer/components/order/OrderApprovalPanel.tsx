@@ -1053,13 +1053,13 @@ export function OrderApprovalPanel({
         closeOnBackdrop={canClose}
         closeOnEscape={canClose}
         size="lg"
-        className="!max-h-[88vh] !max-w-3xl"
+        className="max-h-[88vh]! max-w-3xl!"
         contentClassName="px-5 py-4 sm:px-6"
         ariaLabel={t('orderApprovalPanel.reviewOrder', { defaultValue: 'Review incoming order' })}
         header={(
           <div
             {...approvalMarker}
-            className="flex-shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6"
+            className="shrink-0 border-b liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -1129,7 +1129,7 @@ export function OrderApprovalPanel({
           </div>
         )}
         footer={(
-          <div className="flex-shrink-0 space-y-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
+          <div className="shrink-0 space-y-3 border-t liquid-glass-modal-border bg-white/5 px-5 py-4 dark:bg-black/20 sm:px-6">
             {isBoxDecisionClosedHere ? (
               <>
                 <div
@@ -1163,7 +1163,7 @@ export function OrderApprovalPanel({
                     void handleCloseBoxOrder();
                   }}
                   disabled={isClosingOrder}
-                  className="liquid-glass-modal-button min-h-[3.25rem] w-full justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
+                  className="liquid-glass-modal-button min-h-13 w-full justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30 disabled:opacity-50"
                 >
                   <Ban className="h-4 w-4" />
                   {isClosingOrder
@@ -1199,7 +1199,7 @@ export function OrderApprovalPanel({
                         onClick={() => setPickedTime(time)}
                         disabled={disabled}
                         data-testid={`order-approval-prep-${time}`}
-                        className={`min-h-[2.75rem] rounded-lg px-2 text-sm font-bold transition ${
+                        className={`min-h-11 rounded-lg px-2 text-sm font-bold transition ${
                           estimatedTime === time
                             ? 'border border-amber-400 bg-amber-400 text-black shadow-lg shadow-amber-400/30'
                             : 'liquid-glass-modal-button'
@@ -1221,7 +1221,7 @@ export function OrderApprovalPanel({
                     type="button"
                     onClick={handleApprove}
                     disabled={isApproving || isDeclining || isCheckingDecline}
-                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 active:bg-green-600/30"
+                    className="liquid-glass-modal-button min-h-13 justify-center gap-2 border-green-500/30 bg-green-600/20 text-green-400 active:bg-green-600/30"
                   >
                     <Check className="h-4 w-4" />
                     {isApproving ? t('orderApprovalPanel.approving', { defaultValue: 'Approving...' }) : t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' })}
@@ -1232,7 +1232,7 @@ export function OrderApprovalPanel({
                       void openDeclineModal();
                     }}
                     disabled={isApproving || isDeclining || isCheckingDecline}
-                    className="liquid-glass-modal-button min-h-[3.25rem] justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30"
+                    className="liquid-glass-modal-button min-h-13 justify-center gap-2 border-red-500/30 bg-red-600/20 text-red-400 active:bg-red-600/30"
                   >
                     <XCircle className="h-4 w-4" />
                     {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
@@ -1266,7 +1266,7 @@ export function OrderApprovalPanel({
           <div className="grid gap-3 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-center gap-3">
-                <User className="h-5 w-5 flex-shrink-0 text-purple-400" />
+                <User className="h-5 w-5 shrink-0 text-purple-400" />
                 <div className="min-w-0">
                   <p className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
                     {t('orderApprovalPanel.name', { defaultValue: 'Customer' })}
@@ -1292,9 +1292,9 @@ export function OrderApprovalPanel({
             }`}>
               <div className="flex items-center gap-3">
                 {requestedPaymentMethod === 'cash' ? (
-                  <Banknote className="h-5 w-5 flex-shrink-0 text-green-400" />
+                  <Banknote className="h-5 w-5 shrink-0 text-green-400" />
                 ) : (
-                  <CreditCard className={`h-5 w-5 flex-shrink-0 ${
+                  <CreditCard className={`h-5 w-5 shrink-0 ${
                     requestedPaymentMethod === 'card' || requestedPaymentMethod === 'online'
                       ? 'text-blue-400'
                       : 'liquid-glass-modal-text-muted'
@@ -1318,7 +1318,7 @@ export function OrderApprovalPanel({
           {orderType === 'delivery' && (deliveryAddress || deliveryCity || deliveryPostalCode || deliveryFloor || nameOnRinger || deliveryNotes) && (
             <section className="liquid-glass-modal-card p-4">
               <div className="flex items-start gap-3">
-                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-400">
                   <MapPin className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -1365,7 +1365,7 @@ export function OrderApprovalPanel({
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 flex-1 items-start gap-3">
-                        <div className="flex-shrink-0 text-sm font-bold text-orange-400">
+                        <div className="shrink-0 text-sm font-bold text-orange-400">
                           {item.quantity}x
                         </div>
                         <div className="min-w-0 flex-1">
@@ -1374,7 +1374,7 @@ export function OrderApprovalPanel({
                               {item.categoryPath || item.categoryName}
                             </div>
                           )}
-                          <div className="break-words text-sm font-bold liquid-glass-modal-text">
+                          <div className="wrap-break-word text-sm font-bold liquid-glass-modal-text">
                             {item.name}
                           </div>
                           {item.special_instructions && (
@@ -1400,7 +1400,7 @@ export function OrderApprovalPanel({
                           )}
                         </div>
                       </div>
-                      <div className="flex-shrink-0 text-sm font-bold liquid-glass-modal-text">
+                      <div className="shrink-0 text-sm font-bold liquid-glass-modal-text">
                         {formatCurrency(item.total_price)}
                       </div>
                     </div>
@@ -1464,7 +1464,7 @@ export function OrderApprovalPanel({
         }}
         title={t('orderApprovalPanel.declineReason', { defaultValue: 'Decline reason' })}
         size="sm"
-        className="!max-w-md"
+        className="max-w-md!"
         closeOnBackdrop={!isDeclining}
         closeOnEscape={!isDeclining}
         footer={(
@@ -1514,7 +1514,7 @@ export function OrderApprovalPanel({
                     data-testid={`box-reject-reason-${index}`}
                     onClick={() => setSelectedBoxReason(reason)}
                     disabled={isDeclining}
-                    className={`liquid-glass-modal-button min-h-[2.75rem] w-full justify-between px-4 py-2 text-left disabled:opacity-50 ${
+                    className={`liquid-glass-modal-button min-h-11 w-full justify-between px-4 py-2 text-left disabled:opacity-50 ${
                       isSelected ? 'border-red-500/60 bg-red-600/20 text-red-400' : ''
                     }`}
                   >
@@ -1529,7 +1529,7 @@ export function OrderApprovalPanel({
                         </span>
                       ) : null}
                     </span>
-                    {isSelected ? <Check className="h-4 w-4 flex-shrink-0" aria-hidden="true" /> : null}
+                    {isSelected ? <Check className="h-4 w-4 shrink-0" aria-hidden="true" /> : null}
                   </button>
                 );
               })}
@@ -1540,7 +1540,7 @@ export function OrderApprovalPanel({
                 value={declineReason}
                 onChange={(e) => setDeclineReason(e.target.value)}
                 placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
-                className="liquid-glass-modal-input min-h-[8rem] w-full resize-none"
+                className="liquid-glass-modal-input min-h-32 w-full resize-none"
                 maxLength={DECLINE_REASON_MAX_LENGTH}
                 disabled={isDeclining}
               />

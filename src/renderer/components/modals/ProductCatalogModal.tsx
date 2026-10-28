@@ -1084,7 +1084,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         isOpen={isOpen}
         onClose={onClose}
         title={t('productCatalog.title', 'Product Catalog')}
-        className="!max-w-[95vw] !w-[1400px] !h-[90vh]"
+        className="max-w-[95vw]! w-[1400px]! h-[90vh]!"
       >
         <div className="flex h-full gap-4">
           {/* Left: Product Grid */}
@@ -1176,7 +1176,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                       <div className="flex items-start justify-between mb-2">
                         <Package className="w-8 h-8 text-yellow-300" />
                         {product.quantity <= product.lowStockThreshold && (
-                          <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
+                          <span className="text-xs px-2 py-0.5 rounded-sm bg-yellow-500/20 text-yellow-400">
                             {t('productCatalog.lowStock', 'Low Stock')}
                           </span>
                         )}
@@ -1270,7 +1270,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                               }
                             }}
                             aria-label={t('productCatalog.measuredQuantity', 'Quantity')}
-                            className="w-20 px-2 py-1 rounded bg-white/10 text-white text-center focus:outline-none focus:ring-1 focus:ring-white/40"
+                            className="w-20 px-2 py-1 rounded-sm bg-white/10 text-white text-center focus:outline-hidden focus:ring-1 focus:ring-white/40"
                           />
                           <span className="text-white/60 text-sm">{item.unitOfMeasure}</span>
                           {['kg', 'g', 'lb', 'oz'].includes(item.unitOfMeasure.toLowerCase()) && (
@@ -1401,7 +1401,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                         setManualDeliveryFee(amount)
                       }}
                       placeholder={t('menu.cart.manualDeliveryFeePlaceholder', '0,00')}
-                      className="w-24 rounded-2xl border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                      className="w-24 rounded-2xl border bg-white/10 px-2 py-1 text-right text-white border-white/20 placeholder-gray-400 focus:outline-hidden focus:ring-2 focus:ring-yellow-400"
                     />
                   )}
                 </div>

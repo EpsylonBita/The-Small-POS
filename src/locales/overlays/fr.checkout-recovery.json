@@ -61,7 +61,11 @@
     "conflict": "La demande initiale doit être vérifiée avant de continuer.",
     "refresh": "Actualiser le statut",
     "confirmOriginalResult": "Vérifier l’annulation initiale",
-    "originalResultUnconfirmed": "L’annulation initiale n’a pas pu être confirmée et reste enregistrée. Reconnectez-vous et vérifiez l’addition avant de continuer."
+    "originalResultUnconfirmed": "L’annulation initiale n’a pas pu être confirmée et reste enregistrée. Reconnectez-vous et vérifiez l’addition avant de continuer.",
+    "editRefused": "La modification n’a pas été appliquée car la commande a changé entre-temps. Rouvre-la et refais la modification depuis le début.",
+    "editConflict": "La modification enregistrée doit être vérifiée. Rouvre la commande avant de continuer.",
+    "discardEdit": "Abandonner l’ancienne modification",
+    "editReviewUnavailable": "Impossible d’ouvrir ou d’abandonner la modification enregistrée. Reconnecte-toi et vérifie à nouveau la commande."
   },
   "paymentIntegrity": {
     "reasonCodes": {

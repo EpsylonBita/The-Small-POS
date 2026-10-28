@@ -232,7 +232,7 @@ test('RoomsView create-choice modal is portaled (blur/high-z) with separate chec
   // The shared Modal still mounts via the app-level portal with backdrop blur and
   // a high z-index, so the choice overlay never renders inside the page container.
   assert.match(viewSource, /return renderModalPortal\(/);
-  assert.match(viewSource, /fixed inset-0 z-\[1200\]/);
+  assert.match(viewSource, /fixed inset-0 z-1200(?![\w.-])/);
   assert.match(viewSource, /bg-black\/50 backdrop-blur-sm/);
 
   // newCheckinOrReservation is now also a modal title, so it must exist everywhere.

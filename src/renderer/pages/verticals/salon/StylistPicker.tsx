@@ -71,7 +71,7 @@ const choiceClass =
 export function StylistPicker({ isOpen, serviceName, stylists, loading = false, onPick, onClose }: StylistPickerProps) {
   const { t } = useTranslation();
   return (
-    <LiquidGlassModal isOpen={isOpen} onClose={onClose} size="sm" className="!max-w-md" closeOnBackdrop={false}
+    <LiquidGlassModal isOpen={isOpen} onClose={onClose} size="sm" className="max-w-md!" closeOnBackdrop={false}
       title={t('salonStaff.pickerTitle', 'Who does this service?')}>
       <div className="space-y-2" data-testid="salon-stylist-picker">
         {serviceName && <p className="text-sm liquid-glass-modal-text-muted">{serviceName}</p>}

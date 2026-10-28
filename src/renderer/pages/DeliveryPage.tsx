@@ -380,7 +380,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({
           disabled={!canOpenMap}
           className={`w-full flex items-start gap-2 mb-3 text-left ${isDark ? 'text-white' : 'text-gray-900'} ${canOpenMap ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
         >
-          <MapPin className={`w-4 h-4 mt-0.5 flex-shrink-0 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`} />
+          <MapPin className={`w-4 h-4 mt-0.5 shrink-0 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`} />
           <div className="flex-1 min-w-0">
             <p className="font-medium truncate">{delivery.address.street}</p>
             <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -492,7 +492,7 @@ export const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
   };
 
   return renderModalPortal(
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center">
+    <div className="fixed inset-0 z-1200 flex items-center justify-center">
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={close} />
 
@@ -890,7 +890,7 @@ const DeliveryPage: React.FC = () => {
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
               placeholder={t('delivery.search', 'Search deliveries...')}
-              className={`w-48 pl-9 pr-4 py-2 rounded-xl text-sm bg-transparent outline-none ${
+              className={`w-48 pl-9 pr-4 py-2 rounded-xl text-sm bg-transparent outline-hidden ${
                 isDark ? 'text-zinc-100 placeholder:text-zinc-500' : 'text-gray-900 placeholder:text-gray-400'
               }`}
             />
@@ -945,7 +945,7 @@ const DeliveryPage: React.FC = () => {
               onClick={() => setActiveTab(tab.id)}
               className={`flex-1 px-3 py-2 rounded-2xl text-sm font-medium transition-transform active:scale-[0.98] ${
                 activeTab === tab.id
-                  ? isDark ? 'bg-zinc-100 text-black shadow' : 'bg-black text-white shadow'
+                  ? isDark ? 'bg-zinc-100 text-black shadow-sm' : 'bg-black text-white shadow-sm'
                   : isDark
                   ? 'text-zinc-400 active:text-zinc-100 active:bg-zinc-800'
                   : 'text-gray-600 active:text-gray-900 active:bg-white'

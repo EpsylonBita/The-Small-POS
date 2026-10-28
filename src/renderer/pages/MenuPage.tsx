@@ -535,7 +535,7 @@ const MenuPage: React.FC = () => {
             <h1 className={`text-2xl font-bold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>{t('menu.title')}</h1>
             <button
               onClick={() => navigate('/orders')}
-              className={`px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+              className={`px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
                 resolvedTheme === 'dark' ? 'bg-yellow-400 text-black' : 'bg-black text-white'
               }`}
             >
@@ -590,7 +590,7 @@ const MenuPage: React.FC = () => {
                   </p>
                   <button
                     onClick={handleSyncMenu}
-                    className={`px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+                    className={`px-4 py-2 rounded-2xl font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
                       resolvedTheme === 'dark' ? 'bg-yellow-400 text-black' : 'bg-black text-white'
                     }`}
                   >

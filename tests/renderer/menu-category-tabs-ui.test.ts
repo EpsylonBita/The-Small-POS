@@ -41,7 +41,7 @@ test('MenuCategoryTabs does not fade the trailing edge of category labels', () =
     /flex max-w-full gap-1 overflow-x-auto scrollbar-hide cursor-grab select-none touch-pan-x py-1\.5 pr-3 sm:gap-1\.5/,
   );
   // Pills must not shrink or wrap, and the tighter padding keeps standard categories visible.
-  assert.match(source, /min-h-\[38px\] flex-shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-\[13px\]/);
+  assert.match(source, /min-h-\[38px\] shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-\[13px\]/);
 });
 
 test('menu views pass real item data into flavor tabs and filter by flavor_type', () => {
@@ -102,7 +102,7 @@ test('flavor tab copy and selected styling avoid clipped glow artifacts', () => 
   assert.doesNotMatch(tabsSource, /from-emerald-500\/95/);
   assert.doesNotMatch(tabsSource, /shadow-\[0_10px_28px/);
   assert.match(itemModalSource, /flavorFilterButtonBaseClass/);
-  assert.match(itemModalSource, /inline-flex h-12 min-w-\[7rem\] items-center justify-center rounded-full border px-5/);
+  assert.match(itemModalSource, /inline-flex h-12 min-w-28 items-center justify-center rounded-full border px-5/);
   assert.match(itemModalSource, /border-orange-400\/70 bg-orange-500/);
   // Round 251: the sweet flavor filter is now slate/neutral (was pink) after the item-modal polish.
   assert.match(itemModalSource, /border-slate-300\/70 bg-slate-500/);
@@ -137,13 +137,13 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   assert.match(gridSource, /p-2 sm:p-3/);
   assert.match(gridSource, /gap-2\.5 sm:gap-3/);
 
-  assert.match(modalSource, /md:w-\[19rem\]/);
+  assert.match(modalSource, /md:w-76(?![\w.-])/);
   assert.match(modalSource, /bg-transparent py-2 pl-3 pr-2/);
   assert.match(modalSource, /overflow-visible bg-transparent/);
   assert.match(modalSource, /bg-transparent/);
   assert.doesNotMatch(modalSource, /rounded-\[26px\] border border-white\/22/);
   assert.doesNotMatch(modalSource, /shadow-\[0_18px_42px_rgba\(0,0,0,0\.22\)\]/);
-  assert.doesNotMatch(modalSource, /bg-white\/\[0\.025\]/);
+  assert.doesNotMatch(modalSource, /bg-white\/2\.5(?![\w.-])/);
   assert.doesNotMatch(modalSource, /backdrop-blur-2xl/);
   assert.match(cartSource, /rounded-\[28px\] border border-black\/15 bg-transparent/);
   assert.match(cartSource, /dark:border-white\/60/);
@@ -152,11 +152,11 @@ test('menu modal cards and cart keep the compact glass layout', () => {
   assert.doesNotMatch(cartSource, /overflow-y-auto p-3 touch-scroll pos-scrollbar-glass/);
   assert.match(cartSource, /bg-transparent space-y-3/);
   assert.match(cartSource, /bg-transparent border-0 p-0 shadow-none/);
-  assert.match(cartSource, /<Ticket className="h-8 w-8 flex-shrink-0"/);
-  assert.match(cartSource, /<Award className="h-8 w-8 flex-shrink-0"/);
-  assert.match(cartSource, /<Percent className="h-8 w-8 flex-shrink-0"/);
+  assert.match(cartSource, /<Ticket className="h-8 w-8 shrink-0"/);
+  assert.match(cartSource, /<Award className="h-8 w-8 shrink-0"/);
+  assert.match(cartSource, /<Percent className="h-8 w-8 shrink-0"/);
   assert.doesNotMatch(cartSource, /border-sky-500\/35 bg-sky-500\/12/);
-  assert.doesNotMatch(cartSource, /<Gift className="w-5 h-5 flex-shrink-0"/);
+  assert.doesNotMatch(cartSource, /<Gift className="w-5 h-5 shrink-0"/);
   // Round 251: the touchscreen complete-order action uses active: press feedback, not hover:.
   assert.match(cartSource, /bg-yellow-400 text-black active:bg-yellow-300/);
   assert.doesNotMatch(cartSource, /: 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-\[1\.02\]'/);
@@ -171,10 +171,10 @@ test('menu modal keeps search below the wrapping title and cards expose hold pre
 
   // Long edit titles wrap and search has a full-width second row.
   assert.match(modalSource, /liquid-glass-modal-title text-xl flex flex-wrap items-center gap-2 min-w-0/);
-  assert.match(modalSource, /whitespace-normal break-words/);
+  assert.match(modalSource, /whitespace-normal wrap-break-word/);
   assert.match(modalSource, /ref=\{menuSearchRef\}/);
   assert.match(modalSource, /relative min-w-0 col-span-2 row-start-2/);
-  assert.match(modalSource, /focus:border-yellow-400\/70 focus:outline-none focus:ring-1 focus:ring-yellow-400/);
+  assert.match(modalSource, /focus:border-yellow-400\/70 focus:outline-hidden focus:ring-1 focus:ring-yellow-400/);
   // Both customer states use the reviewed neutral chip; the editable one retains its action.
   assert.match(modalSource, /<OrderContextChip onClick=\{\(\) => setShowCustomerPopover\(true\)\}>/);
   assert.match(chipSource, /<User size=\{15\} aria-hidden="true" \/>/);
@@ -195,7 +195,7 @@ test('menu modal keeps search below the wrapping title and cards expose hold pre
 
   assert.match(gridSource, /createPortal/);
   assert.match(gridSource, /MenuItemPreviewState/);
-  assert.match(gridSource, /fixed inset-0 z-\[2147483001\]/);
+  assert.match(gridSource, /fixed inset-0 z-2147483001(?![\w.-])/);
   assert.match(gridSource, /setPreview\(\{ item: previewItem, anchorRect \}\)/);
   assert.match(gridSource, /menu\.cart\.ingredients/);
   assert.match(gridSource, /ingredients: item\.ingredients \|\| null/);

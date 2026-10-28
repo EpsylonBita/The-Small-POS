@@ -76,7 +76,7 @@ interface DetailRowProps {
 const DetailRow: React.FC<DetailRowProps> = ({ label, value }) => (
   <div className="liquid-glass-modal-inset rounded-xl px-3 py-2.5">
     <p className="liquid-glass-modal-text-muted text-[11px]">{label}</p>
-    <p className="liquid-glass-modal-text mt-0.5 break-words text-sm font-medium">{value || '—'}</p>
+    <p className="liquid-glass-modal-text mt-0.5 wrap-break-word text-sm font-medium">{value || '—'}</p>
   </div>
 )
 
@@ -89,7 +89,7 @@ const SourceLineCard: React.FC<SourceLineCardProps> = ({ line, t }) => (
   <div className="liquid-glass-modal-inset space-y-3 rounded-2xl border p-3">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div className="flex min-w-0 items-start gap-2">
-        <RadioTower className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-300" />
+        <RadioTower className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-300" />
         <div className="min-w-0">
           <p className="liquid-glass-modal-text text-sm font-semibold">
             {line.name || t('settings.peripherals.callerId.serverManaged.sourceLine', 'Source line')}
@@ -238,7 +238,7 @@ const CallerIdSection: React.FC = () => {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <PhoneIncoming className="h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-300" />
+          <PhoneIncoming className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
           <h3 className="liquid-glass-modal-text text-sm font-semibold">
             {t('settings.peripherals.callerId.title', 'Caller ID')}
           </h3>
@@ -257,7 +257,7 @@ const CallerIdSection: React.FC = () => {
       <CallerIdNetworkAccessCard />
 
       <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border px-3 py-2.5">
-        <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />
+        <Info className="mt-0.5 h-4 w-4 shrink-0" />
         <p className="text-xs">
           {t(
             'settings.peripherals.callerId.singleSourceBody',
@@ -275,9 +275,9 @@ const CallerIdSection: React.FC = () => {
         </p>
         <div className="liquid-glass-modal-inset flex items-start gap-3 rounded-2xl border p-3">
           {serverConfig?.enabled && hasAssignment ? (
-            <CheckCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-green-600 dark:text-green-300" />
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-300" />
           ) : (
-            <Server className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-300" />
+            <Server className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
           )}
           <div className="space-y-1">
             <p className="liquid-glass-modal-text text-sm font-semibold">
@@ -296,7 +296,7 @@ const CallerIdSection: React.FC = () => {
 
         {serverConfig && !serverConfig.enabled ? (
           <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border p-3">
-            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="text-xs font-medium">
                 {t('settings.peripherals.callerId.serverManaged.disabledTitle', 'Caller ID is not enabled')}
@@ -313,7 +313,7 @@ const CallerIdSection: React.FC = () => {
 
         {serverConfig?.ipTrustSourcePolicy === 'blocked' && sourceLines.length > 0 ? (
           <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border p-3">
-            <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0" />
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="text-xs font-medium">
                 {t('settings.peripherals.callerId.serverManaged.blockedTitle', 'Source terminal is restricted')}
@@ -330,7 +330,7 @@ const CallerIdSection: React.FC = () => {
 
         {serverError ? (
           <div className="liquid-glass-modal-error flex items-start gap-2 rounded-2xl border p-3" role="alert">
-            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <p className="text-xs">{serverError}</p>
           </div>
         ) : null}
@@ -358,7 +358,7 @@ const CallerIdSection: React.FC = () => {
 
         {sourceLines.length === 0 && receivingLines.length > 0 ? (
           <div className="liquid-glass-modal-inset flex items-start gap-3 rounded-2xl border p-3">
-            <MonitorCheck className="mt-0.5 h-5 w-5 flex-shrink-0 text-green-600 dark:text-green-300" />
+            <MonitorCheck className="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-300" />
             <div className="space-y-1">
               <p className="liquid-glass-modal-text text-sm font-semibold">
                 {t(
@@ -381,7 +381,7 @@ const CallerIdSection: React.FC = () => {
 
         {!hasAssignment && !serverError ? (
           <div className="liquid-glass-modal-warning flex items-start gap-2 rounded-2xl border p-3">
-            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="text-xs font-medium">
                 {t('settings.peripherals.callerId.serverManaged.notAssignedTitle', 'No Caller ID line assigned')}
@@ -402,7 +402,7 @@ const CallerIdSection: React.FC = () => {
       </div>}
       {(status?.error || status?.reason) ? (
         <div className="liquid-glass-modal-error flex items-start gap-2 rounded-2xl border p-3" role="alert">
-          <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <p className="text-xs">
             {status.error || t(
               `settings.peripherals.callerId.reason.${reasonKey(status.reason)}`,
@@ -421,9 +421,9 @@ const CallerIdSection: React.FC = () => {
         </p>
         <div className="flex items-start gap-3">
           {listening ? (
-            <CheckCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-green-600 dark:text-green-300" />
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-300" />
           ) : (
-            <RadioTower className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-300" />
+            <RadioTower className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
           )}
           <div className="space-y-1">
             <p className="liquid-glass-modal-text text-sm font-semibold">
@@ -479,7 +479,7 @@ const CallerIdSection: React.FC = () => {
           type="button"
           onClick={handleRefresh}
           disabled={refreshing}
-          className="liquid-glass-modal-button inline-flex min-h-[44px] w-full items-center justify-center gap-2 px-3 py-2 text-sm font-medium transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+          className="liquid-glass-modal-button inline-flex min-h-touch w-full items-center justify-center gap-2 px-3 py-2 text-sm font-medium transition-transform duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {refreshing ? (
             <Loader2 className="h-4 w-4 animate-spin" />

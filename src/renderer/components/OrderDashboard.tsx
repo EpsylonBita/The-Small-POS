@@ -1770,14 +1770,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const visibleOrderTypeCardCount = newWorkCards.length;
     const orderTypeModalWidthClass =
       visibleOrderTypeCardCount >= 5
-        ? "!max-w-5xl"
+        ? "max-w-5xl!"
         : visibleOrderTypeCardCount === 4
-          ? "!max-w-4xl"
+          ? "max-w-4xl!"
           : visibleOrderTypeCardCount === 3
-            ? "!max-w-3xl"
+            ? "max-w-3xl!"
             : visibleOrderTypeCardCount === 2
-              ? "!max-w-xl"
-              : "!max-w-lg";
+              ? "max-w-xl!"
+              : "max-w-lg!";
     // Round 322 layout, extended to seven cards: from five cards up the lg
     // track has six columns and every card spans two, so rows read as 3+2
     // (fifth card starts at column 2), 3+3, or 3+3+1 (seventh card centred at
@@ -7931,7 +7931,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         ) : activeTab === "rooms" && hasRoomsModule ? (
           /* Rooms hub (Round 236) — embedded RoomsView; the bordered card bounds the scroll. */
           <div
-            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-sm transition-colors ${
+            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-xs transition-colors ${
               resolvedTheme === "light"
                 ? "border-amber-100/80 bg-[#fffaf1]/90"
                 : "border-white/10 bg-slate-950/45"
@@ -7946,7 +7946,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
         ) : activeTab === "services" && hasServicesModule ? (
           /* Services hub (Round 236) — embedded AppointmentsView with its availability check intact. */
           <div
-            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-sm transition-colors ${
+            className={`h-full min-h-0 overflow-hidden rounded-2xl border shadow-xs transition-colors ${
               resolvedTheme === "light"
                 ? "border-amber-100/80 bg-[#fffaf1]/90"
                 : "border-white/10 bg-slate-950/45"
@@ -7987,7 +7987,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           onClose={() => setShowOrderTypeModal(false)}
           title={t("primaryActions.trigger")}
           className={`${orderTypeModalWidthClass} order-type-transparent-modal`}
-          contentClassName="!p-0 !overflow-visible"
+          contentClassName="p-0! overflow-visible!"
         >
           <div className="p-2">
             {isOrderTypeTransitioning ? (
@@ -8236,7 +8236,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           isOpen={showRoomFlowModal}
           onClose={() => setShowRoomFlowModal(false)}
           title={t("orderFlow.roomFlowTitle", { defaultValue: "Room" })}
-          className="!max-w-md"
+          className="max-w-md!"
         >
           <div className="grid grid-cols-1 gap-3 p-2">
             {/* Room Order — only with the Orders module (it charges an order to a room folio). */}
@@ -8248,7 +8248,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   t("orderFlow.roomFlowOrder", { defaultValue: "Room Order" }),
                   t("orderFlow.roomFlowOrderDesc", { defaultValue: "Charge an order to a room" }),
                 )}
-                className="flex min-h-[64px] items-center gap-4 rounded-2xl border-2 border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-amber-400/30 bg-linear-to-br from-amber-500/10 to-amber-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
               >
                 <DoorOpen className="h-7 w-7 shrink-0 text-amber-400" strokeWidth={1.6} />
                 <div>
@@ -8270,7 +8270,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                 t("orderFlow.roomFlowCheckin", { defaultValue: "Check-in" }),
                 t("orderFlow.roomFlowCheckinDesc", { defaultValue: "Check in a reserved room" }),
               )}
-              className="flex min-h-[64px] items-center gap-4 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+              className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-green-400/30 bg-linear-to-br from-green-500/10 to-green-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
             >
               <UserCheck className="h-7 w-7 shrink-0 text-green-400" strokeWidth={1.6} />
               <div>
@@ -8292,7 +8292,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                   t("orderFlow.roomFlowReservation", { defaultValue: "Create Reservation" }),
                   t("orderFlow.roomFlowReservationDesc", { defaultValue: "Reserve an available room" }),
                 )}
-                className="flex min-h-[64px] items-center gap-4 rounded-2xl border-2 border-purple-400/30 bg-gradient-to-br from-purple-500/10 to-purple-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
+                className="flex min-h-touch-xl items-center gap-4 rounded-2xl border-2 border-purple-400/30 bg-linear-to-br from-purple-500/10 to-purple-600/5 px-5 py-4 text-left transition-transform duration-150 active:scale-95"
               >
                 <CalendarPlus className="h-7 w-7 shrink-0 text-[#a855f7]" strokeWidth={1.6} />
                 <div>
@@ -8313,7 +8313,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           isOpen={showRoomOrderSelector}
           onClose={() => setShowRoomOrderSelector(false)}
           title={t("orderFlow.roomOrderTitle", { defaultValue: "Select a room" })}
-          className="!max-w-3xl"
+          className="max-w-3xl!"
         >
           <div className="p-2">
             {roomOrderRooms.length === 0 ? (
@@ -8362,8 +8362,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(
                           })}
                           className={`flex flex-col gap-1 rounded-2xl border-2 px-4 py-3 text-left transition-transform duration-150 ${
                             folioId
-                              ? "border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 active:scale-95"
-                              : "border-white/10 bg-white/[0.03] opacity-50 cursor-not-allowed"
+                              ? "border-amber-400/30 bg-linear-to-br from-amber-500/10 to-amber-600/5 active:scale-95"
+                              : "border-white/10 bg-white/3 opacity-50 cursor-not-allowed"
                           }`}
                         >
                           <span className="text-base font-bold text-white">

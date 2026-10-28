@@ -161,12 +161,12 @@ export const TerminalCardCompact: React.FC<Props> = memo(
                   <span role="img" aria-label={t('ecr.defaultTerminal', 'Default Terminal')}>
                     <Star
                       size={12}
-                      className="text-yellow-400 fill-yellow-400 flex-shrink-0"
+                      className="text-yellow-400 fill-yellow-400 shrink-0"
                     />
                   </span>
                 )}
                 {!device.enabled && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-500/20 text-gray-500 dark:text-gray-400 flex-shrink-0">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-gray-500/20 text-gray-500 dark:text-gray-400 shrink-0">
                     {t('ecr.admission.disabledBadge', { defaultValue: 'Disabled' })}
                   </span>
                 )}

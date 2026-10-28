@@ -61,7 +61,11 @@
     "conflict": "Kërkesa origjinale duhet të verifikohet përpara se të vazhdoni.",
     "refresh": "Rifresko gjendjen",
     "confirmOriginalResult": "Verifiko anulimin fillestar",
-    "originalResultUnconfirmed": "Anulimi fillestar nuk u konfirmua dhe mbetet i ruajtur. Rilidhuni dhe kontrolloni faturën përpara se të vazhdoni."
+    "originalResultUnconfirmed": "Anulimi fillestar nuk u konfirmua dhe mbetet i ruajtur. Rilidhuni dhe kontrolloni faturën përpara se të vazhdoni.",
+    "editRefused": "Ndryshimi nuk u zbatua sepse porosia ndryshoi ndërkohë. Hape përsëri dhe bëje ndryshimin nga fillimi.",
+    "editConflict": "Ndryshimi i ruajtur duhet kontrolluar. Hape përsëri porosinë para se të vazhdosh.",
+    "discardEdit": "Hidhe poshtë ndryshimin e vjetër",
+    "editReviewUnavailable": "Ndryshimi i ruajtur nuk mund të hapej ose të hidhej poshtë. Rilidhu dhe kontrolloje përsëri porosinë."
   },
   "paymentIntegrity": {
     "reasonCodes": {

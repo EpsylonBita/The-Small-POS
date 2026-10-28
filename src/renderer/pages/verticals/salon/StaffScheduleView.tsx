@@ -1024,7 +1024,7 @@ export const StaffScheduleView: React.FC = memo(() => {
 
   const panelClass = isDark
     ? 'bg-zinc-950/95 border-zinc-800 text-zinc-100'
-    : 'bg-white border-slate-200 text-slate-950 shadow-sm';
+    : 'bg-white border-slate-200 text-slate-950 shadow-xs';
   const softPanelClass = isDark
     ? 'bg-zinc-900/70 border-zinc-800'
     : 'bg-slate-50 border-slate-200';
@@ -1034,7 +1034,7 @@ export const StaffScheduleView: React.FC = memo(() => {
     ? 'bg-black/60 border-white/10 ring-1 ring-white/15 text-zinc-100 backdrop-blur-2xl shadow-2xl shadow-black/50'
     : 'bg-white/60 border-white/70 ring-1 ring-white/60 text-slate-950 backdrop-blur-2xl shadow-2xl shadow-black/30';
   const mutedTextClass = isDark ? 'text-zinc-400' : 'text-slate-600';
-  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-none transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/25 ${
+  const inputClass = `w-full rounded-xl border px-3 py-3 text-base outline-hidden transition-colors focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/25 ${
     isDark
       ? 'bg-zinc-900 border-zinc-700 text-zinc-100'
       : 'bg-white border-slate-300 text-slate-950'
@@ -1107,7 +1107,7 @@ export const StaffScheduleView: React.FC = memo(() => {
           }
         }}
       />
-      <motion.div variants={pageMotionContainer} className="mx-auto flex h-full w-full max-w-screen-2xl flex-col gap-4 p-4 md:p-5 xl:p-6">
+      <motion.div variants={pageMotionContainer} className="mx-auto flex h-full w-full max-w-(--breakpoint-2xl) flex-col gap-4 p-4 md:p-5 xl:p-6">
         <motion.section variants={pageMotionItem} className={`rounded-2xl border p-4 md:p-5 ${panelClass}`}>
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div className="space-y-1">

@@ -191,7 +191,7 @@ export const sectionSubtle = (theme: ResolvedTheme) =>
  */
 export const inputBase = (theme: ResolvedTheme) =>
   // radius comes from the shared .liquid-glass-modal-input token (--pos-glass-radius-small)
-  `liquid-glass-modal-input w-full px-3 py-3 focus:outline-none focus:ring-2 focus:ring-yellow-400/50 transition-colors`;
+  `liquid-glass-modal-input w-full px-3 py-3 focus:outline-hidden focus:ring-2 focus:ring-yellow-400/50 transition-colors`;
 
 /**
  * Button styling with liquid glass effect.

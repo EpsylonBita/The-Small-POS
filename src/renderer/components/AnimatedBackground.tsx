@@ -272,7 +272,7 @@ export default function AnimatedBackground() {
       )}
 
       {/* Theme-based gradient overlay */}
-      <div className={`absolute inset-0 bg-gradient-to-br ${isDark ? 'from-black/30 via-black/10 to-black/20' : 'from-white/30 via-white/10 to-white/20'}`} />
+      <div className={`absolute inset-0 bg-linear-to-br ${isDark ? 'from-black/30 via-black/10 to-black/20' : 'from-white/30 via-white/10 to-white/20'}`} />
 
       {/* Glass blur effect */}
       <div className="absolute inset-0 backdrop-blur-[1px]" />

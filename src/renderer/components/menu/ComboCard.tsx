@@ -99,15 +99,15 @@ export const ComboCard: React.FC<ComboCardProps> = ({ combo, orderType = 'pickup
             alt={name}
             className="w-full h-full object-cover"
           />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+          <div className="absolute inset-0 bg-linear-to-t from-black/60 to-transparent" />
         </div>
       ) : (
         <div className={`h-16 flex items-center justify-center ${
           combo.combo_type === 'bogo'
-            ? 'bg-gradient-to-r from-amber-500/20 to-orange-500/20'
+            ? 'bg-linear-to-r from-amber-500/20 to-orange-500/20'
             : combo.combo_type === 'choice'
-              ? 'bg-gradient-to-r from-blue-500/20 to-indigo-500/20'
-              : 'bg-gradient-to-r from-emerald-500/20 to-teal-500/20'
+              ? 'bg-linear-to-r from-blue-500/20 to-indigo-500/20'
+              : 'bg-linear-to-r from-emerald-500/20 to-teal-500/20'
         }`}>
           {React.cloneElement(getTypeIcon() as React.ReactElement<{ className?: string }>, { className: 'w-8 h-8 opacity-40' })}
         </div>

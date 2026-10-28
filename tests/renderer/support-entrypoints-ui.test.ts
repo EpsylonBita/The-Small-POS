@@ -24,14 +24,14 @@ test('support explanation surfaces use amber/neutral glass styling and no hover-
   assert.match(panel, /info:[\s\S]*?bg-amber-500\/15 text-amber-700/);
   assert.match(panel, /high:[\s\S]*?bg-amber-500\/15 text-amber-700/);
   assert.match(panel, /critical:[\s\S]*?bg-red-500\/15 text-red-700/);
-  assert.match(panel, /inline-flex min-h-\[44px\][\s\S]*?active:scale-\[0\.98\]/);
+  assert.match(panel, /inline-flex min-h-touch(?![\w.-])[\s\S]*?active:scale-\[0\.98\]/);
   assert.match(panel, /bg-amber-400 text-black active:bg-amber-300/);
-  assert.match(panel, /bg-white\/\[0\.08\][\s\S]*?active:bg-white\/\[0\.14\]/);
+  assert.match(panel, /bg-white\/8[\s\S]*?active:bg-white\/\[0\.14\]/);
 });
 
 test('printer and health support entry buttons are 44px amber touch controls', () => {
   for (const source of [printerEntry, healthEntry]) {
-    assert.match(source, /inline-flex min-h-\[44px\] items-center gap-2 rounded-2xl/);
+    assert.match(source, /inline-flex min-h-touch items-center gap-2 rounded-2xl/);
     assert.match(source, /border-amber-500\/25 bg-amber-500\/10/);
     assert.match(source, /text-amber-700/);
     assert.match(source, /active:scale-\[0\.98\]/);

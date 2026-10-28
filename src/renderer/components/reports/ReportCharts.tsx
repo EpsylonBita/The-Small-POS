@@ -13,26 +13,10 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from 'recharts';
 import { motion } from 'framer-motion';
 import { formatDate as formatDateValue } from '../../utils/format';
 import type { SalesTrendData, TopItemData, HourlySalesData } from '../../types/reports';
-
-// Type workarounds for Recharts + React 19
-const ResponsiveContainerC: any = ResponsiveContainer as any;
-const AreaChartC: any = AreaChart as any;
-const BarChartC: any = BarChart as any;
-const PieChartC: any = PieChart as any;
-const CartesianGridC: any = CartesianGrid as any;
-const XAxisC: any = XAxis as any;
-const YAxisC: any = YAxis as any;
-const TooltipC: any = Tooltip as any;
-const AreaC: any = Area as any;
-const BarC: any = Bar as any;
-const PieC: any = Pie as any;
-const CellC: any = Cell as any;
-const LegendC: any = Legend as any;
 
 interface ChartContainerProps {
   title: string;
@@ -75,37 +59,27 @@ export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, curre
   return (
     <ChartContainer title={t('reports.sales.salesTrend')} isDark={isDark} delay={0.1}>
       <div className="h-80">
-        <ResponsiveContainerC width="100%" height="100%">
-          <AreaChartC data={data}>
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={data}>
             <defs>
               <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#eab308" stopOpacity={0.8} />
                 <stop offset="95%" stopColor="#eab308" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGridC strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
-            <XAxisC
+            <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
+            <XAxis
               dataKey="date"
               tickFormatter={formatChartDate}
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
             />
-            <YAxisC
+            <YAxis
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
               tickFormatter={(value: number) => currency.format(value)}
             />
-            <TooltipC
-              contentStyle={{
-                backgroundColor: isDark ? '#1f2937' : '#ffffff',
-                border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
-                borderRadius: '8px',
-                color: isDark ? '#ffffff' : '#000000',
-              }}
-              formatter={(value: number) => [currency.format(value), 'Revenue']}
-              labelFormatter={formatChartDate}
-            />
-            <AreaC
+            <Area
               type="monotone"
               dataKey="revenue"
               stroke="#eab308"
@@ -114,8 +88,22 @@ export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, curre
               fill="url(#colorRevenue)"
               animationDuration={1000}
             />
-          </AreaChartC>
-        </ResponsiveContainerC>
+            <Tooltip
+              contentStyle={{
+                backgroundColor: isDark ? '#1f2937' : '#ffffff',
+                border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
+                borderRadius: '8px',
+                color: isDark ? '#ffffff' : '#000000',
+              }}
+              formatter={(value) => typeof value === 'number' || typeof value === 'string'
+                ? [currency.format(Number(value)), 'Revenue']
+                : undefined}
+              labelFormatter={(value) => typeof value === 'string' || typeof value === 'number'
+                ? formatChartDate(String(value))
+                : ''}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
     </ChartContainer>
   );
@@ -136,38 +124,40 @@ export const TopItemsChart = memo<TopItemsChartProps>(({ data, isDark, currency 
   return (
     <ChartContainer title={t('reports.sales.topItems')} isDark={isDark} delay={0.2}>
       <div className="h-80">
-        <ResponsiveContainerC width="100%" height="100%">
-          <BarChartC data={data} layout="vertical">
-            <CartesianGridC strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
-            <XAxisC
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} layout="vertical">
+            <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
+            <XAxis
               type="number"
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
               tickFormatter={(value: number) => currency.format(value)}
             />
-            <YAxisC
+            <YAxis
               type="category"
               dataKey="name"
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
               width={120}
             />
-            <TooltipC
+            <Bar dataKey="revenue" fill="#eab308" radius={[0, 8, 8, 0]} animationDuration={1000}>
+              {data.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+              ))}
+            </Bar>
+            <Tooltip
               contentStyle={{
                 backgroundColor: isDark ? '#1f2937' : '#ffffff',
                 border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
                 borderRadius: '8px',
                 color: isDark ? '#ffffff' : '#000000',
               }}
-              formatter={(value: number) => [currency.format(value), 'Revenue']}
+              formatter={(value) => typeof value === 'number' || typeof value === 'string'
+                ? [currency.format(Number(value)), 'Revenue']
+                : undefined}
             />
-            <BarC dataKey="revenue" fill="#eab308" radius={[0, 8, 8, 0]} animationDuration={1000}>
-              {data.map((entry, index) => (
-                <CellC key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-              ))}
-            </BarC>
-          </BarChartC>
-        </ResponsiveContainerC>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
     </ChartContainer>
   );
@@ -189,36 +179,36 @@ export const HourlySalesChart = memo<HourlySalesChartProps>(({ data, isDark, cur
   return (
     <ChartContainer title={t('reports.sales.salesByHour')} isDark={isDark} delay={0.3}>
       <div className="h-80">
-        <ResponsiveContainerC width="100%" height="100%">
-          <BarChartC data={activeHours}>
-            <CartesianGridC strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
-            <XAxisC
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={activeHours}>
+            <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
+            <XAxis
               dataKey="hour"
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
               tickFormatter={(value: number) => `${value}:00`}
             />
-            <YAxisC
+            <YAxis
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
               tickFormatter={(value: number) => currency.format(value)}
             />
-            <TooltipC
+            <Bar dataKey="revenue" fill="#eab308" radius={[8, 8, 0, 0]} animationDuration={1000} />
+            <Tooltip
               contentStyle={{
                 backgroundColor: isDark ? '#1f2937' : '#ffffff',
                 border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
                 borderRadius: '8px',
                 color: isDark ? '#ffffff' : '#000000',
               }}
-              formatter={(value: number, name: string) => [
-                name === 'revenue' ? currency.format(value) : value,
+              formatter={(value, name) => typeof value === 'number' || typeof value === 'string' ? [
+                name === 'revenue' ? currency.format(Number(value)) : value,
                 name === 'revenue' ? 'Revenue' : 'Orders'
-              ]}
-              labelFormatter={(value: number) => `${value}:00`}
+              ] : undefined}
+              labelFormatter={(value) => `${value}:00`}
             />
-            <BarC dataKey="revenue" fill="#eab308" radius={[8, 8, 0, 0]} animationDuration={1000} />
-          </BarChartC>
-        </ResponsiveContainerC>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
     </ChartContainer>
   );
@@ -251,34 +241,36 @@ export const PaymentMethodChart = memo<PaymentMethodChartProps>(({ cashTotal, ca
   return (
     <ChartContainer title={t('reports.payments.paymentMethods')} isDark={isDark} delay={0.4}>
       <div className="h-80">
-        <ResponsiveContainerC width="100%" height="100%">
-          <PieChartC>
-            <PieC
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
               data={data}
               cx="50%"
               cy="50%"
               labelLine={false}
-              label={({ name, percent }: { name: string; percent: number }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+              label={({ payload, percent }) => `${payload.name}: ${((percent ?? 0) * 100).toFixed(0)}%`}
               outerRadius={100}
               fill="#8884d8"
               dataKey="value"
               animationDuration={1000}
             >
               {data.map((entry, index) => (
-                <CellC key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
               ))}
-            </PieC>
-            <TooltipC
+            </Pie>
+            <Tooltip
               contentStyle={{
                 backgroundColor: isDark ? '#1f2937' : '#ffffff',
                 border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
                 borderRadius: '8px',
                 color: isDark ? '#ffffff' : '#000000',
               }}
-              formatter={(value: number) => currency.format(value)}
+              formatter={(value) => typeof value === 'number' || typeof value === 'string'
+                ? currency.format(Number(value))
+                : undefined}
             />
-          </PieChartC>
-        </ResponsiveContainerC>
+          </PieChart>
+        </ResponsiveContainer>
         <div className={`mt-4 text-center text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
           Total: {currency.format(total)}
         </div>
@@ -310,34 +302,36 @@ export const OrderTypeChart = memo<OrderTypeChartProps>(({ deliveryTotal, instor
   return (
     <ChartContainer title={t('reports.orders.ordersByType')} isDark={isDark} delay={0.5}>
       <div className="h-80">
-        <ResponsiveContainerC width="100%" height="100%">
-          <PieChartC>
-            <PieC
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
               data={data}
               cx="50%"
               cy="50%"
               labelLine={false}
-              label={({ name, percent }: { name: string; percent: number }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+              label={({ payload, percent }) => `${payload.name}: ${((percent ?? 0) * 100).toFixed(0)}%`}
               outerRadius={100}
               fill="#8884d8"
               dataKey="value"
               animationDuration={1000}
             >
               {data.map((entry, index) => (
-                <CellC key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
               ))}
-            </PieC>
-            <TooltipC
+            </Pie>
+            <Tooltip
               contentStyle={{
                 backgroundColor: isDark ? '#1f2937' : '#ffffff',
                 border: `1px solid ${isDark ? '#374151' : '#e5e7eb'}`,
                 borderRadius: '8px',
                 color: isDark ? '#ffffff' : '#000000',
               }}
-              formatter={(value: number) => currency.format(value)}
+              formatter={(value) => typeof value === 'number' || typeof value === 'string'
+                ? currency.format(Number(value))
+                : undefined}
             />
-          </PieChartC>
-        </ResponsiveContainerC>
+          </PieChart>
+        </ResponsiveContainer>
         <div className={`mt-4 text-center text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
           Total: {currency.format(total)}
         </div>

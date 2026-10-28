@@ -314,7 +314,7 @@ test('Round 232/299: navigation sidebar shows NEUTRAL-fade scroll-hint caps (no 
   const botIdx = frame.indexOf('data-navigation-scroll-hint-bottom');
   const bottomCap = frame.slice(botIdx, frame.indexOf('/>', botIdx) + 2);
   for (const cap of [topCap, bottomCap]) {
-    assert.match(cap, /bg-gradient-to-[bt]/);
+    assert.match(cap, /bg-linear-to-[bt]/);
     assert.match(cap, /from-black|from-white/);
     assert.match(cap, /to-transparent/);
     // No coloured dash / pill: no inner element and no amber/yellow tokens.
@@ -350,7 +350,7 @@ test('Round 302: sidebar focus ring is gated by an input-modality guard (pointer
 
   // The native outline is removed ALWAYS (base); the yellow keyboard ring is a separate variant layered on
   // top of the base via focus-visible only.
-  assert.match(source, /const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-none';/);
+  assert.match(source, /const SIDEBAR_FOCUS_BASE = 'rounded-xl focus:outline-hidden';/);
   assert.match(
     source,
     /const SIDEBAR_FOCUS_RING_KEYBOARD = `\$\{SIDEBAR_FOCUS_BASE\} focus-visible:ring-2 focus-visible:ring-yellow-400\/70`;/,

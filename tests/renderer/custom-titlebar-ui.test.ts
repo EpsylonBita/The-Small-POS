@@ -46,7 +46,7 @@ test('the native titlebar owns visible space and top shell actions stay below it
 
   assert.match(
     frameSource,
-    /className=\{`relative z-\[2147483600\] h-8 w-full shrink-0 touch-none select-none border-b/,
+    /className=\{`relative z-2147483600 h-8 w-full shrink-0 touch-none select-none border-b/,
   );
   assert.doesNotMatch(frameSource, /fixed inset-x-0 top-0/);
   assert.match(frameSource, /bg-white\/95/);
@@ -64,9 +64,9 @@ test('the native titlebar owns visible space and top shell actions stay below it
     /data-app-window-content[\s\S]*?className="relative flex min-h-0 flex-1 transform-gpu flex-col overflow-hidden"/,
   );
   assert.match(mainLayoutSource, /fixed top-12 right-24 sm:right-28/);
-  assert.match(appSource, /fixed top-12 left-\[9\.5rem\]/);
+  assert.match(appSource, /fixed top-12 left-38(?![\w.-])/);
   assert.doesNotMatch(mainLayoutSource, /fixed top-28 right-24 sm:right-28/);
-  assert.doesNotMatch(appSource, /fixed top-28 left-\[9\.5rem\]/);
+  assert.doesNotMatch(appSource, /fixed top-28 left-38(?![\w.-])/);
   assert.equal(
     (modalPrimitivesSource.match(/ReactDOM\.createPortal\([^\n]*, document\.body\)/g) || []).length,
     2,
@@ -114,7 +114,7 @@ test('AppWindowFrame keeps update access visible and uses compact no-drag window
   assert.match(source, /window\.removeEventListener\('pointermove', handleGlobalMove, true\)/);
   assert.match(source, /data-app-window-drag-zone/);
   assert.match(source, /style=\{\{ zIndex: 2147483600, pointerEvents: 'auto' \}\}/);
-  assert.match(source, /className=\{`relative z-\[2147483600\] h-8 w-full shrink-0 touch-none select-none border-b/);
+  assert.match(source, /className=\{`relative z-2147483600 h-8 w-full shrink-0 touch-none select-none border-b/);
   assert.doesNotMatch(source, /className=\{`relative h-10/);
   assert.match(source, /absolute inset-x-0 inset-y-0/);
   assert.match(source, /touch-none cursor-grab bg-transparent active:cursor-grabbing/);
@@ -200,7 +200,7 @@ test('AppWindowFrame keeps update access visible and uses compact no-drag window
   assert.doesNotMatch(source, /active:scale-90/);
   assert.match(source, /inline-flex h-\[32px\] min-h-\[32px\] w-\[48px\] min-w-\[48px\] shrink-0 touch-manipulation items-center justify-center bg-transparent p-0 leading-none/);
   assert.match(source, /className="absolute right-0 top-0 z-30 flex h-8 items-start gap-0"/);
-  assert.match(source, /<Minus className="block h-4 w-4 translate-y-\[1px\]" \/>/);
+  assert.match(source, /<Minus className="block h-4 w-4 translate-y-px" \/>/);
   assert.doesNotMatch(source, /\bSquare\b/);
   assert.match(source, /<X className="block h-4 w-4" \/>/);
   const controlBase = source.match(/const controlBase = `([\s\S]*?)`;/);
@@ -254,7 +254,7 @@ test('App wires updater state into the frame on login and main POS routes', () =
   assert.match(source, /<AppRoutes\s+onLogout=\{handleLogout\}\s+onOpenConnectionSettings=\{openConnectionSettings\}\s*\/>/);
   assert.match(readFileSync(appRoutesPath, 'utf8'), /<PageLoadMotion animationKey="new-order" className="h-full min-h-0">/);
   assert.match(source, /if \(!user\) \{\s*setShowConnectionSettings\(false\);/);
-  assert.match(source, /className="fixed top-12 left-\[9\.5rem\] z-40"/);
+  assert.match(source, /className="fixed top-12 left-38 z-40"/);
   assert.match(source, /<SyncStatusIndicator onOpenRecovery=\{openSyncRecovery\} \/>/);
   const unauthenticatedBranch = source.slice(
     source.indexOf('// Show login when no user'),

@@ -322,7 +322,7 @@ export const TableFloorPlanView: React.FC<TableFloorPlanViewProps> = memo(({
   );
 
   const legend = (
-    <div className={`absolute bottom-3 left-3 flex flex-wrap gap-2 rounded-lg px-3 py-2 text-xs font-semibold shadow-sm ${
+    <div className={`absolute bottom-3 left-3 flex flex-wrap gap-2 rounded-lg px-3 py-2 text-xs font-semibold shadow-xs ${
       isDark ? 'bg-[#1b1d20] text-zinc-200' : 'bg-white text-zinc-700'
     }`}>
       {(Object.keys(statusColors) as TableStatus[]).map(status => (

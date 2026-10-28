@@ -77,7 +77,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
   };
 
   return (
-    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title="Driver Orders Diagnostic" size="lg" className="!max-w-2xl">
+    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title="Driver Orders Diagnostic" size="lg" className="max-w-2xl!">
       <div className="space-y-6">
         {/* Check Button */}
         <div className="flex justify-between items-center">

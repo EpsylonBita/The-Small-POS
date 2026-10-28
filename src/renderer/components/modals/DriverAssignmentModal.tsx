@@ -126,7 +126,7 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       onClose={onClose}
       title={isChange ? t('modals.driverAssignment.changeTitle') : t('modals.driverAssignment.title')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={false}
     >
       {isChange ? (

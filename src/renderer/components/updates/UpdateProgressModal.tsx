@@ -26,7 +26,7 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
             onClose={() => { }} // Prevent closing via backdrop/esc during download
             title={t('updates.title.downloading')}
             size="md"
-            className="!max-w-lg"
+            className="max-w-lg!"
             closeOnBackdrop={false}
             closeOnEscape={false}
         >

@@ -39,7 +39,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
             onClose={onClose}
             title={t('updates.title.available')}
             size="md"
-            className="!max-w-lg"
+            className="max-w-lg!"
         >
             <div className="space-y-4">
                 <div className="flex items-center space-x-3 text-amber-300">

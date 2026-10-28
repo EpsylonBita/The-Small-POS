@@ -173,7 +173,7 @@ test('Round 439: IntegrationsPage uses smooth rounded surfaces without stripping
 });
 
 test('Plugin setup modals keep light-theme text and controls readable', () => {
-  const pluginModalClasses = source.match(/className="plugin-setup-modal !max-w-(?:lg|2xl)"/g) ?? [];
+  const pluginModalClasses = source.match(/className="plugin-setup-modal max-w-(?:lg|2xl)!"/g) ?? [];
   assert.equal(
     pluginModalClasses.length,
     2,

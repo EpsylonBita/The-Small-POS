@@ -620,7 +620,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
       {/* Suggestions Dropdown */}
       {searchEnabled && showSuggestions && (suggestions.length > 0 || isLoading) && (
-        <div className="absolute left-0 right-0 top-full z-[9999] mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto scrollbar-hide">
+        <div className="absolute left-0 right-0 top-full z-9999 mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto scrollbar-hide">
           {isLoading && (
             <div className="p-3 text-center text-gray-500 dark:text-gray-400">
               {t('modals.addCustomer.searchingAddresses')}
@@ -635,7 +635,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
               className="w-full text-left p-3 active:bg-white/10 dark:active:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-600/20 last:border-b-0"
             >
               <div className="flex items-start gap-2">
-                <MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300 mt-1 flex-shrink-0" />
+                <MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300 mt-1 shrink-0" />
                 <div>
                   <p className="text-sm font-medium text-gray-900 dark:text-white">
                     {getSuggestionStreetLabel(suggestion)}
@@ -1867,7 +1867,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       ) : undefined}
       ariaLabel={callerIdWorkspace ? getModalTitle() : undefined}
       size={callerIdWorkspace ? 'lg' : 'sm'}
-      className={callerIdWorkspace ? '!max-w-4xl' : '!max-w-lg'}
+      className={callerIdWorkspace ? 'max-w-4xl!' : 'max-w-lg!'}
       closeOnBackdrop={!isSubmitting}
       closeOnEscape={!isSubmitting}
     >
@@ -1898,7 +1898,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
                     ? 'add-customer-phone-warning'
                     : undefined
               }
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? '!border-red-500 focus:!ring-red-500/50' : ''}`}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''} ${phoneErrorText ? 'border-red-500! focus:ring-red-500/50!' : ''}`}
               disabled={isAddressOnlyMode}
               readOnly={isAddressOnlyMode}
             />

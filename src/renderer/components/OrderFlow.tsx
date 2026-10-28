@@ -2072,10 +2072,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const visibleOrderTypeCardCount = 1 + (hasDeliveryModule ? 1 : 0) + (hasTablesModule ? 1 : 0);
   const orderTypeModalWidthClass =
     visibleOrderTypeCardCount === 3
-      ? '!max-w-3xl'
+      ? 'max-w-3xl!'
       : visibleOrderTypeCardCount === 2
-        ? '!max-w-xl'
-        : '!max-w-lg';
+        ? 'max-w-xl!'
+        : 'max-w-lg!';
   const orderTypeGridColsClass =
     visibleOrderTypeCardCount === 3
       ? 'grid-cols-1 sm:grid-cols-3'
@@ -2107,7 +2107,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         onClose={() => setIsOrderTypeModalOpen(false)}
         title={t('orderFlow.selectOrderType')}
         className={`${orderTypeModalWidthClass} order-type-transparent-modal`}
-        contentClassName="!p-0 !overflow-visible"
+        contentClassName="p-0! overflow-visible!"
       >
         <div className="p-2">
           {isTransitioning ? (
@@ -2237,7 +2237,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           isOpen={showZoneAlert}
           onClose={() => setShowZoneAlert(false)}
           title={t('orderFlow.deliveryZoneValidation')}
-          className="!max-w-lg"
+          className="max-w-lg!"
         >
           <ZoneValidationAlert
             validationResult={deliveryZoneInfo}

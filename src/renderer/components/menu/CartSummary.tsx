@@ -258,7 +258,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
                   !isDiscountValid && discountValue > 0
                     ? 'border-red-500 bg-red-50'
                     : 'border-gray-300'
-                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                } focus:outline-hidden focus:ring-2 focus:ring-blue-500`}
                 placeholder={t('forms.placeholders.zero')}
               />
               <span className="text-xs text-gray-500">

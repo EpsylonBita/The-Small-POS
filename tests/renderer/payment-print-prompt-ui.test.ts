@@ -16,7 +16,7 @@ const promptSource = readFileSync(promptPath, 'utf8');
 test('payment print prompt presents a large bare printer icon without a decorative wrapper', () => {
   assert.match(
     promptSource,
-    /<Printer\s+className="h-9 w-9 flex-shrink-0 text-yellow-500 dark:text-yellow-300"\s*\/>/,
+    /<Printer\s+className="h-9 w-9 shrink-0 text-yellow-500 dark:text-yellow-300"\s*\/>/,
   );
   assert.doesNotMatch(
     promptSource,

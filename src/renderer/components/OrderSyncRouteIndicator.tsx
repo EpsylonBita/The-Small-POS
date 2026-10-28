@@ -75,10 +75,10 @@ export const OrderSyncRouteIndicator: React.FC<OrderSyncRouteIndicatorProps> = (
     if (variant === 'dashboard') {
         const routeTone = status.routingMode === 'direct_cloud'
             ? 'border-amber-200/90 bg-amber-50/85 text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200'
-            : 'border-slate-200/90 bg-slate-50/85 text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200';
+            : 'border-slate-200/90 bg-slate-50/85 text-slate-700 dark:border-white/10 dark:bg-white/4 dark:text-slate-200';
 
         return (
-            <div className={`rounded-[24px] border border-slate-200/80 bg-white/92 p-4 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_16px_32px_rgba(2,6,23,0.22)] ${className}`.trim()}>
+            <div className={`rounded-[24px] border border-slate-200/80 bg-white/92 p-4 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-white/10 dark:bg-white/4 dark:shadow-[0_16px_32px_rgba(2,6,23,0.22)] ${className}`.trim()}>
                 <div className="flex items-start justify-between gap-4">
                     <div>
                         <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
@@ -118,7 +118,7 @@ export const OrderSyncRouteIndicator: React.FC<OrderSyncRouteIndicatorProps> = (
     }
 
     return (
-        <div className={`rounded-2xl border border-slate-200/80 bg-white/90 p-3 mt-2 dark:border-white/10 dark:bg-white/[0.04] ${className}`.trim()}>
+        <div className={`rounded-2xl border border-slate-200/80 bg-white/90 p-3 mt-2 dark:border-white/10 dark:bg-white/4 ${className}`.trim()}>
             <div className="flex items-center justify-between mb-1">
                 <span className="text-xs text-slate-500 dark:text-slate-400">{t('sync.routing.label')}</span>
                 <span className={`text-xs font-semibold ${status.routingMode === 'direct_cloud' ? 'text-orange-600 dark:text-orange-300' : 'text-slate-500 dark:text-slate-400'

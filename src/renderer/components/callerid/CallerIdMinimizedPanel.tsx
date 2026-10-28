@@ -174,7 +174,7 @@ export function CallerIdMinimizedPanel({
       ref={panelRef}
       data-caller-id-minimized-panel
       aria-label={ariaLabel}
-      className="fixed z-[10050] w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-2xl border border-amber-400/50 bg-white/95 text-slate-900 shadow-2xl backdrop-blur-xl dark:border-amber-300/35 dark:bg-[#111318]/95 dark:text-white"
+      className="fixed z-10050 w-[min(360px,calc(100vw-24px))] overflow-hidden rounded-2xl border border-amber-400/50 bg-white/95 text-slate-900 shadow-2xl backdrop-blur-xl dark:border-amber-300/35 dark:bg-[#111318]/95 dark:text-white"
       style={{ left: position.x, top: position.y }}
     >
       <div
@@ -199,7 +199,7 @@ export function CallerIdMinimizedPanel({
         <button
           type="button"
           onClick={onRestore}
-          className="rounded-xl border border-amber-400/45 bg-amber-400/15 p-2 text-amber-700 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:scale-95 dark:text-amber-300"
+          className="rounded-xl border border-amber-400/45 bg-amber-400/15 p-2 text-amber-700 transition-transform focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 active:scale-95 dark:text-amber-300"
           aria-label={restoreLabel}
         >
           <Maximize2 className="h-5 w-5" aria-hidden="true" />
@@ -208,7 +208,7 @@ export function CallerIdMinimizedPanel({
         <button
           type="button"
           onClick={onClose}
-          className="rounded-xl border border-slate-300/60 p-2 text-slate-500 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:scale-95 dark:border-white/15 dark:text-white/70"
+          className="rounded-xl border border-slate-300/60 p-2 text-slate-500 transition-transform focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-400 active:scale-95 dark:border-white/15 dark:text-white/70"
           aria-label={closeLabel}
         >
           <X className="h-5 w-5" aria-hidden="true" />

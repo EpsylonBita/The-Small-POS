@@ -1,4 +1,10 @@
 {
+  "checkoutRecovery": {
+    "editRefused": "Die Änderung wurde nicht übernommen, weil sich die Bestellung inzwischen geändert hat. Öffne sie erneut und nimm die Änderung von Anfang an vor.",
+    "editConflict": "Die gespeicherte Änderung muss geprüft werden. Öffne die Bestellung erneut, bevor du fortfährst.",
+    "discardEdit": "Alte Änderung verwerfen",
+    "editReviewUnavailable": "Die gespeicherte Änderung konnte nicht geöffnet oder verworfen werden. Stelle die Verbindung wieder her und prüfe die Bestellung erneut."
+  },
   "missedPlatformOrders": {
     "title_one": "{{count}} Plattform-Bestellung wurde abgelehnt, während die Kasse offline war",
     "title_other": "{{count}} Plattform-Bestellungen wurden abgelehnt, während die Kasse offline war",
@@ -623,7 +629,15 @@
   },
   "auth": {
     "managerApproval": {
-      "subtitle": "An dieser Kasse ist niemand eingecheckt. Ein Manager mit der Berechtigung gibt seine eigene PIN ein. Es wird nichts belastet."
+      "subtitle": "An dieser Kasse ist niemand eingecheckt. Ein Manager mit der Berechtigung gibt seine eigene PIN ein. Es wird nichts belastet.",
+      "checking": "Es wird geprüft, wer im Geschäft die Freigabe erteilen kann…",
+      "noApprover": "Niemand in diesem Geschäft hat die Berechtigung „{{right}}“. Der Inhaber kann sie unter Admin → Rollen vergeben. Eine PIN ist nicht nötig.",
+      "pinRefused": "Diese PIN gehört niemandem mit der Berechtigung „{{right}}“. Gib die persönliche PIN einer berechtigten Leitungskraft ein, nicht die Anmelde-PIN der Kasse.",
+      "paused": "Zu viele falsche Freigabe-PINs. Freigaben sind für {{minutes}} Minuten gesperrt. Du kannst dich weiterhin an der Kasse anmelden.",
+      "rights": {
+        "voidPayments": "Zahlungen stornieren",
+        "cancelOrders": "Bestellungen stornieren"
+      }
     },
     "login": {
       "title": "Mitarbeiter-Anmeldung",
@@ -4282,7 +4296,13 @@
         "keepEditing": "Weiter bearbeiten",
         "discard": "Bestellung verwerfen"
       },
-      "editFailed": "Änderungen konnten nicht gespeichert werden. Bitte versuchen Sie es erneut.",
+      "editFailed": "Die Änderung wurde nicht gespeichert. Behalten Sie den Warenkorb und versuchen Sie die gespeicherte Änderung erneut. Wurde bereits bezahlt, kassieren Sie nicht erneut; lassen Sie die Zahlung unter Systemzustand abgleichen.",
+      "editCurrencyUnavailable": "Die Währung für diese Änderung ist nicht bestätigt. Behalten Sie den Warenkorb und lassen Sie die Währungen von Bestellung, Zahlung und Schicht vor einem neuen Versuch prüfen. Kassieren Sie nicht erneut.",
+      "editCurrencyMismatch": "Die Währungen von Bestellung, Zahlung und Kassenschicht stimmen nicht überein. Lassen Sie die Währungen vor einem neuen Versuch prüfen. Kassieren Sie nicht erneut.",
+      "editCollectorUnavailable": "Die kassierende Schicht konnte nicht geprüft werden. Prüfen Sie, ob die Kassenkraft an dieser Kasse eingecheckt ist, und versuchen Sie die gespeicherte Änderung erneut. Kassieren Sie nicht erneut.",
+      "editPaymentMismatch": "Der bestätigte Differenzbetrag passt nicht zur Änderung. Behalten Sie den Warenkorb und lassen Sie die Zahlung unter Systemzustand abgleichen. Kassieren Sie nicht erneut.",
+      "editLocalOperationFailed": "Die Kasse konnte die Änderung lokal nicht lesen oder speichern. Behalten Sie den Warenkorb und versuchen Sie es erneut. Exportieren Sie bei erneutem Fehler die Supportdaten unter Systemzustand. Kassieren Sie nicht erneut.",
+      "editScopeChanged": "Die Kassenverbindung oder Filialzuordnung hat sich geändert. Stellen Sie die Verbindung wieder her und versuchen Sie die gespeicherte Änderung erneut. Behalten Sie den Warenkorb und kassieren Sie nicht erneut.",
       "saveChanges": "Änderungen speichern",
       "addCustomer": "Kunde hinzufügen",
       "customerInfo": "Kundeninformationen (Optional)",
@@ -5271,6 +5291,11 @@
       "unsavedAlreadyResolved": "Diese Zahlung wurde bereits als zurückgegeben erfasst.",
       "unsavedSavedAfterAll": "Diese Zahlung wurde doch gespeichert: Es gibt nichts zurückzugeben.",
       "unsavedResolveFailed": "Konnte nicht erfasst werden: {{error}}",
+      "heldEditCloseReason": "Bestellung storniert; Korrektur von einer Führungskraft in der Z-Prüfung ohne Geldbuchung geschlossen",
+      "heldEditApprovalTitle": "Korrektur ohne Geld schließen",
+      "heldEditApprovalSubtitle": "Prüfen Sie zuerst das Bankterminal und die Kassenlade. Eine Person mit dem Recht, Zahlungen zu stornieren, gibt ihre eigene PIN ein. Es wird nichts belastet oder zurückgegeben.",
+      "heldEditClosed": "Die Korrektur wurde geschlossen. Es wurde kein Geld gebucht.",
+      "heldEditCloseFailed": "Die Korrektur konnte nicht geschlossen werden. Sie bleibt gehalten; es wurde nichts gebucht.",
       "unsavedSaved": "Zahlung gespeichert.",
       "unsavedStillNotSaved": "An dieser Kasse noch immer nicht gespeichert. Nicht erneut belasten. Versuchen Sie es erneut, oder geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier."
     },
@@ -6136,7 +6161,8 @@
       "enterPin": "Bitte geben Sie Ihre PIN ein",
       "invalidPin": "Falscher Code",
       "loginFailed": "Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut.",
-      "timeout": "Die Anmeldung hat zu lange gedauert. Bitte versuchen Sie es erneut."
+      "timeout": "Die Anmeldung hat zu lange gedauert. Bitte versuchen Sie es erneut.",
+      "lockedOut": "Zu viele falsche PIN-Eingaben. Versuche es in {{minutes}} Minuten erneut."
     },
     "backspace": "Löschtaste"
   },
@@ -10225,7 +10251,8 @@
       "payments_not_saved__new_order": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
       "payments_not_saved__new_order_cannot_save": "Eine Kartenzahlung von {{paymentAmount}} wurde für eine neue Bestellung belastet, die an dieser Kasse noch nicht gespeichert ist: Die Bestellung und ihre Zahlung werden gehalten, bis sie gespeichert sind. Der Kunde wurde belastet: nicht erneut belasten.",
       "cancelled_order_claims_payment": "Diese Bestellung ist storniert, gilt aber noch als bezahlt, und diese Kasse hat für sie keinen Zahlungsdatensatz. Sie ist nicht in diesem Z-Report. Der Tagesabschluss wird dadurch nicht blockiert.",
-      "edit_settlement_not_saved": "Eine bestätigte Bestellkorrektur ist noch nicht gespeichert. Die ursprüngliche Zahlung oder Rückzahlung bleibt erhalten."
+      "edit_settlement_not_saved": "Eine bestätigte Bestellkorrektur ist noch nicht gespeichert. Die ursprüngliche Zahlung oder Rückzahlung bleibt erhalten.",
+      "edit_settlement_not_saved__order_cancelled": "Die Bestellung wurde storniert, daher kann diese bestätigte Korrektur nie mehr gespeichert werden. Die ursprüngliche Einnahme oder Rückgabe bleibt erhalten."
     },
     "fixCodes": {
       "table_cancellation_not_saved": "Stellen Sie die ursprüngliche Tischstornierung wieder her. Übergeben oder erstatten Sie das Geld nicht erneut.",
@@ -10238,7 +10265,8 @@
       "payments_not_saved__new_order": "Speichern Sie die Zahlung erneut: Das speichert die Bestellung und ihre Zahlung, ohne neue Belastung. Lässt sie sich nicht speichern, geben Sie dem Kunden das Geld zurück und bestätigen Sie es hier.",
       "payments_not_saved__new_order_cannot_save": "Diese Bestellung und ihre Zahlung können an dieser Kasse nicht gespeichert werden. Geben Sie dem Kunden das Geld zurück und bestätigen Sie es dann hier.",
       "cancelled_order_claims_payment": "Vom Server wiederherstellen („Jetzt synchronisieren“): Eine Zahlung, die der Server hat, wird hierher kopiert. Gibt es keine, entscheidet der Inhaber, was die Bestellung anzeigen soll.",
-      "edit_settlement_not_saved": "Öffnen Sie die gespeicherte Bearbeitung und speichern Sie dieselbe Korrektur. Kein Geld erneut kassieren oder zurückzahlen."
+      "edit_settlement_not_saved": "Öffnen Sie die gespeicherte Bearbeitung und speichern Sie dieselbe Korrektur. Kein Geld erneut kassieren oder zurückzahlen.",
+      "edit_settlement_not_saved__order_cancelled": "Prüfen Sie das Bankterminal und die Kassenlade auf das Geld dieser Korrektur. Danach schließt eine Führungskraft sie hier ohne Geldbuchung."
     },
     "setAsidePaymentLabel": "Zurückgestellte Zahlung",
     "takenAtLabel": "Angenommen um",
@@ -10248,6 +10276,8 @@
     "chargedAtLabel": "Belastet um",
     "unsavedSaveAgainAction": "Zahlung erneut speichern",
     "unsavedReturnedAction": "Geld an den Kunden zurückgegeben",
+    "heldEditCloseAction": "Ohne Geldbuchung schließen (Führungskraft)",
+    "heldEditClosing": "Wird geschlossen...",
     "unsavedSaving": "Wird gespeichert...",
     "unsavedResolving": "Wird erfasst..."
   },

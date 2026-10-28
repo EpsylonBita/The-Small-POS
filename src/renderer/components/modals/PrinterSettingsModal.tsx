@@ -1421,7 +1421,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
     <button
       type="button"
       onClick={() => toggleSection(key)}
-      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-100/80 text-slate-900 transition-colors active:bg-slate-200/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/10 dark:focus-visible:ring-amber-300/60"
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-100/80 text-slate-900 transition-colors active:bg-slate-200/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:bg-white/5 dark:text-slate-100 dark:active:bg-white/10 dark:focus-visible:ring-amber-300/60"
     >
       <span className="text-xs font-semibold text-slate-900 dark:text-white/90 uppercase tracking-wider">
         {t(labelKey, labelDefault)}
@@ -1448,9 +1448,9 @@ const PrinterSettingsModal: React.FC<Props> = ({
       <div
         key={key}
         onClick={() => handleReceiptActionToggle(key)}
-        className={`flex min-h-[4.25rem] w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all active:scale-[0.99] focus-within:ring-2 focus-within:ring-emerald-500/60 dark:focus-within:ring-emerald-300/60 ${
+        className={`flex min-h-17 w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-all active:scale-[0.99] focus-within:ring-2 focus-within:ring-emerald-500/60 dark:focus-within:ring-emerald-300/60 ${
           enabled
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 shadow-sm dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
+            ? 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 shadow-xs dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
             : 'border-slate-200 bg-slate-50/80 text-slate-800 dark:border-white/10 dark:bg-slate-900/60 dark:text-slate-100'
         }`}
       >
@@ -1463,7 +1463,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
           <Icon className="h-5 w-5" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className={`block whitespace-normal break-words text-sm font-semibold leading-tight ${enabled ? 'text-emerald-950 dark:text-emerald-100' : 'text-slate-900 dark:text-slate-100'}`}>
+          <span className={`block whitespace-normal wrap-break-word text-sm font-semibold leading-tight ${enabled ? 'text-emerald-950 dark:text-emerald-100' : 'text-slate-900 dark:text-slate-100'}`}>
             {label}
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-2">
@@ -1478,7 +1478,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
               className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
                 enabled
                   ? 'border-emerald-300 bg-emerald-100/80 text-emerald-800 dark:border-emerald-300/35 dark:bg-transparent dark:text-emerald-300'
-                  : 'border-slate-300 bg-white/70 text-slate-600 dark:border-white/10 dark:bg-white/[0.06] dark:text-slate-400'
+                  : 'border-slate-300 bg-white/70 text-slate-600 dark:border-white/10 dark:bg-white/6 dark:text-slate-400'
               }`}
             >
               AUTO
@@ -1591,7 +1591,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                     <div className="font-medium liquid-glass-modal-text">
                       {printer.name}
                       {printer.isDefault && (
-                        <span className={`ml-2 rounded border px-2 py-0.5 text-xs ${liquidGlassModalTone('warning')}`}>
+                        <span className={`ml-2 rounded-sm border px-2 py-0.5 text-xs ${liquidGlassModalTone('warning')}`}>
                           {t('settings.printer.default')}
                         </span>
                       )}
@@ -1602,14 +1602,14 @@ const PrinterSettingsModal: React.FC<Props> = ({
                       {status?.queueLength > 0 && ` • ${status.queueLength} ${t('settings.printer.jobsInQueue')}`}
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                      <span className={`px-2 py-0.5 rounded border ${verificationTone(verificationStatus)}`}>
+                      <span className={`px-2 py-0.5 rounded-sm border ${verificationTone(verificationStatus)}`}>
                         {verificationLabel(verificationStatus, t)}
                       </span>
-                      <span className={`px-2 py-0.5 rounded border ${liquidGlassModalTone('neutral')}`}>
+                      <span className={`px-2 py-0.5 rounded-sm border ${liquidGlassModalTone('neutral')}`}>
                         {transportLabel(resolvedTransport, t)}
                       </span>
                       {transportReachable === false && verificationStatus !== 'verified' && (
-                        <span className={`px-2 py-0.5 rounded border ${liquidGlassModalTone('warning')}`}>
+                        <span className={`px-2 py-0.5 rounded-sm border ${liquidGlassModalTone('warning')}`}>
                           {t('settings.printer.transportUnreachable', 'Transport unreachable')}
                         </span>
                       )}
@@ -2177,7 +2177,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                       type="checkbox"
                       checked={logoEnabled}
                       onChange={e => setLogoEnabled(e.target.checked)}
-                      className="rounded"
+                      className="rounded-sm"
                     />
                     <span className="text-xs liquid-glass-modal-text">
                       {t('settings.printer.enableLogo', 'Enable logo')}
@@ -2253,7 +2253,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                     <img
                       src={effectiveLogoSource}
                       alt="Receipt logo preview"
-                      className="max-h-20 object-contain bg-white rounded p-1"
+                      className="max-h-20 object-contain bg-white rounded-sm p-1"
                     />
                   </div>
                 )}
@@ -2458,7 +2458,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                       type="checkbox"
                       checked={formData.isDefault}
                       onChange={e => setFormData(prev => ({ ...prev, isDefault: e.target.checked }))}
-                      className="rounded"
+                      className="rounded-sm"
                     />
                     <span className="text-sm liquid-glass-modal-text">{t('settings.printer.setAsDefault')}</span>
                   </label>
@@ -2467,7 +2467,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                       type="checkbox"
                       checked={formData.enabled}
                       onChange={e => setFormData(prev => ({ ...prev, enabled: e.target.checked }))}
-                      className="rounded"
+                      className="rounded-sm"
                     />
                     <span className="text-sm liquid-glass-modal-text">{t('settings.printer.enabled')}</span>
                   </label>
@@ -2477,7 +2477,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
           </div>
 
           {/* Right: Live Preview */}
-          <div className="w-[340px] flex-shrink-0 flex flex-col">
+          <div className="w-[340px] shrink-0 flex flex-col">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="text-xs font-semibold text-white/70 uppercase tracking-wider">
                 {t('settings.printer.livePreview', 'Live Preview')}
@@ -2644,14 +2644,14 @@ const PrinterSettingsModal: React.FC<Props> = ({
                   </div>
                 )}
                 <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                  <span className={`px-2 py-0.5 rounded border ${verificationTone(status.verificationStatus)}`}>
+                  <span className={`px-2 py-0.5 rounded-sm border ${verificationTone(status.verificationStatus)}`}>
                     {verificationLabel(status.verificationStatus, t)}
                   </span>
-                  <span className="px-2 py-0.5 rounded border border-white/10 liquid-glass-modal-text-muted">
+                  <span className="px-2 py-0.5 rounded-sm border border-white/10 liquid-glass-modal-text-muted">
                     {transportLabel(status.resolvedTransport, t)}
                   </span>
                   {status.resolvedAddress ? (
-                    <span className="px-2 py-0.5 rounded border border-white/10 liquid-glass-modal-text-muted">
+                    <span className="px-2 py-0.5 rounded-sm border border-white/10 liquid-glass-modal-text-muted">
                       {status.resolvedAddress}
                     </span>
                   ) : null}
@@ -2739,15 +2739,15 @@ const PrinterSettingsModal: React.FC<Props> = ({
                 {t('settings.printer.recentJobs')}
               </div>
               <div className="grid grid-cols-3 gap-2 text-center">
-                <div className="p-2 rounded bg-white/5">
+                <div className="p-2 rounded-sm bg-white/5">
                   <div className="text-lg font-bold liquid-glass-modal-text">{diagnostics.recentJobs.total}</div>
                   <div className="text-xs liquid-glass-modal-text-muted">{t('settings.printer.total')}</div>
                 </div>
-                <div className="p-2 rounded bg-green-500/10">
+                <div className="p-2 rounded-sm bg-green-500/10">
                   <div className="text-lg font-bold text-green-400">{diagnostics.recentJobs.successful}</div>
                   <div className="text-xs liquid-glass-modal-text-muted">{t('settings.printer.successful')}</div>
                 </div>
-                <div className="p-2 rounded bg-red-500/10">
+                <div className="p-2 rounded-sm bg-red-500/10">
                   <div className="text-lg font-bold text-red-400">{diagnostics.recentJobs.failed}</div>
                   <div className="text-xs liquid-glass-modal-text-muted">{t('settings.printer.failed')}</div>
                 </div>
@@ -2831,7 +2831,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
       onClose={handleModalClose}
       title={t('settings.printer.title')}
       size="lg"
-      className={viewMode === 'add' || viewMode === 'edit' ? '!max-w-5xl' : '!max-w-2xl'}
+      className={viewMode === 'add' || viewMode === 'edit' ? 'max-w-5xl!' : 'max-w-2xl!'}
       closeOnBackdrop={!wizardBusy}
       closeOnEscape={!wizardBusy}
     >
@@ -2844,7 +2844,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-2xl">
           <div className="bg-gray-900/95 border border-white/15 rounded-3xl p-6 mx-6 max-w-sm w-full shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
-              <Trash2 className="w-5 h-5 text-red-400 flex-shrink-0" />
+              <Trash2 className="w-5 h-5 text-red-400 shrink-0" />
               <div>
                 <h3 className="text-sm font-semibold text-white">Delete Printer</h3>
                 <p className="text-xs text-gray-400 mt-0.5">

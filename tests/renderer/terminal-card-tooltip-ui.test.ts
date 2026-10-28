@@ -150,7 +150,7 @@ test('Round 229: PaymentTerminalsSection refresh button is named + 44px, and Add
   const addBtn = section.slice(section.lastIndexOf('<button', aIdx), section.indexOf('</button>', aIdx) + '</button>'.length);
   assert.match(addBtn, /bg-green-600/);
   assert.match(addBtn, /active:bg-green-700/);
-  assert.match(addBtn, /min-h-\[44px\] items-center justify-center/);
+  assert.match(addBtn, /min-h-touch items-center justify-center/);
   assert.match(addBtn, /<Plus size=\{16\} \/>/);
   assert.doesNotMatch(addBtn, /bg-yellow|border-yellow|bg-amber/);
 

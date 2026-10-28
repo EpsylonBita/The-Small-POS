@@ -96,7 +96,7 @@ test('TableSelector search has a full-width row stacked above the segmented filt
   // The search wrapper is full-width, no longer squeezed into a shared flex row with min-capacity.
   assert.match(source, /<div className="relative w-full">/);
   assert.doesNotMatch(source, /relative min-w-\[200px\] flex-1/);
-  assert.match(source, /className="liquid-glass-modal-input w-full !pl-10"/);
+  assert.match(source, /className="liquid-glass-modal-input w-full pl-10!"/);
 });
 
 // Round 224 live-QA follow-up: cards show formatted display labels (e.g. "#TP03"), but search only checked
@@ -199,9 +199,9 @@ test('TableSelector floor labels are localized in every POS locale with {{floor}
 test('Round 332: TableSelector bounds the modal to the viewport and uses one hidden-scroll content region', () => {
   // Shell is bounded to the VISIBLE viewport (dvh -- avoids the WebView vh overshoot) with a safe margin,
   // as a flex column that hides its own overflow so only the content body scrolls.
-  assert.match(source, /className="flex flex-col overflow-hidden !max-h-\[calc\(100dvh-2rem\)\]"/);
+  assert.match(source, /className="flex flex-col overflow-hidden max-h-\[calc\(100dvh-2rem\)\]!"/);
   // A dynamic-viewport cap with a safe margin (not the unbounded shared default that overshoots the window).
-  assert.match(source, /!max-h-\[calc\(100dvh-2rem\)\]/);
+  assert.match(source, /max-h-\[calc\(100dvh-2rem\)\]!/);
 
   // The content body is the SINGLE scroll region: flex-1 + min-h-0 so it can shrink, overflow-y-auto +
   // scrollbar-hide (no visible native rail), with bottom + scroll padding so the last row clears the radius.
@@ -214,7 +214,7 @@ test('Round 332: TableSelector bounds the modal to the viewport and uses one hid
   // The viewport-bounding props sit on the same modal as the (fixed, shared-shell) title header.
   assert.match(
     source,
-    /<LiquidGlassModal[\s\S]*?title=\{t\('tableSelector\.title'[\s\S]*?className="flex flex-col overflow-hidden !max-h-\[calc\(100dvh-2rem\)\]"[\s\S]*?contentClassName="flex-1 min-h-0 overflow-y-auto scrollbar-hide pb-6 scroll-pb-6"/,
+    /<LiquidGlassModal[\s\S]*?title=\{t\('tableSelector\.title'[\s\S]*?className="flex flex-col overflow-hidden max-h-\[calc\(100dvh-2rem\)\]!"[\s\S]*?contentClassName="flex-1 min-h-0 overflow-y-auto scrollbar-hide pb-6 scroll-pb-6"/,
   );
 
   // Touch-first preserved: no hover utilities sneaked in with the viewport bound.

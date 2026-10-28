@@ -88,7 +88,7 @@ const AboutPage: React.FC = () => {
           <button
             onClick={handleCopy}
             disabled={!about}
-            className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400
+            className={`inline-flex items-center justify-center gap-2 px-4 py-2 rounded-2xl text-sm font-semibold transition-transform duration-150 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400
               ${isDark
                 ? 'bg-yellow-400 text-black'
                 : 'bg-black text-white'}

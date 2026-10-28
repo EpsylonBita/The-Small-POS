@@ -34,7 +34,7 @@ export function SalonRoomChargeModal({ branchId, organizationId, onSelect, onClo
   }, [branchId, organizationId]);
 
   const selected = rooms.find(room => room.id === roomId);
-  return <LiquidGlassModal isOpen onClose={onClose} title={t('hotelDeskService.title')} className="!max-w-lg">
+  return <LiquidGlassModal isOpen onClose={onClose} title={t('hotelDeskService.title')} className="max-w-lg!">
     <div className="space-y-4 p-1">
       <label htmlFor="service-room-charge" className="liquid-glass-modal-text block text-sm">
         {t('hotelDeskService.room')}

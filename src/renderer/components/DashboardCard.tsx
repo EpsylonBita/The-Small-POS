@@ -155,9 +155,9 @@ export const DashboardCard = memo<DashboardCardProps>(({
         dashboard-card
         ${bgClass}
         rounded-2xl border p-6
-        shadow-sm
+        shadow-xs
         ${isDark ? 'border-gray-700/50' : 'border-gray-200'}
-        ${onClick && !disabled ? 'cursor-pointer transition-transform active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-400' : ''}
+        ${onClick && !disabled ? 'cursor-pointer transition-transform active:scale-[0.98] focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-amber-400' : ''}
         ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
         ${className}
       `}
@@ -176,7 +176,7 @@ export const DashboardCard = memo<DashboardCardProps>(({
 
       {/* Value */}
       {isLoading ? (
-        <div className={`h-12 ${isDark ? 'bg-gray-700' : 'bg-gray-200'} rounded animate-pulse`} />
+        <div className={`h-12 ${isDark ? 'bg-gray-700' : 'bg-gray-200'} rounded-sm animate-pulse`} />
       ) : (
         <div className={`text-4xl md:text-5xl font-bold ${textClass}`}>
           {value}

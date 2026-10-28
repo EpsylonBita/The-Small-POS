@@ -8,7 +8,7 @@ import type {
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const repairSettlementOrderSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().guid(),
   order_number: z.string().min(1).max(128).nullable(),
   role: z.enum(['primary', 'supplement', 'credit']),
   fiscal_state: z.enum([
@@ -26,8 +26,8 @@ const repairSettlementOrderSchema = z.object({
 }).strict();
 
 const repairSettlementPaymentSchema = z.object({
-  id: z.string().uuid(),
-  order_id: z.string().uuid(),
+  id: z.string().guid(),
+  order_id: z.string().guid(),
   payment_method: z.string().min(1).max(48),
   amount_minor: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   refunded_minor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -55,9 +55,9 @@ const repairSettlementPaymentSchema = z.object({
 });
 
 const repairSettlementAdjustmentSchema = z.object({
-  id: z.string().uuid(),
-  order_id: z.string().uuid(),
-  payment_id: z.string().uuid(),
+  id: z.string().guid(),
+  order_id: z.string().guid(),
+  payment_id: z.string().guid(),
   adjustment_type: z.enum(['void', 'refund']),
   amount_minor: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   refund_method: z.enum(['cash', 'card']),
@@ -65,8 +65,8 @@ const repairSettlementAdjustmentSchema = z.object({
 }).strict();
 
 const repairSettlementFiscalCommandSchema = z.object({
-  id: z.string().uuid(),
-  order_id: z.string().uuid(),
+  id: z.string().guid(),
+  order_id: z.string().guid(),
   purpose: z.enum(['sale', 'deposit', 'supplement', 'credit', 'cancel']),
   amount_minor: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   status: z.string().min(1).max(48),
@@ -76,7 +76,7 @@ const repairSettlementFiscalCommandSchema = z.object({
 }).strict();
 
 export const repairFinancialProjectionSchema = z.object({
-  repair_id: z.string().uuid(),
+  repair_id: z.string().guid(),
   currency: z.string().regex(/^[A-Z]{3}$/),
   total_minor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   paid_minor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),

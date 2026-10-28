@@ -63,8 +63,8 @@ test('payment method labels fit without clipping or per-letter Greek breaks', ()
 
   assert.doesNotMatch(
     source,
-    /uppercase[^\n]*break-words/,
-    'payment labels must not use break-words',
+    /uppercase[^\n]*wrap-break-word/,
+    'payment labels must not use wrap-break-word',
   );
   assert.doesNotMatch(
     source,
@@ -145,9 +145,9 @@ test('cash input keeps the light-theme surface neutral and reserves color for hi
   assert.match(enoughCash.summary, /bg-white\/80/);
   assert.doesNotMatch(enoughCash.summary, /bg-green|bg-emerald/);
   assert.match(enoughCash.changeTone, /text-emerald-700/);
-  assert.match(enoughCash.completeButton, /(?:^|\s)!bg-emerald-700(?:\s|$)/);
-  assert.doesNotMatch(enoughCash.completeButton, /(?:^|\s)!bg-emerald-600(?:\s|$)/);
-  assert.match(enoughCash.completeButton, /!text-white/);
+  assert.match(enoughCash.completeButton, /(?:^|\s)bg-emerald-700!(?:\s|$)/);
+  assert.doesNotMatch(enoughCash.completeButton, /(?:^|\s)bg-emerald-600!(?:\s|$)/);
+  assert.match(enoughCash.completeButton, /text-white!/);
   assert.match(shortCash.summary, /bg-red-50\/80/);
   assert.match(shortCash.changeTone, /text-red-700/);
 });

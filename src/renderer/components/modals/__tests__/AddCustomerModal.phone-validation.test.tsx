@@ -179,7 +179,7 @@ describe('new customer phone', () => {
     const message = 'Phone number must have 10 digits (you entered 11)';
     expect(screen.getByRole('alert')).toHaveTextContent(message);
     expect(phoneInput).toHaveAttribute('aria-invalid', 'true');
-    expect(phoneInput.className).toContain('!border-red-500');
+    expect(phoneInput.className).toContain('border-red-500!');
 
     fillRequiredFields();
     submit(container);

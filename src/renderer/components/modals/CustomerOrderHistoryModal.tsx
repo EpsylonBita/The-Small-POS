@@ -111,18 +111,18 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
         <>
             {/* Backdrop */}
             <div
-                className="liquid-glass-modal-backdrop fixed inset-0 z-[1100]"
+                className="liquid-glass-modal-backdrop fixed inset-0 z-1100"
                 onClick={onClose}
             />
 
             {/* Modal Container */}
-            <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[80vh] z-[1150] flex flex-col">
+            <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[80vh] z-1150 flex flex-col">
 
                 {/* Header */}
-                <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
+                <div className="shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
                     <div className="flex justify-between items-center">
                         <div className="flex items-center gap-3">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black shadow-sm">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-yellow-400 text-black shadow-xs">
                                 <History className="w-5 h-5" />
                             </div>
                             <div>
@@ -145,7 +145,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 </div>
 
                 {/* Stats Bar */}
-                <div className="flex-shrink-0 px-6 py-3 bg-white/5 border-b liquid-glass-modal-border">
+                <div className="shrink-0 px-6 py-3 bg-white/5 border-b liquid-glass-modal-border">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-6">
                             <div>
@@ -240,7 +240,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 </div>
 
                 {/* Footer */}
-                <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border">
+                <div className="shrink-0 px-6 py-4 border-t liquid-glass-modal-border">
                     <button
                         onClick={onClose}
                         className="liquid-glass-modal-button w-full border-yellow-400/40 bg-yellow-400/15 text-yellow-200 active:bg-yellow-400/25"

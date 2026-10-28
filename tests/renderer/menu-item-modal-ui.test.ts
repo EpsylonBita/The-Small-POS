@@ -69,7 +69,7 @@ test('notes overlay is portaled app-level above the modal, not an in-container a
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /\{showNotesOverlay && renderModalPortal\(\s*<div/);
   // Full-screen, blurred backdrop above the parent modal layer.
-  assert.match(source, /className="fixed inset-0 z-\[20050\][^"]*bg-slate-950\/45 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-20050(?![\w.-])[^"]*bg-slate-950\/45 backdrop-blur-sm/);
 
   // The clipped in-container overlay is gone.
   assert.doesNotMatch(source, /\{showNotesOverlay && \(\s*<div/);
@@ -95,7 +95,7 @@ test('notes textarea handles Escape to close only the notes overlay (not the par
   assert.doesNotMatch(source, /onKeyDown=\{\(e\) => e\.stopPropagation\(\)\}/);
   // The overlay stays portaled with the blurred backdrop (no regression).
   assert.match(source, /\{showNotesOverlay && renderModalPortal\(/);
-  assert.match(source, /className="fixed inset-0 z-\[20050\][^"]*bg-slate-950\/45 backdrop-blur-sm/);
+  assert.match(source, /className="fixed inset-0 z-20050(?![\w.-])[^"]*bg-slate-950\/45 backdrop-blur-sm/);
 });
 
 test('notes overlay action uses a localized key present in every POS locale', () => {

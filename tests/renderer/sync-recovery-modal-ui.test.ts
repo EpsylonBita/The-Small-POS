@@ -27,8 +27,8 @@ test('SyncRecoveryModal shell is amber/neutral, touch-first, and hides native sc
   assert.match(source, /border-amber-200\/90 bg-amber-50\/90/);
   assert.match(source, /dark:border-amber-400\/30 dark:bg-amber-500\/10/);
   assert.match(source, /role="status"[\s\S]*?animate-spin/);
-  assert.match(source, /<summary className="min-h-\[44px\]/);
-  assert.match(source, /min-h-\[44px\] min-w-\[44px\] rounded-2xl/);
+  assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
+  assert.match(source, /min-h-touch min-w-touch rounded-2xl/);
 });
 
 test('SyncRecoveryModal keeps recovery loading, navigation, and panel wiring unchanged', () => {

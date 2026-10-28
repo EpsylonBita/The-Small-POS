@@ -26,7 +26,7 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
             onClose={onInstallOnRestart}
             title={t('updates.title.downloaded')}
             size="md"
-            className="!max-w-lg"
+            className="max-w-lg!"
         >
             <div className="space-y-6 text-center">
                 <div className="flex justify-center mb-4">

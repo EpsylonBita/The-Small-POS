@@ -137,7 +137,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
       onClose={onClose}
       title={t('ecr.discovery.title', 'Discover Payment Terminals')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
     >
       <div className="space-y-6">
         {/* Search type toggles */}
@@ -199,7 +199,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         {/* Error message */}
         {error && !isSearching && (
           <div className="flex items-center gap-3 p-4 rounded-2xl bg-red-500/10 border border-red-500/30">
-            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
             <p className="text-red-400 text-sm">{error}</p>
           </div>
         )}
@@ -212,7 +212,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                 key={warning}
                 className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30"
               >
-                <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
                 <p className="text-amber-300 text-sm">{t(warning, warning)}</p>
               </div>
             ))}
@@ -222,7 +222,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
         {showFiscalHint && (
           <div className="space-y-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
             <div className="flex items-start gap-3">
-              <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400" />
+              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
               <div className="space-y-1">
                 <p className="text-sm font-medium text-amber-200">
                   {t(

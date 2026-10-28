@@ -110,7 +110,7 @@ test('Round 384: recovery center panel is touch-first and avoids old sky/orange 
   assert.match(source, /warning:[\s\S]*?border border-amber-400\/30 bg-amber-500\/10 text-amber-700/);
   assert.match(source, /info:[\s\S]*?border border-slate-300\/80 bg-white\/85 text-slate-700/);
   assert.match(source, /<details className="rounded-2xl border border-slate-200/);
-  assert.match(source, /<summary className="min-h-\[44px\]/);
+  assert.match(source, /<summary className="min-h-touch(?![\w.-])/);
 
   // Touch feedback replaces hover on recovery actions while preserving semantic action colors.
   assert.match(source, /min-h-\[48px\][\s\S]*?disabled:opacity-50/);

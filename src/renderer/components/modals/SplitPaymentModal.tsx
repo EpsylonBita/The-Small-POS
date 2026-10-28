@@ -1319,13 +1319,13 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         onClose={onClose}
         title={t("splitPayment.title", "Split Payment")}
         size="xl"
-        className="split-payment-modal !max-w-4xl !max-h-[96vh]"
+        className="split-payment-modal max-w-4xl! max-h-[96vh]!"
         closeMode="request"
         closeDisabled={isCloseLocked}
         closeOnBackdrop={false}
         closeOnEscape={!isCloseLocked}
         footer={footer}
-        contentClassName="flex min-h-0 flex-col overflow-hidden !px-6 !py-3"
+        contentClassName="flex min-h-0 flex-col overflow-hidden px-6! py-3!"
       >
           <div
             className="relative flex min-h-0 flex-1 flex-col space-y-3"
@@ -1340,7 +1340,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
           <PlatformHeldPaymentNotice
             notice={platformHeldNotice}
             showBlockedAction
-            className="flex-shrink-0"
+            className="shrink-0"
           />
           <UnsavedChargedPaymentBanner
             payments={unsaved.payments}
@@ -1349,9 +1349,9 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
               try { applySplitStateSnapshot(await fetchLatestSplitState(), { resetDraft: true, mode: activeTab }); } catch (refreshError) { console.warn('[SplitPaymentModal] Split refresh after Save payment again failed:', refreshError); }
             }}
             isSaving={unsaved.isSaving}
-            className="flex-shrink-0"
+            className="shrink-0"
           />
-          <div className="split-payment-total flex-shrink-0">
+          <div className="split-payment-total shrink-0">
             <p className="mb-0.5 text-sm liquid-glass-modal-text-muted">
               {t("splitPayment.orderTotal", "Order Total")}
             </p>
@@ -1369,7 +1369,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             )}
           </div>
           {isInitializing ? (
-            <div className="flex flex-shrink-0 items-center gap-3 rounded-2xl border border-slate-200/90 bg-white/80 p-4 dark:border-white/10 dark:bg-white/5">
+            <div className="flex shrink-0 items-center gap-3 rounded-2xl border border-slate-200/90 bg-white/80 p-4 dark:border-white/10 dark:bg-white/5">
               <Loader2 className="h-5 w-5 animate-spin text-slate-600 dark:text-white/70" />
               <div>
                 <h3 className="font-semibold liquid-glass-modal-text">
@@ -1385,11 +1385,11 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
             </div>
           ) : (
             <>
-              <div className="flex flex-shrink-0 gap-1 rounded-xl border border-slate-200/90 bg-slate-100/80 p-1 dark:border-white/10 dark:bg-white/5">
+              <div className="flex shrink-0 gap-1 rounded-xl border border-slate-200/90 bg-slate-100/80 p-1 dark:border-white/10 dark:bg-white/5">
                 <button
                   type="button"
                   onClick={() => setActiveTab("by-amount")}
-                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-yellow-400 text-black shadow-sm split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-amount" ? "bg-yellow-400 text-black shadow-xs split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
                 >
                   <Split className="h-4 w-4" />
                   {t("splitPayment.byAmount", "By Amount")}
@@ -1397,7 +1397,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
                 <button
                   type="button"
                   onClick={() => setActiveTab("by-items")}
-                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-yellow-400 text-black shadow-sm split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
+                  className={`flex flex-1 items-center justify-center gap-2 rounded-2xl py-2 text-sm font-medium transition-all ${activeTab === "by-items" ? "bg-yellow-400 text-black shadow-xs split-payment-segment-selected" : "text-slate-500 active:text-slate-700 dark:text-white/40 dark:active:text-white/60"}`}
                 >
                   <ShoppingCart className="h-4 w-4" />
                   {t("splitPayment.byItems", "By Items")}

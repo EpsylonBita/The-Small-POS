@@ -29,7 +29,7 @@ export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDial
   return (
     <div
       onClick={handleClick}
-      className="flex cursor-pointer items-start gap-3 rounded-2xl p-3 transition-transform active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
+      className="flex cursor-pointer items-start gap-3 rounded-2xl p-3 transition-transform active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80"
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {

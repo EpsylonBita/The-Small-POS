@@ -545,7 +545,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(actor, "real-manager");
-        assert!(!payload.contains("2468"));
+        // The evidence carries a random snapshot id and a nanosecond
+        // timestamp, so a bare substring check for the PIN digits failed by
+        // chance (gates 28/10/2026). Check values and key names instead.
+        let evidence: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let evidence = evidence.as_object().unwrap();
+        assert!(evidence.values().all(|value| value != "2468"));
+        assert!(!evidence
+            .keys()
+            .any(|key| key.to_ascii_lowercase().contains("pin")));
         assert!(!payload.contains("forged-actor"));
     }
 

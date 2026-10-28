@@ -329,7 +329,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
               type="submit"
               form="terminal-config-form"
               disabled={isSaving || bluetoothUnavailable || deviceTypeBlocked || !requiredFieldsComplete}
-              className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-green-600 active:bg-green-700 text-white font-medium border border-green-600 shadow-sm shadow-green-600/25 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center justify-center px-6 py-2 rounded-xl bg-green-600 active:bg-green-700 text-white font-medium border border-green-600 shadow-xs shadow-green-600/25 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSaving
                 ? t('common.actions.saving', 'Saving...')
@@ -380,7 +380,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
                     aria-checked={selected}
                     disabled={option === 'payment_terminal' && identityIsFiscal}
                     onClick={() => setDeviceType(option)}
-                    className={`min-h-[44px] rounded-xl border px-3 py-2 text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50 ${
+                    className={`min-h-touch rounded-xl border px-3 py-2 text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50 ${
                       selected
                         ? 'border-green-600 bg-green-600/15 text-green-800 dark:text-green-200'
                         : 'liquid-glass-modal-border bg-white/5 liquid-glass-modal-text'
@@ -599,7 +599,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             </div>
           </div>
 
-          <div className="flex min-h-[44px] items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
             <span className="text-sm liquid-glass-modal-text">
               {t('ecr.config.printOnTerminal', 'Print receipt on terminal')}
             </span>
@@ -611,7 +611,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             />
           </div>
 
-          <div className="flex min-h-[44px] items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
             <span className="text-sm liquid-glass-modal-text">
               {t('ecr.config.setDefault', 'Set as default terminal')}
             </span>
@@ -623,7 +623,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
             />
           </div>
 
-          <div className="flex min-h-[44px] items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
+          <div className="flex min-h-touch items-center justify-between gap-3 rounded-xl border liquid-glass-modal-border bg-white/5 px-3 py-2">
             <span className="text-sm liquid-glass-modal-text">
               {t('ecr.config.enabled', 'Terminal enabled')}
             </span>

@@ -541,7 +541,7 @@ const CouponsPage: React.FC = () => {
             onClick={() => void fetchCoupons()}
             disabled={loading}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-sm ${
+            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-xs ${
               isDark
                 ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
                 : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
@@ -598,7 +598,7 @@ const CouponsPage: React.FC = () => {
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           placeholder={t('coupons.search', 'Search coupons...')}
-          className="flex-1 bg-transparent outline-none text-sm"
+          className="flex-1 bg-transparent outline-hidden text-sm"
         />
       </div>
 
@@ -744,7 +744,7 @@ const CouponsPage: React.FC = () => {
       )}
 
       {showModal && renderModalPortal(
-        <div className="fixed inset-0 z-[1200] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4" onClick={closeModal}>
+        <div className="fixed inset-0 z-1200 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4" onClick={closeModal}>
           <motion.div
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}

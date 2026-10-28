@@ -347,7 +347,7 @@ export const MenuManagementPage: React.FC = () => {
   }`;
   // Keep the full touch target while letting the availability icon stand alone.
   const getAvailabilityToggleClass = (active: boolean) =>
-    `inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-500 ${
+    `inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-amber-500 ${
       active
         ? resolvedTheme === 'dark' ? 'text-green-400 active:bg-zinc-800' : 'text-green-700 active:bg-gray-100'
         : resolvedTheme === 'dark' ? 'text-zinc-400 active:bg-zinc-800' : 'text-gray-600 active:bg-gray-100'
@@ -402,7 +402,7 @@ export const MenuManagementPage: React.FC = () => {
             resolvedTheme === 'dark'
               ? 'bg-zinc-900 border-white text-white placeholder-zinc-400'
               : 'bg-gray-100 border-white text-gray-900 placeholder-gray-500'
-          } focus:outline-none focus:ring-2 focus:ring-white/70`}
+          } focus:outline-hidden focus:ring-2 focus:ring-white/70`}
         />
       </div>
     </motion.div>
@@ -554,7 +554,7 @@ export const MenuManagementPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setSearchTerm('')}
-                className={`mt-1 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border px-5 transition active:scale-95 ${
+                className={`mt-1 inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border px-5 transition active:scale-95 ${
                   resolvedTheme === 'dark'
                     ? 'border-amber-400/30 bg-amber-400/10 text-amber-200 active:bg-amber-400/20'
                     : 'border-amber-400/40 bg-amber-400/15 text-amber-700 active:bg-amber-400/25'
@@ -616,7 +616,7 @@ export const MenuManagementPage: React.FC = () => {
           onClick={loadData}
           disabled={loading}
           aria-label={refreshLabel}
-          className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl border backdrop-blur-xl transition shadow-sm shadow-amber-500/10 ${resolvedTheme === 'dark' ? 'border-amber-400/30 bg-white/10 text-amber-300 active:bg-white/20' : 'border-amber-400/40 bg-black/5 text-amber-600 active:bg-black/10'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+          className={`inline-flex h-12 w-12 items-center justify-center rounded-2xl border backdrop-blur-xl transition shadow-xs shadow-amber-500/10 ${resolvedTheme === 'dark' ? 'border-amber-400/30 bg-white/10 text-amber-300 active:bg-white/20' : 'border-amber-400/40 bg-black/5 text-amber-600 active:bg-black/10'} ${loading ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>

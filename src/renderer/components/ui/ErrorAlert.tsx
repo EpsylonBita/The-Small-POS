@@ -121,7 +121,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
                             </button>
 
                             {isExpanded && (
-                                <div className="mt-2 text-xs font-mono bg-black/30 p-2 rounded border border-white/5 overflow-x-auto text-white/70 whitespace-pre-wrap">
+                                <div className="mt-2 text-xs font-mono bg-black/30 p-2 rounded-sm border border-white/5 overflow-x-auto text-white/70 whitespace-pre-wrap">
                                     {typeof details === 'string' ? details : details}
                                 </div>
                             )}

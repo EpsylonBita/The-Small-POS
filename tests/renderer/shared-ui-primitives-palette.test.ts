@@ -56,9 +56,19 @@ test('shared payment blocker panel keeps semantic cash green but makes card/spli
   const source = sources.paymentBlockers;
 
   assert.match(source, /case "cash":[\s\S]*?border-emerald-400\/30 bg-emerald-500\/10/);
-  assert.match(source, /case "card":[\s\S]*?border-zinc-300\/25 bg-white\/\[0\.06\]/);
+  assert.match(source, /case "card":[\s\S]*?border-zinc-300\/25 bg-white\/6/);
   assert.match(source, /case "split":[\s\S]*?border-amber-400\/30 bg-amber-500\/10/);
   assert.match(source, /border border-amber-400\/25 bg-amber-500\/10/);
   assert.match(source, /bg-amber-400 text-slate-950 active:bg-amber-300/);
-  assert.match(source, /min-h-\[44px\][\s\S]*rounded-2xl/);
+  assert.match(source, /min-h-touch(?![\w.-])[\s\S]*rounded-2xl/);
+});
+
+// The v4 upgrader names the 44px targets min-h-touch/min-w-touch. Keep their
+// exact pixel contract alongside the source-class assertions that use them.
+test('Tailwind touch target tokens remain exactly 44px in both renderer theme entrypoints', () => {
+  for (const relativePath of ['src/index.css', 'src/renderer/styles/globals.css']) {
+    const theme = readFileSync(path.join(projectRoot, relativePath), 'utf8');
+    assert.match(theme, /--min-height-touch:\s*44px;/, `${relativePath} touch height must stay 44px`);
+    assert.match(theme, /--min-width-touch:\s*44px;/, `${relativePath} touch width must stay 44px`);
+  }
 });

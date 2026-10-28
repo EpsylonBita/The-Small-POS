@@ -73,7 +73,7 @@ export function WaiterServiceRequestManager({ enabled }: { enabled: boolean }) {
   </div>
   if (!enabled || !inbox.available) return null
   return <>
-    {inbox.actionable && <div className="fixed bottom-5 left-5 z-[9000] flex max-w-sm flex-col gap-2">
+    {inbox.actionable && <div className="fixed bottom-5 left-5 z-9000 flex max-w-sm flex-col gap-2">
       {rejections.length > 0 && <button data-testid="waiter-service-rejection-alert" onClick={() => setOverview(true)}
         className="rounded-xl border border-red-500 bg-red-50 px-4 py-3 text-left text-red-900 shadow-lg dark:bg-red-950 dark:text-red-100">
         <span role="alert" className="block font-bold">{t('waiterService.unreadRejections', { count: rejections.length })}</span>

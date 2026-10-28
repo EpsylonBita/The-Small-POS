@@ -258,7 +258,7 @@ export const POSGlassButton = React.forwardRef<HTMLButtonElement, POSGlassButton
         {loading && (
           <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
         )}
-        {!loading && icon && <span className="flex-shrink-0">{icon}</span>}
+        {!loading && icon && <span className="shrink-0">{icon}</span>}
         {/* No flex-1 on the label: a growing span fills the button and defeats the
             base `justify-content: center`, pinning the icon left. Content-sized span
             lets icon + label center as one optical group (command-button alignment).
@@ -1147,7 +1147,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         </div>
 
         {footer && (
-          <div className="flex-shrink-0">
+          <div className="shrink-0">
             {footer}
           </div>
         )}
@@ -1274,7 +1274,7 @@ export const POSGlassSwitch: React.FC<POSGlassSwitchProps> = ({
     disabled={disabled}
     onClick={() => { if (!disabled) onChange?.(!checked) }}
     className={cn(
-      'pos-glass-switch group inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center border-0 bg-transparent p-0 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+      'pos-glass-switch group inline-flex min-h-touch min-w-touch shrink-0 items-center justify-center border-0 bg-transparent p-0 focus:outline-hidden disabled:cursor-not-allowed disabled:opacity-50',
       className
     )}
   >
@@ -1289,8 +1289,8 @@ export const POSGlassSwitch: React.FC<POSGlassSwitchProps> = ({
     >
       <span
         className={cn(
-          'absolute top-[3px] start-[3px] h-7 w-7 rounded-full bg-white shadow-md shadow-black/20 transition-transform duration-200',
-          checked ? 'translate-x-[24px] rtl:-translate-x-[24px]' : 'translate-x-0'
+          'absolute top-[3px] inset-s-[3px] h-7 w-7 rounded-full bg-white shadow-md shadow-black/20 transition-transform duration-200',
+          checked ? 'translate-x-[24px] rtl:translate-x-[-24px]' : 'translate-x-0'
         )}
       />
     </span>

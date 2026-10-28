@@ -730,7 +730,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
       >
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            <span className="min-w-0 break-words text-xl font-bold leading-tight">
+            <span className="min-w-0 wrap-break-word text-xl font-bold leading-tight">
               {orderLabel}
             </span>
             {isReady && (
@@ -761,9 +761,9 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
                 <StationIcon station={item.station} />
                 <span className="font-medium">{item.quantity}x</span>
                 <div className="min-w-0">
-                  <span className="break-words">{item.name}</span>
+                  <span className="wrap-break-word">{item.name}</span>
                   {item.modifiers && item.modifiers.length > 0 && (
-                    <p className={`break-words text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{item.modifiers.join(', ')}</p>
+                    <p className={`wrap-break-word text-xs ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{item.modifiers.join(', ')}</p>
                   )}
                 </div>
               </div>
@@ -874,7 +874,7 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
             }}
             disabled={loading}
             aria-label={t('common.refresh', 'Refresh')}
-            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-sm active:scale-95 ${
+            className={`h-12 w-12 rounded-xl inline-flex items-center justify-center transition-all shadow-xs active:scale-95 ${
               isDark
                 ? 'border border-white/80 bg-white text-black active:bg-zinc-200'
                 : 'border border-black bg-black text-white active:bg-zinc-800'
@@ -1024,12 +1024,12 @@ function KitchenDisplayView({ model, externalWindow }: { model: KdsModel; extern
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map(i => (
             <div key={i} className={`p-6 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} animate-pulse`}>
-              <div className={`h-6 rounded w-1/2 mb-4 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+              <div className={`h-6 rounded-sm w-1/2 mb-4 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
               <div className="space-y-2">
-                <div className={`h-10 rounded ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
-                <div className={`h-10 rounded ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+                <div className={`h-10 rounded-sm ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+                <div className={`h-10 rounded-sm ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
               </div>
-              <div className={`h-12 rounded mt-4 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+              <div className={`h-12 rounded-sm mt-4 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
             </div>
           ))}
         </div>

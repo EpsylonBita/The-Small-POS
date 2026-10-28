@@ -438,7 +438,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
         data-testid="incoming-order-alert"
         data-order-id={(shownOrder ?? head).id}
         data-escalated={watch.escalated ? 'true' : 'false'}
-        className="liquid-glass-modal-shell flex max-w-md flex-col focus:outline-none"
+        className="liquid-glass-modal-shell flex max-w-md flex-col focus:outline-hidden"
         onKeyDown={handleKeyDown}
       >
         <div role="alert" className="flex items-start gap-4 px-6 pt-6">
@@ -499,7 +499,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
             type="button"
             onClick={handleOpen}
             data-testid="incoming-order-alert-open"
-            className={`${liquidGlassModalButton('primary', 'lg')} min-h-[56px] flex-1 text-lg font-bold`}
+            className={`${liquidGlassModalButton('primary', 'lg')} min-h-touch-lg flex-1 text-lg font-bold`}
           >
             {cashierLocked
               ? t('incomingOrderAlert.checkInToAccept', { defaultValue: 'Check in a cashier' })
@@ -509,7 +509,7 @@ export const IncomingOrderAlertHost: React.FC<IncomingOrderAlertHostProps> = ({
             type="button"
             onClick={handleLater}
             data-testid="incoming-order-alert-later"
-            className={`${liquidGlassModalButton('secondary', 'lg')} min-h-[56px] sm:w-40`}
+            className={`${liquidGlassModalButton('secondary', 'lg')} min-h-touch-lg sm:w-40`}
           >
             {t('incomingOrderAlert.later', { defaultValue: 'Later' })}
           </button>

@@ -100,7 +100,7 @@ interface FolioActionSubmit {
 }
 
 const fieldClass = (isDark: boolean) =>
-  `w-full px-3 py-2.5 rounded-xl text-sm border focus:outline-none focus:ring-2 focus:ring-yellow-400 ${
+  `w-full px-3 py-2.5 rounded-xl text-sm border focus:outline-hidden focus:ring-2 focus:ring-yellow-400 ${
     isDark ? 'bg-zinc-900/60 border-white/10 text-zinc-100' : 'bg-white/75 border-gray-200/80 text-gray-900'
   }`;
 
@@ -202,7 +202,7 @@ const FolioActionModal: React.FC<{
       : t('hotelMoney.collect');
 
   return renderModalPortal(
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-1200 flex items-center justify-center p-4">
       <button
         type="button"
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -636,19 +636,19 @@ export const GuestBillingView: React.FC = memo(() => {
       <motion.div variants={pageMotionItem} className="flex-1 flex flex-col min-w-0">
         {/* Stats */}
         <motion.div variants={pageMotionContainer} className="flex gap-4 mb-4">
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-xs'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('guestBilling.stats.activeFolios', { defaultValue: 'Active Folios' })}
             </div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.activeCount}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-xs'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('guestBilling.stats.outstandingBalance', { defaultValue: 'Outstanding Balance' })}
             </div>
             <div className={`text-xl font-bold text-amber-500`}>{formatMoney(stats.activeBalance, commonFolioCurrency(folios.filter(folio => folio.status === 'active')))}</div>
           </motion.div>
-          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-sm'}`}>
+          <motion.div variants={pageMotionItem} className={`px-4 py-2 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-white/10' : 'bg-white/80 border-gray-200 shadow-xs'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('guestBilling.stats.disputed', { defaultValue: 'Disputed' })}
             </div>
@@ -665,7 +665,7 @@ export const GuestBillingView: React.FC = memo(() => {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder={t('guestBilling.searchPlaceholder', { defaultValue: 'Search guest or room...' })}
-              className={`w-full pl-10 pr-4 py-2 rounded-xl ${isDark ? 'bg-zinc-900/70 text-white border-white/10' : 'bg-white text-gray-900 border-gray-200'} border focus:outline-none focus:ring-2 focus:ring-yellow-400`}
+              className={`w-full pl-10 pr-4 py-2 rounded-xl ${isDark ? 'bg-zinc-900/70 text-white border-white/10' : 'bg-white text-gray-900 border-gray-200'} border focus:outline-hidden focus:ring-2 focus:ring-yellow-400`}
             />
           </div>
           {(['all', ...FOLIO_STATUSES] as const).map(status => (
@@ -695,14 +695,14 @@ export const GuestBillingView: React.FC = memo(() => {
               onClick={() => setSelectedFolio(folio)}
               className={`w-full p-4 rounded-2xl text-left transition-transform active:scale-[0.99] border ${
                 selectedFolio?.id === folio.id ? 'ring-2 ring-yellow-400' : ''
-              } ${isDark ? 'bg-zinc-900/70 border-white/10 active:bg-white/10' : 'bg-white border-gray-200 shadow-sm active:bg-gray-50'}`}
+              } ${isDark ? 'bg-zinc-900/70 border-white/10 active:bg-white/10' : 'bg-white border-gray-200 shadow-xs active:bg-gray-50'}`}
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <User className={`w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-500'}`} />
                   <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{folio.guestName}</span>
                 </div>
-                <span className={`px-2 py-1 rounded text-xs ${statusBadgeClass(folio.status)}`}>
+                <span className={`px-2 py-1 rounded-sm text-xs ${statusBadgeClass(folio.status)}`}>
                   {statusLabel(folio.status)}
                 </span>
               </div>
@@ -740,7 +740,7 @@ export const GuestBillingView: React.FC = memo(() => {
           <div className={`p-3 rounded-2xl mb-4 border ${isDark ? 'bg-white/5 border-white/10' : 'bg-gray-50 border-gray-200'}`}>
             <div className="flex items-center justify-between">
               <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedFolio.guestName}</div>
-              <span className={`px-2 py-1 rounded text-xs ${statusBadgeClass(selectedFolio.status)}`}>
+              <span className={`px-2 py-1 rounded-sm text-xs ${statusBadgeClass(selectedFolio.status)}`}>
                 {statusLabel(selectedFolio.status)}
               </span>
             </div>

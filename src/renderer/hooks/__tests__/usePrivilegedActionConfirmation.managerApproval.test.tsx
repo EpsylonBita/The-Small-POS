@@ -11,26 +11,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mock = vi.hoisted(() => ({
   confirmPrivilegedAction: vi.fn(),
+  available: vi.fn(),
 }));
 
 vi.mock('../../../lib', () => ({
   getBridge: () => ({ auth: { confirmPrivilegedAction: mock.confirmPrivilegedAction } }),
 }));
 
+vi.mock('../../services/manager-approval', () => ({
+  managerApprovalAvailable: mock.available,
+}));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key,
+    t: (key: string, options?: { defaultValue?: string; right?: string; minutes?: number }) =>
+      `${options?.defaultValue ?? key}${options?.right ? `: ${options.right}` : ''}${options?.minutes ? `: ${options.minutes}` : ''}`,
   }),
 }));
 
 vi.mock('../../components/auth/PINLoginModal', () => ({
-  default: ({ isOpen, subtitle, onSubmit }: any) =>
+  default: ({ isOpen, subtitle, onSubmit, blockedMessage, errorMessage }: any) =>
     isOpen ? (
       <div role="dialog">
         <p data-testid="pin-subtitle">{subtitle}</p>
-        <button type="button" onClick={() => void onSubmit('2468')}>
+        {blockedMessage ? <p role="status">{blockedMessage}</p> : <button type="button" onClick={() => void onSubmit('2468')}>
           Enter PIN
-        </button>
+        </button>}
+        {errorMessage && <p role="alert">{errorMessage}</p>}
       </div>
     ) : null,
 }));
@@ -70,10 +77,56 @@ function Harness({ action, onDone }: { action: () => Promise<string>; onDone: (v
 
 beforeEach(() => {
   mock.confirmPrivilegedAction.mockReset().mockResolvedValue({ success: true });
+  mock.available.mockReset().mockResolvedValue({ available: true, permission: 'pos.refunds.process' });
 });
 afterEach(cleanup);
 
 describe('usePrivilegedActionConfirmation: a manager approves with nobody on shift', () => {
+  it('shows the missing store right instead of collecting a PIN when nobody can approve', async () => {
+    mock.available.mockResolvedValue({ available: false, permission: 'pos.refunds.process' });
+    const action = vi.fn().mockRejectedValue(managerApprovalRequired);
+    render(<Harness action={action} onDone={vi.fn()} />);
+    await act(async () => { screen.getByRole('button', { name: 'Record' }).click(); });
+    expect(mock.available).toHaveBeenCalledWith('void_payments');
+    expect(screen.getByRole('status').textContent).toContain('auth.managerApproval.noApprover');
+    expect(screen.queryByRole('button', { name: 'Enter PIN' })).toBeNull();
+    expect(mock.confirmPrivilegedAction).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dialog open and explains a refused personal manager PIN', async () => {
+    mock.confirmPrivilegedAction.mockRejectedValue({ code: 'UNAUTHORIZED', reason: 'Invalid PIN' });
+    render(<Harness action={vi.fn().mockRejectedValue(managerApprovalRequired)} onDone={vi.fn()} />);
+    await act(async () => { screen.getByRole('button', { name: 'Record' }).click(); });
+    await act(async () => { screen.getByRole('button', { name: 'Enter PIN' }).click(); });
+    expect(screen.getByRole('alert').textContent).toContain('auth.managerApproval.pinRefused');
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('keeps paused approvals open without a PIN pad, then allows entry when the pause expires', async () => {
+    mock.confirmPrivilegedAction.mockRejectedValue(JSON.stringify({ code: 'APPROVALS_PAUSED', minutes: 5, permission: 'pos.refunds.process' }));
+    render(<Harness action={vi.fn().mockRejectedValue(managerApprovalRequired)} onDone={vi.fn()} />);
+    await act(async () => { screen.getByRole('button', { name: 'Record' }).click(); });
+    vi.useFakeTimers();
+    try {
+      await act(async () => { screen.getByRole('button', { name: 'Enter PIN' }).click(); });
+      expect(screen.getByRole('status').textContent).toContain('auth.managerApproval.paused');
+      expect(screen.getByRole('status').textContent).toContain('5');
+      expect(screen.queryByRole('button', { name: 'Enter PIN' })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+      expect(screen.getByRole('button', { name: 'Enter PIN' })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('handles a directory change discovered during PIN confirmation without closing', async () => {
+    mock.confirmPrivilegedAction.mockRejectedValue({ code: 'NO_APPROVER_IN_STORE', permission: 'pos.refunds.process' });
+    render(<Harness action={vi.fn().mockRejectedValue(managerApprovalRequired)} onDone={vi.fn()} />);
+    await act(async () => { screen.getByRole('button', { name: 'Record' }).click(); });
+    await act(async () => { screen.getByRole('button', { name: 'Enter PIN' }).click(); });
+    expect(screen.getByRole('status').textContent).toContain('auth.managerApproval.noApprover');
+    expect(screen.queryByRole('button', { name: 'Enter PIN' })).toBeNull();
+  });
   it("asks for a manager's own PIN and sends what it approves", async () => {
     const action = vi
       .fn<() => Promise<string>>()

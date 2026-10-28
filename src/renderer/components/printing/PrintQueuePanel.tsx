@@ -220,7 +220,7 @@ const PrintQueueIssue: React.FC<PrintQueueIssueProps> = ({
     <div className="rounded-xl border border-yellow-300 bg-yellow-50 px-2 py-2 text-xs text-yellow-900 dark:border-yellow-400/30 dark:bg-yellow-500/10 dark:text-yellow-100">
       <div className="flex items-start gap-2">
         <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
-        <span className="min-w-0 flex-1 break-words">{summary}</span>
+        <span className="min-w-0 flex-1 wrap-break-word">{summary}</span>
       </div>
       {details && (
         <>
@@ -244,7 +244,7 @@ const PrintQueueIssue: React.FC<PrintQueueIssueProps> = ({
             aria-expanded={expanded}
             aria-controls={detailsId}
             onClick={() => setExpanded((current) => !current)}
-            className="mt-2 inline-flex min-h-[44px] min-w-[44px] items-center gap-1 rounded-xl border border-yellow-400/60 px-2 py-1 text-xs font-semibold active:bg-yellow-100 dark:active:bg-yellow-500/20"
+            className="mt-2 inline-flex min-h-touch min-w-touch items-center gap-1 rounded-xl border border-yellow-400/60 px-2 py-1 text-xs font-semibold active:bg-yellow-100 dark:active:bg-yellow-500/20"
           >
             {expanded
               ? <ChevronUp aria-hidden="true" className="h-4 w-4" />
@@ -254,7 +254,7 @@ const PrintQueueIssue: React.FC<PrintQueueIssueProps> = ({
               : label('settings.printQueue.showDetails', 'Show details')}
           </button>
           {expanded && (
-            <p id={detailsId} className="mt-2 break-words border-t border-yellow-300 pt-2 text-xs dark:border-yellow-400/30">
+            <p id={detailsId} className="mt-2 wrap-break-word border-t border-yellow-300 pt-2 text-xs dark:border-yellow-400/30">
               {details}
             </p>
           )}
@@ -300,7 +300,7 @@ const UnseenPausedPrinterControls: React.FC<UnseenPausedPrinterControlsProps> = 
             )}
             onClick={() => onResume(`unseen-${position}`, profileId, printerName)}
             disabled={busy}
-            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
+            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
           >
             <PlayCircle aria-hidden="true" className="h-4 w-4" />
             {label('settings.printQueue.resumePrinter', 'Resume')}
@@ -788,7 +788,7 @@ const PrintQueuePanel: React.FC = () => {
             aria-label={label('settings.printQueue.refreshAria', 'Refresh POS print queue')}
             onClick={() => void queue.refresh()}
             disabled={queue.loading}
-            className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition active:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-white/15 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+            className="inline-flex min-h-touch w-full items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition active:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-white/15 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
           >
             <RefreshCw aria-hidden="true" className={`h-4 w-4 ${queue.loading ? 'animate-spin' : ''}`} />
             {label('settings.printQueue.refresh', 'Refresh')}
@@ -800,7 +800,7 @@ const PrintQueuePanel: React.FC = () => {
               : label('settings.printQueue.pauseQueueAria', 'Pause POS print queue')}
             onClick={handleQueuePauseToggle}
             disabled={queue.loading || anyMutationBusy}
-            className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl border border-yellow-400 bg-yellow-50 px-3 py-2 text-xs font-semibold text-yellow-900 transition active:bg-yellow-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-yellow-400/35 dark:bg-yellow-400/10 dark:text-yellow-100 dark:active:bg-yellow-400/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+            className="inline-flex min-h-touch w-full items-center justify-center gap-2 rounded-2xl border border-yellow-400 bg-yellow-50 px-3 py-2 text-xs font-semibold text-yellow-900 transition active:bg-yellow-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-yellow-400/35 dark:bg-yellow-400/10 dark:text-yellow-100 dark:active:bg-yellow-400/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
           >
             {displayQueuePaused
               ? <PlayCircle aria-hidden="true" className="h-4 w-4" />
@@ -814,7 +814,7 @@ const PrintQueuePanel: React.FC = () => {
             aria-label={label('settings.printQueue.pauseCancelAria', 'Pause and cancel POS jobs')}
             onClick={() => setConfirmation({ kind: 'bulk' })}
             disabled={queue.loading || bulkMutationBusy}
-            className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition active:bg-rose-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:active:bg-rose-500/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+            className="inline-flex min-h-touch w-full items-center justify-center gap-2 rounded-2xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition active:bg-rose-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:active:bg-rose-500/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
           >
             <XCircle aria-hidden="true" className="h-4 w-4" />
             {label('settings.printQueue.pauseCancel', 'Pause and cancel POS jobs')}
@@ -929,7 +929,7 @@ const PrintQueuePanel: React.FC = () => {
                         {job.printerDisplayName}
                       </div>
                       {job.resolvedTarget && (
-                        <div className="break-words text-[11px] text-slate-600 dark:text-slate-400">
+                        <div className="wrap-break-word text-[11px] text-slate-600 dark:text-slate-400">
                           {job.resolvedTarget}
                         </div>
                       )}
@@ -989,7 +989,7 @@ const PrintQueuePanel: React.FC = () => {
                               : label('settings.printQueue.cancelJobAria', 'Cancel POS print job')}
                             onClick={() => handleCancelJob(job.id)}
                             disabled={jobBusy}
-                            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1 rounded-xl border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700 active:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:active:bg-rose-500/20"
+                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700 active:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-400/30 dark:bg-rose-500/10 dark:text-rose-100 dark:active:bg-rose-500/20"
                           >
                             <XCircle aria-hidden="true" className="h-4 w-4" />
                             {label('settings.printQueue.cancel', 'Cancel')}
@@ -1007,7 +1007,7 @@ const PrintQueuePanel: React.FC = () => {
                               : label('settings.printQueue.retryJobAria', 'Retry POS print job')}
                             onClick={() => handleRetryJob(job.id)}
                             disabled={jobBusy}
-                            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
+                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
                           >
                             <RotateCcw aria-hidden="true" className="h-4 w-4" />
                             {label('settings.printQueue.retry', 'Retry')}
@@ -1029,7 +1029,7 @@ const PrintQueuePanel: React.FC = () => {
                               actionContext: rowContext,
                             })}
                             disabled={jobBusy}
-                            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1 rounded-xl border border-yellow-400 bg-yellow-50 px-2 py-1 text-xs font-semibold text-yellow-900 active:bg-yellow-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-yellow-400/35 dark:bg-yellow-400/10 dark:text-yellow-100 dark:active:bg-yellow-400/20"
+                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-yellow-400 bg-yellow-50 px-2 py-1 text-xs font-semibold text-yellow-900 active:bg-yellow-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-yellow-400/35 dark:bg-yellow-400/10 dark:text-yellow-100 dark:active:bg-yellow-400/20"
                           >
                             <Printer aria-hidden="true" className="h-4 w-4" />
                             {label('settings.printQueue.reprint', 'Reprint')}
@@ -1056,7 +1056,7 @@ const PrintQueuePanel: React.FC = () => {
                             )}
                             disabled={jobBusy
                               || [...busyActions].some((key) => key.startsWith(`resume:${job.printerProfileId}:`))}
-                            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
+                            className="inline-flex min-h-touch min-w-touch items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 active:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100 dark:active:bg-emerald-500/20"
                           >
                             <PlayCircle aria-hidden="true" className="h-4 w-4" />
                             {label('settings.printQueue.resumePrinter', 'Resume')}
@@ -1087,7 +1087,7 @@ const PrintQueuePanel: React.FC = () => {
               aria-label={label('settings.printQueue.showMoreAria', 'Show more POS print jobs')}
               onClick={() => setLimit((current) => Math.min(MAX_LIMIT, current + LIMIT_STEP))}
               disabled={queue.loading || queue.stale || Boolean(queue.error) || anyMutationBusy}
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700 active:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-white/15 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
+              className="inline-flex min-h-touch min-w-touch items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700 active:bg-slate-100 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500 dark:border-white/15 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:disabled:border-white/10 dark:disabled:bg-white/5 dark:disabled:text-slate-400"
             >
               {label('settings.printQueue.showMore', 'Show more')}
             </button>

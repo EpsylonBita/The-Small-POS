@@ -127,7 +127,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
 
       {/* Detail Panel */}
       {showDetailPanel && (
-        <div className="absolute top-full right-0 mt-2 bg-gradient-to-br from-gray-900/95 to-gray-800/95 backdrop-blur-xl shadow-2xl rounded-2xl border border-white/10 p-5 min-w-80 z-[100]">
+        <div className="absolute top-full right-0 mt-2 bg-linear-to-br from-gray-900/95 to-gray-800/95 backdrop-blur-xl shadow-2xl rounded-2xl border border-white/10 p-5 min-w-80 z-100">
           <div className="space-y-4">
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-white/10">
@@ -255,7 +255,7 @@ export const TerminalTypeIndicator: React.FC<TerminalTypeIndicatorProps> = ({
               <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-3">
                 <div className="flex items-start gap-2">
                   <svg
-                    className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5"
+                    className="w-5 h-5 text-blue-400 shrink-0 mt-0.5"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"

@@ -82,8 +82,8 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
       rounded-xl font-medium transition-all duration-200
       transform active:scale-95 border backdrop-blur-sm
       flex items-center justify-center gap-1.5 sm:gap-2 whitespace-nowrap
-      min-h-[40px] sm:min-h-[44px] touch-feedback
-      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2
+      min-h-[40px] sm:min-h-touch touch-feedback
+      focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2
       focus-visible:ring-offset-transparent
     `;
 
@@ -92,7 +92,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
     // success / destructive / edit-utility, so colour now encodes meaning, not chrome.
     const neutralGlass =
       resolvedTheme === 'light'
-        ? 'bg-white/80 text-zinc-700 border-zinc-300 shadow-sm shadow-zinc-300/20 active:bg-zinc-100 focus-visible:ring-zinc-400'
+        ? 'bg-white/80 text-zinc-700 border-zinc-300 shadow-xs shadow-zinc-300/20 active:bg-zinc-100 focus-visible:ring-zinc-400'
         : 'bg-zinc-800/80 text-zinc-100 border-zinc-600/50 shadow-lg shadow-black/20 active:bg-zinc-700 focus-visible:ring-zinc-400';
 
     switch (variant) {

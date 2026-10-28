@@ -202,7 +202,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
       onClose={() => undefined}
       title={t('modals.refund.editSettlementTitle', { defaultValue: 'Settle Edit Refund' })}
       size="lg"
-      className="!max-w-3xl"
+      className="max-w-3xl!"
       closeOnBackdrop={false}
       closeOnEscape={false}
       footer={(
@@ -319,7 +319,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                     </button>
                   </div>
 
-                  <div className="grid gap-3 md:grid-cols-[140px,1fr]">
+                  <div className="grid gap-3 md:grid-cols-[140px_1fr]">
                     <label className="space-y-1">
                       <span className="text-xs font-semibold uppercase tracking-wider liquid-glass-modal-text-muted">
                         {t('modals.refund.amount', { defaultValue: 'Amount' })}
@@ -330,7 +330,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                           aria-label={t('modals.refund.amount', { defaultValue: 'Amount' })}
                           value={draft.amount}
                           onValueChange={(amount) => setDraft(payment.id, (current) => ({ ...current, amount }))}
-                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3 text-sm focus:border-orange-400/50 focus:outline-none"
+                          className="liquid-glass-modal-input w-full rounded-2xl py-2 pl-12 pr-3 text-sm focus:border-orange-400/50 focus:outline-hidden"
                           placeholder="0,00"
                         />
                       </div>
@@ -344,7 +344,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                         rows={2}
                         value={draft.reason}
                         onChange={(event) => setDraft(payment.id, (current) => ({ ...current, reason: event.target.value }))}
-                        className="liquid-glass-modal-input w-full rounded-2xl px-3 py-2 text-sm focus:border-orange-400/50 focus:outline-none"
+                        className="liquid-glass-modal-input w-full rounded-2xl px-3 py-2 text-sm focus:border-orange-400/50 focus:outline-hidden"
                         placeholder={t('modals.refund.reasonPlaceholder', { defaultValue: 'Enter refund reason...' })}
                       />
                     </label>

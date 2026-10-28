@@ -26,14 +26,14 @@ test('renderModalPortal mounts at document.body with an SSR fallback', () => {
 test('AppointmentsView booking modal portals to body with a full-screen blur backdrop', () => {
   assert.ok(importsHelper(appointments), 'AppointmentsView must use renderModalPortal');
   assert.match(appointments, /return renderModalPortal\(/);
-  assert.match(appointments, /fixed inset-0 z-\[1000\][^`]*backdrop-blur-xl/);
+  assert.match(appointments, /fixed inset-0 z-1000(?![\w.-])[^`]*backdrop-blur-xl/);
   assert.match(appointments, /isDark \? 'bg-black\/55' : 'bg-black\/22'/);
 });
 
 test('RoomsView modal portals to body with a high-z full-screen blur overlay', () => {
   assert.ok(importsHelper(rooms), 'RoomsView must use renderModalPortal');
   assert.match(rooms, /return renderModalPortal\(/);
-  assert.match(rooms, /fixed inset-0 z-\[1200\]/);
+  assert.match(rooms, /fixed inset-0 z-1200(?![\w.-])/);
   assert.match(rooms, /absolute inset-0 bg-black\/50 backdrop-blur-sm/);
 });
 
@@ -66,7 +66,7 @@ test('RoomsView shared Modal closes on Escape only when it is the topmost dialog
 test('GuestBillingView charge/payment modal portals to body with a high-z full-screen blur overlay', () => {
   assert.ok(importsHelper(guestBilling), 'GuestBillingView must use renderModalPortal');
   assert.match(guestBilling, /return renderModalPortal\(/);
-  assert.match(guestBilling, /fixed inset-0 z-\[1200\]/);
+  assert.match(guestBilling, /fixed inset-0 z-1200(?![\w.-])/);
   assert.match(guestBilling, /absolute inset-0 bg-black\/50 backdrop-blur-sm/);
 });
 
@@ -78,7 +78,7 @@ test('ReservationsView create + details overlays portal to body with high z and 
   // The clipped low-z overlays (behind the sidebar) must be gone.
   assert.doesNotMatch(reservations, /fixed inset-0 z-40/);
   assert.doesNotMatch(reservations, /fixed inset-0 z-30/);
-  const highZ = reservations.match(/fixed inset-0 z-\[1200\]/g);
+  const highZ = reservations.match(/fixed inset-0 z-1200(?![\w.-])/g);
   assert.ok(highZ && highZ.length >= 2, 'both overlays should use the high app-modal z-index');
 
   // The create/service overlays share a full-screen blurred glass backdrop.

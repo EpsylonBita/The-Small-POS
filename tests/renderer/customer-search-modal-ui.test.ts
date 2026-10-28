@@ -78,7 +78,7 @@ test('CustomerSearchModal address + action MapPins are amber/neutral (not blue) 
   // No MapPin (or any icon) is blue anywhere in the modal.
   assert.doesNotMatch(source, /<MapPin[^>]*text-blue/);
   // The non-selected address-row marker is neutral; the Add Address action marker is amber.
-  assert.match(source, /<MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0\.5 flex-shrink-0" \/>/);
+  assert.match(source, /<MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0\.5 shrink-0" \/>/);
   assert.match(actionSection, /<MapPin className="w-4 h-4 text-amber-500 dark:text-amber-300" \/>/);
 
   // Selected-address border stays green; the three action fills stay transparent; edit amber, delete red.
@@ -146,7 +146,7 @@ test('CustomerSearchModal renders a translated, touch-sized Caller ID add-addres
   const callerIdActions = source.slice(callerIdActionsStart, callerIdActionsEnd);
 
   assert.match(callerIdActions, /type="button"/);
-  assert.match(callerIdActions, /min-h-\[44px\]/);
+  assert.match(callerIdActions, /min-h-touch(?![\w.-])/);
   assert.match(callerIdActions, /dark:border-amber-400\/50[\s\S]*dark:text-white/);
   assert.match(callerIdActions, /t\('modals\.customerSearch\.addNewAddress', 'Add address'\)/);
   assert.doesNotMatch(callerIdActions, /editCustomer|deleteCustomer|Trash2|<Edit/);

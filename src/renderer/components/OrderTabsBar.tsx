@@ -146,7 +146,7 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
         aria-label={t('dashboard.tabs.tablistLabel', 'Order status tabs')}
         className={`flex backdrop-blur-sm rounded-xl p-1.5 sm:p-2 border overflow-x-auto scrollbar-hide touch-pan-x ${
           resolvedTheme === 'light'
-            ? 'bg-[#fbf4e9]/90 border-amber-200/60 shadow-sm'
+            ? 'bg-[#fbf4e9]/90 border-amber-200/60 shadow-xs'
             : 'bg-white/10 border-white/20'
         }`}
         style={{ WebkitOverflowScrolling: 'touch' }}
@@ -174,7 +174,7 @@ const OrderTabsBar: React.FC<OrderTabsBarProps> = React.memo(
             className={`flex-1 min-w-[90px] px-3 sm:px-4 py-2.5 sm:py-3 rounded-lg font-medium transition-all duration-200 relative touch-feedback active:scale-95 ${
               activeTab === tab.id
                 ? resolvedTheme === 'light'
-                  ? 'bg-[#fffdf8]/95 backdrop-blur-sm shadow-sm border border-amber-100/80'
+                  ? 'bg-[#fffdf8]/95 backdrop-blur-sm shadow-xs border border-amber-100/80'
                   : 'bg-white/20 shadow-lg'
                 : resolvedTheme === 'light'
                   ? 'active:bg-[#fff7e8]/90'

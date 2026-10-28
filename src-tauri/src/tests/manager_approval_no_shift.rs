@@ -11,7 +11,7 @@
 //! shift check-in trusts) among the staff whose store permissions allow the
 //! action (THE-448 names, as on Android: `pos.refunds.process` for a payment,
 //! `pos.orders.cancel` for an order). It is used once, audited, and wrong PINs
-//! count toward the terminal's lockout. With a shift open, nothing changes.
+//! count only toward a separate five-minute approval pause.
 
 use rusqlite::params;
 use serde_json::{json, Value};
@@ -156,9 +156,13 @@ fn structured(error: &GuardedCommandError) -> &PrivilegedActionError {
 }
 
 fn lockout_attempts(td: &TestDb) -> u32 {
-    crate::db::get_setting(&td.state.conn.lock().unwrap(), "staff", "lockout_attempts")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
+    crate::db::get_setting(
+        &td.state.conn.lock().unwrap(),
+        "staff",
+        "approval_lockout_attempts",
+    )
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(0)
 }
 
 #[test]

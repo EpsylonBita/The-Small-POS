@@ -756,8 +756,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       ) : undefined}
       ariaLabel={callerIdWorkspace ? t('modals.customerSearch.title') : undefined}
       size={callerIdWorkspace ? 'xl' : 'sm'}
-      className={callerIdWorkspace ? '!max-w-6xl !max-h-[90vh]' : '!max-w-md'}
-      contentClassName={callerIdWorkspace ? '!px-6 !pb-6' : undefined}
+      className={callerIdWorkspace ? 'max-w-6xl! max-h-[90vh]!' : 'max-w-md!'}
+      contentClassName={callerIdWorkspace ? 'px-6! pb-6!' : undefined}
       closeOnBackdrop={true}
       closeOnEscape={true}
       initialFocusRef={searchInputRef}
@@ -786,7 +786,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             onChange={handleSearchChange}
             onKeyDown={handleKeyPress}
             placeholder={t('modals.customerSearch.searchPlaceholder', 'Enter phone or name...')}
-            className="customer-search-yellow-input liquid-glass-modal-input w-full rounded-xl px-3 py-3 pl-10 transition-all focus:outline-none"
+            className="customer-search-yellow-input liquid-glass-modal-input w-full rounded-xl px-3 py-3 pl-10 transition-all focus:outline-hidden"
             autoFocus
           />
           {/* Real-time search indicator */}
@@ -829,7 +829,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           <button
             type="button"
             onClick={handleAddNewCustomer}
-            className="min-h-12 rounded-xl border-2 border-emerald-600 bg-white px-6 py-3 font-semibold text-emerald-700 shadow-[0_5px_0_rgba(4,120,87,0.24),0_10px_22px_rgba(15,23,42,0.12)] transition-transform active:translate-y-1 active:shadow-sm dark:border-emerald-500 dark:bg-white dark:text-emerald-700"
+            className="min-h-12 rounded-xl border-2 border-emerald-600 bg-white px-6 py-3 font-semibold text-emerald-700 shadow-[0_5px_0_rgba(4,120,87,0.24),0_10px_22px_rgba(15,23,42,0.12)] transition-transform active:translate-y-1 active:shadow-xs dark:border-emerald-500 dark:bg-white dark:text-emerald-700"
             style={{
               backgroundColor: '#ffffff',
               borderColor: '#16a34a',
@@ -906,7 +906,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               </div>
               {customer.ban_reason && (
                 <p className="text-sm text-red-400 flex items-start gap-2 mt-2">
-                  <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{t('modals.customerSearch.banReason', 'Reason')}: {customer.ban_reason}</span>
                 </p>
               )}
@@ -964,7 +964,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                       event.preventDefault();
                       setSelectedAddressId(addr.id);
                     }}
-                    className={`w-full cursor-pointer rounded-lg p-2 transition-all ${callerIdWorkspace ? 'min-h-[116px] !rounded-xl !p-4' : ''} ${isSelected
+                    className={`w-full cursor-pointer rounded-lg p-2 transition-all ${callerIdWorkspace ? 'min-h-[116px] rounded-xl! p-4!' : ''} ${isSelected
                       ? 'border-2 border-green-500/60 bg-transparent'
                       : 'border border-gray-200 bg-transparent active:border-gray-300 dark:border-white/10 dark:active:border-white/20'
                       }`}
@@ -972,11 +972,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     <div className="flex items-start gap-2">
                       {/* Checkmark or MapPin icon */}
                       {isSelected ? (
-                        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center shrink-0 mt-0.5">
                           <Check className="w-3 h-3 text-white" />
                         </div>
                       ) : (
-                        <MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0.5 flex-shrink-0" />
+                        <MapPin className="w-4 h-4 text-gray-500 dark:text-gray-300 mt-0.5 shrink-0" />
                       )}
                       <div className="flex-1 min-w-0">
                         <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
@@ -1083,7 +1083,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               )}
               {customer.address && (
                 <p className="text-sm liquid-glass-modal-text-muted flex items-start gap-1">
-                  <MapPin className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <MapPin className="w-4 h-4 mt-0.5 shrink-0" />
                   <span>
                     {customer.address}
                     {customer.postal_code && ` (${customer.postal_code})`}
@@ -1185,7 +1185,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               <button
                 type="button"
                 onClick={handleAddNewAddress}
-                className="mt-4 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-amber-600 bg-white px-4 py-3 font-semibold text-slate-900 transition-transform active:scale-[0.98] dark:border-amber-400/50 dark:bg-slate-900 dark:text-white"
+                className="mt-4 flex min-h-touch w-full items-center justify-center gap-2 rounded-xl border border-amber-600 bg-white px-4 py-3 font-semibold text-slate-900 transition-transform active:scale-[0.98] dark:border-amber-400/50 dark:bg-slate-900 dark:text-white"
               >
                 <MapPin className="h-5 w-5 text-amber-600 dark:text-amber-300" />
                 {t('modals.customerSearch.addNewAddress', 'Add address')}
@@ -1272,7 +1272,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                     buildSelectedCustomer(),
                     searchQuery.trim(),
                   )}
-                  className={`flex min-h-[96px] flex-col items-center justify-center gap-2 rounded-2xl border-2 bg-white px-4 py-4 font-semibold text-slate-900 shadow-[0_7px_0_rgba(15,23,42,0.12),0_14px_28px_rgba(15,23,42,0.14)] transition-transform active:translate-y-1 active:shadow-sm dark:bg-white dark:text-slate-900 ${config.classes}`}
+                  className={`flex min-h-[96px] flex-col items-center justify-center gap-2 rounded-2xl border-2 bg-white px-4 py-4 font-semibold text-slate-900 shadow-[0_7px_0_rgba(15,23,42,0.12),0_14px_28px_rgba(15,23,42,0.14)] transition-transform active:translate-y-1 active:shadow-xs dark:bg-white dark:text-slate-900 ${config.classes}`}
                 >
                   <Icon className={`h-8 w-8 ${config.iconClasses}`} strokeWidth={1.8} />
                   <span className="text-center text-sm leading-tight">{config.label}</span>

@@ -151,8 +151,8 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
       })
     : null;
   const accentClass = isCheckin
-    ? 'border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5'
-    : 'border-purple-400/30 bg-gradient-to-br from-purple-500/10 to-purple-600/5';
+    ? 'border-green-400/30 bg-linear-to-br from-green-500/10 to-green-600/5'
+    : 'border-purple-400/30 bg-linear-to-br from-purple-500/10 to-purple-600/5';
   const EmptyIcon = isCheckin ? UserCheck : CalendarPlus;
 
   // Floor filter narrows the displayed room cards. Reset to "all" each time the picker reopens
@@ -168,7 +168,7 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
   );
 
   return (
-    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title={title} className="!max-w-3xl">
+    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title={title} className="max-w-3xl!">
       <div className="p-2">
         {rooms.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-10 text-center">
@@ -233,7 +233,7 @@ export const RoomStaySelectorModal: React.FC<RoomStaySelectorModalProps> = ({
 // ---------------------------------------------------------------------------------------------
 
 const fieldClass =
-  'liquid-glass-modal-input w-full rounded-xl px-3 py-3 text-base focus:outline-none';
+  'liquid-glass-modal-input w-full rounded-xl px-3 py-3 text-base focus:outline-hidden';
 
 const GlassInput: React.FC<{
   icon?: React.ReactNode;
@@ -468,7 +468,7 @@ export const RoomCheckinModal: React.FC<RoomStayFormBaseProps> = ({
       isOpen
       onClose={() => { if (!submitting) onClose(); }}
       title={t('roomsView.newCheckin', { defaultValue: 'New Check-in' })}
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={!submitting}
       closeOnEscape={!submitting}
     >
@@ -667,7 +667,7 @@ export const RoomReservationModal: React.FC<RoomStayFormBaseProps> = ({
       isOpen
       onClose={() => { if (!submitting) onClose(); }}
       title={reservation ? t('roomWorkflow.editBooking') : t('roomsView.newReservation', { defaultValue: 'New Reservation' })}
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={!submitting}
       closeOnEscape={!submitting}
     >

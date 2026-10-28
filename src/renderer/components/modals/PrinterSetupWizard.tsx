@@ -1077,7 +1077,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
                   setTemplate('classic')
                   setReadability(guessReadabilityFromRecommended(candidate.recommended))
                 }}
-                className={`min-h-[44px] w-full text-left p-3 rounded-lg border transition-all active:scale-[0.99] ${
+                className={`min-h-touch w-full text-left p-3 rounded-lg border transition-all active:scale-[0.99] ${
                   selected
                     ? 'bg-amber-50 border-amber-400 text-amber-950 dark:bg-amber-500/15 dark:border-amber-400/50 dark:text-amber-100'
                     : 'bg-slate-50 border-slate-200 text-slate-800 dark:bg-slate-900/60 dark:border-white/10 dark:text-slate-100'
@@ -1160,7 +1160,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
             <div className="font-medium liquid-glass-modal-text">
               {t(stage.titleKey, stage.defaultTitle)}
               {stage.optional && (
-                <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-[11px] text-slate-700 dark:bg-white/10 dark:text-slate-200">
+                <span className="ml-2 rounded-sm bg-slate-200 px-1.5 py-0.5 text-[11px] text-slate-700 dark:bg-white/10 dark:text-slate-200">
                   {t('settings.printer.optional', 'Optional')}
                 </span>
               )}
@@ -1174,7 +1174,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
             aria-label={sendLabel}
             disabled={disabled || !canStart || saving || discovering || Boolean(submittingKind) || sampleActionBusy}
             onClick={() => void handleRunVerification(stage.kind)}
-            className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
+            className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch min-w-touch`}
           >
             {submittingKind === stage.kind
               ? t('settings.printer.testing', 'Testing...')
@@ -1222,7 +1222,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
                 )}
                 disabled={sampleActionBusy}
                 onClick={() => void handleTrackedCancel(stage.kind)}
-                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch min-w-touch`}
               >
                 {t('settings.printer.quickWizardCancelSample', 'Cancel sample')}
               </button>
@@ -1237,7 +1237,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
                 )}
                 disabled={sampleActionBusy}
                 onClick={() => void handleTrackedRetry(stage.kind)}
-                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch min-w-touch`}
               >
                 {t('settings.printer.quickWizardRetrySample', 'Retry sample')}
               </button>
@@ -1257,14 +1257,14 @@ const PrinterSetupWizard: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => handleConfirmStage(stage.kind, true)}
-                className={`${liquidGlassModalButton('primary', 'sm')} min-h-[44px] min-w-[44px]`}
+                className={`${liquidGlassModalButton('primary', 'sm')} min-h-touch min-w-touch`}
               >
                 {t('common.actions.yes', 'Yes')}
               </button>
               <button
                 type="button"
                 onClick={() => handleConfirmStage(stage.kind, false)}
-                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`}
+                className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch min-w-touch`}
               >
                 {t('common.actions.no', 'No')}
               </button>
@@ -1302,7 +1302,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
               onClick={() => {
                 if (!saveTokenRef.current) onOpenLogoSettings()
               }}
-              className={`${liquidGlassModalButton('secondary', 'sm')} mt-2 min-h-[44px] min-w-[44px]`}
+              className={`${liquidGlassModalButton('secondary', 'sm')} mt-2 min-h-touch min-w-touch`}
             >
               {t('settings.printer.quickWizardOpenLogoSettings', 'Open logo settings')}
             </button>
@@ -1330,7 +1330,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
         onClick={() => {
           if (!saveTokenRef.current) onOpenLogoSettings()
         }}
-        className={`${liquidGlassModalButton('secondary', 'sm')} mt-2 min-h-[44px] min-w-[44px]`}
+        className={`${liquidGlassModalButton('secondary', 'sm')} mt-2 min-h-touch min-w-touch`}
       >
         {t('settings.printer.quickWizardOpenLogoSettings', 'Open logo settings')}
       </button>
@@ -1432,7 +1432,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
             && effectiveLogoConfigured
             && verification.encoding.phase === 'confirmed'
             && verification.branding.phase !== 'confirmed' && (
-              <label className={`flex min-h-[44px] items-center gap-2 rounded-2xl border p-3 text-sm ${liquidGlassModalTone('warning')}`}>
+              <label className={`flex min-h-touch items-center gap-2 rounded-2xl border p-3 text-sm ${liquidGlassModalTone('warning')}`}>
                 <input
                   type="checkbox"
                   checked={verification.continueWithoutLogo}
@@ -1440,7 +1440,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
                     type: 'continue_without_logo',
                     value: event.target.checked,
                   })}
-                  className="h-5 w-5 rounded"
+                  className="h-5 w-5 rounded-sm"
                 />
                 {t('settings.printer.quickWizardContinueWithoutLogo', 'Continue without verified logo output')}
               </label>
@@ -1535,7 +1535,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
               tabIndex={readability === size ? 0 : -1}
               onClick={() => setReadability(size)}
               onKeyDown={event => handleReadabilityKeyDown(event, size)}
-              className={`min-h-[44px] min-w-[44px] rounded-lg border px-3 py-2 text-sm ${
+              className={`min-h-touch min-w-touch rounded-lg border px-3 py-2 text-sm ${
                 readability === size
                   ? liquidGlassModalTone('warning')
                   : liquidGlassModalTone('neutral')
@@ -1552,7 +1552,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
           {t('settings.printer.quickWizardLivePreview', 'Live style preview')}
         </div>
         <div
-          className="bg-white text-black rounded px-3 py-2"
+          className="bg-white text-black rounded-sm px-3 py-2"
           style={{
             fontSize: readability === 'small' ? 12 : readability === 'large' ? 16 : 14,
             lineHeight: readability === 'small' ? '1.2' : readability === 'large' ? '1.45' : '1.3',
@@ -1602,13 +1602,13 @@ const PrinterSetupWizard: React.FC<Props> = ({
         </div>
       </div>
 
-      <label className={`flex min-h-[44px] items-center gap-2 text-sm cursor-pointer ${defaultReceiptAllowed ? 'liquid-glass-modal-text' : 'liquid-glass-modal-text-muted'}`}>
+      <label className={`flex min-h-touch items-center gap-2 text-sm cursor-pointer ${defaultReceiptAllowed ? 'liquid-glass-modal-text' : 'liquid-glass-modal-text-muted'}`}>
         <input
           type="checkbox"
           checked={defaultReceiptAllowed ? setDefaultReceipt : false}
           onChange={e => setSetDefaultReceipt(e.target.checked)}
           disabled={!defaultReceiptAllowed}
-          className="rounded"
+          className="rounded-sm"
         />
         {defaultReceiptAllowed
           ? t('settings.printer.setAsDefault', 'Set as default')
@@ -1619,16 +1619,16 @@ const PrinterSetupWizard: React.FC<Props> = ({
         <div className="text-xs liquid-glass-modal-text-muted">
           {t('settings.printer.quickWizardAssignOtherRoles', 'Assign this printer to other roles (optional)')}
         </div>
-        <label className="flex min-h-[44px] items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
-          <input type="checkbox" checked={assignKitchen} onChange={e => setAssignKitchen(e.target.checked)} className="rounded" />
+        <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
+          <input type="checkbox" checked={assignKitchen} onChange={e => setAssignKitchen(e.target.checked)} className="rounded-sm" />
           {t('settings.printer.roleKitchen', 'Kitchen')}
         </label>
-        <label className="flex min-h-[44px] items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
-          <input type="checkbox" checked={assignBar} onChange={e => setAssignBar(e.target.checked)} className="rounded" />
+        <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
+          <input type="checkbox" checked={assignBar} onChange={e => setAssignBar(e.target.checked)} className="rounded-sm" />
           {t('settings.printer.roleBar', 'Bar')}
         </label>
-        <label className="flex min-h-[44px] items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
-          <input type="checkbox" checked={assignLabel} onChange={e => setAssignLabel(e.target.checked)} className="rounded" />
+        <label className="flex min-h-touch items-center gap-2 text-sm liquid-glass-modal-text cursor-pointer">
+          <input type="checkbox" checked={assignLabel} onChange={e => setAssignLabel(e.target.checked)} className="rounded-sm" />
           {t('settings.printer.roleLabel', 'Label')}
         </label>
       </div>
@@ -1658,7 +1658,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
                   onClick={() => {
                     if (!saving && !saveTokenRef.current) setCurrentStep(step)
                   }}
-                  className={`min-h-[44px] min-w-[44px] px-2.5 py-1.5 text-xs rounded-md transition active:scale-95 ${
+                  className={`min-h-touch min-w-touch px-2.5 py-1.5 text-xs rounded-md transition active:scale-95 ${
                     active
                       ? 'bg-amber-100 text-amber-900 dark:bg-amber-500/20 dark:text-amber-100'
                       : passed
@@ -1674,7 +1674,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
         </ol>
         <button disabled={saving} onClick={() => {
           if (!saveTokenRef.current) onOpenExpert()
-        }} className={`${liquidGlassModalButton('secondary', 'sm')} min-h-[44px] min-w-[44px]`} type="button">
+        }} className={`${liquidGlassModalButton('secondary', 'sm')} min-h-touch min-w-touch`} type="button">
           <span className="inline-flex items-center justify-center gap-1">
             <SlidersHorizontal className="w-4 h-4 shrink-0" />
             {t('settings.printer.quickWizardAdvanced', 'Expert Settings')}
@@ -1690,12 +1690,12 @@ const PrinterSetupWizard: React.FC<Props> = ({
       <div className="flex items-center justify-between border-t border-slate-200 pt-2 dark:border-white/10">
         <button disabled={saving} onClick={() => {
           if (!saveTokenRef.current) onCancel()
-        }} className={`${liquidGlassModalButton('secondary', 'md')} min-h-[44px] min-w-[44px]`} type="button">
+        }} className={`${liquidGlassModalButton('secondary', 'md')} min-h-touch min-w-touch`} type="button">
           {t('common.actions.cancel', 'Cancel')}
         </button>
         <div className="flex items-center gap-2">
           {stepIndex > 0 && (
-            <button disabled={saving} onClick={gotoPrevious} className={`${liquidGlassModalButton('secondary', 'md')} min-h-[44px] min-w-[44px]`} type="button">
+            <button disabled={saving} onClick={gotoPrevious} className={`${liquidGlassModalButton('secondary', 'md')} min-h-touch min-w-touch`} type="button">
               {t('common.actions.back', 'Back')}
             </button>
           )}
@@ -1703,7 +1703,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
             <button
               onClick={gotoNext}
               disabled={saving || !canContinue}
-              className={`${liquidGlassModalButton('primary', 'md')} min-h-[44px] min-w-[44px]`}
+              className={`${liquidGlassModalButton('primary', 'md')} min-h-touch min-w-touch`}
               type="button"
             >
               <span className="inline-flex items-center justify-center gap-1">
@@ -1716,7 +1716,7 @@ const PrinterSetupWizard: React.FC<Props> = ({
             <button
               onClick={() => void handleSave()}
               disabled={saving || !saveAllowed}
-              className={`${liquidGlassModalButton('primary', 'md')} min-h-[44px] min-w-[44px]`}
+              className={`${liquidGlassModalButton('primary', 'md')} min-h-touch min-w-touch`}
               type="button"
             >
               {saving ? t('common.actions.saving', 'Saving...') : t('common.actions.save', 'Save')}

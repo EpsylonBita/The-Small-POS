@@ -185,7 +185,7 @@ export function TableReleaseOwedModal({
                   setAskingReason(false);
                   setReason('');
                 }}
-                className="min-h-[44px] rounded-2xl border liquid-glass-modal-border px-3 py-2 font-semibold disabled:opacity-60"
+                className="min-h-touch rounded-2xl border liquid-glass-modal-border px-3 py-2 font-semibold disabled:opacity-60"
               >
                 {t('common.actions.back', { defaultValue: 'Back' })}
               </button>
@@ -193,7 +193,7 @@ export function TableReleaseOwedModal({
                 type="button"
                 disabled={busy || trimmedReason.length === 0}
                 onClick={() => onCancelOrder(trimmedReason)}
-                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-2xl border border-red-400/50 bg-red-500/80 px-3 py-2 font-semibold text-white disabled:opacity-60"
+                className="inline-flex min-h-touch items-center justify-center gap-2 rounded-2xl border border-red-400/50 bg-red-500/80 px-3 py-2 font-semibold text-white disabled:opacity-60"
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
                 {t('tableRelease.confirmCancel', { defaultValue: 'Cancel the order' })}

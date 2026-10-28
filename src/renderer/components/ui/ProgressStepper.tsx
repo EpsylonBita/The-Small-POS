@@ -111,7 +111,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         {!isLast && orientation === 'horizontal' && (
                             <div className="absolute left-[calc(50%+1.7rem)] right-[calc(-50%+1.7rem)] top-[1.35rem] h-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
                                 <motion.div
-                                    className="h-full origin-left rounded-full bg-gradient-to-r from-emerald-400 via-emerald-400 to-yellow-400/90"
+                                    className="h-full origin-left rounded-full bg-linear-to-r from-emerald-400 via-emerald-400 to-yellow-400/90"
                                     initial={false}
                                     animate={connectorFilled ? 'visible' : 'hidden'}
                                     variants={connectorFillVariants}
@@ -125,9 +125,9 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         )}
 
                         {!isLast && orientation === 'vertical' && (
-                            <div className="absolute bottom-[-1rem] left-[1.35rem] top-[3rem] w-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
+                            <div className="absolute -bottom-4 left-[1.35rem] top-12 w-[2px] rounded-full bg-slate-200/90 dark:bg-white/10">
                                 <motion.div
-                                    className="w-full origin-top rounded-full bg-gradient-to-b from-emerald-400 via-emerald-400 to-yellow-400/90"
+                                    className="w-full origin-top rounded-full bg-linear-to-b from-emerald-400 via-emerald-400 to-yellow-400/90"
                                     initial={false}
                                     animate={connectorFilled ? 'visible' : 'hidden'}
                                     variants={connectorFillVariants}
@@ -202,7 +202,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                         >
                             <div
                                 className={cn(
-                                    'max-w-[8rem] text-center text-xs font-semibold leading-tight sm:max-w-[9rem] sm:text-sm',
+                                    'max-w-32 text-center text-xs font-semibold leading-tight sm:max-w-36 sm:text-sm sm:leading-5',
                                     tones.label
                                 )}
                             >
@@ -210,7 +210,7 @@ export const ProgressStepper: React.FC<ProgressStepperProps> = ({
                             </div>
                             {step.description && (
                                 <motion.div
-                                    className="mt-1 max-w-[9rem] text-[11px] leading-tight text-slate-500 dark:text-slate-400"
+                                    className="mt-1 max-w-36 text-[11px] leading-tight text-slate-500 dark:text-slate-400"
                                     initial={false}
                                     animate={{ opacity: 1 }}
                                     transition={{ duration: 0.18, ease: MOTION_EASE }}

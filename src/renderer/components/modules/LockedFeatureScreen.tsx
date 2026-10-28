@@ -171,7 +171,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         {/* Main card */}
         <POSGlassCard className="p-8 text-center">
           {/* Lock icon with gradient */}
-          <div className="mx-auto w-24 h-24 rounded-[28px] bg-gradient-to-br from-amber-400/25 to-white/10 flex items-center justify-center mb-6 relative border border-amber-400/25">
+          <div className="mx-auto w-24 h-24 rounded-[28px] bg-linear-to-br from-amber-400/25 to-white/10 flex items-center justify-center mb-6 relative border border-amber-400/25">
             <div className="absolute inset-0 rounded-[28px] bg-amber-400/10 blur-xl" />
             <Lock className="h-12 w-12 text-amber-300 relative z-10" />
           </div>
@@ -212,7 +212,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
               {/* Benefits preview */}
               {moduleInfo && moduleInfo.features.length > 0 && (
                 <button
-                  className="mb-6 mx-auto flex min-h-[44px] items-center gap-1 rounded-2xl px-3 text-sm font-semibold text-amber-300 transition-transform active:scale-[0.98] active:bg-amber-400/10"
+                  className="mb-6 mx-auto flex min-h-touch items-center gap-1 rounded-2xl px-3 text-sm font-semibold text-amber-300 transition-transform active:scale-[0.98] active:bg-amber-400/10"
                   onClick={() => setShowLearnMore(true)}
                 >
                   <Sparkles className="h-4 w-4" />
@@ -267,7 +267,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
             onClose={() => setShowLearnMore(false)}
             title={`${moduleInfo.display_name} Features`}
             size="md"
-            className="!max-w-lg"
+            className="max-w-lg!"
           >
             <div className="space-y-6">
               {/* Description */}
@@ -282,7 +282,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
                 <ul className="space-y-2">
                   {moduleInfo.features.map((feature) => (
                     <li key={feature.id} className="flex items-start gap-2">
-                      <Check className="h-4 w-4 text-green-400 mt-0.5 flex-shrink-0" />
+                      <Check className="h-4 w-4 text-green-400 mt-0.5 shrink-0" />
                       <div>
                       <span className="liquid-glass-modal-text text-sm">{feature.name}</span>
                       {feature.description && (

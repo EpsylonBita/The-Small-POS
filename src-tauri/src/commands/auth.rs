@@ -177,6 +177,32 @@ pub async fn auth_get_session_stats(
 }
 
 #[tauri::command]
+pub async fn auth_manager_approval_available(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    refresh_approval_directory(&db).await;
+    auth::manager_approval_availability(arg0, &db)
+}
+
+/// Both the prompt and confirmation use the current directory when reachable;
+/// offline, use its stored copy. Neither waits more than five seconds to refresh.
+async fn refresh_approval_directory(db: &db::DbState) {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        auth::refresh_staff_auth_directory(db, None),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(error = %error, "Staff directory refresh before a manager approval failed")
+        }
+        Err(_) => tracing::debug!("Staff directory refresh before a manager approval timed out"),
+    }
+}
+
+#[tauri::command]
 pub async fn auth_confirm_privileged_action(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
@@ -186,20 +212,7 @@ pub async fn auth_confirm_privileged_action(
     // permissions when the till is online (as Android does); offline, the
     // last synced directory decides. Bounded: never holds the approval up.
     if auth::confirmation_asks_manager_approval(arg0.as_ref()) {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            auth::refresh_staff_auth_directory(&db, None),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::debug!(error = %error, "Staff directory refresh before a manager approval failed")
-            }
-            Err(_) => {
-                tracing::debug!("Staff directory refresh before a manager approval timed out")
-            }
-        }
+        refresh_approval_directory(&db).await;
     }
     auth::confirm_privileged_action(arg0, &db, &auth_state)
 }

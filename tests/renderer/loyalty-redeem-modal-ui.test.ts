@@ -10,7 +10,7 @@ test('LoyaltyRedeemModal keeps checkout-only redemption behavior', () => {
   const source = readFileSync(sourcePath, 'utf8');
 
   assert.match(source, /createPortal\(modal, document\.body\)/);
-  assert.match(source, /z-\[2147483000\]/);
+  assert.match(source, /z-2147483000(?![\w.-])/);
   assert.match(source, /liquid-glass-modal-shell/);
   assert.match(source, /liquid-glass-modal-backdrop/);
   assert.match(source, /setRedeemPoints\(effectiveMaxPoints\)/);

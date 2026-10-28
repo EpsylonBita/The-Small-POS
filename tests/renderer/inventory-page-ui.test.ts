@@ -88,7 +88,7 @@ test('InventoryPage history and adjustment overlays portal above the page contai
 
   // High-z, full-screen, blurred backdrops for both overlays.
   const highZBlur = source.match(
-    /className="fixed inset-0 bg-black\/[0-9]+ backdrop-blur-sm[^"]*z-\[1200\][^"]*"/g,
+    /className="fixed inset-0 bg-black\/[0-9]+ backdrop-blur-sm[^"]*z-1200(?![\w.-])[^"]*"/g,
   );
   assert.ok(highZBlur && highZBlur.length >= 2, 'both overlays should use high-z blurred backdrops');
 
@@ -214,7 +214,7 @@ test('InventoryPage adjustment modal panel sets explicit dark/light foreground t
   );
   // It is still portaled with the blurred backdrop (no regression).
   assert.match(source, /\{showAdjustModal && selectedItem && renderModalPortal\(/);
-  assert.match(source, /fixed inset-0 bg-black\/50 backdrop-blur-sm[^"]*z-\[1200\]/);
+  assert.match(source, /fixed inset-0 bg-black\/50 backdrop-blur-sm[^"]*z-1200(?![\w.-])/);
 });
 
 // Round 185 (touch-first a11y): InventoryPage icon-only controls exposed native title descriptions

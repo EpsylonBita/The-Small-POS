@@ -361,8 +361,8 @@ const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionB
         ref={wrapperRef}
         data-page-motion-skip="true"
         className={cn(
-          'fixed z-[900]',
-          'w-[5.25rem] h-[5.25rem] sm:w-[5.75rem] sm:h-[5.75rem] rounded-full',
+          'fixed z-900',
+          'w-21 h-21 sm:w-23 sm:h-23 rounded-full',
           'pos-fab-halo',
           effect === 'animated' ? 'pos-fab-halo--animated' : 'pos-fab-halo--static',
           movable && 'pos-fab-halo--movable',
@@ -384,7 +384,7 @@ const FloatingActionButton = React.forwardRef<HTMLButtonElement, FloatingActionB
           className={cn(
             'w-full h-full rounded-full',
             'flex items-center justify-center isolate',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/55 focus-visible:ring-offset-0',
+            'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/55 focus-visible:ring-offset-0',
             'touch-action-manipulation',
             'text-white',
             'pos-fab',

@@ -858,7 +858,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
   const renderFrozen = (request: FrozenGiftRequest) => (
     <dl
       data-testid="gift-return-frozen"
-      className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-sm"
+      className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
     >
       <dt className="liquid-glass-modal-text-muted">
         {t("modals.refund.gift.reviewPayment")}
@@ -894,7 +894,7 @@ const GiftOriginalReturnPanel: React.FC<GiftOriginalReturnPanelProps> = ({
       <dt className="liquid-glass-modal-text-muted">
         {t("modals.refund.gift.reviewReason")}
       </dt>
-      <dd className="liquid-glass-modal-text break-words">{request.reason}</dd>
+      <dd className="liquid-glass-modal-text wrap-break-word">{request.reason}</dd>
     </dl>
   );
 
@@ -1760,7 +1760,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   );
 
   const modalHeader = (
-    <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
+    <div className="shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
       <div className="flex justify-between items-start gap-4">
         <div className="flex-1">
           <h2 className="text-2xl font-bold liquid-glass-modal-text">
@@ -1787,7 +1787,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   );
 
   const modalFooter = (
-    <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
+    <div className="shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
       <button
         data-testid="refund-modal-close"
         onClick={requestClose}
@@ -1804,7 +1804,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       onClose={onClose}
       onCloseIntent={fenceGiftSession}
       size="lg"
-      className="!max-w-3xl"
+      className="max-w-3xl!"
       contentClassName="p-0 overflow-hidden"
       ariaLabel={t("modals.refund.title", { defaultValue: "Void / Refund" })}
       header={modalHeader}

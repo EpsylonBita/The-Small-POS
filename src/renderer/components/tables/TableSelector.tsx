@@ -199,7 +199,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
          content body below becomes the single hidden-scroll region with bottom + scroll padding so the final
          row clears the rounded bottom. Scoped to this modal via className/contentClassName -- no global
          change to LiquidGlassModal. */
-      className="flex flex-col overflow-hidden !max-h-[calc(100dvh-2rem)]"
+      className="flex flex-col overflow-hidden max-h-[calc(100dvh-2rem)]!"
       contentClassName="flex-1 min-h-0 overflow-y-auto scrollbar-hide pb-6 scroll-pb-6"
     >
       {/* Glass surface (LiquidGlassModal) keeps TableSelector consistent with the Settings + Order Type
@@ -228,7 +228,7 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               aria-label={t('tableSelector.searchPlaceholder', { defaultValue: 'Search by table number...' })}
-              className="liquid-glass-modal-input w-full !pl-10"
+              className="liquid-glass-modal-input w-full pl-10!"
             />
           </div>
 

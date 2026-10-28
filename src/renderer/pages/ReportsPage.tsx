@@ -223,14 +223,14 @@ const ReportsPage: React.FC = () => {
                 isDark
                   ? 'border-gray-700 bg-gray-800/50 text-gray-100 backdrop-blur-md'
                   : 'border-gray-300 bg-white/80 text-gray-800 backdrop-blur-md'
-              } transition-transform duration-150 active:scale-[0.98] shadow-lg flex items-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400`}
+              } transition-transform duration-150 active:scale-[0.98] shadow-lg flex items-center gap-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400`}
             >
               <Download className="w-5 h-5" />
               {t('reports.actions.exportCSV')}
             </button>
             <button
               onClick={() => setShowZReport(true)}
-              className={`px-6 py-3 rounded-xl transition-transform duration-150 active:scale-[0.98] shadow-lg flex items-center gap-2 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-400 ${
+              className={`px-6 py-3 rounded-xl transition-transform duration-150 active:scale-[0.98] shadow-lg flex items-center gap-2 font-semibold focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-yellow-400 ${
                 isDark ? 'bg-yellow-400 text-black' : 'bg-black text-white'
               }`}
             >
@@ -255,7 +255,7 @@ const ReportsPage: React.FC = () => {
             title={t('reports.sales.totalSales')}
             value={formatMoney(todayStats?.totalSales ?? 0)}
             subtitle={t('reports.trends.revenueChange')}
-            color="bg-gradient-to-br from-green-500 to-green-600"
+            color="bg-linear-to-br from-green-500 to-green-600"
             delay={0.15}
           />
           <MetricCard
@@ -323,7 +323,7 @@ const ReportsPage: React.FC = () => {
 
           {Boolean(paymentBreakdown?.twint?.count || paymentBreakdown?.twint?.total) && (
             <div data-payment-method="twint" className={`p-6 rounded-xl border ${isDark ? 'bg-gray-800/50 border-gray-700/50 text-white' : 'bg-white/80 border-gray-200/50 text-gray-900'}`}>
-              <img src={twintLogo} alt="TWINT" className="h-8 mb-4 rounded" />
+              <img src={twintLogo} alt="TWINT" className="h-8 mb-4 rounded-sm" />
               <p className="text-3xl font-bold mb-2">{formatMoney(paymentBreakdown?.twint?.total ?? 0)}</p>
               <p className="text-sm">{paymentBreakdown?.twint?.count ?? 0} {t('reports.payments.transactions')}</p>
             </div>
@@ -340,7 +340,7 @@ const ReportsPage: React.FC = () => {
               } shadow-lg border ${isDark ? 'border-gray-700/50' : 'border-gray-200/50'}`}
             >
               <div className="flex items-center gap-3 mb-4">
-                <div className="p-3 rounded-2xl bg-gradient-to-br from-green-500 to-green-600">
+                <div className="p-3 rounded-2xl bg-linear-to-br from-green-500 to-green-600">
                   <CreditCard className="w-6 h-6 text-white" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>

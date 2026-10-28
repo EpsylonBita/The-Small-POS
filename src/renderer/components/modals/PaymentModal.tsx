@@ -202,7 +202,7 @@ export const getCashInputVisualClasses = (
   quickAmountSelected:
     'border-yellow-400 bg-yellow-400 text-slate-950 shadow-[0_6px_16px_rgba(234,179,8,0.18)] dark:border-yellow-400/70 dark:bg-yellow-400/20 dark:text-yellow-100 dark:shadow-none',
   quickAmountIdle:
-    'border-slate-200/90 bg-white/90 text-slate-900 shadow-sm active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:shadow-none dark:active:bg-white/10',
+    'border-slate-200/90 bg-white/90 text-slate-900 shadow-xs active:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-white dark:shadow-none dark:active:bg-white/10',
   cashInput:
     'border-slate-300/90 bg-white/90 text-slate-950 shadow-inner placeholder:text-slate-400 focus:border-yellow-400 focus:ring-2 focus:ring-yellow-400/20 dark:border-white/20 dark:bg-white/10 dark:text-white dark:placeholder:text-white/35 dark:focus:border-yellow-400/70',
   summary: hasEnoughCash
@@ -214,8 +214,8 @@ export const getCashInputVisualClasses = (
     : 'text-red-700 dark:text-red-300',
   changeChip: CASH_CHANGE_CHIP_CLASS,
   completeButton: hasEnoughCash
-    ? '!border-emerald-700 !bg-emerald-700 !text-white !shadow-[0_8px_20px_rgba(4,120,87,0.24)] active:!bg-emerald-800 dark:!border-emerald-400/50 dark:!bg-emerald-500/20 dark:!text-emerald-100 dark:!shadow-none'
-    : '!border-slate-200/80 !bg-slate-100/80 !text-slate-400 dark:!border-white/10 dark:!bg-white/5 dark:!text-white/35',
+    ? 'border-emerald-700! bg-emerald-700! text-white! shadow-[0_8px_20px_rgba(4,120,87,0.24)]! active:bg-emerald-800! dark:border-emerald-400/50! dark:bg-emerald-500/20! dark:text-emerald-100! dark:shadow-none!'
+    : 'border-slate-200/80! bg-slate-100/80! text-slate-400! dark:border-white/10! dark:bg-white/5! dark:text-white/35!',
 });
 
 export const CashChangeChip: React.FC<{
@@ -821,7 +821,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       onClose={handleClose}
       title={t('modals.payment.title')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
       closeOnBackdrop={false}
       closeOnEscape={!isProcessingPayment}
       closeDisabled={isProcessingPayment}
@@ -921,7 +921,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         {pendingTwintReceipts.length===0 && currentStep === 'minimum_warning' && (
           <div className="space-y-4">
             <div className="flex items-center gap-3 p-4 rounded-2xl bg-orange-500/10 border border-orange-500/30">
-              <AlertTriangle className="w-8 h-8 text-orange-400 flex-shrink-0" />
+              <AlertTriangle className="w-8 h-8 text-orange-400 shrink-0" />
               <div>
                 <h3 className="font-semibold text-orange-400">
                   {t('modals.payment.belowMinimumTitle', 'Minimum Order Not Met')}
@@ -984,7 +984,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             </button>}
             {isFeatureLoading ? (
               <div className="flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-white/10 w-full">
-                <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin flex-shrink-0" />
+                <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin shrink-0" />
                 <div>
                   <h3 className="font-semibold liquid-glass-modal-text">
                     {t('modals.payment.loadingMethods', 'Loading payment methods')}
@@ -996,7 +996,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             ) : !hasAnyPaymentMethod ? (
               <div className="flex items-center gap-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 w-full">
-                <AlertTriangle className="w-6 h-6 text-amber-400 flex-shrink-0" />
+                <AlertTriangle className="w-6 h-6 text-amber-400 shrink-0" />
                 <div>
                   <h3 className="font-semibold text-amber-400">
                     {t('settings.terminal.messages.noPaymentMethods', 'No payment methods available')}
@@ -1077,7 +1077,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
                         ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-amber-400/30 bg-gradient-to-br from-amber-500/10 to-amber-600/5 active:scale-[0.98]'
+                        : 'border-amber-400/30 bg-linear-to-br from-amber-500/10 to-amber-600/5 active:scale-[0.98]'
                       }`}
                   >
                     <BedDouble
@@ -1108,7 +1108,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     className={`group relative flex flex-col items-center justify-center ${paymentOptionPaddingClass} rounded-2xl border-2 transition-all duration-300 overflow-hidden
                       ${isProcessingPayment
                         ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
-                        : 'border-violet-400/30 bg-gradient-to-br from-violet-500/10 to-violet-600/5 active:scale-[0.98]'
+                        : 'border-violet-400/30 bg-linear-to-br from-violet-500/10 to-violet-600/5 active:scale-[0.98]'
                       }`}
                   >
                     <Gift
@@ -1160,7 +1160,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
             {roomChargeFallback && !isProcessingPayment && (
               <div className="mt-4 flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
-                <AlertTriangle className="h-5 w-5 flex-shrink-0 text-amber-400" />
+                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-400" />
                 <p className="text-sm text-amber-300">
                   {t(
                     'modals.payment.roomChargeFallback',
@@ -1221,7 +1221,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 onValueChange={setCashReceived}
                 placeholder="0,00"
                 autoFocus
-                className={`w-full rounded-xl border-2 p-4 text-center text-3xl font-bold outline-none transition-colors ${cashInputVisualClasses.cashInput}`}
+                className={`w-full rounded-xl border-2 p-4 text-center text-3xl font-bold outline-hidden transition-colors ${cashInputVisualClasses.cashInput}`}
               />
             </div>
 

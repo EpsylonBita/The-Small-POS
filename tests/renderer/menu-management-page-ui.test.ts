@@ -56,7 +56,7 @@ test('MenuManagementPage uses neutral controls and theme-aware grid cards', () =
   assert.match(source, /w-full pl-10 pr-4 py-2 rounded-2xl border/);
   assert.match(source, /bg-zinc-900 border-white text-white placeholder-zinc-400/);
   assert.match(source, /bg-gray-100 border-white text-gray-900 placeholder-gray-500/);
-  assert.match(source, /focus:outline-none focus:ring-2 focus:ring-white\/70/);
+  assert.match(source, /focus:outline-hidden focus:ring-2 focus:ring-white\/70/);
   assert.match(source, /const gridCardClass = `p-4 rounded-xl border/);
   assert.match(source, /bg-zinc-900 border-zinc-700/);
   assert.match(source, /bg-white border-gray-200/);

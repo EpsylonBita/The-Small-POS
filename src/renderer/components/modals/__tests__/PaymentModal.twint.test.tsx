@@ -101,8 +101,9 @@ describe('PaymentModal distinct manual TWINT tender',()=>{
   qrMocks.loadReceipts.mockResolvedValueOnce([{kind:'manual_twint_checkout',method:'twint',idempotencyKey:'original',amount:12.35,currency:'CHF'}] as never[]);
   qrMocks.saveReceipt.mockResolvedValue(true);
   const onPaymentComplete=vi.fn();const onClose=vi.fn();render(<PaymentModal isOpen onClose={onClose} orderTotal={15} onPaymentComplete={onPaymentComplete}/>);
-  fireEvent.click(await screen.findByRole('button',{name:'Save original TWINT receipt'}));
-  await waitFor(()=>expect(onClose).toHaveBeenCalled());
+  // The modal's first render can pass 1 s on a loaded machine (gates 28/10/2026).
+  fireEvent.click(await screen.findByRole('button',{name:'Save original TWINT receipt'},{timeout:5000}));
+  await waitFor(()=>expect(onClose).toHaveBeenCalled(),{timeout:5000});
   expect(qrMocks.saveReceipt).toHaveBeenCalledWith(expect.objectContaining({idempotencyKey:'original',amount:12.35}));
   expect(onPaymentComplete).not.toHaveBeenCalled();expect(screen.queryByAltText('Official shop TWINT QR')).not.toBeInTheDocument();
  });
@@ -110,8 +111,8 @@ describe('PaymentModal distinct manual TWINT tender',()=>{
   const receipt={kind:'manual_twint_payment',method:'twint',orderId:'existing-order',idempotencyKey:'original-existing',amount:12.35,currency:'CHF'};
   qrMocks.loadReceipts.mockResolvedValueOnce([receipt] as never[]);qrMocks.saveReceipt.mockResolvedValueOnce(false);
   const onPaymentComplete=vi.fn();const onClose=vi.fn();render(<PaymentModal isOpen onClose={onClose} orderTotal={15} onPaymentComplete={onPaymentComplete} existingOrder={existingOrder}/>);
-  fireEvent.click(await screen.findByRole('button',{name:'Save original TWINT receipt'}));
-  await waitFor(()=>expect(qrMocks.saveReceipt).toHaveBeenCalledWith(receipt));
+  fireEvent.click(await screen.findByRole('button',{name:'Save original TWINT receipt'},{timeout:5000}));
+  await waitFor(()=>expect(qrMocks.saveReceipt).toHaveBeenCalledWith(receipt),{timeout:5000});
   expect(qrMocks.loadReceipts).toHaveBeenCalledWith('existing-order');
   expect(onClose).not.toHaveBeenCalled();expect(onPaymentComplete).not.toHaveBeenCalled();expect(screen.queryByRole('button',{name:'TWINT'})).not.toBeInTheDocument();expect(screen.queryByAltText('Official shop TWINT QR')).not.toBeInTheDocument();
  });

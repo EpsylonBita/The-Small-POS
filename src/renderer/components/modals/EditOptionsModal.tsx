@@ -47,7 +47,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
       onClose={onClose}
       title={t('modals.editOptions.title')}
       size="md"
-      className="!max-w-lg"
+      className="max-w-lg!"
     >
             <p className="liquid-glass-modal-text-muted mb-6">
               {t('modals.editOptions.message', { count: orderCount })}
@@ -57,7 +57,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Customer Info Option */}
               <button
                 onClick={onEditInfo}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-slate-100 dark:active:bg-slate-800 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500/60 dark:focus-visible:ring-slate-300/60 ${liquidGlassModalTone('neutral')}`}
+                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-slate-100 dark:active:bg-slate-800 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-500/60 dark:focus-visible:ring-slate-300/60 ${liquidGlassModalTone('neutral')}`}
               >
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-2xl border border-slate-300 bg-white/80 dark:border-white/10 dark:bg-slate-800/80 flex items-center justify-center backdrop-blur-sm">
@@ -75,7 +75,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               {/* Edit Order Items Option */}
               <button
                 onClick={onEditOrder}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-emerald-100 dark:active:bg-emerald-500/20 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 dark:focus-visible:ring-emerald-300/60 ${liquidGlassModalTone('success')}`}
+                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-emerald-100 dark:active:bg-emerald-500/20 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-emerald-500/60 dark:focus-visible:ring-emerald-300/60 ${liquidGlassModalTone('success')}`}
               >
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-2xl border border-emerald-200 bg-emerald-100/80 dark:border-emerald-400/30 dark:bg-emerald-500/15 flex items-center justify-center backdrop-blur-sm">
@@ -94,7 +94,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
               <button
                 onClick={onEditPayment}
                 disabled={!canEditPayment}
-                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 ${
+                className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 focus-visible:outline-hidden focus-visible:ring-2 ${
                   canEditPayment
                     ? `${liquidGlassModalTone('warning')} active:bg-amber-100 dark:active:bg-amber-500/20 active:scale-[0.99] focus-visible:ring-amber-500/60 dark:focus-visible:ring-amber-300/60`
                     : `${liquidGlassModalTone('neutral')} cursor-not-allowed`
@@ -131,7 +131,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                   type="button"
                   data-testid="edit-options-change-driver"
                   onClick={onChangeDriver}
-                  className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-sky-100 dark:active:bg-sky-500/20 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 dark:focus-visible:ring-sky-300/60 border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100`}
+                  className={`w-full p-4 rounded-2xl border text-left transition-all duration-200 active:bg-sky-100 dark:active:bg-sky-500/20 active:scale-[0.99] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sky-500/60 dark:focus-visible:ring-sky-300/60 border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-400/30 dark:bg-sky-500/10 dark:text-sky-100`}
                 >
                   <div className="flex items-center gap-3">
                     <div className="w-12 h-12 rounded-2xl border border-sky-200 bg-sky-100/80 dark:border-sky-400/30 dark:bg-sky-500/15 flex items-center justify-center backdrop-blur-sm">
@@ -181,7 +181,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                           className={`rounded-xl border px-3 py-2 text-sm font-semibold transition-all ${
                             isActive
                               ? 'border-yellow-400 bg-yellow-400 text-black cursor-default'
-                              : 'border-slate-300 bg-white/80 text-slate-900 active:bg-slate-100 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:border-white/20 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:focus-visible:ring-amber-300/60'
+                              : 'border-slate-300 bg-white/80 text-slate-900 active:bg-slate-100 active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:border-white/20 dark:bg-white/10 dark:text-slate-100 dark:active:bg-white/20 dark:focus-visible:ring-amber-300/60'
                           }`}
                         >
                           {label}

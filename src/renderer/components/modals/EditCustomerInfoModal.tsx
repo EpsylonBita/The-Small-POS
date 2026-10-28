@@ -65,7 +65,7 @@ interface AddressSelectionDetails {
 }
 
 const editCustomerInputClass =
-  'w-full px-4 py-2 rounded-lg border bg-gray-100 dark:bg-zinc-800/80 border-gray-300 dark:border-zinc-600 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-400/60 dark:focus:ring-white/30 focus:border-gray-500 dark:focus:border-white/50';
+  'w-full px-4 py-2 rounded-lg border bg-gray-100 dark:bg-zinc-800/80 border-gray-300 dark:border-zinc-600 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 focus:outline-hidden focus:ring-2 focus:ring-gray-400/60 dark:focus:ring-white/30 focus:border-gray-500 dark:focus:border-white/50';
 
 const editCustomerSaveButtonClass =
   'liquid-glass-modal-button liquid-glass-modal-success flex-1 rounded-xl disabled:opacity-50 disabled:saturate-0 disabled:cursor-not-allowed';
@@ -559,10 +559,10 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       onClose={handleClose}
       title={t('modals.editCustomer.title')}
       size="xl"
-      className="!max-w-3xl"
+      className="max-w-3xl!"
       footer={(
         /* Fixed action bar: rendered below the scroll body so Save/Cancel stay visible without scrolling. */
-        <div className="flex gap-3 border-t border-white/15 bg-white/[0.05] px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.03]">
+        <div className="flex gap-3 border-t border-white/15 bg-white/5 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-white/3">
           <button
             type="button"
             onClick={handleClose}
@@ -643,7 +643,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             )}
 
             {hasDeliveryPro && addressSuggestions.length > 0 && (
-              <div className="absolute z-[9999] w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-2xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
+              <div className="absolute z-9999 w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-2xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {addressSuggestions.map((suggestion, index) => (
                   <button
                     key={suggestion.place_id || index}
@@ -651,7 +651,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                     className="w-full px-4 py-3 text-left active:bg-gray-100 dark:active:bg-gray-700 transition-colors border-b border-gray-200 dark:border-gray-600 last:border-b-0"
                   >
                     <div className="flex items-start gap-2">
-                      <MapPin className="w-4 h-4 text-gray-400 mt-1 flex-shrink-0" />
+                      <MapPin className="w-4 h-4 text-gray-400 mt-1 shrink-0" />
                       <div>
                         <p className="text-sm font-medium text-gray-900 dark:text-white">
                           {getSuggestionStreetLabel(suggestion)}

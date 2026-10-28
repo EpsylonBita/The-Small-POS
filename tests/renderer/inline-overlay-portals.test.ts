@@ -20,7 +20,7 @@ const tableSelector = read('src/renderer/components/tables/TableSelector.tsx');
 test('CouponsPage coupon create/edit modal portals to body with a high-z blur overlay', () => {
   assert.match(couponsPage, /import \{ renderModalPortal \} from '\.\.\/utils\/render-modal-portal';/);
   assert.match(couponsPage, /\{showModal && renderModalPortal\(/);
-  assert.match(couponsPage, /fixed inset-0 z-\[1200\] bg-black\/50 backdrop-blur-sm/);
+  assert.match(couponsPage, /fixed inset-0 z-1200 bg-black\/50 backdrop-blur-sm/);
   // The clipped inline z-50 (no blur, no portal) overlay is gone.
   assert.doesNotMatch(couponsPage, /fixed inset-0 z-50 bg-black\/50/);
 });
@@ -28,14 +28,14 @@ test('CouponsPage coupon create/edit modal portals to body with a high-z blur ov
 test('ScanDevicePanel portals to body with a high-z blur overlay', () => {
   assert.match(scanPanel, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(scanPanel, /return renderModalPortal\(/);
-  assert.match(scanPanel, /fixed inset-0 z-\[1200\][^"]*bg-black\/60 backdrop-blur-sm/);
+  assert.match(scanPanel, /fixed inset-0 z-1200(?![\w.-])[^"]*bg-black\/60 backdrop-blur-sm/);
   assert.doesNotMatch(scanPanel, /fixed inset-0 z-50 flex items-center justify-center bg-black\/60/);
 });
 
 test('DeliveryValidationComponent override modal portals to body with a high-z blur overlay', () => {
   assert.match(deliveryValidation, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(deliveryValidation, /showOverrideModal && renderModalPortal\(/);
-  assert.match(deliveryValidation, /fixed inset-0 z-\[1200\][^"]*bg-black\/45 backdrop-blur-md/);
+  assert.match(deliveryValidation, /fixed inset-0 z-1200(?![\w.-])[^"]*bg-black\/45 backdrop-blur-md/);
   // The old non-blurred, non-portaled overlay is gone.
   assert.doesNotMatch(deliveryValidation, /bg-black bg-opacity-50/);
 });
@@ -43,7 +43,7 @@ test('DeliveryValidationComponent override modal portals to body with a high-z b
 test('DeliveryPage DriverAssignmentModal portals to body with a high-z blur overlay', () => {
   assert.match(deliveryPage, /import \{ renderModalPortal \} from '\.\.\/utils\/render-modal-portal';/);
   assert.match(deliveryPage, /return renderModalPortal\(/);
-  assert.match(deliveryPage, /fixed inset-0 z-\[1200\] flex items-center justify-center/);
+  assert.match(deliveryPage, /fixed inset-0 z-1200 flex items-center justify-center/);
   assert.match(deliveryPage, /absolute inset-0 bg-black\/50 backdrop-blur-sm/);
   // The inline z-50 modal wrapper is gone.
   assert.doesNotMatch(deliveryPage, /fixed inset-0 z-50 flex items-center justify-center/);
@@ -52,7 +52,7 @@ test('DeliveryPage DriverAssignmentModal portals to body with a high-z blur over
 test('PaymentDialog portals to body with a high-z blur overlay', () => {
   assert.match(paymentDialog, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal'/);
   assert.match(paymentDialog, /return renderModalPortal\(/);
-  assert.match(paymentDialog, /fixed inset-0 z-\[1200\] flex items-center justify-center/);
+  assert.match(paymentDialog, /fixed inset-0 z-1200 flex items-center justify-center/);
   assert.match(paymentDialog, /absolute inset-0 bg-black\/70 backdrop-blur-sm/);
   // The inline z-50 wrapper is gone.
   assert.doesNotMatch(paymentDialog, /fixed inset-0 z-50 flex items-center justify-center/);
@@ -61,7 +61,7 @@ test('PaymentDialog portals to body with a high-z blur overlay', () => {
 test('SyncNotificationManager restart-required modal portals to body with a high-z blur overlay', () => {
   assert.match(syncNotifications, /import \{ renderModalPortal \} from '\.\.\/utils\/render-modal-portal';/);
   assert.match(syncNotifications, /\{restartRequired && renderModalPortal\(/);
-  assert.match(syncNotifications, /fixed inset-0 bg-black\/50 backdrop-blur-sm[^"]*z-\[1200\]/);
+  assert.match(syncNotifications, /fixed inset-0 bg-black\/50 backdrop-blur-sm[^"]*z-1200(?![\w.-])/);
   // The old full-screen, non-blurred restart overlay is gone (corner toast keeps its own z).
   assert.doesNotMatch(syncNotifications, /fixed inset-0 bg-black bg-opacity-50/);
 });
@@ -75,6 +75,6 @@ test('TableSelector overlays via the shared LiquidGlassModal glass shell (not re
   assert.match(tableSelector, /<LiquidGlassModal\b/);
   // The old hand-rolled portal shell + opaque backdrop are gone.
   assert.doesNotMatch(tableSelector, /renderModalPortal/);
-  assert.doesNotMatch(tableSelector, /fixed inset-0 z-\[1200\] flex items-center justify-center/);
+  assert.doesNotMatch(tableSelector, /fixed inset-0 z-1200 flex items-center justify-center/);
   assert.doesNotMatch(tableSelector, /absolute inset-0 bg-black\/50 backdrop-blur-sm/);
 });

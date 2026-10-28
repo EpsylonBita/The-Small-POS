@@ -611,7 +611,7 @@ fn the_refresh_replaces_the_mirror_only_when_the_money_already_matches() {
 fn every_refusal_writes_one_fixed_code_event_with_the_field_name_only() {
     assert_eq!(
         crate::edit_settlement_recovery::refusal_code("PRIVATE_TOKEN_CANARY"),
-        "EDIT_REFUSAL_UNCLASSIFIED"
+        "EDIT_LOCAL_OPERATION_FAILED"
     );
     #[derive(Clone, Default)]
     struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -714,7 +714,7 @@ fn canonical_adoption_rolls_back_the_preimage_guard_and_all_fields_on_failure() 
         &capability(canonical),
     )
     .unwrap_err();
-    assert!(refused.code.contains("test write failure"));
+    assert_eq!(refused.code, "EDIT_LOCAL_OPERATION_FAILED");
     let (floor, total): (String, f64) = conn
         .query_row(
             "SELECT delivery_floor,total_amount FROM orders WHERE id=?1",

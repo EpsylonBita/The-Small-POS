@@ -220,7 +220,7 @@ const KioskManagementPage: React.FC = () => {
             type="button"
             onClick={() => void fetchKioskData()}
             disabled={isLoading}
-            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-sm ${
+            className={`h-12 w-12 rounded-2xl inline-flex items-center justify-center transition-transform duration-150 shadow-xs ${
               isDark
                 ? 'border border-amber-400/30 bg-amber-500/15 text-amber-300 active:bg-amber-500/25'
                 : 'border border-amber-400/40 bg-amber-50 text-amber-600 active:bg-amber-100'
@@ -243,7 +243,7 @@ const KioskManagementPage: React.FC = () => {
 
       {/* Kiosk Status Card */}
       <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-2xl ${
-        isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
+        isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-xs'
       }`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -341,7 +341,7 @@ const KioskManagementPage: React.FC = () => {
 
       {/* QR Code Info */}
       <motion.div variants={pageMotionItem} className={`mb-6 p-6 rounded-2xl ${
-        isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
+        isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-xs'
       }`}>
         <div className="flex items-center gap-4 mb-4">
           <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${isDark ? 'bg-yellow-400/15' : 'bg-yellow-100'}`}>
@@ -365,7 +365,7 @@ const KioskManagementPage: React.FC = () => {
 
       {/* Recent Kiosk Orders */}
       <motion.div variants={pageMotionItem} className={`rounded-2xl ${
-        isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
+        isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-xs'
       }`}>
         <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="font-semibold">
@@ -450,7 +450,7 @@ function StatCard({ icon, label, value, color, isDark }: StatCardProps) {
 
   return (
     <motion.div variants={pageMotionItem} className={`p-4 rounded-2xl ${
-      isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-sm'
+      isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200 shadow-xs'
     }`}>
       <div className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl ${colorClasses[color]} mb-3`}>
         {icon}

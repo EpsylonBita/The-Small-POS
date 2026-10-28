@@ -91,7 +91,7 @@ const UpgradePromptModal: React.FC<UpgradePromptModalProps> = ({ isOpen, onClose
   return (
     <LiquidGlassModal isOpen={isOpen} onClose={onClose}
       onCloseIntent={() => { lifecycle.current.closing = true; lifecycle.current.generation += 1 }}
-      title={t('modules.launchPurchase.title')} size="md" className="!max-w-lg" closeOnBackdrop closeOnEscape>
+      title={t('modules.launchPurchase.title')} size="md" className="max-w-lg!" closeOnBackdrop closeOnEscape>
       <div className="space-y-5">
         <h3 className="text-xl font-bold">{metadata?.name || feature || t('modules.unknownModule', { defaultValue: 'This feature' })}</h3>
         {guidance ? <p>{t(guidance.summaryKey)}</p> : metadata?.description ? <p>{metadata.description}</p> : null}

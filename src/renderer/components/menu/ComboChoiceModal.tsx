@@ -157,8 +157,8 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
           allChoicesFilled
             ? 'border-green-500/70 bg-green-600 text-white active:scale-[0.98] active:bg-green-700'
             : isDark
-              ? 'cursor-not-allowed border-white/10 bg-white/[0.06] text-white/35'
-              : 'cursor-not-allowed border-black/10 bg-black/[0.06] text-black/35'
+              ? 'cursor-not-allowed border-white/10 bg-white/6 text-white/35'
+              : 'cursor-not-allowed border-black/10 bg-black/6 text-black/35'
         }`}
       >
         {t('menu.combos.choice.addToCart', 'Add to Cart')}
@@ -193,9 +193,9 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                   : '';
                 return (
                   <div key={index} className={`flex items-center gap-3 rounded-2xl border p-3 backdrop-blur-sm ${
-                    isDark ? 'border-white/10 bg-white/[0.05]' : 'border-black/10 bg-white/70'
+                    isDark ? 'border-white/10 bg-white/5' : 'border-black/10 bg-white/70'
                   }`}>
-                    <Check className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                    <Check className="w-4 h-4 text-emerald-500 shrink-0" />
                     <span className={`font-medium flex-1 ${
                       isDark ? 'text-white' : 'text-gray-900'
                     }`}>
@@ -229,7 +229,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                             ? 'border-yellow-400/70 bg-yellow-400/12'
                             : 'border-yellow-500/70 bg-yellow-50'
                           : isDark
-                            ? 'border-white/12 bg-black/20 active:border-white/25 active:bg-white/[0.06]'
+                            ? 'border-white/12 bg-black/20 active:border-white/25 active:bg-white/6'
                             : 'border-black/12 bg-white/60 active:border-black/20 active:bg-white/90'
                       }`}
                     >
@@ -270,8 +270,8 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                                       ? 'bg-yellow-400/14'
                                       : 'bg-yellow-50'
                                     : isDark
-                                      ? 'active:bg-white/[0.06]'
-                                      : 'active:bg-black/[0.04]'
+                                      ? 'active:bg-white/6'
+                                      : 'active:bg-black/4'
                                 }`}
                               >
                                 <span className={isDark ? 'text-white' : 'text-gray-900'}>

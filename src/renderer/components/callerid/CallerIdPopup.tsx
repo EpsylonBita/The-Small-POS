@@ -44,7 +44,7 @@ export function CallerIdToastContent({
     <div className="flex flex-col gap-2 min-w-[280px] max-w-[360px]">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center">
+        <div className="shrink-0 w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center">
           <PhoneIncoming className="w-5 h-5 text-green-400" />
         </div>
         <div className="flex-1 min-w-0">
@@ -57,7 +57,7 @@ export function CallerIdToastContent({
           type="button"
           onClick={() => toast.dismiss(toastId)}
           aria-label={t('common.actions.close', 'Close')}
-          className="flex-shrink-0 rounded-lg p-1 transition-transform active:scale-95 active:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80"
+          className="shrink-0 rounded-lg p-1 transition-transform active:scale-95 active:bg-white/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-300/80"
         >
           <X className="w-4 h-4 text-zinc-500" />
         </button>
@@ -79,7 +79,7 @@ export function CallerIdToastContent({
               toast.dismiss(toastId)
               onSearchCustomer()
             }}
-            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200"
+            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition-transform active:scale-[0.98] active:bg-amber-500 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-amber-200"
           >
             <Search className="w-3.5 h-3.5" />
             {t('callerid.popup.searchCustomer', 'Search customer')}

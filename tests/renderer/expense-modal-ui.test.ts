@@ -79,7 +79,7 @@ test('ExpenseModal surfaces and fields are light by default and retain dark-them
   assert.match(source, /className=\{drawerPanelClass\}/);
   assert.match(source, /className=\{drawerSidePanelClass\}/);
   assert.match(source, /className=\{`\$\{drawerInputClass\} flex items-center justify-between gap-3 text-left/);
-  assert.match(source, /className=\{`\$\{drawerInputClass\} !pl-10 text-lg font-bold`\}/);
+  assert.match(source, /className=\{`\$\{drawerInputClass\} pl-10! text-lg font-bold`\}/);
   assert.match(source, /className=\{`\$\{drawerInputClass\} min-h-\[92px\] resize-none`\}/);
   assert.doesNotMatch(source, /liquid-glass-modal-input/);
 });
@@ -87,11 +87,11 @@ test('ExpenseModal surfaces and fields are light by default and retain dark-them
 test('ExpenseModal submit actions are light surfaces with dark-theme transparent variants', () => {
   assert.match(
     source,
-    /const drawerExpenseSubmitClass = '!border-slate-300\/80 !bg-white\/70 !font-bold !text-emerald-700[\s\S]*dark:!border-neutral-700\/60 dark:!bg-transparent dark:!text-emerald-400 dark:!shadow-none'/,
+    /const drawerExpenseSubmitClass = 'border-slate-300\/80! bg-white\/70! font-bold! text-emerald-700![\s\S]*dark:border-neutral-700\/60! dark:bg-transparent! dark:text-emerald-400! dark:shadow-none!'/,
   );
   assert.match(
     source,
-    /const drawerStaffPaymentSubmitClass = '!border-slate-300\/80 !bg-white\/70 !font-bold !text-amber-700[\s\S]*dark:!border-neutral-700\/60 dark:!bg-transparent dark:!text-yellow-400 dark:!shadow-none'/,
+    /const drawerStaffPaymentSubmitClass = 'border-slate-300\/80! bg-white\/70! font-bold! text-amber-700![\s\S]*dark:border-neutral-700\/60! dark:bg-transparent! dark:text-yellow-400! dark:shadow-none!'/,
   );
   assert.match(
     source,

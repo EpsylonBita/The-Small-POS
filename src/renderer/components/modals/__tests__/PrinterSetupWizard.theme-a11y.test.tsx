@@ -126,14 +126,14 @@ describe('PrinterSetupWizard accessibility and theme consumption', () => {
     expect(screen.getByRole('button', { name: 'detect' })).toHaveAttribute('aria-current', 'step')
     const candidate = await screen.findByRole('button', { name: /Accessible Printer/ })
     expect(candidate).toHaveAttribute('aria-pressed', 'true')
-    expect(candidate).toHaveClass('min-h-[44px]')
+    expect(candidate).toHaveClass('min-h-touch')
 
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'verify' }))
       .toHaveAttribute('aria-current', 'step'))
     for (const button of screen.getAllByRole('button')) {
       if (/^(Send|Cancel|Back|Next|Expert|Open logo)/i.test(button.textContent ?? '')) {
-        expect(button.className).toContain('min-h-[44px]')
+        expect(button.className).toContain('min-h-touch')
       }
     }
   })
@@ -201,7 +201,7 @@ describe('PrinterSetupWizard accessibility and theme consumption', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'save' }))
     for (const checkbox of screen.getAllByRole('checkbox')) {
-      expect(checkbox.closest('label')).toHaveClass('min-h-[44px]')
+      expect(checkbox.closest('label')).toHaveClass('min-h-touch')
     }
   })
 })

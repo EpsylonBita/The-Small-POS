@@ -749,7 +749,7 @@ const PurchaseOrdersTab: React.FC = () => {
                             [item.id]: { ...prev[item.id], quantity: event.target.value },
                           }))
                         }
-                        className={`mt-1 h-10 w-full rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                        className={`mt-1 h-10 w-full rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                       />
                     </label>
                     <label className={`text-xs ${subtleClass}`}>
@@ -766,7 +766,7 @@ const PurchaseOrdersTab: React.FC = () => {
                             [item.id]: { ...prev[item.id], unitCost: event.target.value },
                           }))
                         }
-                        className={`mt-1 h-10 w-full rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+                        className={`mt-1 h-10 w-full rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
                       />
                     </label>
                   </div>
@@ -802,7 +802,7 @@ const PurchaseOrdersTab: React.FC = () => {
             value={receiveNotes}
             onChange={(event) => setReceiveNotes(event.target.value)}
             placeholder={t('procurement.receive.notesPlaceholder', 'Delivery notes (optional)')}
-            className={`h-10 w-full rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+            className={`h-10 w-full rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
           />
 
           <button
@@ -834,14 +834,14 @@ const PurchaseOrdersTab: React.FC = () => {
             onChange={(event) => setSearchTerm(event.target.value)}
             placeholder={t('procurement.searchPlaceholder', 'Search purchase orders...')}
             aria-label={t('procurement.searchPlaceholder', 'Search purchase orders...')}
-            className="h-11 w-full rounded-xl bg-transparent pl-10 pr-3 text-sm outline-none"
+            className="h-11 w-full rounded-xl bg-transparent pl-10 pr-3 text-sm outline-hidden"
           />
         </div>
         <select
           value={statusFilter}
           onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
           aria-label={t('procurement.filterAll', 'All statuses')}
-          className={`h-11 rounded-xl border px-3 text-sm outline-none ${fieldClass}`}
+          className={`h-11 rounded-xl border px-3 text-sm outline-hidden ${fieldClass}`}
         >
           <option value="all">{t('procurement.filterAll', 'All statuses')}</option>
           <option value="ordered">{t('procurement.status.ordered', 'Ordered')}</option>

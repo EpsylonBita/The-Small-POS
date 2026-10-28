@@ -69,14 +69,14 @@ test('ReservationForm renders through an app-level portal above the sidebar and 
   // layer with a full-screen backdrop/blur, and a constrained, scrollable body.
   assert.match(source, /import \{ renderModalPortal \} from '\.\.\/\.\.\/utils\/render-modal-portal';/);
   assert.match(source, /return renderModalPortal\(\s*<div/);
-  assert.match(source, /className="fixed inset-0 z-\[1200\] flex items-center justify-center"/);
+  assert.match(source, /className="fixed inset-0 z-1200 flex items-center justify-center"/);
   assert.match(source, /bg-black\/50 backdrop-blur-sm/);
   // The old inline z-50 overlay (clipped by the dashboard container) is gone.
   assert.doesNotMatch(source, /fixed inset-0 z-50/);
   // Body is height-constrained and scrolls so header/footer never clip.
   assert.match(source, /max-h-\[90vh\]/);
   assert.match(source, /flex-1 min-h-0 overflow-y-auto/);
-  assert.match(source, /border-t flex-shrink-0/);
+  assert.match(source, /border-t shrink-0/);
 });
 
 test('ReservationForm passes count for guest pluralization (no flat "guests" label)', () => {
@@ -363,7 +363,7 @@ test('ReservationForm uses semantic action colours (cancel red, create green) an
   // The old purple focus/save styling is gone entirely.
   assert.doesNotMatch(source, /purple/);
   // Cancel button is red; submit/create button is green.
-  assert.match(source, /flex-1 inline-flex min-h-\[44px\][^"]*border-red-500\/50 bg-red-500\/10[^"]*text-red-600/);
+  assert.match(source, /flex-1 inline-flex min-h-touch(?![\w.-])[^"]*border-red-500\/50 bg-red-500\/10[^"]*text-red-600/);
   assert.match(source, /type="submit"[\s\S]*?bg-green-600 active:bg-green-700/);
 });
 

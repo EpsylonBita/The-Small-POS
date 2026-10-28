@@ -516,7 +516,7 @@ const InventoryPage: React.FC = () => {
             placeholder={t('inventory.searchPlaceholder', 'Search ingredients...')}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-white text-gray-900'} focus:outline-none focus:ring-2 ${isDark ? 'focus:ring-zinc-600' : 'focus:ring-gray-300'}`}
+            className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-white text-gray-900'} focus:outline-hidden focus:ring-2 ${isDark ? 'focus:ring-zinc-600' : 'focus:ring-gray-300'}`}
           />
         </div>
         <div className="flex gap-2">
@@ -563,7 +563,7 @@ const InventoryPage: React.FC = () => {
         <div className={`rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} p-8`}>
           <div className="animate-pulse space-y-4">
             {[1, 2, 3, 4, 5].map(i => (
-              <div key={i} className={`h-12 rounded ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+              <div key={i} className={`h-12 rounded-sm ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
             ))}
           </div>
         </div>
@@ -636,7 +636,7 @@ const InventoryPage: React.FC = () => {
 
       {/* Item History Modal */}
       {historyItem && renderModalPortal(
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[1200] p-4" onClick={closeHistoryModal}>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-1200 p-4" onClick={closeHistoryModal}>
           <motion.div
             ref={historyDialogRef}
             role="dialog"
@@ -794,7 +794,7 @@ const InventoryPage: React.FC = () => {
 
       {/* Adjust Stock Modal */}
       {showAdjustModal && selectedItem && renderModalPortal(
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-[1200]" onClick={closeAdjustModal}>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-1200" onClick={closeAdjustModal}>
           <motion.div
             ref={adjustDialogRef}
             role="dialog"

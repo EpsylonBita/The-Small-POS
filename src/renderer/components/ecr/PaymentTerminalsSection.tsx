@@ -1002,7 +1002,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({
             setSelectedDiscoveredDevice(undefined)
             setShowConfigModal(true)
           }}
-          className="flex-1 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
+          className="flex-1 inline-flex min-h-touch items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-green-600/30 transition-transform duration-150 active:scale-[0.98] active:bg-green-700"
         >
           <Plus size={16} />
           {t('ecr.addManual', 'Add Terminal')}
