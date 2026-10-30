@@ -281,7 +281,7 @@ fn sha256_hex(parts: &[&str]) -> String {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    crate::core_helpers::lower_hex(&hasher.finalize())
 }
 
 fn card_fingerprint(scope: &GiftScope, card_number: &str) -> String {

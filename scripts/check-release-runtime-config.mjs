@@ -33,6 +33,12 @@ const androidBuildScriptPath = path.join(
   'app',
   'build.gradle',
 );
+const tauriConfigPath = path.join(
+  repositoryRoot,
+  'pos-tauri',
+  'src-tauri',
+  'tauri.conf.json',
+);
 
 // The public POS source mirror intentionally does not contain the private
 // monorepo release workflow. Enforce this contract whenever the workflow is
@@ -59,6 +65,10 @@ const staleGuardStart = workflow.indexOf(staleGuardMarker);
 const syncStepStart = workflow.indexOf('      - name: Sync pos-tauri source to public repo');
 const callerIdPinsMarker = '      - name: Validate Caller ID offline lease build pins';
 const callerIdPinsStart = workflow.indexOf(callerIdPinsMarker);
+const signStepMarker = '      - name: Sign installer for updater';
+const signStepStart = workflow.indexOf(signStepMarker);
+const manifestStepMarker = '      - name: Generate latest.json updater manifest';
+const manifestStepStart = workflow.indexOf(manifestStepMarker);
 
 if (buildStepStart < 0) {
   console.error('POS release runtime config contract failed: Build NSIS bundle step is missing.');
@@ -82,6 +92,11 @@ if (staleGuardStart < 0 || syncStepStart < staleGuardStart) {
 
 if (callerIdPinsStart < 0 || callerIdPinsStart > buildStepStart) {
   console.error('POS release runtime config contract failed: Caller ID build-pin validation is missing before packaging.');
+  process.exit(1);
+}
+
+if (signStepStart < 0 || manifestStepStart < signStepStart) {
+  console.error('POS release runtime config contract failed: updater signing must precede latest.json generation.');
   process.exit(1);
 }
 
@@ -114,6 +129,15 @@ const callerIdPinsNextStepStart = workflow.indexOf(
 const callerIdPinsStep = workflow.slice(
   callerIdPinsStart,
   callerIdPinsNextStepStart < 0 ? workflow.length : callerIdPinsNextStepStart,
+);
+const signStep = workflow.slice(signStepStart, manifestStepStart);
+const manifestNextStepStart = workflow.indexOf(
+  '\n      - name:',
+  manifestStepStart + manifestStepMarker.length,
+);
+const manifestStep = workflow.slice(
+  manifestStepStart,
+  manifestNextStepStart < 0 ? workflow.length : manifestNextStepStart,
 );
 
 const requiredTokens = [
@@ -226,6 +250,34 @@ for (const token of [
 
 if (staleGuardRun.includes('${{ github.')) {
   violations.push('stale-publication run script must not interpolate untrusted github context directly');
+}
+
+// Updater 2.14 refuses a latest.json whose version differs from the one the
+// signature records, but only a signature made with --app-version records it.
+const signCalls = signStep.split('\n').filter((line) => line.includes('npx tauri signer sign'));
+if (signCalls.length === 0) {
+  violations.push('updater signing step must run npx tauri signer sign');
+}
+if (signCalls.some((line) => !line.includes('--app-version "$env:RELEASE_VERSION"'))) {
+  violations.push('every updater signature must bind the release version with --app-version');
+}
+if (!signStep.includes('RELEASE_VERSION: ${{ steps.version.outputs.version }}')) {
+  violations.push('the signed version must come from the release version step');
+}
+if (!manifestStep.includes('--version "${{ steps.version.outputs.version }}"')) {
+  violations.push('latest.json must announce the same release version the signature records');
+}
+
+// Releases up to 1.4.139 were signed without a version, and the updater accepts
+// such a signature unless the build sets requireSignedVersion. Without it, a
+// tampered latest.json can still announce one of those older installers as new.
+// allowDowngrades would let it re-announce any older release under its real version.
+const updaterConfig = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf8'))?.plugins?.updater ?? {};
+if (updaterConfig.requireSignedVersion !== true) {
+  violations.push('tauri.conf.json plugins.updater.requireSignedVersion must be true');
+}
+if (updaterConfig.allowDowngrades === true) {
+  violations.push('tauri.conf.json plugins.updater.allowDowngrades must stay off');
 }
 
 if (violations.length > 0) {

@@ -79,6 +79,7 @@ mod print_dispatch;
 mod print_history;
 mod print_snapshot;
 mod printers;
+mod receipt_font;
 mod receipt_renderer;
 mod recovery;
 mod refunds;

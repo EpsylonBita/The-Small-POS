@@ -14488,8 +14488,8 @@ fn apply_or_retain_remote_payment(conn: &Connection, payment: &Value) -> Result<
     let id = str_any(payment, &["id", "payment_id", "paymentId"]).unwrap_or_else(|| {
         use sha2::Digest;
         format!(
-            "malformed:{:x}",
-            sha2::Sha256::digest(payment.to_string().as_bytes())
+            "malformed:{}",
+            crate::core_helpers::lower_hex(&sha2::Sha256::digest(payment.to_string().as_bytes()))
         )
     });
     match sync_remote_payment_into_local_with_context(conn, payment) {

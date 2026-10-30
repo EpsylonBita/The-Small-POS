@@ -3084,7 +3084,7 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().unwrap().into_owned();
             assert!(
                 !name.starts_with("logs/"),
                 "default diagnostics exported raw log entry {name}"
@@ -3190,7 +3190,14 @@ mod tests {
         let file = std::fs::File::open(&export_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let entry_names: Vec<String> = (0..archive.len())
-            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .map(|index| {
+                archive
+                    .by_index(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned()
+            })
             .collect();
         assert!(entry_names.contains(&"terminal_context.json".to_string()));
         assert!(entry_names.contains(&"sync_status.json".to_string()));
@@ -3684,7 +3691,7 @@ mod tests {
         }
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().unwrap().into_owned();
             assert!(
                 !name.starts_with("logs/"),
                 "logs unexpectedly exported: {name}"

@@ -232,7 +232,7 @@ fn read_snapshot_columns(
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::core_helpers::lower_hex(&Sha256::digest(bytes))
 }
 
 fn is_lowercase_sha256(value: &str) -> bool {

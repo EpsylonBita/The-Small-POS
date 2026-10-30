@@ -1077,7 +1077,7 @@ pub async fn send_candidate_report_with_bundle(
             return Err("Diagnostics ZIP exceeds the 2 MiB upload limit".into());
         }
         let bytes = std::fs::read(path).map_err(|_| "Diagnostics ZIP could not be read")?;
-        bundle_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
+        bundle_hash = Some(crate::core_helpers::lower_hex(&Sha256::digest(&bytes)));
         body["diagnosticBundle"] = json!({
             "fileName": std::path::Path::new(path).file_name().and_then(|name| name.to_str()),
             "base64": base64::engine::general_purpose::STANDARD.encode(bytes),

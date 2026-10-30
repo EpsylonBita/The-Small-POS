@@ -3,11 +3,11 @@ use base64::Engine as _;
 use chrono::DateTime;
 use font8x8::UnicodeFonts;
 use image::{GrayImage, Luma};
-use rusttype::{point, Font as RustFont, Scale};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
 use crate::escpos::{EscPosBuilder, PaperWidth};
+use crate::receipt_font::ReceiptFont;
 
 pub const RECEIPT_LAYOUT_REVISION: &str = "2026-07-30-r19";
 
@@ -7256,8 +7256,8 @@ fn body_boldness_offsets(weight: u32) -> &'static [(i32, i32)] {
 }
 
 struct RasterFonts {
-    regular: RustFont<'static>,
-    bold: RustFont<'static>,
+    regular: ReceiptFont,
+    bold: ReceiptFont,
 }
 
 /// Cached parsed TTF fonts — parsing embedded TTF bytes is expensive (~100-500ms
@@ -7266,10 +7266,10 @@ fn cached_raster_fonts() -> &'static RasterFonts {
     use std::sync::OnceLock;
     static FONTS: OnceLock<RasterFonts> = OnceLock::new();
     FONTS.get_or_init(|| {
-        let regular = RustFont::try_from_bytes(NOTO_SERIF_REGULAR_TTF)
+        let regular = ReceiptFont::parse(NOTO_SERIF_REGULAR_TTF)
             .expect("embedded Noto Serif Regular must parse");
-        let bold = RustFont::try_from_bytes(NOTO_SERIF_BOLD_TTF)
-            .expect("embedded Noto Serif Bold must parse");
+        let bold =
+            ReceiptFont::parse(NOTO_SERIF_BOLD_TTF).expect("embedded Noto Serif Bold must parse");
         RasterFonts { regular, bold }
     })
 }
@@ -7279,7 +7279,7 @@ impl RasterFonts {
         Ok(cached_raster_fonts())
     }
 
-    fn font(&self, weight: RasterTextWeight) -> &RustFont<'static> {
+    fn font(&self, weight: RasterTextWeight) -> &ReceiptFont {
         match weight {
             RasterTextWeight::Regular => &self.regular,
             RasterTextWeight::Bold => &self.bold,
@@ -7290,7 +7290,7 @@ impl RasterFonts {
         if ch.is_whitespace() {
             return true;
         }
-        self.regular.glyph(ch).id().0 != 0 && self.bold.glyph(ch).id().0 != 0
+        self.regular.glyph_id(ch) != 0 && self.bold.glyph_id(ch) != 0
     }
 
     /// Test-only since 1.4.102: production draws through `sanitize_for_font`
@@ -7299,7 +7299,7 @@ impl RasterFonts {
     fn missing_glyphs(&self, text: &str, weight: RasterTextWeight) -> usize {
         let font = self.font(weight);
         text.chars()
-            .filter(|ch| !ch.is_whitespace() && font.glyph(*ch).id().0 == 0)
+            .filter(|ch| !ch.is_whitespace() && font.glyph_id(*ch) == 0)
             .count()
     }
 
@@ -7317,7 +7317,7 @@ impl RasterFonts {
         let mut out = String::with_capacity(text.len());
         let mut touched = 0;
         for ch in text.chars() {
-            if ch.is_whitespace() || font.glyph(ch).id().0 != 0 {
+            if ch.is_whitespace() || font.glyph_id(ch) != 0 {
                 out.push(ch);
             } else if ch.is_alphanumeric() {
                 out.push('?');
@@ -7587,15 +7587,10 @@ impl TtfReceiptComposer {
         // Measure what will be drawn (`draw_text_at_position` sanitises the
         // same way), so wrapping and drawing never disagree about a width.
         let (text, _) = self.fonts.sanitize_for_font(text, style.weight);
-        let scale = Scale::uniform(style.size_px.max(1.0));
+        let size_px = style.size_px.max(1.0);
         let mut width = 0.0_f32;
-        let mut prev = None;
         for ch in text.chars() {
-            if let Some(prev_ch) = prev {
-                width += font.pair_kerning(scale, prev_ch, ch);
-            }
-            width += font.glyph(ch).scaled(scale).h_metrics().advance_width + style.tracking_px;
-            prev = Some(ch);
+            width += font.advance_width(font.glyph_id(ch), size_px) + style.tracking_px;
         }
         if !text.is_empty() {
             width -= style.tracking_px.max(0.0);
@@ -7620,10 +7615,10 @@ impl TtfReceiptComposer {
         let (sanitized, touched) = self.fonts.sanitize_for_font(text, style.weight);
         self.missing_glyph_count += touched;
         let text = sanitized.trim_end();
-        let font = self.fonts.font(style.weight).clone();
-        let scale = Scale::uniform(style.size_px.max(1.0));
-        let v_metrics = font.v_metrics(scale);
-        let baseline = y as f32 + v_metrics.ascent;
+        let fonts = self.fonts;
+        let font = fonts.font(style.weight);
+        let size_px = style.size_px.max(1.0);
+        let baseline = y as f32 + font.ascent(size_px);
         let overdraw_offsets = if style.apply_body_boldness {
             body_boldness_offsets(self.body_font_weight)
         } else {
@@ -7631,28 +7626,15 @@ impl TtfReceiptComposer {
         };
 
         let mut caret = start_x as f32;
-        let mut prev = None;
         for ch in text.chars() {
-            if let Some(prev_ch) = prev {
-                caret += font.pair_kerning(scale, prev_ch, ch);
-            }
-            let glyph = font
-                .glyph(ch)
-                .scaled(scale)
-                .positioned(point(caret, baseline));
-            let advance = glyph.unpositioned().h_metrics().advance_width;
-            if let Some(bounds) = glyph.pixel_bounding_box() {
-                glyph.draw(|gx, gy, value| {
-                    let px = bounds.min.x + gx as i32;
-                    let py = bounds.min.y + gy as i32;
-                    self.blend_pixel(px, py, style.ink, value);
-                    for (dx, dy) in overdraw_offsets {
-                        self.blend_pixel(px + dx, py + dy, style.ink, value);
-                    }
-                });
-            }
-            caret += advance + style.tracking_px;
-            prev = Some(ch);
+            let glyph = font.glyph_id(ch);
+            font.draw_glyph(glyph, size_px, caret, baseline, |px, py, value| {
+                self.blend_pixel(px, py, style.ink, value);
+                for (dx, dy) in overdraw_offsets {
+                    self.blend_pixel(px + dx, py + dy, style.ink, value);
+                }
+            });
+            caret += font.advance_width(glyph, size_px) + style.tracking_px;
         }
     }
 

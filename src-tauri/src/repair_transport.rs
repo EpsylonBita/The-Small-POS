@@ -1913,7 +1913,7 @@ fn validate_repair_attachment_upload(
         return Err(RepairHookError::sign_in("REPAIR_STAFF_SESSION_REQUIRED"));
     }
 
-    let actual_hash = format!("{:x}", Sha256::digest(&upload.bytes));
+    let actual_hash = crate::core_helpers::lower_hex(&Sha256::digest(&upload.bytes));
     if actual_hash != upload.metadata.sha256_hex {
         return Err(RepairHookError::permanent(
             "REPAIR_ATTACHMENT_HASH_MISMATCH",
@@ -5389,7 +5389,7 @@ fn validate_repair_attachment_content_body(
 ) -> Result<RepairDownloadedAttachment, RepairHookError> {
     if bytes.len() != expectation.byte_size as usize
         || bytes.len() > MAX_REPAIR_ATTACHMENT_BYTES
-        || format!("{:x}", Sha256::digest(&*bytes)) != headers.sha256_hex
+        || crate::core_helpers::lower_hex(&Sha256::digest(&*bytes)) != headers.sha256_hex
     {
         return Err(RepairHookError::permanent(
             "REPAIR_ATTACHMENT_INTEGRITY_FAILED",
@@ -6018,7 +6018,7 @@ mod attachment_binary_tests {
     #[test]
     fn attachment_binary_requires_exact_security_headers_length_and_hash() {
         let body = b"safe payload";
-        let hash = format!("{:x}", Sha256::digest(body));
+        let hash = crate::core_helpers::lower_hex(&Sha256::digest(body));
         let headers = [
             ("content-type", "image/jpeg"),
             ("content-length", "12"),
@@ -6064,7 +6064,7 @@ mod attachment_binary_tests {
     fn attachment_binary_rejects_redirect_and_disposition_surfaces() {
         let body = b"safe payload";
         for forbidden in ["location", "content-disposition"] {
-            let hash = format!("{:x}", Sha256::digest(body));
+            let hash = crate::core_helpers::lower_hex(&Sha256::digest(body));
             let mut headers = vec![
                 ("content-type", "image/jpeg"),
                 ("content-length", "12"),

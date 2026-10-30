@@ -346,7 +346,7 @@ fn validate_terminal_identity_rollback_binding(
             && binding.target_admin_dashboard_url.is_empty()
             && binding.target_organization_id.is_empty()
             && binding.target_branch_id.is_empty()
-            && binding.target_api_key_digest == format!("{:x}", Sha256::digest(b""))
+            && binding.target_api_key_digest == crate::core_helpers::lower_hex(&Sha256::digest(b""))
     } else {
         false
     };
@@ -7553,7 +7553,7 @@ pub(crate) fn stage_attachment(
             &workspace_json,
         )?;
 
-        let sha256_hex = format!("{:x}", Sha256::digest(&input.bytes));
+        let sha256_hex = crate::core_helpers::lower_hex(&Sha256::digest(&input.bytes));
         let metadata = AttachmentPrivateMetadata {
             attachment_id: input.attachment_id.clone(),
             operation_id: input.operation_id.clone(),
@@ -8192,7 +8192,7 @@ impl crate::repair_transport::RepairQueueHooks for NativeRepairQueueHooks {
             || metadata.sha256_hex != row.7
             || metadata.mime_type != row.8
             || metadata.byte_size != u64::try_from(row.9).unwrap_or(u64::MAX)
-            || format!("{:x}", Sha256::digest(&bytes)) != metadata.sha256_hex
+            || crate::core_helpers::lower_hex(&Sha256::digest(&bytes)) != metadata.sha256_hex
         {
             return Err(crate::repair_transport::RepairHookError::permanent(
                 "REPAIR_ATTACHMENT_STAGE_INVALID",
@@ -16703,7 +16703,10 @@ mod tests {
         let file = if path.is_dir() {
             "DIRECTORY".to_string()
         } else if path.exists() {
-            format!("FILE:{:x}", Sha256::digest(fs::read(path).unwrap()))
+            format!(
+                "FILE:{}",
+                crate::core_helpers::lower_hex(&Sha256::digest(fs::read(path).unwrap()))
+            )
         } else {
             "MISSING".to_string()
         };
@@ -17778,12 +17781,12 @@ mod tests {
             old_admin_dashboard_url: "https://old.example.com".to_string(),
             old_organization_id: "11111111-1111-4111-8111-111111111111".to_string(),
             old_branch_id: "22222222-2222-4222-8222-222222222222".to_string(),
-            old_api_key_digest: format!("{:x}", Sha256::digest(b"old-key")),
+            old_api_key_digest: crate::core_helpers::lower_hex(&Sha256::digest(b"old-key")),
             target_terminal_id: "terminal-beta".to_string(),
             target_admin_dashboard_url: "https://new.example.com".to_string(),
             target_organization_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
             target_branch_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string(),
-            target_api_key_digest: format!("{:x}", Sha256::digest(b"new-key")),
+            target_api_key_digest: crate::core_helpers::lower_hex(&Sha256::digest(b"new-key")),
         }
     }
 

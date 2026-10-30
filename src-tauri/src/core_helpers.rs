@@ -4,6 +4,12 @@ use std::path::PathBuf;
 
 use crate::{db, storage, MODULE_CACHE_FILE};
 
+/// Lowercase hex of `bytes`, e.g. a SHA-256 digest. sha2 0.11 digests are
+/// `hybrid_array::Array`s, which do not implement `LowerHex`.
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub(crate) fn payload_arg0_as_string(
     arg0: Option<serde_json::Value>,
     keys: &[&str],

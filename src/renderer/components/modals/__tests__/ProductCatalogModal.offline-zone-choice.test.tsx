@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 // Offline week Ω6β in the retail catalogue (delivery of goods): offline, a
 // saved address whose Google point expired (FIX-03, 28 days) gets its zone
@@ -34,15 +34,21 @@ vi.mock('../../../contexts/barcode-scanner-context', () => ({
   useBarcodeScannerContext: () => ({ state: { isScanning: false } }),
   useOnBarcodeScan: () => undefined,
 }));
-vi.mock('../../../../lib', () => ({
-  getBridge: () => ({
+// One bridge, as the till's getBridge() singleton. A new object per call
+// changed `bridge.customers` on every render, which re-ran the address lookup
+// and hid the zone choice for a moment (nightly Full Regression, 30/10/2026).
+vi.mock('../../../../lib', () => {
+  const bridge = {
     settings: { getLocal: async () => ({}), get: async () => null },
     branchData: { getDeliveryZones: mocks.getDeliveryZones },
     customers: { updateAddress: vi.fn() },
-  }),
-  onEvent: vi.fn(),
-  offEvent: vi.fn(),
-}));
+  };
+  return {
+    getBridge: () => bridge,
+    onEvent: vi.fn(),
+    offEvent: vi.fn(),
+  };
+});
 vi.mock('../../../services/server-reachability', () => ({
   isTillKnownOffline: () => mocks.offline,
   subscribeServerReachability: () => () => undefined,
@@ -77,16 +83,17 @@ const expiredAddress = {
   longitude: 22.9502,
 };
 
-const show = () => render(
+const modal = (address = expiredAddress) => (
   <ProductCatalogModal
     isOpen
     onClose={() => {}}
     orderType="delivery"
     selectedCustomer={{ id: 'c1', name: 'Customer' }}
-    selectedAddress={expiredAddress}
+    selectedAddress={address}
     onOrderComplete={mocks.complete}
-  />,
+  />
 );
+const show = () => render(modal());
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -101,7 +108,7 @@ afterEach(cleanup);
 
 describe('retail delivery offline, saved address with an expired Google point', () => {
   it('waits for the cashier to choose the zone, then sends its fee and the marker', async () => {
-    show();
+    const view = show();
     fireEvent.click(await screen.findByText('Water'));
     const option = await screen.findByTestId('offline-zone-option-zone-b');
     expect(screen.getByText('menu.cart.deliveryFeeChooseZone')).toBeInTheDocument();
@@ -109,10 +116,19 @@ describe('retail delivery offline, saved address with an expired Google point', 
     expect(mocks.validate).not.toHaveBeenCalled();
     expect(mocks.search).not.toHaveBeenCalled();
 
+    // The fee and the "zone chosen manually" marker come in the same render.
     fireEvent.click(option);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Checkout' })).toBeEnabled());
-    // The marker can render a tick after the button enables (seen under a full parallel run).
-    expect(await screen.findByText('menu.cart.zoneChosenManually')).toBeInTheDocument();
+    const picker = screen.getByTestId('offline-zone-picker');
+    expect(within(picker).getByText('menu.cart.zoneChosenManually')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Checkout' })).toBeEnabled();
+
+    // The parent rebuilds the address object on every render. The choice stays
+    // in force: the address is not looked up again, so the picker and its
+    // marker never leave the screen and Checkout stays enabled.
+    view.rerender(modal({ ...expiredAddress }));
+    expect(picker).toBeInTheDocument();
+    expect(within(picker).getByText('menu.cart.zoneChosenManually')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Checkout' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Checkout' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm payment' }));

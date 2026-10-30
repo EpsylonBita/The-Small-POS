@@ -1683,7 +1683,7 @@ fn attachment_metadata(bytes: &[u8]) -> RepairRawAttachmentMetadata {
         caption: Some("Φωτογραφία πριν την επισκευή".to_string()),
         mime_type: "image/png".to_string(),
         byte_size: u64::try_from(bytes.len()).expect("attachment size"),
-        sha256_hex: format!("{:x}", Sha256::digest(bytes)),
+        sha256_hex: crate::core_helpers::lower_hex(&Sha256::digest(bytes)),
     }
 }
 

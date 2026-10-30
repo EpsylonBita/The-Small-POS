@@ -48,6 +48,29 @@ Run desktop app in dev:
 npm run pos:tauri:dev
 ```
 
+### Agent door (dev only)
+
+Lets an agent drive the running dev app through structured page elements instead of screenshots and pixel clicks.
+
+```bash
+npm run pos:tauri:dev:agent
+```
+
+- The script is `pos:tauri:dev` plus `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`.
+- With it, the app's WebView2 serves the Chrome DevTools Protocol on `127.0.0.1:9222`, loopback only.
+- The `pos-tauri-webview` server in the repository `.mcp.json` is the official Playwright MCP (`@playwright/mcp`, pinned) with `--cdp-endpoint http://127.0.0.1:9222`. Through it an agent can:
+  - read the page as an accessibility snapshot;
+  - click and type by element;
+  - read console messages and network requests;
+  - take screenshots;
+  - emulate dark/light and reduced motion.
+- When the app is not running with this script, the server's tools just fail to connect.
+
+Limits:
+- Only the dev script opens the port. Release builds, installers and store tills never set the variable.
+- Native Windows dialogs and the print spooler are outside the WebView, so the door cannot reach them.
+- Staff PINs and passwords are always typed by a person, never by the agent.
+
 Type-check and production frontend build:
 
 ```bash

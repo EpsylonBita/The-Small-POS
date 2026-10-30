@@ -302,7 +302,7 @@ fn validate_terminal_transition_journal(
 fn api_key_digest(api_key: &str) -> String {
     let canonical = api::extract_api_key_from_connection_string(api_key)
         .unwrap_or_else(|| api_key.trim().to_string());
-    format!("{:x}", Sha256::digest(canonical.as_bytes()))
+    crate::core_helpers::lower_hex(&Sha256::digest(canonical.as_bytes()))
 }
 
 /// Full native authority fingerprint; never persist the raw credential tuple.
@@ -347,7 +347,9 @@ pub(crate) fn current_access_binding_digest() -> Result<Option<String>, String> 
         api_key_digest(&authority[4]),
     ))
     .map_err(|_| "TERMINAL_MANAGED_TUPLE_CONFLICT".to_string())?;
-    Ok(Some(format!("{:x}", Sha256::digest(frozen))))
+    Ok(Some(crate::core_helpers::lower_hex(&Sha256::digest(
+        frozen,
+    ))))
 }
 
 fn terminal_identity_rollback_binding(

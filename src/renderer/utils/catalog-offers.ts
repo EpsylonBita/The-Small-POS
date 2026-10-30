@@ -4,6 +4,7 @@ import type {
   CatalogType,
   MatchedCatalogOffer,
   OfferEvaluationCartItem,
+  OfferTrigger,
   RewardAction,
 } from '../../../../shared/types/catalog-offer';
 import { isCatalogOfferAvailableNow } from '../../../../shared/types/catalog-offer';
@@ -129,13 +130,18 @@ function takeSpecificItem(
   return remaining > 0 ? null : consumed;
 }
 
-function takeCategoryItems(
+/**
+ * Takes `quantity` units from the lines that `matches`, most expensive first.
+ * Category and item-set triggers share this rule, exactly as the server's
+ * evaluator (admin `api/pos/offers/_shared.ts`) does.
+ */
+function takeMostExpensiveMatches(
   items: MutableCartItem[],
-  categoryId: string,
+  matches: (item: MutableCartItem) => boolean,
   quantity: number,
 ): ConsumedQuantity[] | null {
   const candidates = items
-    .filter((item) => item.category_id === categoryId && item.quantity > 0)
+    .filter((item) => matches(item) && item.quantity > 0)
     .sort((left, right) => right.unit_price - left.unit_price);
 
   const availableQuantity = candidates.reduce((sum, item) => sum + item.quantity, 0);
@@ -163,6 +169,40 @@ function takeCategoryItems(
   }
 
   return remaining > 0 ? null : consumed;
+}
+
+function takeCategoryItems(
+  items: MutableCartItem[],
+  categoryId: string,
+  quantity: number,
+): ConsumedQuantity[] | null {
+  return takeMostExpensiveMatches(items, (item) => item.category_id === categoryId, quantity);
+}
+
+function takeItemSetItems(
+  items: MutableCartItem[],
+  itemIds: string[],
+  quantity: number,
+): ConsumedQuantity[] | null {
+  const itemIdSet = new Set(itemIds);
+  return takeMostExpensiveMatches(items, (item) => itemIdSet.has(item.item_id), quantity);
+}
+
+function takeTriggerItems(
+  items: MutableCartItem[],
+  trigger: OfferTrigger,
+): ConsumedQuantity[] | null {
+  switch (trigger.trigger_type) {
+    case 'specific_item':
+      return takeSpecificItem(items, trigger.item_id as string, trigger.quantity);
+    case 'category_quantity':
+      return takeCategoryItems(items, trigger.category_id as string, trigger.quantity);
+    case 'item_set_quantity':
+      return takeItemSetItems(items, trigger.item_ids ?? [], trigger.quantity);
+    default:
+      // A trigger type this build does not know never matches.
+      return null;
+  }
 }
 
 function evaluateOfferAgainstRemainingCart({
@@ -197,10 +237,7 @@ function evaluateOfferAgainstRemainingCart({
     let applicationValid = true;
 
     for (const trigger of triggers) {
-      const allocations =
-        trigger.trigger_type === 'specific_item'
-          ? takeSpecificItem(nextState, trigger.item_id as string, trigger.quantity)
-          : takeCategoryItems(nextState, trigger.category_id as string, trigger.quantity);
+      const allocations = takeTriggerItems(nextState, trigger);
 
       if (!allocations || allocations.length === 0) {
         applicationValid = false;

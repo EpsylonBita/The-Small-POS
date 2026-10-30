@@ -456,7 +456,7 @@ pub(crate) fn is_generated_reset_manifest_path(path: &Path) -> bool {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::core_helpers::lower_hex(&Sha256::digest(bytes))
 }
 
 fn write_reset_ownership_unlocked(record: &ResetOwnershipRecord) -> Result<(), String> {
@@ -2027,7 +2027,7 @@ mod tests {
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+        crate::core_helpers::lower_hex(&Sha256::digest(bytes))
     }
 
     fn bound_ownership_value(

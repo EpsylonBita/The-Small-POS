@@ -37,6 +37,24 @@ function requiredArg(args, key) {
   return value;
 }
 
+// `tauri signer sign --app-version` (CLI 2.12+) writes the version into the
+// minisign trusted comment as a tab separated `version:<value>` field. The
+// signature covers that comment, and tauri-plugin-updater 2.14 refuses an
+// update whose announced version differs from it, so a manifest may only
+// announce the version its signature was made for.
+function signedVersion(signature) {
+  const minisign = Buffer.from(signature, 'base64').toString('utf8');
+  const trustedComment = minisign
+    .split(/\r?\n/)
+    .find((line) => line.startsWith('trusted comment: '));
+  if (!trustedComment) return null;
+  const field = trustedComment
+    .slice('trusted comment: '.length)
+    .split('\t')
+    .find((entry) => entry.startsWith('version:'));
+  return field ? field.slice('version:'.length) : null;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -72,6 +90,17 @@ function main() {
   const signature = base64Candidates.sort((a, b) => b.length - a.length)[0] || '';
   if (!signature) {
     throw new Error(`No base64 signature payload found in: ${signatureFilePath}`);
+  }
+  const signatureVersion = signedVersion(signature);
+  if (!signatureVersion) {
+    throw new Error(
+      `Signature carries no signed version; sign with \`tauri signer sign --app-version ${version}\`: ${signatureFilePath}`,
+    );
+  }
+  if (signatureVersion.replace(/^v/, '') !== version.replace(/^v/, '')) {
+    throw new Error(
+      `Signature was made for version ${signatureVersion}, not ${version}: ${signatureFilePath}`,
+    );
   }
 
   const downloadUrl = `https://github.com/${repoOwner}/${repoName}/releases/download/${normalizedReleaseTag}/${assetFileName}`;

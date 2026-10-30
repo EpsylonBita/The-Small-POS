@@ -675,7 +675,10 @@ pub fn read_official_package_with_limits(
         let entry = zip
             .by_index(index)
             .map_err(|_| "CAP_SETUP_ARCHIVE_ENTRY_REJECTED".to_string())?;
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .map_err(|_| "CAP_SETUP_ARCHIVE_ENTRY_REJECTED".to_string())?
+            .into_owned();
 
         if is_symlink_mode(entry.unix_mode()) {
             return Err("CAP_SETUP_ARCHIVE_ENTRY_REJECTED".into());

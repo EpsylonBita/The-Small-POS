@@ -78,6 +78,40 @@ it offers 1.4.120 — accepted for that one transition.
 `tests/renderer/release-notes-changelog.test.ts` fails a version bump whose
 section lacks a language block or whose blocks carry different numbers of points.
 
+### Signed version
+
+`latest.json` itself is not signed; the signature covers only the installer. A
+tampered manifest could therefore announce a new version number with the `url`
+and `signature` of an older release, and the till would install that older,
+validly signed build.
+
+From the first release after 1.4.139, the workflow signs with
+`tauri signer sign --app-version <version>` (Tauri CLI 2.12+). The version goes
+into the minisign trusted comment (`timestamp:…\tfile:…\tversion:1.4.140`),
+which the signature covers. tauri-plugin-updater 2.14 refuses an update whose
+`latest.json` `version` differs from it (`SignedVersionMismatch`).
+`scripts/generate-updater-manifest.mjs` refuses a signature that records no
+version or another version, and `scripts/check-release-runtime-config.mjs`
+fails if a sign call drops `--app-version`.
+
+Releases up to 1.4.139 were signed without a version, and by default the
+updater accepts a signature without one. From 1.4.140 `tauri.conf.json` sets
+`plugins.updater.requireSignedVersion: true` (founder decision, 30/10/2026),
+so such a till refuses those too (`MissingSignedVersion`) and a tampered
+manifest cannot point it at an older installer. `check-release-runtime-config.mjs`
+fails if the flag is missing or false, or if `allowDowngrades` is turned on.
+Updaters before 2.14 do not read the field, so 1.4.139 and older tills install
+a versioned release as before (checked against updater 2.10.1, which 1.4.139
+runs).
+
+The flag never blocks a rollback. A till only installs a release newer than
+the one it runs, and every release from 1.4.140 on carries a version, so
+re-marking an earlier release as Latest works as before. The one way it
+refuses a real update is a newer release signed without `--app-version`: the
+till keeps running its version and reports "Failed to download update", until
+the release's `.sig` and `latest.json` are replaced with a versioned signature
+or the next version ships.
+
 ## Automatic Public Release Flow
 
 Public `pos-tauri` releases start automatically when a matching `pos-tauri/**`,
@@ -172,6 +206,12 @@ changes, so the first build after a dependency bump is still cold; only
 later runs with matching dependencies reuse the cache. Actual time savings
 have not yet been measured from a warm-cache run.
 
+The Tauri bundler tools (NSIS, its plugins) are cached separately from
+`~\AppData\Local\tauri` under `Windows-tauri-tools-v<n>`. A cache hit never
+saves the key again, so when a Tauri upgrade moves the bundler to another NSIS
+release, bump `<n>`; otherwise every run restores the old tools and downloads
+the new ones again. `v2` holds NSIS 3.13 (tauri 2.12).
+
 ## Reused CI Evidence (2026-10-13)
 
 `scripts/release-ci-evidence.mjs --target desktop` lets the release skip checks that CI already ran on the same code. It gives one answer per check:
@@ -221,7 +261,14 @@ npm run pos:tauri:verify:win
 
 ## Manual Manifest Generation Example
 
+Sign with the release version first; the manifest script refuses a signature
+without it:
+
 ```bash
+npx tauri signer sign "src-tauri/target/release/bundle/nsis/The Small POS_1.2.3_x64-setup.exe" \
+  --private-key-path <key file> \
+  --app-version 1.2.3
+
 node scripts/generate-updater-manifest.mjs \
   --version 1.2.3 \
   --releaseTag v1.2.3 \
